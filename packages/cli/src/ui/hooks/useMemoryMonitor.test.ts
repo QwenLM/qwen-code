@@ -20,6 +20,15 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
+const mockSetOnToolCompleteCallback = vi.fn();
+vi.mock('../contexts/ConfigContext.js', () => ({
+  useConfig: () => ({
+    getMemoryPressureMonitor: () => ({
+      setOnToolCompleteCallback: mockSetOnToolCompleteCallback,
+    }),
+  }),
+}));
+
 import {
   useMemoryMonitor,
   MEMORY_CHECK_INTERVAL,

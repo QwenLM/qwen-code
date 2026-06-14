@@ -245,6 +245,9 @@ export class MemoryPressureMonitor extends EventEmitter {
   private readonly coreConfig: Config;
 
   private pendingCheck = false;
+  private lastCheckTime = 0;
+  private checkGeneration = 0;
+  private onToolCompleteCallback?: () => void;
   private cleanupInProgress = false;
   // Sampling runs every pressure check, so a persistent failure would spam the
   // logs. Surface the first failure at error level (so operators can tell
@@ -310,16 +313,36 @@ export class MemoryPressureMonitor extends EventEmitter {
     this.lastCleanupTime = 0;
   }
 
+  /** Register a callback invoked when the monitor detects starvation. */
+  setOnToolCompleteCallback(cb: (() => void) | undefined): void {
+    this.onToolCompleteCallback = cb;
+  }
+
   /**
    * Schedule a deferred memory check after a tool finishes execution.
    * Uses queueMicrotask to batch checks across concurrently-completing
-   * tools within the same event-loop tick.
+   * tools within the same event-loop tick. Falls back to synchronous
+   * execution when the microtask has been starved for ≥ 60 s.
    */
   scheduleCheck(): void {
+    const now = Date.now();
+
+    if (this.pendingCheck && now - this.lastCheckTime > 60_000) {
+      this.pendingCheck = false;
+      this.checkGeneration++;
+      this.lastCheckTime = now;
+      this.performCheck();
+      this.onToolCompleteCallback?.();
+      return;
+    }
+
     if (this.pendingCheck) return;
     this.pendingCheck = true;
+    const gen = ++this.checkGeneration;
     queueMicrotask(() => {
+      if (gen !== this.checkGeneration) return;
       try {
+        this.lastCheckTime = Date.now();
         this.performCheck();
       } finally {
         this.pendingCheck = false;

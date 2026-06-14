@@ -91,6 +91,9 @@ vi.mock('./hooks/useFocus.js');
 vi.mock('./hooks/useBracketedPaste.js');
 vi.mock('./hooks/useKeypress.js');
 vi.mock('./hooks/useLoadingIndicator.js');
+vi.mock('./hooks/useMemoryMonitor.js', () => ({
+  useMemoryMonitor: () => {},
+}));
 vi.mock('./hooks/useFolderTrust.js');
 vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');

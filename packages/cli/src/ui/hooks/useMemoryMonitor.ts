@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import process from 'node:process';
 import os from 'node:os';
 import v8 from 'v8';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { type HistoryItemWithoutId, MessageType } from '../types.js';
+import { useConfig } from '../contexts/ConfigContext.js';
 
 const debugLogger = createDebugLogger('MEMORY_MONITOR');
 
@@ -36,56 +37,59 @@ export const useMemoryMonitor = ({
   compactOldItems,
 }: MemoryMonitorOptions) => {
   const lastCompactRef = useRef(0);
+  const lastIntervalRunRef = useRef(Date.now());
+  const config = useConfig();
+
+  const runMemoryCheck = useCallback(() => {
+    const memUsage = process.memoryUsage();
+    const heapUsed = memUsage.heapUsed / 1024 / 1024;
+    const heapTotal = memUsage.heapTotal / 1024 / 1024;
+    const rss = memUsage.rss / 1024 / 1024;
+    const external = memUsage.external / 1024 / 1024;
+    const arrayBuffers = memUsage.arrayBuffers / 1024 / 1024;
+
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[MEMORY_USAGE] ` +
+          `heapUsed=${heapUsed.toFixed(1)}MB, ` +
+          `heapTotal=${heapTotal.toFixed(1)}MB, ` +
+          `rss=${rss.toFixed(1)}MB, ` +
+          `external=${external.toFixed(1)}MB, ` +
+          `arrayBuffers=${arrayBuffers.toFixed(1)}MB, ` +
+          `heapUtilization=${((heapUsed / heapTotal) * 100).toFixed(1)}%`,
+      );
+    }
+
+    // UI history compaction when heap exceeds threshold
+    const now = Date.now();
+    if (
+      compactOldItems &&
+      memUsage.heapUsed > MEMORY_UI_COMPACT_THRESHOLD() &&
+      now - lastCompactRef.current > UI_COMPACT_COOLDOWN_MS
+    ) {
+      lastCompactRef.current = now;
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          `[UI_COMPACT] heapUsed=${heapUsed.toFixed(1)}MB ` +
+            `exceeds ${(MEMORY_UI_COMPACT_THRESHOLD() / 1024 / 1024).toFixed(0)}MB threshold, ` +
+            `compacting UI history`,
+        );
+      }
+      try {
+        compactOldItems();
+      } catch (err) {
+        debugLogger.error(
+          `[UI_COMPACT] compactOldItems failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    lastIntervalRunRef.current = Date.now();
+  }, [compactOldItems]);
 
   useEffect(() => {
     // Debug logging + UI compaction interval — runs every 30 s, never cleared.
-    // UI compaction lives here (not in the warning interval) because the
-    // warning interval self-destructs via clearInterval once RSS exceeds 7 GB,
-    // which would also kill the compaction check.
-    const debugIntervalId = setInterval(() => {
-      const memUsage = process.memoryUsage();
-      const heapUsed = memUsage.heapUsed / 1024 / 1024;
-      const heapTotal = memUsage.heapTotal / 1024 / 1024;
-      const rss = memUsage.rss / 1024 / 1024;
-      const external = memUsage.external / 1024 / 1024;
-      const arrayBuffers = memUsage.arrayBuffers / 1024 / 1024;
-
-      if (debugLogger.isEnabled()) {
-        debugLogger.debug(
-          `[MEMORY_USAGE] ` +
-            `heapUsed=${heapUsed.toFixed(1)}MB, ` +
-            `heapTotal=${heapTotal.toFixed(1)}MB, ` +
-            `rss=${rss.toFixed(1)}MB, ` +
-            `external=${external.toFixed(1)}MB, ` +
-            `arrayBuffers=${arrayBuffers.toFixed(1)}MB, ` +
-            `heapUtilization=${((heapUsed / heapTotal) * 100).toFixed(1)}%`,
-        );
-      }
-
-      // UI history compaction when heap exceeds threshold
-      const now = Date.now();
-      if (
-        compactOldItems &&
-        memUsage.heapUsed > MEMORY_UI_COMPACT_THRESHOLD() &&
-        now - lastCompactRef.current > UI_COMPACT_COOLDOWN_MS
-      ) {
-        lastCompactRef.current = now;
-        if (debugLogger.isEnabled()) {
-          debugLogger.debug(
-            `[UI_COMPACT] heapUsed=${heapUsed.toFixed(1)}MB ` +
-              `exceeds ${(MEMORY_UI_COMPACT_THRESHOLD() / 1024 / 1024).toFixed(0)}MB threshold, ` +
-              `compacting UI history`,
-          );
-        }
-        try {
-          compactOldItems();
-        } catch (err) {
-          debugLogger.error(
-            `[UI_COMPACT] compactOldItems failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    }, MEMORY_DEBUG_INTERVAL);
+    const debugIntervalId = setInterval(runMemoryCheck, MEMORY_DEBUG_INTERVAL);
 
     // Warning interval — warns once then self-destructs.
     const warningIntervalId = setInterval(() => {
@@ -115,5 +119,23 @@ export const useMemoryMonitor = ({
       clearInterval(debugIntervalId);
       clearInterval(warningIntervalId);
     };
-  }, [addItem, compactOldItems]);
+  }, [addItem, runMemoryCheck]);
+
+  // Heartbeat: Core's MemoryPressureMonitor notifies us when its
+  // queueMicrotask has been starved for ≥ 60 s. If our own setInterval
+  // hasn't run in that window either, force a full check.
+  useEffect(() => {
+    const monitor = config.getMemoryPressureMonitor();
+    if (!monitor) return;
+
+    monitor.setOnToolCompleteCallback(() => {
+      if (Date.now() - lastIntervalRunRef.current > 60_000) {
+        runMemoryCheck();
+      }
+    });
+
+    return () => {
+      monitor.setOnToolCompleteCallback(undefined);
+    };
+  }, [config, runMemoryCheck]);
 };
