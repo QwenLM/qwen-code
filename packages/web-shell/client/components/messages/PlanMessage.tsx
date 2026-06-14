@@ -1,53 +1,50 @@
-import { memo } from 'react';
+import { memo, useContext, useState } from 'react';
 import type { TodoItem } from '../../adapters/types';
-import { getTodoStatusIcon } from '../../utils/todos';
+import { TodoTimelineContext } from '../../App';
+import { TodoEventSummary, TodoFullList } from './TodoView';
 import { useI18n } from '../../i18n';
 import styles from './PlanMessage.module.css';
 
 interface PlanMessageProps {
+  id: string;
   todos: TodoItem[];
 }
 
-function getStatusClass(status: TodoItem['status']): string {
-  switch (status) {
-    case 'completed':
-      return styles.completed;
-    case 'in_progress':
-      return styles.inProgress;
-    case 'pending':
-      return '';
-  }
-}
-
 export const PlanMessage = memo(function PlanMessage({
+  id,
   todos,
 }: PlanMessageProps) {
   const { t } = useI18n();
+  const timeline = useContext(TodoTimelineContext);
+  const [expanded, setExpanded] = useState(false);
   if (todos.length === 0) return null;
 
-  // Size the number column to the widest index so the status markers stay
-  // aligned once the list grows past 9 items.
-  const numColumnWidth = `${String(todos.length).length + 1}ch`;
+  const total = todos.length;
+  const completed = todos.filter((td) => td.status === 'completed').length;
+  const events = timeline.get(id)?.events ?? [];
 
   return (
     <div className={styles.message}>
-      <div className={styles.title}>{t('plan.title')}</div>
-      <div className={styles.list}>
-        {todos.map((todo, index) => (
-          <div
-            key={todo.id || index}
-            className={`${styles.item} ${getStatusClass(todo.status)}`}
-          >
-            <span className={styles.num} style={{ minWidth: numColumnWidth }}>
-              {index + 1}.
-            </span>
-            <span className={styles.marker}>
-              {getTodoStatusIcon(todo.status)}
-            </span>
-            <span className={styles.content}>{todo.content}</span>
-          </div>
-        ))}
-      </div>
+      <button
+        type="button"
+        className={styles.header}
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        title={expanded ? t('todo.collapse') : t('todo.expand')}
+      >
+        <span className={styles.chevron} aria-hidden="true">
+          {expanded ? '▾' : '▸'}
+        </span>
+        <span className={styles.title}>{t('plan.title')}</span>
+        <span className={styles.progress}>
+          {completed}/{total}
+        </span>
+      </button>
+      {expanded ? (
+        <TodoFullList todos={todos} numbered />
+      ) : (
+        <TodoEventSummary todos={todos} events={events} />
+      )}
     </div>
   );
 });

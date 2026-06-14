@@ -1,5 +1,15 @@
 import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
 
+/**
+ * The todo tool is registered as `todo_write` on the wire, but older paths and
+ * the ACP plan bridge use `todowrite`. Match both so detection never hinges on
+ * the (unrelated) tool `kind`, which is `think` for this tool.
+ */
+export function isTodoWriteToolName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return normalized === 'todo_write' || normalized === 'todowrite';
+}
+
 export function parseTodoItemsFromEntries(
   entries: readonly unknown[],
 ): TodoItem[] | undefined {
@@ -22,8 +32,7 @@ export function parseTodoItemsFromEntries(
 export function extractTodosFromToolCall(
   tool: ACPToolCall,
 ): TodoItem[] | undefined {
-  const toolName = tool.toolName.toLowerCase();
-  if (toolName !== 'todowrite' && tool.kind !== 'other') {
+  if (!isTodoWriteToolName(tool.toolName) && tool.kind !== 'other') {
     return undefined;
   }
 
@@ -117,6 +126,93 @@ export function getFloatingTodos(
   // user sends the next prompt.
   if (allCompleted && userMessageAfter) return EMPTY_FLOATING_TODOS;
   return { todos, allCompleted, sourceMessageId, sourceCallId };
+}
+
+/** A status transition surfaced for a single todo snapshot. */
+export interface TodoEvent {
+  kind: 'started' | 'completed';
+  id: string;
+  content: string;
+}
+
+/** What changed in one todo snapshot relative to the conversation so far. */
+export interface TodoSnapshotDiff {
+  events: TodoEvent[];
+  completed: number;
+  total: number;
+}
+
+interface TodoSnapshot {
+  /** Key the diff is stored under: tool callId, or plan message id. */
+  key: string;
+  todos: TodoItem[];
+}
+
+/**
+ * The todo snapshots carried by one message, in order. In the web-shell daemon
+ * path todos arrive as `todo_write` tool calls; the ACP bridge instead emits
+ * `plan` messages. Handle both so the timeline works regardless of source.
+ */
+function todoSnapshotsOf(message: Message): TodoSnapshot[] {
+  if (message.role === 'plan') {
+    return [{ key: message.id, todos: message.todos }];
+  }
+  if (message.role === 'tool_group') {
+    const snapshots: TodoSnapshot[] = [];
+    for (const tool of message.tools) {
+      const todos = extractTodosFromToolCall(tool);
+      if (todos) snapshots.push({ key: tool.callId, todos });
+    }
+    return snapshots;
+  }
+  return [];
+}
+
+/**
+ * Walk the todo snapshots in order and, for each one, derive what changed
+ * relative to the running state: which items just started and which just
+ * completed.
+ *
+ * Keyed by snapshot id (tool callId or plan message id) so a history row can
+ * look up its own diff. Only transitions actually witnessed produce events — an
+ * item first seen already completed (e.g. a restored session's opening
+ * snapshot) is recorded silently so its old completion is not replayed as if it
+ * just happened.
+ */
+export function computeTodoTimeline(
+  messages: readonly Message[],
+): Map<string, TodoSnapshotDiff> {
+  const result = new Map<string, TodoSnapshotDiff>();
+  const lastStatus = new Map<string, TodoItem['status']>();
+
+  for (const message of messages) {
+    for (const { key, todos } of todoSnapshotsOf(message)) {
+      const events: TodoEvent[] = [];
+
+      for (const todo of todos) {
+        const prev = lastStatus.get(todo.id);
+        if (todo.status === 'in_progress' && prev !== 'in_progress') {
+          events.push({ kind: 'started', id: todo.id, content: todo.content });
+        } else if (
+          todo.status === 'completed' &&
+          prev !== 'completed' &&
+          prev !== undefined
+        ) {
+          events.push({
+            kind: 'completed',
+            id: todo.id,
+            content: todo.content,
+          });
+        }
+        lastStatus.set(todo.id, todo.status);
+      }
+
+      const completed = todos.filter((t) => t.status === 'completed').length;
+      result.set(key, { events, completed, total: todos.length });
+    }
+  }
+
+  return result;
 }
 
 export interface TodoWindow {

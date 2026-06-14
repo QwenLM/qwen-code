@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Message, TodoItem } from '../adapters/types';
-import { getFloatingTodos, getTodoStatusIcon, getTodoWindow } from './todos';
+import {
+  computeTodoTimeline,
+  getFloatingTodos,
+  getTodoStatusIcon,
+  getTodoWindow,
+} from './todos';
 
 function todo(id: string, status: TodoItem['status']): TodoItem {
   return { id, content: `task ${id}`, status };
@@ -17,8 +22,9 @@ function todoWriteMessage(id: string, todos: TodoItem[]): Message {
     tools: [
       {
         callId: `call-${id}`,
-        toolName: 'TodoWrite',
+        toolName: 'todo_write',
         status: 'completed',
+        kind: 'think',
         args: { todos },
       },
     ],
@@ -126,6 +132,89 @@ describe('getFloatingTodos', () => {
     expect(state.todos).toHaveLength(2);
     expect(state.allCompleted).toBe(true);
     expect(state.sourceMessageId).toBe('p1');
+  });
+});
+
+describe('computeTodoTimeline', () => {
+  it('emits started and completed events across snapshots', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [todo('1', 'in_progress'), todo('2', 'pending')]),
+      planMessage('p2', [todo('1', 'completed'), todo('2', 'in_progress')]),
+    ]);
+
+    expect(timeline.get('p1')).toEqual({
+      events: [{ kind: 'started', id: '1', content: 'task 1' }],
+      completed: 0,
+      total: 2,
+    });
+    expect(timeline.get('p2')).toEqual({
+      events: [
+        { kind: 'completed', id: '1', content: 'task 1' },
+        { kind: 'started', id: '2', content: 'task 2' },
+      ],
+      completed: 1,
+      total: 2,
+    });
+  });
+
+  it('emits a completed event when an item skips in_progress', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [todo('1', 'pending')]),
+      planMessage('p2', [todo('1', 'completed')]),
+    ]);
+
+    expect(timeline.get('p1')?.events).toEqual([]);
+    expect(timeline.get('p2')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'task 1' },
+    ]);
+  });
+
+  it('does not replay completions for items first seen already completed', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [todo('1', 'completed'), todo('2', 'in_progress')]),
+    ]);
+
+    expect(timeline.get('p1')).toEqual({
+      events: [{ kind: 'started', id: '2', content: 'task 2' }],
+      completed: 1,
+      total: 2,
+    });
+  });
+
+  it('produces no events for an unchanged re-emitted snapshot', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [todo('1', 'in_progress')]),
+      planMessage('p2', [todo('1', 'in_progress')]),
+    ]);
+
+    expect(timeline.get('p2')?.events).toEqual([]);
+  });
+
+  it('tracks todo_write tool-call snapshots, keyed by callId', () => {
+    const timeline = computeTodoTimeline([
+      todoWriteMessage('m1', [todo('1', 'in_progress')]),
+      todoWriteMessage('m2', [todo('1', 'completed')]),
+    ]);
+
+    expect(timeline.get('call-m1')?.events).toEqual([
+      { kind: 'started', id: '1', content: 'task 1' },
+    ]);
+    expect(timeline.get('call-m2')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'task 1' },
+    ]);
+  });
+
+  it('ignores messages that carry no todo snapshot', () => {
+    const timeline = computeTodoTimeline([
+      userMessage('u1'),
+      assistantMessage('a1'),
+      todoWriteMessage('m1', [todo('1', 'in_progress')]),
+    ]);
+
+    expect(timeline.size).toBe(1);
+    expect(timeline.get('call-m1')?.events).toEqual([
+      { kind: 'started', id: '1', content: 'task 1' },
+    ]);
   });
 });
 

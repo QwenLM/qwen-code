@@ -227,8 +227,9 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }),
     ]);
 
-    // Adjacent tool blocks share one tool_group (Native CLI batch parity),
-    // but each TodoWrite call keeps its own tool entry and todo payload.
+    // Each TodoWrite update stands alone in its own group (it renders as a
+    // self-contained collapsible checklist), rather than merging with adjacent
+    // tool calls.
     expect(messages).toEqual([
       {
         id: 'tg-todo-1',
@@ -239,6 +240,13 @@ describe('transcriptBlocksToDaemonMessages', () => {
             callId: 'todo-call-1',
             toolName: 'TodoWrite',
           }),
+        ],
+      },
+      {
+        id: 'tg-todo-2',
+        role: 'tool_group',
+        timestamp: 2,
+        tools: [
           expect.objectContaining({
             callId: 'todo-call-2',
             toolName: 'TodoWrite',
@@ -326,6 +334,24 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toMatchObject([
       { role: 'tool_group', tools: [{ callId: 'tc1' }] },
       { role: 'tool_group', tools: [{ callId: 'agent-call-1' }] },
+      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+    ]);
+  });
+
+  it('never merges todo_write updates into or after a regular tool_group', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
+      toolBlock('todo-1', 'todo-call-1', 'completed', 2, {
+        toolName: 'todo_write',
+        toolKind: 'think',
+        rawInput: { todos: [{ id: '1', content: 'A', status: 'in_progress' }] },
+      }),
+      toolBlock('t2', 'tc2', 'completed', 3, { toolName: 'Edit' }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
+      { role: 'tool_group', tools: [{ callId: 'todo-call-1' }] },
       { role: 'tool_group', tools: [{ callId: 'tc2' }] },
     ]);
   });

@@ -69,7 +69,7 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case 'plan':
-        return <PlanMessage todos={message.todos} />;
+        return <PlanMessage id={message.id} todos={message.todos} />;
       case 'system':
         return (
           <SystemMessage
