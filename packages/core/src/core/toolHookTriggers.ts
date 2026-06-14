@@ -442,6 +442,8 @@ export async function firePostToolBatchHook(
 export interface NotificationHookResult {
   /** Additional context from the hook */
   additionalContext?: string;
+  /** Terminal escape sequence requested by the hook */
+  terminalSequence?: string;
 }
 
 /**
@@ -485,11 +487,16 @@ export async function fireNotificationHook(
       'Notification',
       response.output,
     );
+    const result: NotificationHookResult = {};
     const additionalContext = notificationOutput.getAdditionalContext();
+    if (additionalContext !== undefined) {
+      result.additionalContext = additionalContext;
+    }
+    if (notificationOutput.terminalSequence !== undefined) {
+      result.terminalSequence = notificationOutput.terminalSequence;
+    }
 
-    return {
-      additionalContext,
-    };
+    return result;
   } catch (error) {
     // Notification hook errors should not affect the notification flow
     debugLogger.warn(

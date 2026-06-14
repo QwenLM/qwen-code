@@ -129,6 +129,8 @@ interface ParsedLog {
     function_args?: string;
     success?: boolean;
     duration_ms?: number;
+    status?: string;
+    'error.message'?: string;
   };
   scopeMetrics?: {
     metrics: {
@@ -569,6 +571,8 @@ export class TestRig {
         args: string;
         success: boolean;
         duration_ms: number;
+        status?: string;
+        error?: string;
       };
     }[] = [];
 
@@ -760,6 +764,8 @@ export class TestRig {
         args: string;
         success: boolean;
         duration_ms: number;
+        status?: string;
+        error?: string;
       };
     }[] = [];
 
@@ -776,6 +782,8 @@ export class TestRig {
             args: logData.attributes.function_args,
             success: logData.attributes.success,
             duration_ms: logData.attributes.duration_ms,
+            status: logData.attributes.status,
+            error: logData.attributes['error.message'],
           },
         });
       }

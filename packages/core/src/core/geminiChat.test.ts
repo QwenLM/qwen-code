@@ -3375,6 +3375,203 @@ describe('GeminiChat', async () => {
       ).toBeLessThan(100_000);
     });
 
+    it('stops pre-send hard-rescue after repeated failed hard-tier compactions', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse('after failed rescue'),
+      );
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `hard-rescue-${i}` },
+            `prompt-hard-rescue-bound-${i}`,
+          ),
+        ).rejects.toThrow(
+          /compression status: COMPRESSION_FAILED_EMPTY_SUMMARY/i,
+        );
+      }
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after bounded hard-rescue failures' },
+        'prompt-hard-rescue-after-failures',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES).fill(true),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('hard-tier rescue skipped'),
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('prompt_id=prompt-hard-rescue-after-failures'),
+      );
+    });
+
+    it('falls back to reactive overflow recovery after the hard-rescue bound is exhausted', async () => {
+      const failedRescueResult = {
+        newHistory: null,
+        info: {
+          originalTokenCount: 178_000,
+          newTokenCount: 178_000,
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+        },
+      };
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary after overflow' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce(failedRescueResult)
+        .mockResolvedValueOnce(failedRescueResult)
+        .mockResolvedValueOnce(failedRescueResult)
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(
+          new Error('prompt is too long: 180000 tokens > 128000 maximum'),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('after reactive fallback'));
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `failed-hard-rescue-${i}` },
+            `prompt-hard-rescue-before-reactive-${i}`,
+          ),
+        ).rejects.toThrow(
+          /compression status: COMPRESSION_FAILED_EMPTY_SUMMARY/i,
+        );
+      }
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after hard-rescue bound' },
+        'prompt-hard-rescue-reactive-fallback',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES + 1);
+      expect(
+        compressSpy.mock.calls
+          .slice(0, MAX_CONSECUTIVE_FAILURES)
+          .map(([, opts]) => opts.force),
+      ).toEqual(Array(MAX_CONSECUTIVE_FAILURES).fill(true));
+      expect(compressSpy.mock.calls[MAX_CONSECUTIVE_FAILURES][1].force).toBe(
+        true,
+      );
+      expect(
+        compressSpy.mock.calls[MAX_CONSECUTIVE_FAILURES][1].originalTokenCount,
+      ).toBe(180_000);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('does not count thrown hard-rescue attempts toward the retry bound', async () => {
+      const compressionError = new Error('compression side-query failed');
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockRejectedValue(compressionError);
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 1; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `throwing-hard-rescue-${i}` },
+            `prompt-hard-rescue-throw-${i}`,
+          ),
+        ).rejects.toThrow(compressionError);
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES + 1);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
+
+    it('stops hard-rescue after repeated NOOP results are still oversized', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `noop-hard-rescue-${i}` },
+            `prompt-hard-rescue-noop-${i}`,
+          ),
+        ).rejects.toThrow(/compression status: NOOP/i);
+      }
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('after bounded noop hard-rescue'),
+      );
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after bounded noop hard-rescue' },
+        'prompt-hard-rescue-after-noop-bound',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES).fill(true),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('hard-tier rescue skipped'),
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'prompt_id=prompt-hard-rescue-after-noop-bound',
+        ),
+      );
+    });
+
     it('does not replace token counters when usage reports zero prompt tokens', async () => {
       vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
         newHistory: null,

@@ -14,6 +14,10 @@ import {
   type Mock,
 } from 'vitest';
 
+// Force UTC timezone so toLocaleDateString('en-US', ...) produces consistent
+// output regardless of the developer's local timezone.
+process.env.TZ = 'UTC';
+
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,6 +49,7 @@ import {
   Turn,
   type ServerGeminiStreamEvent,
 } from './turn.js';
+import { LoopType } from '../telemetry/types.js';
 
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
@@ -61,11 +66,15 @@ import {
   buildAddedMcpToolsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
+import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
+import type { AvailableSkillEntry } from '../tools/skill-utils.js';
+import { ToolNames } from '../tools/tool-names.js';
 import {
   __resetActiveGoalStoreForTests,
   clearActiveGoal,
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
+import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -151,52 +160,71 @@ vi.mock('../utils/gitUtils.js', async (importOriginal) => {
 vi.mock('../utils/nextSpeakerChecker', () => ({
   checkNextSpeaker: vi.fn().mockResolvedValue(null),
 }));
-vi.mock('../utils/environmentContext', () => ({
-  SYSTEM_REMINDER_OPEN: '<system-reminder>',
-  getEnvironmentContext: vi
-    .fn()
-    .mockResolvedValue([{ text: 'Mocked env context' }]),
-  getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    {
-      role: 'user',
-      parts: [
-        { text: '<system-reminder>\nMocked env context\n</system-reminder>' },
+vi.mock('../tools/skill-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../tools/skill-utils.js')>();
+  return {
+    ...actual,
+    collectAvailableSkillEntries: vi.fn(),
+  };
+});
+vi.mock('../utils/environmentContext', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/environmentContext.js')>();
+  return {
+    ...actual,
+    getEnvironmentContext: vi
+      .fn()
+      .mockResolvedValue([{ text: 'Mocked env context' }]),
+    getDirectoryContextString: vi
+      .fn()
+      .mockResolvedValue('Mocked directory context'),
+    getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
+      [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nMocked env context\n</system-reminder>',
+            },
+          ],
+        },
+        ...(extraHistory ?? []),
       ],
-    },
-    ...(extraHistory ?? []),
-  ]),
-  buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
-    tools.length === 0
-      ? null
-      : `<system-reminder>\nadded: ${tools.map((tool) => tool.name).join(', ')}\n</system-reminder>`,
-  ),
-  getStartupContextLength: vi.fn((history) => {
-    const first = history?.[0];
-    if (first?.role !== 'user') return 0;
-    const text = first.parts?.[0]?.text;
-    if (typeof text === 'string' && text.startsWith('<system-reminder>')) {
-      return 1;
-    }
-    // Legacy format: [user(env), model("Got it. Thanks for the context!")].
-    if (
-      history?.[1]?.role === 'model' &&
-      history?.[1]?.parts?.[0]?.text === 'Got it. Thanks for the context!'
-    ) {
-      return 2;
-    }
-    return 0;
-  }),
-  isSystemReminderContent: vi.fn((content) => {
-    const parts = content?.parts;
-    if (!parts || parts.length === 0) return false;
-    return parts.every(
-      (part: { text?: string }) =>
-        typeof part.text === 'string' &&
-        part.text.startsWith('<system-reminder>') &&
-        part.text.includes('</system-reminder>'),
-    );
-  }),
-}));
+      [],
+    ]),
+    buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
+      tools.length === 0
+        ? null
+        : `<system-reminder>\nadded: ${tools.map((tool) => tool.name).join(', ')}\n</system-reminder>`,
+    ),
+    getStartupContextLength: vi.fn((history) => {
+      const first = history?.[0];
+      if (first?.role !== 'user') return 0;
+      const text = first.parts?.[0]?.text;
+      if (typeof text === 'string' && text.startsWith('<system-reminder>')) {
+        return 1;
+      }
+      if (
+        history?.[1]?.role === 'model' &&
+        history?.[1]?.parts?.[0]?.text === 'Got it. Thanks for the context!'
+      ) {
+        return 2;
+      }
+      return 0;
+    }),
+    isSystemReminderContent: vi.fn((content) => {
+      const parts = content?.parts;
+      if (!parts || parts.length === 0) return false;
+      return parts.every(
+        (part: { text?: string }) =>
+          typeof part.text === 'string' &&
+          part.text.startsWith('<system-reminder>') &&
+          part.text.includes('</system-reminder>'),
+      );
+    }),
+  };
+});
 vi.mock('../utils/generateContentResponseUtilities', () => ({
   getResponseText: (result: GenerateContentResponse) =>
     result.candidates?.[0]?.content?.parts?.map((part) => part.text).join('') ||
@@ -217,7 +245,9 @@ vi.mock('../utils/generateContentResponseUtilities', () => ({
 const mockUiTelemetryService = vi.hoisted(() => ({
   setLastPromptTokenCount: vi.fn(),
   getLastPromptTokenCount: vi.fn(),
+  setLastCachedContentTokenCount: vi.fn(),
   reset: vi.fn(),
+  resetSession: vi.fn(),
   addEvent: vi.fn(),
 }));
 vi.mock('../telemetry/tracer.js', () => ({
@@ -242,7 +272,45 @@ vi.mock('../telemetry/loggers.js', () => ({
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
   logApiRequest: vi.fn(),
+  logLoopDetected: vi.fn(),
+  logLoopDetectionDisabled: vi.fn(),
 }));
+
+const { mockClientDebugLogger } = vi.hoisted(() => ({
+  mockClientDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(false),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (namespace: string) =>
+      namespace === 'CLIENT'
+        ? mockClientDebugLogger
+        : actual.createDebugLogger(namespace),
+  };
+});
+
+vi.mock(
+  '../services/microcompaction/microcompact.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../services/microcompaction/microcompact.js')
+      >();
+    return {
+      ...actual,
+      microcompactHistory: vi.fn(actual.microcompactHistory),
+    };
+  },
+);
+import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
 // Mock RequestTokenizer to use simple character-based estimation
 vi.mock('../utils/request-tokenizer/requestTokenizer.js', () => ({
@@ -303,6 +371,12 @@ describe('Gemini Client (client.ts)', () => {
   let mockConfig: Config;
   let client: GeminiClient;
   let mockGenerateContentFn: Mock;
+  let mockFileHistoryService: {
+    makeSnapshot: ReturnType<typeof vi.fn>;
+    getSnapshots: ReturnType<typeof vi.fn>;
+    restoreFromSnapshots: ReturnType<typeof vi.fn>;
+    rewind: ReturnType<typeof vi.fn>;
+  };
   let mockMemoryManager: {
     scheduleExtract: ReturnType<typeof vi.fn>;
     scheduleDream: ReturnType<typeof vi.fn>;
@@ -342,6 +416,12 @@ describe('Gemini Client (client.ts)', () => {
     mockGenerateContentFn = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '{"key": "value"}' }] } }],
     });
+    mockFileHistoryService = {
+      makeSnapshot: vi.fn().mockResolvedValue(undefined),
+      getSnapshots: vi.fn().mockReturnValue([]),
+      restoreFromSnapshots: vi.fn(),
+      rewind: vi.fn(),
+    };
 
     // Disable 429 simulation for tests
     setSimulate429(false);
@@ -427,6 +507,7 @@ describe('Gemini Client (client.ts)', () => {
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
+      getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
@@ -442,7 +523,12 @@ describe('Gemini Client (client.ts)', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
+      getSkillManager: vi.fn().mockReturnValue(undefined),
+      consumeInlineAnnouncedSkillKeys: vi
+        .fn()
+        .mockReturnValue(new Set<string>()),
       getDebugLogger: vi.fn().mockReturnValue({
+        isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
         info: vi.fn(),
         warn: vi.fn(),
@@ -484,6 +570,7 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     __resetActiveGoalStoreForTests();
   });
@@ -550,6 +637,68 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80);
+    });
+
+    it('seeds recently completed tools from resumed history', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_read',
+                      name: 'read_file',
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'call_read',
+                      name: 'read_file',
+                      response: { ok: true },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_pending',
+                      name: 'write_file',
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
     });
 
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
@@ -691,6 +840,7 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockRejectedValue(new Error('hook failed'));
       const debugLogger = {
+        isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
         info: vi.fn(),
         warn: vi.fn(),
@@ -1011,7 +1161,7 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([]);
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[], []]);
 
       await client.refreshStartupContextReminder();
 
@@ -1049,7 +1199,10 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([newPrelude]);
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [newPrelude],
+        [],
+      ]);
 
       await client.refreshStartupContextReminder();
 
@@ -1431,6 +1584,29 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('resetChat', () => {
+    it('refreshes the live system instruction after the working directory changes', async () => {
+      vi.mocked(getRecentGitStatus)
+        .mockReturnValueOnce('Git snapshot A')
+        .mockReturnValueOnce('Git snapshot B');
+      vi.mocked(getRecentGitStatus).mockClear();
+
+      await client.startChat();
+      expect(client.getChat()['generationConfig'].systemInstruction).toContain(
+        'Git snapshot A',
+      );
+
+      await client.addWorkingDirectoryChangedContext(
+        '/test/project/root',
+        '/test/other/root',
+      );
+
+      const systemInstruction = client.getChat()['generationConfig']
+        .systemInstruction as string;
+      expect(systemInstruction).not.toContain('Git snapshot A');
+      expect(systemInstruction).toContain('Git snapshot B');
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
+    });
+
     it('clears cached git status so it can be recomputed for the next session', async () => {
       vi.mocked(getRecentGitStatus)
         .mockReturnValueOnce('Git snapshot A')
@@ -1574,6 +1750,28 @@ describe('Gemini Client (client.ts)', () => {
       await client.initialize();
 
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reset lastInjectedDate', async () => {
+      client['lastInjectedDate'] = 'Friday, June 5, 2026';
+      await client.resetChat();
+      expect(client['lastInjectedDate']).toBeUndefined();
+    });
+
+    it('resets Hook microcompaction checkpoint', async () => {
+      client['lastHookMicrocompactionTimestamp'] = Date.now();
+
+      await client.resetChat();
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBeNull();
+    });
+
+    it('clears recently completed tools', async () => {
+      client.recordCompletedToolCall('read_file');
+
+      await client.resetChat();
+
+      expect(client['recentCompletedToolNames']).toEqual([]);
     });
   });
 
@@ -1780,6 +1978,7 @@ describe('Gemini Client (client.ts)', () => {
       mockChat = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
         tryCompress: vi.fn().mockResolvedValue({
           originalTokenCount: 0,
           newTokenCount: 0,
@@ -1814,6 +2013,25 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(client['lastApiCompletionTimestamp']).toBeNull();
+    });
+
+    it('seeds Hook microcompaction checkpoint on user turns', async () => {
+      client['lastHookMicrocompactionTimestamp'] = null;
+      const before = Date.now();
+
+      const gen = client.sendMessageStream(
+        [{ text: 'Hello' }],
+        new AbortController().signal,
+        'prompt-hook-seed',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of gen) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThanOrEqual(
+        before,
+      );
     });
   });
 
@@ -1908,6 +2126,246 @@ describe('Gemini Client (client.ts)', () => {
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
       // fast-path disarmed.
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not abort the turn when microcompaction cleanup fails', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockImplementation(() => {
+        throw new Error('cache disarm failed');
+      });
+
+      const { history } = await makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const events: ServerGeminiStreamEvent[] = [];
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-error-boundary',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        { type: GeminiEventType.Content, value: 'response' },
+      ]);
+    });
+
+    it('microcompacts old tool results on Hook continuations', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThan(
+        Date.now() - 60_000,
+      );
+    });
+
+    it('does not abort Hook continuations when microcompaction cleanup fails', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockImplementation(() => {
+        throw new Error('hook cache disarm failed');
+      });
+
+      const { history } = await makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      const checkpoint = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = checkpoint;
+      mockClientDebugLogger.error.mockClear();
+
+      const events: ServerGeminiStreamEvent[] = [];
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-error-boundary',
+        { type: SendMessageType.Hook },
+      );
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        { type: GeminiEventType.Content, value: 'response' },
+      ]);
+      expect(mockClientDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'microcompactHistory failed: hook cache disarm failed',
+        ),
+      );
+      expect(client['lastHookMicrocompactionTimestamp']).toBe(checkpoint);
+    });
+
+    it('skips the next Hook microcompaction after one just ran', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const firstStream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-fire',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of firstStream) {
+        /* drain */
+      }
+
+      const checkpointAfterFire = client['lastHookMicrocompactionTimestamp'];
+      expect(setHistory).toHaveBeenCalled();
+      expect(checkpointAfterFire).toBeGreaterThan(Date.now() - 60_000);
+
+      setHistory.mockClear();
+      clear.mockClear();
+      markReadEvictedFromHistory.mockClear();
+
+      const secondStream = client.sendMessageStream(
+        [{ text: 'continue goal again' }],
+        new AbortController().signal,
+        'prompt-mc-hook-skip',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of secondStream) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBe(
+        checkpointAfterFire,
+      );
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('initializes Hook microcompaction from the last API completion timestamp', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = null;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-init',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThan(
+        Date.now() - 60_000,
+      );
+    });
+
+    it('does not microcompact Hook continuations when the checkpoint is recent', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = Date.now();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-recent',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('seeds Hook microcompaction checkpoint to now when no API call completed', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = null;
+      client['lastHookMicrocompactionTimestamp'] = null;
+      const before = Date.now();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-no-api-completion',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThanOrEqual(
+        before,
+      );
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
     it('falls back to a blanket clear when blanked reads cannot be linked to a path (id-less provider)', async () => {
@@ -2146,6 +2604,312 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('runs microcompaction on SendMessageType.Hook', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'goal continuation' }],
+        new AbortController().signal,
+        'prompt-hook-test',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // Microcompaction ran — history was replaced
+      expect(setHistory).toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+    });
+
+    it('does not run microcompaction on SendMessageType.ToolResult', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'tool result' }],
+        new AbortController().signal,
+        'prompt-toolresult-test',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // Microcompaction did NOT run
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('runs microcompaction on SendMessageType.Cron', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'cron job' }],
+        new AbortController().signal,
+        'prompt-cron-test',
+        { type: SendMessageType.Cron },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+    });
+
+    it('does not reset the Hook checkpoint when Cron skips microcompaction', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      const checkpoint = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = checkpoint;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'cron job' }],
+        new AbortController().signal,
+        'prompt-cron-hook-checkpoint',
+        { type: SendMessageType.Cron },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBe(checkpoint);
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('does not run microcompaction on SendMessageType.Retry', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        getHistoryLength: vi.fn().mockReturnValue(history.length),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
+        getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set()),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'retry' }],
+        new AbortController().signal,
+        'prompt-retry-test',
+        { type: SendMessageType.Retry },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('continues sendMessage when microcompactHistory throws', async () => {
+      mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      vi.mocked(microcompactHistory).mockImplementationOnce(() => {
+        throw new Error('compaction boom');
+      });
+      mockClientDebugLogger.error.mockClear();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'cron job' }],
+        new AbortController().signal,
+        'prompt-mc-error-test',
+        { type: SendMessageType.Cron },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(mockClientDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('microcompactHistory failed: compaction boom'),
+      );
+      expect(setHistory).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('tryCompressChatFast', () => {
+    let mcTmpDir: string;
+
+    // Real on-disk files so client.ts's `fsPromises.stat(filePath)` succeeds.
+    // `node:fs` is mocked but `node:fs/promises` is not.
+    beforeEach(async () => {
+      mcTmpDir = await mkdtemp(join(tmpdir(), 'qwen-compress-fast-'));
+    });
+    afterEach(async () => {
+      await rm(mcTmpDir, { recursive: true, force: true });
+    });
+
+    it('returns early on NOOP without touching FileReadCache', async () => {
+      const { clear } = mockFileReadCacheStub();
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 100,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.NOOP);
+      expect(compressFast).toHaveBeenCalledOnce();
+      expect(clear).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(false);
+    });
+
+    it('calls clear() when unresolvedEvictedReads > 0 on COMPRESSED', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 2,
+          evictedReadPaths: [],
+          toolsCleared: 3,
+          mediaCleared: 0,
+          tokensSaved: 800,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(clear).toHaveBeenCalledOnce();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('performs surgical disarm and falls back to clear() on inode miss', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockReturnValueOnce(false); // inode mismatch
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 300,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 0,
+          evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          toolsCleared: 2,
+          mediaCleared: 0,
+          tokensSaved: 700,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
+      expect(clear).toHaveBeenCalledOnce();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('succeeds with surgical disarm when all inodes match (no clear)', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockReturnValue(true); // all match
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 400,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 0,
+          evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          toolsCleared: 1,
+          mediaCleared: 0,
+          tokensSaved: 600,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
+      expect(clear).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
     });
   });
 
@@ -2550,6 +3314,7 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockRejectedValue(new Error('compact hook failed'));
       const debugLogger = {
+        isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
         info: vi.fn(),
         warn: vi.fn(),
@@ -2795,7 +3560,10 @@ Other open files:
       expect(mockChat.addHistory).not.toHaveBeenCalled();
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
-        [`<system-reminder>\n${expectedContext}\n</system-reminder>\n\nHi`],
+        [
+          expect.stringMatching(/^<system-reminder>\nThe current date is:/),
+          `<system-reminder>\n${expectedContext}\n</system-reminder>\n\nHi`,
+        ],
         expect.any(AbortSignal),
       );
     });
@@ -2990,6 +3758,7 @@ hello
         getHistory: vi.fn().mockReturnValue([]),
       };
       client['chat'] = mockChat as GeminiChat;
+      client.recordCompletedToolCall('mcp__ata__article-list-query');
 
       const stream = client.sendMessageStream(
         [{ text: 'Please answer tersely' }],
@@ -3006,6 +3775,7 @@ hello
         expect.objectContaining({
           config: mockConfig,
           excludedFilePaths: expect.any(Set),
+          recentTools: ['mcp__ata__article-list-query'],
         }),
       );
       expect(mockTurnRunFn).toHaveBeenCalledWith(
@@ -3341,6 +4111,7 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
       mockTurnRunFn.mockReturnValue(
@@ -3377,12 +4148,13 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
       // Force LoopDetector to trip on the first event.
       const loopDetector = client['loopDetector'];
-      vi.spyOn(loopDetector, 'addAndCheck').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops').mockReturnValue(true);
       vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(null);
 
       mockTurnRunFn.mockReturnValue(
@@ -3501,7 +4273,10 @@ hello
       // The main request should have been called without any memory content
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
-        ['Quick question'],
+        [
+          expect.stringMatching(/^<system-reminder>\nThe current date is:/),
+          'Quick question',
+        ],
         expect.any(AbortSignal),
       );
 
@@ -3537,7 +4312,10 @@ hello
       // The main request should have been called without any memory content
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
-        ['Quick question'],
+        [
+          expect.stringMatching(/^<system-reminder>\nThe current date is:/),
+          'Quick question',
+        ],
         expect.any(AbortSignal),
       );
     });
@@ -3592,6 +4370,231 @@ hello
         type: GeminiEventType.HookSystemMessage,
         value: 'Managed auto-memory updated: user.md',
       });
+    });
+
+    it('should inject the current date on every UserQuery turn', async () => {
+      client['lastInjectedDate'] = undefined;
+      vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'What day is it?' }],
+        new AbortController().signal,
+        'prompt-id-date-inject',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      // The first element in the request should be the date reminder
+      // wrapped in <system-reminder> tags
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        [
+          expect.stringMatching(
+            /^<system-reminder>\nThe current date is:.*June 5, 2026/,
+          ),
+          'What day is it?',
+        ],
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should not inject duplicate date on the same day', async () => {
+      client['lastInjectedDate'] = undefined;
+      vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
+
+      const mockStream1 = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream1);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // First query on June 5 — should inject date
+      const stream1 = client.sendMessageStream(
+        [{ text: 'First question' }],
+        new AbortController().signal,
+        'prompt-id-date-first',
+      );
+      for await (const _ of stream1) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        [
+          expect.stringMatching(
+            /^<system-reminder>\nThe current date is:.*June 5, 2026/,
+          ),
+          'First question',
+        ],
+        expect.any(AbortSignal),
+      );
+
+      // Second query same day — should NOT inject date again
+      const mockStream2 = (async function* () {
+        yield { type: 'content', value: 'World' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream2);
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'First question' }] },
+        { role: 'model', parts: [{ text: 'Hello' }] },
+      ]);
+
+      const stream2 = client.sendMessageStream(
+        [{ text: 'Second question' }],
+        new AbortController().signal,
+        'prompt-id-date-second',
+      );
+      for await (const _ of stream2) {
+        // consume stream
+      }
+
+      // Second call should NOT have date prefix (already injected today)
+      const secondCall = mockTurnRunFn.mock.calls[1];
+      expect(secondCall[1][0]).toBe('Second question');
+    });
+
+    it('should re-inject date when session spans midnight', async () => {
+      client['lastInjectedDate'] = undefined;
+
+      vi.setSystemTime(new Date('2026-06-04T12:00:00Z'));
+
+      const mockStream1 = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream1);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // First query on June 4 — should inject date
+      const stream1 = client.sendMessageStream(
+        [{ text: 'Day one' }],
+        new AbortController().signal,
+        'prompt-id-date-day-one',
+      );
+      for await (const _ of stream1) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        [
+          expect.stringMatching(
+            /^<system-reminder>\nThe current date is:.*June 4, 2026/,
+          ),
+          'Day one',
+        ],
+        expect.any(AbortSignal),
+      );
+
+      // Advance to June 5 — date should change
+      vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
+
+      const mockStream2 = (async function* () {
+        yield { type: 'content', value: 'New day' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream2);
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'Day one' }] },
+        { role: 'model', parts: [{ text: 'Hello' }] },
+      ]);
+
+      const stream2 = client.sendMessageStream(
+        [{ text: 'Day two' }],
+        new AbortController().signal,
+        'prompt-id-date-day-two',
+      );
+      for await (const _ of stream2) {
+        // consume stream
+      }
+
+      // New date should be injected with June 5
+      const secondCall = mockTurnRunFn.mock.calls[1];
+      expect(secondCall[1][0]).toMatch(
+        /^<system-reminder>\nThe current date is:.*June 5, 2026/,
+      );
+    });
+
+    it('should not inject date on Cron turns', async () => {
+      client['lastInjectedDate'] = undefined;
+      vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Cron response' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // Send a Cron message — date should NOT be injected
+      const stream = client.sendMessageStream(
+        [{ text: 'cron-task' }],
+        new AbortController().signal,
+        'prompt-id-cron',
+        { type: SendMessageType.Cron },
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      // Date must NOT be present, but other system reminders (e.g. PlanMode)
+      // may be included, so check that the date reminder is absent
+      const cronCall = mockTurnRunFn.mock.calls[0];
+      const cronRequest = cronCall[1].join('\n');
+      expect(cronRequest).not.toContain(
+        '<system-reminder>\nThe current date is:',
+      );
+
+      // UserQuery after Cron should still inject date normally
+      client['lastInjectedDate'] = undefined;
+      mockChat.getHistory = vi.fn().mockReturnValue([]);
+      const mockStream2 = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream2);
+      const stream2 = client.sendMessageStream(
+        [{ text: 'User question' }],
+        new AbortController().signal,
+        'prompt-id-cron-user',
+      );
+      for await (const _ of stream2) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        [
+          expect.stringMatching(
+            /^<system-reminder>\nThe current date is:.*June 5, 2026/,
+          ),
+          'User question',
+        ],
+        expect.any(AbortSignal),
+      );
     });
 
     describe('autoSkill: scheduleSkillReview via runManagedAutoMemoryBackgroundTasks', () => {
@@ -4342,7 +5345,10 @@ Other open files:
             expect(getLastTurnRequestText()).toContain('</system-reminder>');
           } else {
             expect(mockChat.addHistory).not.toHaveBeenCalled();
-            expect(getLastTurnRequestText()).not.toContain('<system-reminder>');
+            // Date reminder uses <system-reminder> too, so check for the IDE-specific one
+            expect(getLastTurnRequestText()).not.toContain(
+              "Here is a summary of changes in the user's current editor context",
+            );
           }
         },
       );
@@ -4577,7 +5583,10 @@ Other open files:
           /* consume */
         }
 
-        expect(getLastTurnRequestText()).not.toContain('<system-reminder>');
+        // Date reminder uses <system-reminder> too, so check for IDE-specific one
+        expect(getLastTurnRequestText()).not.toContain(
+          "Here is the user's current editor context",
+        );
         expect(client['lastSentIdeContext']).toBeUndefined();
         expect(client['forceFullIdeContext']).toBe(true);
 
@@ -5061,14 +6070,15 @@ Other open files:
       expect(mockCheckNextSpeaker).not.toHaveBeenCalled();
     });
 
-    it('does not run loop checks when skipLoopDetection is true', async () => {
+    it('keeps deterministic tool-call checks when skipLoopDetection is true', async () => {
       // Arrange
       // Ensure config returns true for skipLoopDetection
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
 
       // Replace loop detector with spies
       const ldMock = {
-        addAndCheck: vi.fn().mockReturnValue(false),
+        addAndCheckDeterministicToolCallLoop: vi.fn().mockReturnValue(false),
+        addAndCheckHeuristicLoops: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       };
       // @ts-expect-error override private for testing
@@ -5096,8 +6106,49 @@ Other open files:
         // consume stream
       }
 
-      // Assert - loop detection methods should not be called when skipLoopDetection is true
-      expect(ldMock.addAndCheck).not.toHaveBeenCalled();
+      expect(ldMock.addAndCheckDeterministicToolCallLoop).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(ldMock.addAndCheckHeuristicLoops).not.toHaveBeenCalled();
+    });
+
+    it('hard-stops identical tool calls even when skipLoopDetection is true', async () => {
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          for (let i = 0; i < 5; i++) {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: `repeat-${i}`,
+                name: 'run_shell_command',
+                args: { command: 'echo repeated' },
+              },
+            };
+          }
+        })(),
+      );
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'repeat a tool' }],
+          new AbortController().signal,
+          'prompt-id-skip-loop-identical',
+        ),
+      );
+
+      expect(events.at(-1)).toEqual({
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
+      });
+      expect(events).toHaveLength(5);
     });
 
     describe('retry sendMessageType', () => {
@@ -5684,6 +6735,103 @@ Other open files:
         expect(recordAttributionSnapshot).not.toHaveBeenCalled();
       });
     });
+
+    describe('file history snapshot persistence', () => {
+      let recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
+      const latestSnapshot: FileHistorySnapshot = {
+        promptId: 'prompt-uq',
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {
+          'a.txt': {
+            backupFileName: 'backup-a',
+            version: 1,
+            backupTime: new Date('2026-06-13T00:00:01.000Z'),
+          },
+        },
+      };
+
+      beforeEach(() => {
+        recordFileHistorySnapshot = vi.fn();
+        mockFileHistoryService.makeSnapshot.mockResolvedValue(undefined);
+        mockFileHistoryService.getSnapshots.mockReturnValue([latestSnapshot]);
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot,
+          recordUserMessage: vi.fn(),
+          recordCronPrompt: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+      });
+
+      async function collectStream(
+        messageType: SendMessageType,
+        promptId = 'prompt-uq',
+      ): Promise<ServerGeminiStreamEvent[]> {
+        const stream = client.sendMessageStream(
+          [{ text: 'user' }],
+          new AbortController().signal,
+          promptId,
+          { type: messageType },
+        );
+        const chunks: ServerGeminiStreamEvent[] = [];
+        for await (const chunk of stream) {
+          chunks.push(chunk);
+        }
+        return chunks;
+      }
+
+      it('calls makeSnapshot for UserQuery turns', async () => {
+        await collectStream(SendMessageType.UserQuery, 'prompt-file-history');
+
+        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
+          'prompt-file-history',
+        );
+      });
+
+      it('records the latest snapshot after a UserQuery snapshot', async () => {
+        await collectStream(SendMessageType.UserQuery);
+
+        expect(recordFileHistorySnapshot).toHaveBeenCalledWith(latestSnapshot);
+      });
+
+      it('does not call makeSnapshot for ToolResult and Retry turns', async () => {
+        await collectStream(SendMessageType.ToolResult, 'prompt-tool-result');
+        await collectStream(SendMessageType.Retry, 'prompt-retry');
+
+        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+      });
+
+      it('swallows makeSnapshot rejection and still yields content', async () => {
+        mockFileHistoryService.makeSnapshot.mockRejectedValueOnce(
+          new Error('snapshot failed'),
+        );
+
+        const chunks = await collectStream(SendMessageType.UserQuery);
+
+        expect(chunks).toContainEqual({
+          type: GeminiEventType.Content,
+          value: 'ok',
+        });
+      });
+
+      it('swallows recordFileHistorySnapshot errors and still yields content', async () => {
+        recordFileHistorySnapshot.mockImplementationOnce(() => {
+          throw new Error('record failed');
+        });
+
+        const chunks = await collectStream(SendMessageType.UserQuery);
+
+        expect(chunks).toContainEqual({
+          type: GeminiEventType.Content,
+          value: 'ok',
+        });
+      });
+    });
   });
 
   describe('generateContent', () => {
@@ -5710,6 +6858,25 @@ Other open files:
           contents,
         }),
         'test-session-id',
+      );
+    });
+
+    it('forwards configured retryErrorCodes to retryWithBackoff', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        retryErrorCodes: [4999],
+      } as unknown as ContentGeneratorConfig);
+
+      await client.generateContent(
+        [{ role: 'user', parts: [{ text: 'hi' }] }],
+        {},
+        new AbortController().signal,
+        client['config'].getModel(),
+      );
+
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({ extraRetryErrorCodes: [4999] }),
       );
     });
 
@@ -6338,5 +7505,379 @@ Other open files:
       );
       expect(createContentGenerator).toHaveBeenCalledTimes(2);
     });
+  });
+
+  describe('drainSkillAndCommandReminders', () => {
+    const makeEntries = (
+      names: string[],
+      level: 'project' | 'bundled' = 'project',
+    ): AvailableSkillEntry[] =>
+      names.map((name) => ({ name, description: `desc-${name}`, level }));
+
+    const mockSkillManager = {
+      listSkills: vi.fn().mockResolvedValue([]),
+      getActivatedSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+    };
+
+    const mockChat = {
+      addHistory: vi.fn(),
+      getHistory: vi.fn().mockReturnValue([]),
+      setHistory: vi.fn(),
+    };
+
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const priv = () => client as any;
+
+    async function drain() {
+      await priv().drainSkillAndCommandReminders();
+    }
+
+    beforeEach(() => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set<string>(),
+      );
+      vi.mocked(mockConfig.getSkillManager).mockReturnValue(
+        mockSkillManager as unknown as ReturnType<Config['getSkillManager']>,
+      );
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
+        name === ToolNames.SKILL ? ({} as any) : undefined,
+      );
+      priv().chat = mockChat;
+      priv().announcedSkillReminderKeys = new Set();
+      priv().skillRemindersInitialized = false;
+      mockChat.addHistory.mockClear();
+    });
+
+    it('first drain without snapshot seed announces all entries as new', async () => {
+      // When seedSkillReminderDedupFromSnapshot was never called (edge-case
+      // construction path), the first drain treats every entry as genuinely
+      // new rather than silently swallowing them as "already announced".
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a', 'skill-b']),
+      });
+
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(true);
+      expect(priv().announcedSkillReminderKeys.size).toBe(2);
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+      expect(addedContent.parts[0].text).toContain('skill-b');
+    });
+
+    it('first drain with snapshot seed emits nothing for seeded entries', async () => {
+      // When seedSkillReminderDedupFromSnapshot was called (normal path),
+      // the first drain does not re-announce entries already in the snapshot.
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-a', 'skill-b']),
+      );
+
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a', 'skill-b']),
+      });
+
+      await drain();
+
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('drain with a genuinely new skill emits a reminder', async () => {
+      // Seed from snapshot (normal startChat path)
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
+      // Drain: skill-b is new
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a', 'skill-b']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-b');
+      // Already-seeded skill-a should not appear in the reminder
+      expect(addedContent.parts[0].text).not.toContain('desc-skill-a');
+    });
+
+    it('drain with no new skills after seed emits nothing', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
+      const entries = makeEntries(['skill-a']);
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries,
+      });
+
+      await drain(); // same skills as seed
+
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('removed skill prunes its key so re-adding re-announces', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
+      // Second drain: skill-a removed (user disabled)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+      await drain();
+
+      expect(priv().announcedSkillReminderKeys.size).toBe(0);
+
+      // Third drain: skill-a re-added (user re-enabled)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('path-activated skill is announced by drain (no suppression based on shared activation set)', async () => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set(['skill-a']),
+      );
+
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-existing']),
+      );
+
+      // Drain: skill-a appears — announced by drain because it was not
+      // in the snapshot, regardless of getActivatedSkillNames state.
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing', 'skill-a']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('path-activated skill re-announces after disable/re-enable', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
+      // Second drain: skill-a removed (user disabled)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+      await drain();
+
+      // Third drain: skill-a re-added (user re-enabled) — SHOULD re-announce
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('returns early when Skill tool is not registered', async () => {
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockReturnValue(undefined);
+
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(false);
+    });
+
+    it('returns early and logs when collectAvailableSkillEntries throws', async () => {
+      vi.mocked(collectAvailableSkillEntries).mockRejectedValue(
+        new Error('load failed'),
+      );
+
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(false);
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('command entries use cmd: key prefix and are not suppressed by activatedConditional', async () => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set(['mcp-prompt-a']),
+      );
+
+      // Seed from snapshot with a file-based skill
+      priv().seedSkillReminderDedupFromSnapshot([
+        {
+          name: 'existing-skill',
+          description: 'desc',
+          level: 'project' as const,
+        },
+      ]);
+
+      // Second drain: add a command entry (no level — MCP prompt/command)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [
+          {
+            name: 'existing-skill',
+            description: 'desc',
+            level: 'project' as const,
+          },
+          { name: 'mcp-prompt-a', description: 'a command' },
+        ],
+      });
+      await drain();
+
+      // Command entries (no level) should NOT be suppressed by activatedConditional
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('mcp-prompt-a');
+    });
+
+    it('command entry prunes and re-announces correctly', async () => {
+      // Seed from snapshot with a command
+      priv().seedSkillReminderDedupFromSnapshot([
+        { name: 'cmd-a', description: 'desc' },
+      ]);
+
+      // Second drain: command removed
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+      await drain();
+
+      expect(priv().announcedSkillReminderKeys.has('cmd:cmd-a')).toBe(false);
+
+      // Third drain: command re-added
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [{ name: 'cmd-a', description: 'desc' }],
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('cmd-a');
+    });
+
+    it('seedSkillReminderDedupFromSnapshot seeds from provided entries', async () => {
+      const entries = makeEntries(['skill-a', 'skill-b']);
+
+      priv().seedSkillReminderDedupFromSnapshot(entries);
+
+      expect(priv().skillRemindersInitialized).toBe(true);
+      expect(priv().announcedSkillReminderKeys.size).toBe(2);
+      expect(priv().announcedSkillReminderKeys.has('skill:skill-a')).toBe(true);
+      expect(priv().announcedSkillReminderKeys.has('skill:skill-b')).toBe(true);
+    });
+
+    it('seedSkillReminderDedupFromSnapshot with empty entries resets state', () => {
+      // Seed with some data first
+      priv().announcedSkillReminderKeys = new Set(['skill:old']);
+      priv().skillRemindersInitialized = false;
+
+      priv().seedSkillReminderDedupFromSnapshot([]);
+
+      expect(priv().skillRemindersInitialized).toBe(true);
+      expect(priv().announcedSkillReminderKeys.size).toBe(0);
+    });
+
+    it('inline-announced skills consumed from config are not re-announced by drain', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-existing']),
+      );
+
+      // Simulate coreToolScheduler recording inline-announced skills
+      vi.mocked(mockConfig.consumeInlineAnnouncedSkillKeys).mockReturnValue(
+        new Set(['skill:skill-inline']),
+      );
+
+      // Drain sees skill-inline as a new entry but it was already announced
+      // inline by coreToolScheduler, so it should not be re-announced.
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing', 'skill-inline']),
+      });
+      await drain();
+
+      // skill-inline should be in announcedSkillReminderKeys but NOT in the
+      // reminder (no addHistory call since all new entries were consumed)
+      expect(priv().announcedSkillReminderKeys.has('skill:skill-inline')).toBe(
+        true,
+      );
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('inline-announced does not suppress genuinely new skills', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-existing']),
+      );
+
+      // Only skill-inline was announced inline
+      vi.mocked(mockConfig.consumeInlineAnnouncedSkillKeys).mockReturnValue(
+        new Set(['skill:skill-inline']),
+      );
+
+      // Both skill-inline and skill-new appear; only skill-new should be
+      // announced since skill-inline was already handled inline.
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing', 'skill-inline', 'skill-new']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-new');
+      expect(addedContent.parts[0].text).not.toContain('desc-skill-inline');
+    });
+    /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 });

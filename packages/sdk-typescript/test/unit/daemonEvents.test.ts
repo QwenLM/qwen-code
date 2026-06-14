@@ -1649,11 +1649,19 @@ describe('PR 21 — auth device-flow events', () => {
 
     it('mcp_server_restart_refused: routes to refused counter only, all reasons accepted', () => {
       const initial = createDaemonSessionViewState();
-      const reasons: Array<'in_flight' | 'disabled' | 'budget_would_exceed'> = [
-        'in_flight',
-        'disabled',
-        'budget_would_exceed',
-      ];
+      const reasons: Array<
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        // F2 (#4175 commit 5): pool-mode hard restart failure carried
+        // alongside the soft-skip reasons. The reducer treats it like
+        // any other refusal — count + remember last — without a
+        // dedicated counter, since the bridge fan-out emits one event
+        // per failed pool entry and aggregating into the refused
+        // counter is the operator-meaningful signal ("this many
+        // restart attempts didn't take effect").
+        | 'restart_failed'
+      > = ['in_flight', 'disabled', 'budget_would_exceed', 'restart_failed'];
       let state = initial;
       for (const [i, reason] of reasons.entries()) {
         state = reduceDaemonSessionEvent(state, {
@@ -1663,9 +1671,9 @@ describe('PR 21 — auth device-flow events', () => {
           data: { serverName: 'docs', reason },
         });
       }
-      expect(state.mcpRestartRefusedCount).toBe(3);
+      expect(state.mcpRestartRefusedCount).toBe(4);
       expect(state.mcpRestartCount).toBe(0);
-      expect(state.lastMcpRestartRefused?.reason).toBe('budget_would_exceed');
+      expect(state.lastMcpRestartRefused?.reason).toBe('restart_failed');
       // Bogus reason literal is rejected by the parser.
       const malformed: DaemonEvent = {
         id: 99,
@@ -1693,6 +1701,1030 @@ describe('PR 21 — auth device-flow events', () => {
         },
       });
       expect(next.lastToolToggle?.originatorClientId).toBe('data-client');
+    });
+  });
+
+  // F3 Commit 7 — multi-client permission coordination event reducer
+  // tests. Covers permission_partial_vote / permission_forbidden plus
+  // the side-effect that resolved/already_resolved events clear
+  // `permissionVoteProgress` for the matching requestId.
+  describe('F3 permission coordination events', () => {
+    it('narrows permission_partial_vote and permission_forbidden via asKnownDaemonEvent', () => {
+      const partial = asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'permission_partial_vote',
+        data: {
+          requestId: 'req-1',
+          sessionId: 'sess-1',
+          votesReceived: 1,
+          votesNeeded: 1,
+          quorum: 2,
+          optionTallies: { proceed_once: 1 },
+        },
+      });
+      expect(partial?.type).toBe('permission_partial_vote');
+
+      const forbidden = asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'permission_forbidden',
+        data: {
+          requestId: 'req-1',
+          sessionId: 'sess-1',
+          clientId: 'client_B',
+          reason: 'designated_mismatch',
+        },
+        originatorClientId: 'client_A',
+      });
+      expect(forbidden?.type).toBe('permission_forbidden');
+    });
+
+    it('rejects malformed permission_partial_vote (negative tally)', () => {
+      expect(
+        asKnownDaemonEvent({
+          id: 3,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: -1 },
+          },
+        }),
+      ).toBeUndefined();
+    });
+
+    it('rejects malformed permission_forbidden (unknown reason)', () => {
+      expect(
+        asKnownDaemonEvent({
+          id: 4,
+          v: 1,
+          type: 'permission_forbidden',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            reason: 'unauthorized',
+          },
+        }),
+      ).toBeUndefined();
+    });
+
+    it('reducer accumulates permission_partial_vote into permissionVoteProgress', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+      ]);
+      expect(state.permissionVoteProgress['req-1']).toMatchObject({
+        votesReceived: 1,
+        votesNeeded: 1,
+        quorum: 2,
+        optionTallies: { proceed_once: 1 },
+      });
+      expect(Object.keys(state.pendingPermissions)).toEqual(['req-1']);
+    });
+
+    it('reducer clears permissionVoteProgress on permission_resolved', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 3,
+          v: 1,
+          type: 'permission_resolved',
+          data: {
+            requestId: 'req-1',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      expect(state.permissionVoteProgress).toEqual({});
+      expect(state.pendingPermissions).toEqual({});
+    });
+
+    it('reducer clears permissionVoteProgress on permission_already_resolved', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 3,
+          v: 1,
+          type: 'permission_already_resolved',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      expect(state.permissionVoteProgress).toEqual({});
+    });
+
+    // Wenshao review #4335 / 3271041465 — SDK reconnects mid-permission
+    // and misses `permission_request`, then sees `permission_partial_vote`
+    // (stored in permissionVoteProgress). When the matching
+    // `permission_resolved` arrives, the early-return path on
+    // unmatched requestId must STILL clear the orphan progress
+    // entry; otherwise it persists for the lifetime of the session.
+    it('reducer clears orphan permissionVoteProgress on unmatched permission_resolved (reconnect race)', () => {
+      const state = reduceDaemonSessionEvents([
+        // No permission_request — simulates a client that reconnected
+        // after the original prompt was dispatched.
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'orphan-req',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_resolved',
+          data: {
+            requestId: 'orphan-req',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      // Pre-fix: permissionVoteProgress['orphan-req'] would still be
+      // populated because the resolved-handler early-returned without
+      // touching permissionVoteProgress. Post-fix: cleared.
+      expect(state.permissionVoteProgress).toEqual({});
+      // The unmatched-resolution counter still bumps; that signal
+      // remains valuable for diagnostics.
+      expect(state.unmatchedPermissionResolutionCount).toBe(1);
+      expect(state.lastUnmatchedPermissionResolutionId).toBe('orphan-req');
+    });
+
+    it('reducer clears orphan permissionVoteProgress on unmatched permission_already_resolved (reconnect race)', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'orphan-req',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_already_resolved',
+          data: {
+            requestId: 'orphan-req',
+            sessionId: 'sess-1',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      expect(state.permissionVoteProgress).toEqual({});
+      expect(state.unmatchedPermissionResolutionCount).toBe(1);
+    });
+
+    it('reducer appends permission_forbidden to bounded forbiddenVotes', () => {
+      const events: DaemonEvent[] = [];
+      for (let i = 0; i < 35; i++) {
+        events.push({
+          id: 100 + i,
+          v: 1,
+          type: 'permission_forbidden',
+          data: {
+            requestId: `req-${i}`,
+            sessionId: 'sess-1',
+            clientId: `client_${i}`,
+            reason: 'designated_mismatch',
+          },
+          originatorClientId: 'prompt-originator',
+        });
+      }
+      const state = reduceDaemonSessionEvents(events);
+      // Ring is bounded at 32; total count tracks all events.
+      expect(state.forbiddenVotes.length).toBe(32);
+      expect(state.forbiddenVoteCount).toBe(35);
+      // FIFO eviction — the first 3 entries should have been evicted.
+      expect(state.forbiddenVotes[0]!.requestId).toBe('req-3');
+      expect(state.forbiddenVotes[31]!.requestId).toBe('req-34');
+    });
+
+    // Wenshao review #4335 / 3272576003 — terminal events
+    // (session_died / session_closed / client_evicted / stream_error)
+    // must drop forbiddenVotes + forbiddenVoteCount alongside the
+    // existing pendingPermissions / permissionVoteProgress reset.
+    // Pre-fix the rejection history would persist on a dead session
+    // and adapters reading view state would render stale data.
+    it.each([
+      ['session_died', { sessionId: 'sess-1', reason: 'dead' }],
+      [
+        'session_closed',
+        { sessionId: 'sess-1', reason: 'client_close' as const },
+      ],
+      [
+        'client_evicted',
+        { sessionId: 'sess-1', clientId: 'c', reason: 'too-slow' },
+      ],
+      ['stream_error', { sessionId: 'sess-1', error: 'broken' }],
+    ])(
+      'reducer clears forbiddenVotes + forbiddenVoteCount on %s (#4335 / 3272576003)',
+      (terminalType, terminalData) => {
+        const state = reduceDaemonSessionEvents([
+          {
+            id: 1,
+            v: 1,
+            type: 'permission_forbidden',
+            data: {
+              requestId: 'req-1',
+              sessionId: 'sess-1',
+              clientId: 'rejected',
+              reason: 'designated_mismatch',
+            },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: terminalType,
+            data: terminalData,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+        ]);
+        expect(state.forbiddenVotes).toEqual([]);
+        expect(state.forbiddenVoteCount).toBe(0);
+        expect(state.alive).toBe(false);
+      },
+    );
+
+    // Wenshao review #4335 / 3270622311 — the SSE envelope's
+    // `originatorClientId` (= prompt originator per F3 N3) must reach
+    // view state. Pre-fix, the reducer copied only `event.data` and
+    // dropped the prompt-originator attribution, leaving SDK consumers
+    // unable to tell which client's prompt was targeted by the
+    // partial-vote progress / forbidden vote.
+    it('reducer stamps prompt-originator on permission_partial_vote view state (mergeOriginator)', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+          originatorClientId: 'prompt-originator-id',
+        },
+      ]);
+      expect(state.permissionVoteProgress['req-1']).toMatchObject({
+        requestId: 'req-1',
+        votesReceived: 1,
+        originatorClientId: 'prompt-originator-id',
+      });
+    });
+
+    it('reducer stamps prompt-originator on permission_forbidden view state (mergeOriginator)', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_forbidden',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            clientId: 'rejected-voter-id',
+            reason: 'designated_mismatch',
+          },
+          originatorClientId: 'prompt-originator-id',
+        },
+      ]);
+      expect(state.forbiddenVotes).toHaveLength(1);
+      expect(state.forbiddenVotes[0]).toMatchObject({
+        requestId: 'req-1',
+        clientId: 'rejected-voter-id',
+        originatorClientId: 'prompt-originator-id',
+      });
+    });
+
+    it('reducer preserves data.originatorClientId over envelope when both present (mergeOriginator)', () => {
+      // Defensive: mergeOriginator's contract is to PRESERVE any pre-
+      // existing data.originatorClientId. The daemon does not currently
+      // populate it, but if a future producer does, the reducer must
+      // not overwrite it with the envelope value.
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_forbidden',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            clientId: 'rejected',
+            reason: 'designated_mismatch',
+            originatorClientId: 'data-side-originator',
+          },
+          originatorClientId: 'envelope-side-originator',
+        },
+      ]);
+      expect(state.forbiddenVotes[0]?.originatorClientId).toBe(
+        'data-side-originator',
+      );
+    });
+
+    it('partial_vote → resolved ordering (M=2 N=2 quorum scenario)', () => {
+      // F3 N3 ordering invariant — partial_vote frames precede the
+      // resolved frame for the same requestId.
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 3,
+          v: 1,
+          type: 'permission_resolved',
+          data: {
+            requestId: 'req-1',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      // Reducer end-state: pending cleared, vote progress cleared.
+      expect(state.permissionVoteProgress).toEqual({});
+      expect(state.pendingPermissions).toEqual({});
+    });
+
+    it('rejects malformed permission_partial_vote payload via unrecognizedKnownEventCount counter', () => {
+      // The reducer's `narrow then no-op` path: when the event type IS
+      // in `KNOWN_EVENT_TYPES` but its data fails the type-guard
+      // (e.g. missing required fields, negative tally), the reducer
+      // bumps `unrecognizedKnownEventCount` rather than crashing.
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 9,
+        v: 1,
+        type: 'permission_partial_vote',
+        data: { malformed: true },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.permissionVoteProgress).toEqual({});
+    });
+
+    it('forward-compat: emits unknown event types fall through silently (no counter bump)', () => {
+      // R3-11 (final review fold-in) — true forward-compat path. The
+      // reducer's `unrecognizedKnownEventCount` only fires for types
+      // that ARE in `KNOWN_EVENT_TYPES` (i.e. the daemon and SDK
+      // agree on the type but disagree on the shape). For unknown
+      // types — e.g. a future daemon emitting `permission_unknown_v2`
+      // before the SDK ships support — the reducer must silently
+      // ignore (track only `lastEventId`) so the SDK can keep
+      // streaming through unknown events without piling up false
+      // unrecognized-known counts.
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 99,
+        v: 1,
+        type: 'permission_unknown_v2_future',
+        data: { whatever: 'shape' },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(0);
+      expect(state.lastEventId).toBe(99);
+    });
+  });
+
+  describe('state_resync_required (#4175 F4 prereq, Ilya0527 issue #15)', () => {
+    it('sets awaitingResync + records the resync data when daemon emits state_resync_required', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'state_resync_required',
+        data: {
+          reason: 'ring_evicted',
+          lastDeliveredId: 5,
+          earliestAvailableId: 12,
+        },
+      });
+      expect(state.awaitingResync).toBe(true);
+      expect(state.resyncRequiredCount).toBe(1);
+      expect(state.lastResyncRequired).toEqual({
+        reason: 'ring_evicted',
+        lastDeliveredId: 5,
+        earliestAvailableId: 12,
+      });
+    });
+
+    it('auto-skips delta events (session_update) while awaitingResync is true', () => {
+      // Step 1: daemon emits resync → flag set.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      // Step 2: subsequent session_update would normally set
+      // `lastSessionUpdate` — but awaitingResync auto-skips it.
+      const skipped = reduceDaemonSessionEvent(afterResync, {
+        id: 13,
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 's-X', phase: 'prompting' },
+      });
+      // lastSessionUpdate unchanged (skipped), lastEventId DID advance.
+      expect(skipped.lastSessionUpdate).toBeUndefined();
+      expect(skipped.lastEventId).toBe(13);
+      expect(skipped.awaitingResync).toBe(true);
+    });
+
+    it('auto-skips permission_request while awaitingResync (no pendingPermissions mutation)', () => {
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const skipped = reduceDaemonSessionEvent(afterResync, {
+        id: 13,
+        v: 1,
+        type: 'permission_request',
+        data: {
+          requestId: 'req-stale',
+          sessionId: 's-1',
+          toolCall: {
+            toolCallId: 'tc-1',
+            status: 'pending',
+            title: 'Read /etc/passwd',
+          },
+          options: [
+            {
+              optionId: 'allow_once',
+              name: 'Allow once',
+              kind: 'allow_once',
+            },
+          ],
+        },
+      });
+      // pendingPermissions stays empty — the permission_request was
+      // applied to stale state and we can't trust which permissions
+      // are still pending until loadSession recovery.
+      expect(skipped.pendingPermissions).toEqual({});
+    });
+
+    it('still applies terminal events (session_died) while awaitingResync', () => {
+      // Critical: a session that DIES while in resync limbo must still
+      // be observable as dead. Otherwise UIs would render "loading
+      // resync state…" indefinitely while the underlying session is
+      // gone.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const dead = reduceDaemonSessionEvent(afterResync, {
+        id: 14,
+        v: 1,
+        type: 'session_died',
+        data: { sessionId: 's-1', reason: 'channel_closed' },
+      });
+      expect(dead.alive).toBe(false);
+      expect(dead.terminalEvent?.type).toBe('session_died');
+      // awaitingResync stays set (the consumer never recovered from
+      // resync — the session just died first). The terminal event
+      // takes precedence for UI rendering.
+      expect(dead.awaitingResync).toBe(true);
+    });
+
+    it('still applies stream_error while awaitingResync', () => {
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const errored = reduceDaemonSessionEvent(afterResync, {
+        v: 1,
+        type: 'stream_error',
+        data: { error: 'transport gone' },
+      });
+      expect(errored.alive).toBe(false);
+      expect(errored.streamError).toEqual({ error: 'transport gone' });
+    });
+
+    it('captures errorKind on stream_error in view state (wenshao #4360 review)', () => {
+      // The daemon stamps `errorKind` on `stream_error` payloads when
+      // classifiable (commit `14637cd79`, via `mapDomainErrorToErrorKind`).
+      // SDK consumers receiving these frames need `state.streamError.
+      // errorKind` to render typed retry/remediation UI (e.g. retry on
+      // init_timeout, install on missing_binary) without regex-matching
+      // the `error` message string.
+      //
+      // This test pins the flowthrough: the reducer's `stream_error`
+      // case must assign `event.data` as-is to `state.streamError`,
+      // preserving all fields including the optional `errorKind`. If
+      // a future refactor strips `errorKind` (e.g. by spreading only
+      // `{error}` instead of the full data object), this fails.
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'stream_error',
+        data: {
+          error: 'initialize timed out after 5000ms',
+          errorKind: 'init_timeout',
+        },
+      });
+      expect(state.alive).toBe(false);
+      expect(state.streamError?.errorKind).toBe('init_timeout');
+      expect(state.streamError?.error).toContain('timed out');
+    });
+
+    it('still applies session_closed while awaitingResync (wenshao #4360 review)', () => {
+      // session_closed is in RESYNC_PASSTHROUGH_TYPES alongside
+      // session_died — terminal session lifecycle signals must still
+      // surface even when the consumer is in resync limbo. Otherwise
+      // a session that closes during resync would silently keep
+      // `alive: true` in view state and the UI would render "loading
+      // resync state…" indefinitely.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const closed = reduceDaemonSessionEvent(afterResync, {
+        id: 15,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1', reason: 'client_initiated' },
+      });
+      expect(closed.alive).toBe(false);
+      expect(closed.terminalEvent?.type).toBe('session_closed');
+      // awaitingResync stays set (consumer never recovered) — the
+      // terminal event takes precedence for UI rendering but the
+      // resync flag remains as observability state.
+      expect(closed.awaitingResync).toBe(true);
+    });
+
+    it('still applies client_evicted while awaitingResync (wenshao #4360 review)', () => {
+      // client_evicted is the 5th member of RESYNC_PASSTHROUGH_TYPES.
+      // It happens when the subscriber's queue overflows (the daemon
+      // closes the stream after force-pushing the synthetic frame).
+      // Even in resync limbo, the SDK must see the eviction so the
+      // adapter can stop pretending the stream is alive.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const evicted = reduceDaemonSessionEvent(afterResync, {
+        v: 1,
+        type: 'client_evicted',
+        data: { reason: 'queue_overflow', droppedAfter: 17 },
+      });
+      expect(evicted.alive).toBe(false);
+      expect(evicted.terminalEvent?.type).toBe('client_evicted');
+    });
+
+    it('reseeding view state via createDaemonSessionViewState clears awaitingResync (consumer recovery)', () => {
+      // Consumer recovery path: after observing awaitingResync, call
+      // loadSession (out of band) and reconstruct view state. The
+      // fresh state has the flag back to false.
+      const stale = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'state_resync_required',
+        data: {
+          reason: 'ring_evicted',
+          lastDeliveredId: 5,
+          earliestAvailableId: 12,
+        },
+      });
+      expect(stale.awaitingResync).toBe(true);
+      // Consumer calls loadSession + builds fresh state from result.
+      const recovered = createDaemonSessionViewState({
+        sessionId: 's-1',
+        lastEventId: 20,
+      });
+      expect(recovered.awaitingResync).toBe(false);
+      expect(recovered.resyncRequiredCount).toBe(0);
+    });
+
+    it('a second state_resync_required increments resyncRequiredCount', () => {
+      // Repeated reconnect past the ring boundary — counter accumulates.
+      let state = createDaemonSessionViewState();
+      state = reduceDaemonSessionEvent(state, {
+        v: 1,
+        type: 'state_resync_required',
+        data: {
+          reason: 'ring_evicted',
+          lastDeliveredId: 5,
+          earliestAvailableId: 12,
+        },
+      });
+      state = reduceDaemonSessionEvent(state, {
+        v: 1,
+        type: 'state_resync_required',
+        data: {
+          reason: 'ring_evicted',
+          lastDeliveredId: 20,
+          earliestAvailableId: 100,
+        },
+      });
+      expect(state.resyncRequiredCount).toBe(2);
+      expect(state.lastResyncRequired?.lastDeliveredId).toBe(20);
+    });
+
+    it('rejects malformed state_resync_required payload via unrecognizedKnownEventCount', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'state_resync_required',
+        data: { reason: 'ring_evicted' }, // missing lastDeliveredId/earliestAvailableId
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.awaitingResync).toBe(false);
+    });
+
+    it('still applies session_snapshot while awaitingResync (RESYNC_PASSTHROUGH_TYPES)', () => {
+      // session_snapshot is in RESYNC_PASSTHROUGH_TYPES — a reconnecting
+      // client that missed ring events still needs to seed its side-channel
+      // model/mode state. Without passthrough, the auto-skip gate would
+      // drop the snapshot and the client would remain on stale null/null.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      expect(afterResync.awaitingResync).toBe(true);
+
+      const afterSnapshot = reduceDaemonSessionEvent(afterResync, {
+        id: 13,
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: 'qwen-max',
+          currentApprovalMode: 'auto-edit',
+        },
+      });
+      // The snapshot must have applied — model/mode state is populated.
+      expect(afterSnapshot.currentModelId).toBe('qwen-max');
+      expect(afterSnapshot.approvalMode).toBe('auto-edit');
+      // awaitingResync stays true (consumer hasn't explicitly recovered).
+      expect(afterSnapshot.awaitingResync).toBe(true);
+    });
+  });
+
+  describe('followup_suggestion (daemon assist push)', () => {
+    it('recognizes followup_suggestion frames as known events', () => {
+      const event = {
+        id: 3,
+        v: 1,
+        type: 'followup_suggestion',
+        data: {
+          sessionId: 's-1',
+          suggestion: 'Run the build?',
+          promptId: 's-1########3',
+        },
+      } satisfies DaemonEvent;
+      const known = asKnownDaemonEvent(event);
+      expect(known?.type).toBe('followup_suggestion');
+      if (known?.type === 'followup_suggestion') {
+        expect(known.data.sessionId).toBe('s-1');
+        expect(known.data.suggestion).toBe('Run the build?');
+        expect(known.data.promptId).toBe('s-1########3');
+      }
+    });
+
+    it('rejects malformed followup_suggestion payloads', () => {
+      // Missing fields → predicate rejects → asKnownDaemonEvent
+      // returns undefined → reducer counts via unrecognizedKnownEventCount.
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { suggestion: 'x', promptId: 'p' },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { sessionId: 's', promptId: 'p' },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { sessionId: 's', suggestion: 'x' },
+        }),
+      ).toBeUndefined();
+      // Empty suggestion is protocol garbage — the daemon filters
+      // rejected suggestions server-side and only emits when accepted.
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { sessionId: 's', suggestion: '', promptId: 'p' },
+        }),
+      ).toBeUndefined();
+      // Wrong types.
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { sessionId: 's', suggestion: 42, promptId: 'p' },
+        }),
+      ).toBeUndefined();
+    });
+
+    it('reducer stores lastFollowupSuggestion and overwrites on a fresh event', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { sessionId: 's-1', phase: 'prompting' },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'followup_suggestion',
+          data: {
+            sessionId: 's-1',
+            suggestion: 'First',
+            promptId: 's-1########1',
+          },
+        },
+        {
+          id: 3,
+          v: 1,
+          type: 'followup_suggestion',
+          data: {
+            sessionId: 's-1',
+            suggestion: 'Second',
+            promptId: 's-1########2',
+          },
+        },
+      ]);
+      expect(state.lastFollowupSuggestion).toEqual({
+        sessionId: 's-1',
+        suggestion: 'Second',
+        promptId: 's-1########2',
+      });
+      // Non-terminal — does not touch alive / pendingPermissions.
+      expect(state.alive).toBe(true);
+      expect(state.terminalEvent).toBeUndefined();
+      expect(state.lastEventId).toBe(3);
+    });
+
+    it('malformed payload routes to unrecognizedKnownEventCount', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'followup_suggestion',
+        data: { sessionId: 's-1', suggestion: 'incomplete' }, // missing promptId
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.lastFollowupSuggestion).toBeUndefined();
+    });
+  });
+
+  describe('session_snapshot (A5 #4511)', () => {
+    it('asKnownDaemonEvent narrows session_snapshot', () => {
+      const event: DaemonEvent = {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: 'qwen-turbo',
+          currentApprovalMode: 'auto',
+        },
+      };
+      const known = asKnownDaemonEvent(event);
+      expect(known).toBeDefined();
+      expect(known!.type).toBe('session_snapshot');
+    });
+
+    it('reducer seeds currentModelId and approvalMode from snapshot', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: 'qwen-turbo',
+          currentApprovalMode: 'yolo',
+        },
+      });
+      expect(state.sessionId).toBe('s-1');
+      expect(state.currentModelId).toBe('qwen-turbo');
+      expect(state.approvalMode).toBe('yolo');
+    });
+
+    it('reducer does not overwrite model/mode with null snapshot values', () => {
+      const initial = {
+        ...createDaemonSessionViewState(),
+        currentModelId: 'existing-model',
+        approvalMode: 'default',
+      };
+      const state = reduceDaemonSessionEvent(initial, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+        },
+      });
+      expect(state.currentModelId).toBe('existing-model');
+      expect(state.approvalMode).toBe('default');
+    });
+
+    it('drops malformed session_snapshot (missing sessionId)', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: { currentModelId: 'qwen-turbo' },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+    });
+
+    it('drops session_snapshot with a non-string currentModelId', () => {
+      // Guards the reducer's `!= null` propagation: an unchecked non-string
+      // would land in `state.currentModelId` and crash downstream string ops.
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: 42 as unknown as string,
+          currentApprovalMode: null,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.currentModelId).toBeUndefined();
+    });
+
+    it('drops session_snapshot with a non-string currentApprovalMode', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: null,
+          currentApprovalMode: {} as unknown as string,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.approvalMode).toBeUndefined();
     });
   });
 });

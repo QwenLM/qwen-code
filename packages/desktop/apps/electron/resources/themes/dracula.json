@@ -1,0 +1,26 @@
+{
+  "name": "Dracula",
+  "description": "Dark purple with bright accents",
+  "author": "Zeno Rocha",
+  "license": "MIT",
+  "source": "https://github.com/dracula/dracula-theme",
+  "supportedModes": ["dark"],
+  "shikiTheme": {
+    "light": "github-light",
+    "dark": "dracula"
+  },
+  "background": "#282a36",
+  "foreground": "#f8f8f2",
+  "accent": "#bd93f9",
+  "info": "#ffb86c",
+  "success": "#50fa7b",
+  "destructive": "#ff5555",
+  "dark": {
+    "background": "#282a36",
+    "foreground": "#f8f8f2",
+    "accent": "#bd93f9",
+    "info": "#ffb86c",
+    "success": "#50fa7b",
+    "destructive": "#ff5555"
+  }
+}

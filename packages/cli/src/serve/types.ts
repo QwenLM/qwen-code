@@ -9,12 +9,17 @@ import {
   type ServeFeature,
   type ServeProtocolVersions,
 } from './capabilities.js';
+// Import the canonical `PermissionPolicy` union from acp-bridge
+// instead of inlining the string literals, so upstream changes
+// are compiler-flagged here.
+import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
 
 /**
  * Stage 1 daemon mode shape.
  *
- * `http-bridge` (Stage 1): per #3803 §02, one `qwen --acp` child per
- *   daemon (the daemon binds to ONE workspace at boot). Multiple
+ * `http-bridge` (Stage 1): one `qwen --acp` child per daemon (the
+ *   daemon binds to ONE workspace at boot). Multiple
  *   sessions multiplex onto that child via the agent's native
  *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`),
  *   sharing the child's process / OAuth / file-cache / hierarchy-memory
@@ -49,6 +54,11 @@ export interface ServeOptions {
    */
   maxSessions?: number;
   /**
+   * Per-session cap on accepted prompts that have not settled yet.
+   * Defaults to 5. `0` or `Infinity` disables the cap.
+   */
+  maxPendingPromptsPerSession?: number;
+  /**
    * Listener-level TCP connection cap (`server.maxConnections`).
    * Defaults to 256 — bounds the raw socket count regardless of
    * session count, so a slow / phantom SSE client can't pin the
@@ -57,7 +67,7 @@ export interface ServeOptions {
    * `server.maxConnections` unset, which falls back to Node's
    * built-in unlimited default. We avoid actually setting
    * `server.maxConnections = 0` because on Node 22 that causes the
-   * listener to refuse EVERY connection (tanzhenxin issue 1).
+   * listener to refuse EVERY connection.
    * NaN / negative values throw at boot. Independent of
    * `maxSessions` because one session can have many SSE subscribers
    * (default cap 64) plus short-lived REST calls.
@@ -66,16 +76,15 @@ export interface ServeOptions {
   /**
    * Per-session SSE replay ring depth. Threaded into the bridge as
    * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
-   * construction site. Defaults to 8000 (the target named in
-   * #3803 §02 for chatty Stage 1 sessions). Must be a positive
+   * construction site. Defaults to 8000. Must be a positive
    * finite integer — `0` / `NaN` / negative fail at boot. Larger
    * rings let clients with longer reconnect gaps replay more history
    * at the cost of a few hundred KB extra RAM per session.
    */
   eventRingSize?: number;
   /**
-   * Absolute workspace path this daemon binds to. Per #3803 §02 the
-   * daemon is **1 daemon = 1 workspace × N sessions**: one bound
+   * Absolute workspace path this daemon binds to. The daemon is
+   * **1 daemon = 1 workspace × N sessions**: one bound
    * workspace at boot, sessions multiplexed on the single
    * `qwen --acp` child via `connection.newSession()`.
    *
@@ -88,13 +97,13 @@ export interface ServeOptions {
    * systemd / docker-compose / k8s / `qwen-coordinator` reference
    * orchestrator. There is no intra-daemon multi-workspace mode
    * (the previous Stage 1 `byWorkspaceChannel` routing layer was
-   * removed in the §02 design revision).
+   * removed in the design revision).
    *
    * Defaults to `process.cwd()` when omitted.
    */
   workspace?: string;
   /**
-   * Issue #4175 PR 15. When true, refuses to boot without a bearer
+   * When true, refuses to boot without a bearer
    * token — even on loopback. Loopback's no-token developer default
    * is convenient for local prototyping but unsafe to ship inside
    * shared dev environments / CI runners / multi-tenant workstations
@@ -109,7 +118,12 @@ export interface ServeOptions {
    */
   requireAuth?: boolean;
   /**
-   * Issue #4175 PR 14. Cap on live MCP clients spawned inside the
+   * Opt in to direct session shell execution. The effective policy also
+   * requires a configured bearer token and a session-bound client id.
+   */
+  enableSessionShell?: boolean;
+  /**
+   * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
    * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
    * core's `McpClientManager` picks it up. Combined with
@@ -127,16 +141,61 @@ export interface ServeOptions {
    */
   mcpClientBudget?: number;
   /**
-   * Issue #4175 PR 14. Enforcement mode for `mcpClientBudget`.
+   * Enforcement mode for `mcpClientBudget`.
    * Boot rejects `enforce` without a budget; otherwise resolves to
    * `warn` when budget set / `off` when budget unset.
    */
   mcpBudgetMode?: 'enforce' | 'warn' | 'off';
+  /**
+   * Whether the daemon advertises the
+   * `mcp_workspace_pool` + `mcp_pool_restart` capability tags.
+   */
+  mcpPoolActive?: boolean;
+  /**
+   * Cross-origin allowlist for browser webui
+   * deployments.
+   */
+  allowOrigins?: string[];
+  /**
+   * Allow auth provider baseUrl values that point at localhost/private
+   * networks. Off by default because the daemon exposes this as an HTTP
+   * mutation; local development can opt in explicitly for local model
+   * endpoints.
+   */
+  allowPrivateAuthBaseUrl?: boolean;
+  /**
+   * Server-side wallclock cap on a single
+   * `POST /session/:id/prompt` from receipt to completion.
+   */
+  promptDeadlineMs?: number;
+  /**
+   * Per-SSE-connection idle deadline.
+   */
+  writerIdleTimeoutMs?: number;
+  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  channelIdleTimeoutMs?: number;
+  /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
+  sessionReapIntervalMs?: number;
+  /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
+  sessionIdleTimeoutMs?: number;
+  /**
+   * Enable per-tier HTTP rate limiting. Off by default. When enabled,
+   * requests exceeding per-tier limits receive 429 + Retry-After.
+   */
+  rateLimit?: boolean;
+  /** Max prompt requests per window per key (default 10). Requires --rate-limit. */
+  rateLimitPrompt?: number;
+  /** Max mutation requests per window per key (default 30). Requires --rate-limit. */
+  rateLimitMutation?: number;
+  /** Max read requests per window per key (default 120). Requires --rate-limit. */
+  rateLimitRead?: number;
+  /** Rate limit window duration in ms (default 60000). Requires --rate-limit. */
+  rateLimitWindowMs?: number;
 }
 
 /**
  * Capability envelope returned from `GET /capabilities`. Clients gate UI off
- * `features`, never off `mode` (per design §10 protocol-compatibility).
+ * `features`, never off `mode` (per protocol-compatibility design).
  *
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
@@ -147,6 +206,11 @@ export interface CapabilitiesEnvelope {
    * additive to v=1; older v=1 daemons omit it.
    */
   protocolVersions?: ServeProtocolVersions;
+  /**
+   * Qwen Code CLI/SDK version served by this daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  qwenCodeVersion?: string;
   mode: ServeMode;
   features: string[];
   /**
@@ -159,8 +223,8 @@ export interface CapabilitiesEnvelope {
    */
   modelServices: string[];
   /**
-   * Absolute workspace path this daemon is bound to (per #3803 §02:
-   * `1 daemon = 1 workspace`). Clients use this to:
+   * Absolute workspace path this daemon is bound to
+   * (`1 daemon = 1 workspace`). Clients use this to:
    *   - Detect mismatch before posting `/session` (vs. waiting for
    *     400 workspace_mismatch from the bridge).
    *   - Omit `cwd` on `POST /session` — the route falls back to this
@@ -168,13 +232,122 @@ export interface CapabilitiesEnvelope {
    *
    * Optional at the type level (matches the SDK's `DaemonCapabilities`
    * type) because the field is an additive extension of the v=1
-   * envelope introduced by #3803 §02. Daemons predating §02 still
-   * announce `v: 1` and omit this field; the protocol's "bump v only
-   * on incompatible frame changes" stance (see `qwen-serve-protocol.md`
-   * "Additive to v=1" note) makes additive optionality the correct
-   * shape. The post-§02 server code here always populates it.
+   * envelope. Older daemons may omit this field; additive optionality
+   * is the correct shape per the protocol's versioning stance. The
+   * current server code always populates it.
    */
   workspaceCwd?: string;
+  /**
+   * Transport families this daemon supports. Always includes `'rest'`;
+   * future builds may add `'acp-http'` and/or `'acp-ws'`. SDK clients
+   * use `negotiateTransport()` to auto-select the best available.
+   * Additive — older daemons omit this field; SDK consumers should
+   * treat absence as `['rest']`.
+   */
+  transports?: string[];
+  /**
+   * Daemon-policy namespace. Active values for
+   * cross-cutting daemon coordination policies that don't fit on a
+   * per-feature flag. Today only `permission` is populated (active
+   * `PermissionMediator` strategy); future entries (e.g. `network`,
+   * `audit`) extend the namespace without polluting the top-level
+   * envelope. Optional / additive — daemons predating F3 omit it.
+   */
+  policy?: {
+    /**
+     * Active permission mediation policy. Distinct from the
+     * `permission_mediation` capability `modes` list, which
+     * advertises the build-supported set; this field tells clients
+     * which one is currently in effect.
+     */
+    permission?: PermissionPolicy;
+  };
+  /**
+   * Active daemon resource limits. Additive to v=1; older daemons may omit it.
+   * `null` means the operator explicitly disabled that cap.
+   */
+  limits?: {
+    maxPendingPromptsPerSession?: number | null;
+  };
+  /**
+   * Language codes accepted by `POST /session/:id/language`.
+   * Additive — older daemons omit this field; clients should
+   * treat absence as "unknown" rather than "none".
+   */
+  supportedLanguages?: string[];
+}
+
+export interface ServeAuthProviderModel {
+  id: string;
+  contextWindowSize?: number;
+  enableThinking?: boolean;
+  modalities?: InputModalities;
+  description?: string;
+}
+
+export interface ServeAuthProviderBaseUrlOption {
+  id: string;
+  label: string;
+  url: string;
+  documentationUrl?: string;
+  apiKeyUrl?: string;
+}
+
+export interface ServeAuthProviderDescriptor {
+  id: string;
+  label: string;
+  description: string;
+  uiGroup?: string;
+  protocol: AuthType;
+  protocolOptions?: AuthType[];
+  baseUrl?: string | ServeAuthProviderBaseUrlOption[];
+  envKey?: string;
+  models?: ServeAuthProviderModel[];
+  modelsEditable?: boolean;
+  apiKeyPlaceholder?: string;
+  documentationUrl?: string;
+  showAdvancedConfig?: boolean;
+  uiLabels?: {
+    flowTitle?: string;
+    baseUrlStepTitle?: string;
+  };
+  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+}
+
+export interface ServeAuthProviderCatalog {
+  v: 1;
+  workspaceCwd: string;
+  providers: ServeAuthProviderDescriptor[];
+  groups: Array<{
+    id: 'alibaba' | 'third-party' | 'custom';
+    label: string;
+    description: string;
+    providerIds: string[];
+  }>;
+}
+
+export interface ServeAuthProviderInstallRequest {
+  providerId: string;
+  protocol?: AuthType;
+  baseUrl?: string;
+  apiKey: string;
+  modelIds?: string[];
+  advancedConfig?: {
+    enableThinking?: boolean;
+    multimodal?: InputModalities;
+    contextWindowSize?: number;
+    maxTokens?: number;
+  };
+}
+
+export interface ServeAuthProviderInstallResult {
+  v: 1;
+  providerId: string;
+  providerLabel: string;
+  authType: AuthType;
+  modelId?: string;
+  baseUrl?: string;
+  message: string;
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

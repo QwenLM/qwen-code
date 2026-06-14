@@ -63,9 +63,8 @@ describe('Turn', () => {
   });
 
   describe('constructor', () => {
-    it('should initialize pendingToolCalls and debugResponses', () => {
+    it('should initialize pendingToolCalls', () => {
       expect(turn.pendingToolCalls).toEqual([]);
-      expect(turn.getDebugResponses()).toEqual([]);
     });
   });
 
@@ -110,7 +109,6 @@ describe('Turn', () => {
         { type: GeminiEventType.Content, value: 'Hello' },
         { type: GeminiEventType.Content, value: ' world' },
       ]);
-      expect(turn.getDebugResponses().length).toBe(2);
     });
 
     it('should emit Thought events when a thought part is present', async () => {
@@ -264,7 +262,6 @@ describe('Turn', () => {
         expect.stringMatching(/^tool2-\d{13}-\w{10,}$/),
       );
       expect(turn.pendingToolCalls[1]).toEqual(event2.value);
-      expect(turn.getDebugResponses().length).toBe(1);
     });
 
     it('should yield UserCancelled event if signal is aborted', async () => {
@@ -305,7 +302,6 @@ describe('Turn', () => {
         { type: GeminiEventType.Content, value: 'First part' },
         { type: GeminiEventType.UserCancelled },
       ]);
-      expect(turn.getDebugResponses().length).toBe(1);
     });
 
     it('should yield Error event and report if sendMessageStream throws', async () => {
@@ -332,7 +328,6 @@ describe('Turn', () => {
       expect(errorEvent.value).toEqual({
         error: { message: 'API Error', status: undefined },
       });
-      expect(turn.getDebugResponses().length).toBe(0);
       expect(reportError).toHaveBeenCalledWith(
         error,
         'Error when talking to API',
@@ -876,31 +871,6 @@ describe('Turn', () => {
         { type: GeminiEventType.ChatCompressed, value: compressionInfo },
         { type: GeminiEventType.Content, value: 'after' },
       ]);
-    });
-  });
-
-  describe('getDebugResponses', () => {
-    it('should return collected debug responses', async () => {
-      const resp1 = {
-        candidates: [{ content: { parts: [{ text: 'Debug 1' }] } }],
-      } as unknown as GenerateContentResponse;
-      const resp2 = {
-        functionCalls: [{ name: 'debugTool' }],
-      } as unknown as GenerateContentResponse;
-      const mockResponseStream = (async function* () {
-        yield { type: StreamEventType.CHUNK, value: resp1 };
-        yield { type: StreamEventType.CHUNK, value: resp2 };
-      })();
-      mockSendMessageStream.mockResolvedValue(mockResponseStream);
-      const reqParts: Part[] = [{ text: 'Hi' }];
-      for await (const _ of turn.run(
-        'test-model',
-        reqParts,
-        new AbortController().signal,
-      )) {
-        // consume stream
-      }
-      expect(turn.getDebugResponses()).toEqual([resp1, resp2]);
     });
   });
 

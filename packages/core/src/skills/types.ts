@@ -112,6 +112,13 @@ export interface SkillConfig {
   disableModelInvocation?: boolean;
 
   /**
+   * Whether users can invoke this skill directly via `/<skill-name>`.
+   * Defaults to true. Parsed from the `user-invocable` frontmatter field in
+   * SKILL.md.
+   */
+  userInvocable?: boolean;
+
+  /**
    * Optional glob patterns that gate when this skill is offered to the model.
    * When present and non-empty, the skill is a "conditional skill": it stays
    * out of the SkillTool listing until a tool invocation touches a file path
@@ -154,6 +161,28 @@ export function parseModelField(
     return undefined;
   }
   return trimmed;
+}
+
+/**
+ * Parse the `user-invocable` field from skill frontmatter.
+ * Returns `undefined` when omitted or set to an invalid value, preserving the
+ * command-layer default that skills are user-invocable unless explicitly
+ * disabled.
+ */
+export function parseUserInvocableField(
+  frontmatter: Record<string, unknown>,
+): boolean | undefined {
+  const raw = frontmatter['user-invocable'];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === true || raw === 'true') {
+    return true;
+  }
+  if (raw === false || raw === 'false') {
+    return false;
+  }
+  return undefined;
 }
 
 /**
@@ -231,6 +260,24 @@ export function parsePathsField(
  * out, which is the actual injection vector this guards against.
  */
 export const SKILL_NAME_PATTERN = /^[\p{L}\p{N}_:.-]+$/u;
+
+/**
+ * Parse the `allowedTools` field from skill frontmatter.
+ * Returns `undefined` when the field is omitted. Throws when the field is
+ * present but not an array.
+ */
+export function parseAllowedToolsField(
+  frontmatter: Record<string, unknown>,
+): string[] | undefined {
+  const raw = frontmatter['allowedTools'];
+  if (raw == null) {
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error('"allowedTools" must be an array');
+  }
+  return raw.map(String);
+}
 
 /**
  * Validate that a skill `name` is safe to embed into prompts and reminders

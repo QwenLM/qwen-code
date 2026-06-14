@@ -214,6 +214,42 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect((childNonBareWrite as any).config).toBe(childNonBare);
   });
 
+  it('applies persisted launch flags before rebuilding the child registry', async () => {
+    const parent = new Config({ ...baseParams, bareMode: false });
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO_EDIT,
+      {
+        persistedCliFlags: {
+          bare: true,
+          sandbox: null,
+          screenReader: true,
+          model: 'agent-model',
+          maxSessionTurns: 7,
+          maxToolCalls: 11,
+        },
+      },
+    );
+
+    expect(child.getBareMode()).toBe(true);
+    expect(child.getSandbox()).toBeUndefined();
+    expect(child.getScreenReader()).toBe(true);
+    expect(child.getModel()).toBe('agent-model');
+    expect(child.getMaxSessionTurns()).toBe(7);
+    expect(child.getMaxToolCalls()).toBe(11);
+
+    await child.getToolRegistry().warmAll();
+    expect(child.getToolRegistry().getAllToolNames()).not.toContain(
+      ToolNames.WRITE_FILE,
+    );
+  });
+
   describe('TOOL_REGISTRY_REBUILT marker propagation', () => {
     // Reviewer raised a concern that
     // `Object.prototype.hasOwnProperty.call(base, 'getToolRegistry')`

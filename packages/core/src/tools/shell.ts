@@ -2166,6 +2166,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
         this.config,
         ShellTool.Name,
         llmContent,
+        // Per-tool char budget; mirrors ShellTool.maxOutputChars. keep='both'
+        // preserves the command's start AND its trailing exit/error summary
+        // (where shell failures report). Kept in-tool (not deferred to the
+        // scheduler) so the long-run hint below is appended OUTSIDE the
+        // truncation envelope; the scheduler's sentinel makes its later pass a
+        // no-op here. lines: Infinity keeps this char-only so the global line
+        // cap can't undercut the declared 30k char budget — many short lines
+        // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
+        { threshold: 30_000, keep: 'both', lines: Number.POSITIVE_INFINITY },
       );
 
       if (truncatedResult.outputFile) {
@@ -4258,6 +4267,10 @@ export class ShellTool extends BaseDeclarativeTool<
 > {
   static Name: string = ToolNames.SHELL;
 
+  override get maxOutputChars(): number {
+    return 30_000;
+  }
+
   constructor(private readonly config: Config) {
     super(
       ShellTool.Name,
@@ -4361,16 +4374,14 @@ export class ShellTool extends BaseDeclarativeTool<
     // `-c` script. This matches every other sensitive check in this file
     // (directory, read-only, command-root extraction, etc.).
     if (!params.is_background) {
-      const sleepPattern = detectBlockedSleepPatternDetails(
-        stripShellWrapper(params.command),
-      );
+      const sleepPattern = detectBlockedSleepPatternDetails(strippedCommand);
       if (sleepPattern !== null) {
         const intentionalSleepGuidance =
           sleepPattern.intentionalSleepRejection ??
           (sleepPattern.isStandalone
             ? 'If you genuinely need a standalone delay (rate limiting, deliberate pacing), ' +
               'add a trailing comment like `# intentional-sleep: wait for MCP rate limit reset` (up to 10 minutes).'
-            : 'The intentional-sleep escape hatch only applies to standalone sleep commands; split follow-up commands into a separate invocation.');
+            : 'Split into two calls: first `sleep N # intentional-sleep: <reason>` (standalone), then the follow-up command.');
         return (
           `Blocked: ${sleepPattern.description}. ` +
           'Run blocking commands in the background with is_background: true. ' +

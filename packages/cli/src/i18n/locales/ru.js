@@ -816,12 +816,9 @@ export default {
     'Нельзя создать fork, пока выполняется ответ или вызов инструмента. Дождитесь завершения или обработайте ожидающий вызов инструмента.',
   'Cannot fork before the first conversation turn.':
     'Нельзя создать fork до первого сообщения в разговоре.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'Команде /fork требуется feature gate fork. Установите QWEN_CODE_ENABLE_FORK_SUBAGENT=1, чтобы включить его.',
   'The agent tool is unavailable; cannot fork.':
     'Инструмент агента недоступен; fork создать нельзя.',
-  'Failed to launch fork: {{error}}':
-    'Не удалось запустить fork: {{error}}',
+  'Failed to launch fork: {{error}}': 'Не удалось запустить fork: {{error}}',
   'User launched a background fork via /fork: {{directive}}':
     'Пользователь запустил фоновый fork через /fork: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
@@ -1353,6 +1350,21 @@ export default {
     'В этой сессии не было вызовов инструментов.',
   'Session start time is unavailable, cannot calculate stats.':
     'Время начала сессии недоступно, невозможно рассчитать статистику.',
+  Activity: 'Активность',
+  Efficiency: 'Эффективность',
+  Today: 'Сегодня',
+  'Token Trend': 'Тренд токенов',
+  'Cache Hit Rate': 'Попадание в кэш',
+  'Tool Success': 'Успех инструментов',
+  'Tool Leaderboard': 'Рейтинг инструментов',
+  Time: 'Время',
+  Success: 'Успех',
+  Cache: 'Кэш',
+  Latency: 'Задержка',
+  'Code Impact': 'Изменения кода',
+  net: 'нетто',
+  streak: 'серия',
+  best: 'рекорд',
 
   // ============================================================================
   // Command Format Migration
@@ -1362,6 +1374,26 @@ export default {
   'Found {{count}} TOML command files:':
     'Найдено {{count}} файлов команд TOML:',
   'Current tasks': 'Текущие задачи',
+  'Background tasks': 'Фоновые задачи',
+  'No tasks currently running': 'Нет запущенных задач',
+  'No entry to show.': 'Нет записи для отображения.',
+  'needs approval': 'требует подтверждения',
+  'Background agent needs approval': 'Фоновый агент требует подтверждения',
+  'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
+  Running: 'Выполняется',
+  Paused: 'Приостановлено',
+  Completed: 'Завершено',
+  Failed: 'Ошибка',
+  Stopped: 'Остановлено',
+  Shell: 'Оболочка',
+  Monitor: 'Монитор',
+  Command: 'Команда',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] консолидация памяти',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] консолидация памяти (проверка {{count}} сессии)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] консолидация памяти (проверка {{count}} сессий)',
   '... and {{count}} more': '... и ещё {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Формат TOML устарел. Хотите перенести их в формат Markdown?',
@@ -1939,4 +1971,41 @@ export default {
   'start server': 'запустить сервер',
   '中国 (China)': 'Китай',
   '中国 (China) - 阿里云百炼': 'Китай - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': 'Карта активности',
+  Less: 'Меньше',
+  More: 'Больше',
+  Sessions: 'Сессии',
+  Duration: 'Длительность',
+  Projects: 'Проекты',
+  'Loading stats...': 'Загрузка статистики...',
+  '(no data)': '(нет данных)',
+  d: 'д',
+  h: 'ч',
+  m: 'м',
+  Input: 'Ввод',
+  Models: 'Модели',
+  'All time': 'За всё время',
+  'Last 7 days': 'Последние 7 дней',
+  'Last 30 days': 'Последние 30 дней',
+  'Show usage statistics dashboard.':
+    'Показать панель статистики использования.',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API-запросы',
+  'Tool Calls': 'Вызовы инструментов',
+  'Success rate': 'Успешность',
+  'Code Changes': 'Изменения кода',
+  Tool: 'Инструмент',
+  reqs: 'запр.',
+  in: 'вх.',
+  out: 'вых.',
+  'In/Out': 'Вх/Вых',
 };

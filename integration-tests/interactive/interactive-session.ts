@@ -76,7 +76,7 @@ export class InteractiveSession {
    * @example
    * ```ts
    * const session = await InteractiveSession.start({
-   *   env: { QWEN_CODE_ENABLE_CRON: '1' },
+   *   env: { QWEN_CODE_DISABLE_CRON: '1' },
    *   args: ['--approval-mode', 'yolo'],
    * });
    * ```
