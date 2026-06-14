@@ -356,6 +356,10 @@ export class ChatCompressionService {
                 chat.getHistoryShallow(true),
                 pendingUserMessage,
                 originalTokenCount,
+                // lastOutputTokenCount is unavailable here. The common
+                // sendMessageStream path passes precomputedEffectiveTokens,
+                // which already includes the chat's previous output tokens.
+                0,
                 slimmingConfig.imageTokenEstimate,
               )
             : originalTokenCount;

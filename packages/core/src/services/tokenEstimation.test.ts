@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import {
   estimateContentTokens,
   estimatePromptTokens,
+  getUsageOutputTokenCountForPromptEstimate,
 } from './tokenEstimation.js';
 
 const textContent = (text: string): Content => ({
@@ -84,8 +85,79 @@ describe('estimatePromptTokens', () => {
     expect(estimatePromptTokens(history, user, 5000)).toBe(5000 + userEst);
   });
 
+  it('includes the previous turn candidate tokens in the steady-state estimate', () => {
+    const userEst = estimateContentTokens([user]);
+    expect(estimatePromptTokens(history, user, 5000, 1200)).toBe(
+      5000 + 1200 + userEst,
+    );
+  });
+
+  it('keeps custom image-token estimates as the fifth argument', () => {
+    const imageUser: Content = {
+      role: 'user',
+      parts: [{ inlineData: { mimeType: 'image/png', data: 'xxx' } }],
+    };
+
+    expect(estimatePromptTokens(history, imageUser, 5000, 1200, 1600)).toBe(
+      5000 + 1200 + 1600,
+    );
+  });
+
   it('falls back to full estimate when lastPromptTokenCount is 0', () => {
     const fullEst = estimateContentTokens([...history, user]);
     expect(estimatePromptTokens(history, user, 0)).toBe(fullEst);
+  });
+});
+
+describe('getUsageOutputTokenCountForPromptEstimate', () => {
+  it('uses totalTokenCount when available to avoid candidate/thought overlap ambiguity', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        totalTokenCount: 180,
+        candidatesTokenCount: 70,
+        thoughtsTokenCount: 50,
+      }),
+    ).toBe(80);
+  });
+
+  it('does not double-count thoughts that appear included in candidates', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        candidatesTokenCount: 150,
+        thoughtsTokenCount: 120,
+      }),
+    ).toBe(150);
+  });
+
+  it('adds thoughts when they exceed candidates and are likely disjoint', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        candidatesTokenCount: 50,
+        thoughtsTokenCount: 120,
+      }),
+    ).toBe(170);
+  });
+
+  it('adds equal candidate and thought counts because equality does not prove overlap', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        candidatesTokenCount: 80,
+        thoughtsTokenCount: 80,
+      }),
+    ).toBe(160);
+  });
+
+  it('clamps negative disjoint output token counts to zero', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        candidatesTokenCount: -10,
+        thoughtsTokenCount: -5,
+      }),
+    ).toBe(0);
   });
 });
