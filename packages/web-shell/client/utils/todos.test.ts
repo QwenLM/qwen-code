@@ -6,6 +6,7 @@ import {
   getFloatingTodos,
   getTodoStatusIcon,
   getTodoWindow,
+  todoTimelineSignature,
 } from './todos';
 
 function todo(id: string, status: TodoItem['status']): TodoItem {
@@ -252,6 +253,76 @@ describe('computeTodoTimeline', () => {
     expect(timeline.get('p1')?.events).toEqual([
       { kind: 'completed', id: '1', content: 'task 1' },
     ]);
+  });
+
+  it('tracks an item that carries over and completes in a later turn', () => {
+    // id+content keys the same task across a user turn, so a "continue" turn
+    // that finishes a carried-over item still surfaces the completion (a
+    // user-turn reset would drop this).
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [item('1', 'Build feature', 'in_progress')]),
+      userMessage('u1'),
+      planMessage('p2', [item('1', 'Build feature', 'completed')]),
+    ]);
+
+    expect(timeline.get('p2')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'Build feature' },
+    ]);
+  });
+
+  // Documented limitation of id+content keying: a mid-task reword reads as a new
+  // task, so its completion is treated as first-seen and omitted from the diff.
+  it('omits the completion when a todo is reworded on the same id (known gap)', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [item('1', 'Write report', 'in_progress')]),
+      planMessage('p2', [item('1', 'Write the final report', 'completed')]),
+    ]);
+
+    expect(timeline.get('p2')?.events).toEqual([]);
+  });
+
+  // Documented limitation: two unrelated plans reusing both id AND content
+  // collide, so the second plan's completion is suppressed.
+  it('collides when unrelated plans reuse the same id and content (known gap)', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('a', [item('1', 'Run tests', 'completed')]),
+      userMessage('u1'),
+      planMessage('b', [item('1', 'Run tests', 'completed')]),
+    ]);
+
+    expect(timeline.get('b')?.events).toEqual([]);
+  });
+});
+
+describe('todoTimelineSignature', () => {
+  it('is unchanged by edits to non-todo messages', () => {
+    const a = todoTimelineSignature([
+      planMessage('p1', [todo('1', 'in_progress')]),
+      assistantMessage('a1'),
+    ]);
+    const b = todoTimelineSignature([
+      planMessage('p1', [todo('1', 'in_progress')]),
+      { id: 'a1', role: 'assistant', content: 'different text' },
+    ]);
+    expect(b).toBe(a);
+  });
+
+  it('changes when an item id, status, or content changes', () => {
+    const base = todoTimelineSignature([
+      planMessage('p1', [todo('1', 'in_progress')]),
+    ]);
+    const status = todoTimelineSignature([
+      planMessage('p1', [todo('1', 'completed')]),
+    ]);
+    const id = todoTimelineSignature([
+      planMessage('p1', [todo('2', 'in_progress')]),
+    ]);
+    const content = todoTimelineSignature([
+      planMessage('p1', [item('1', 'reworded', 'in_progress')]),
+    ]);
+    expect(status).not.toBe(base);
+    expect(id).not.toBe(base);
+    expect(content).not.toBe(base);
   });
 });
 

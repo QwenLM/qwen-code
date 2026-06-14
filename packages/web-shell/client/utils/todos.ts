@@ -152,7 +152,17 @@ interface TodoSnapshot {
  * ids (`plan-0`, `plan-1`, …) and models restart numbering at `1, 2, 3` for each
  * new `todo_write` plan, so a later, unrelated list reuses an earlier list's
  * ids. Keying on id alone would diff a new plan's items against a previous
- * plan's stale terminal status; id+content keeps distinct tasks separate.
+ * plan's stale terminal status; id+content keeps distinct tasks separate, and —
+ * unlike a user-turn reset — it still tracks a list correctly when it spans
+ * turns (a "continue" turn that completes an item carried over from before).
+ *
+ * Two rare cases this trades for, both degrading to "the collapsed diff omits
+ * one event" while the expanded list stays correct:
+ * - A todo reworded mid-task on a stable id (`1 "Write report"` →
+ *   `1 "Write the final report" completed`) reads as a new task, so the
+ *   completion is treated as first-seen and not surfaced.
+ * - Two unrelated plans that reuse both the id AND the exact content (a generic
+ *   recurring todo like `"Run tests"`) still collide.
  */
 function todoStateKey(todo: TodoItem): string {
   return JSON.stringify([todo.id, todo.content]);
