@@ -147,8 +147,11 @@ This delivery is the **unencrypted approval surface**. Intentionally absent:
   Markdown→HTML `formatted_body` and 16 KB flush) and **threads on long
   streams** (`m.thread`). Only `permission_request` is rendered; the room stays
   quiet otherwise.
-- Registration declares `supportsMarkdown: true` rather than the spec's `"full"`
-  (the shared `BridgeClient` registration shape is boolean-only).
+- Registration advertises `supportsMarkdown: "none"` — the bridge sends plain
+  `m.text` with no `formatted_body`, so markdown is shown literally (it would be
+  `"full"` only once HTML `formatted_body` rendering is added). Also
+  `supportsActions: false` (reactions, not buttons), `supportsThreads: false`,
+  `supportsEdits: true` (the `m.replace` edit on resolve).
 - `/sync` and SSE cursors are in-memory (a restart does a fresh full sync, which
   re-establishes state but does not replay history).
 

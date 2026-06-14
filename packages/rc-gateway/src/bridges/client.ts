@@ -17,6 +17,8 @@
  * hands one over, preserving the owner-explicit-grant property of the scope.
  */
 
+import type { BridgeMarkdownSupport } from './registry.js';
+
 /** A parsed SSE frame from `/rc/session/:id/events`. */
 export interface BridgeEvent {
   id?: number;
@@ -67,7 +69,10 @@ export class BridgeClient {
     id: string;
     displayName: string;
     supportsActions?: boolean;
-    supportsMarkdown?: boolean;
+    /** 'full' | 'limited' | 'none' — how richly the service renders markdown. */
+    supportsMarkdown?: BridgeMarkdownSupport;
+    supportsThreads?: boolean;
+    supportsEdits?: boolean;
     maxMessageBytes?: number;
   }): Promise<WriteResult> {
     return this.postJson('/rc/bridges', reg);

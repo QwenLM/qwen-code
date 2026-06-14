@@ -75,7 +75,9 @@ const VALID = {
   id: 'telegram',
   displayName: 'Telegram',
   supportsActions: true,
-  supportsMarkdown: true,
+  supportsMarkdown: 'limited',
+  supportsThreads: false,
+  supportsEdits: false,
   maxMessageBytes: 4096,
 };
 
@@ -89,7 +91,9 @@ describe('POST /rc/bridges (register/heartbeat)', () => {
       id: 'telegram',
       displayName: 'Telegram',
       supportsActions: true,
-      supportsMarkdown: true,
+      supportsMarkdown: 'limited',
+      supportsThreads: false,
+      supportsEdits: false,
       maxMessageBytes: 4096,
       tokenId: 'tkn-bridge',
     });
@@ -97,7 +101,10 @@ describe('POST /rc/bridges (register/heartbeat)', () => {
     expect(registry.get('telegram')?.displayName).toBe('Telegram');
     const rec = audit.calls.find((c) => c.action === 'bridge_registered');
     expect(rec?.target).toBe('telegram');
-    expect(rec?.detail).toMatchObject({ displayName: 'Telegram' });
+    expect(rec?.detail).toMatchObject({
+      displayName: 'Telegram',
+      supportsMarkdown: 'limited',
+    });
   });
 
   it('is idempotent on the stable id (re-POST updates + refreshes registeredAt)', async () => {
@@ -109,11 +116,36 @@ describe('POST /rc/bridges (register/heartbeat)', () => {
     expect(second.json.registeredAt).toBeGreaterThan(first.json.registeredAt);
   });
 
-  it('defaults capability flags to false and clamps maxMessageBytes', async () => {
+  it('defaults capabilities conservatively and clamps maxMessageBytes', async () => {
     const { json } = await post({ id: 'discord', displayName: 'Discord' });
     expect(json.supportsActions).toBe(false);
-    expect(json.supportsMarkdown).toBe(false);
+    expect(json.supportsMarkdown).toBe('none'); // enum default, not boolean
+    expect(json.supportsThreads).toBe(false);
+    expect(json.supportsEdits).toBe(false);
     expect(json.maxMessageBytes).toBe(0);
+  });
+
+  it('accepts the markdown enum and the thread/edit flags', async () => {
+    const { json } = await post({
+      ...VALID,
+      id: 'discord',
+      supportsMarkdown: 'full',
+      supportsThreads: true,
+      supportsEdits: true,
+    });
+    expect(json.supportsMarkdown).toBe('full');
+    expect(json.supportsThreads).toBe(true);
+    expect(json.supportsEdits).toBe(true);
+  });
+
+  it('coerces an unrecognized supportsMarkdown (incl. a stale boolean) to none', async () => {
+    expect(
+      (await post({ ...VALID, supportsMarkdown: true })).json.supportsMarkdown,
+    ).toBe('none');
+    expect(
+      (await post({ ...VALID, supportsMarkdown: 'fancy' })).json
+        .supportsMarkdown,
+    ).toBe('none');
   });
 
   it('400s an invalid id / display name / maxMessageBytes', async () => {
@@ -225,7 +257,9 @@ describe('BridgeRegistry', () => {
       tokenId: 't',
       displayName: 'A',
       supportsActions: false,
-      supportsMarkdown: false,
+      supportsMarkdown: 'none',
+      supportsThreads: false,
+      supportsEdits: false,
       maxMessageBytes: 0,
       registeredAt: 1,
     });
@@ -234,7 +268,9 @@ describe('BridgeRegistry', () => {
       tokenId: 't',
       displayName: 'B',
       supportsActions: false,
-      supportsMarkdown: false,
+      supportsMarkdown: 'none',
+      supportsThreads: false,
+      supportsEdits: false,
       maxMessageBytes: 0,
       registeredAt: 2,
     });

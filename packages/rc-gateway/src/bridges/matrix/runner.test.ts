@@ -55,8 +55,12 @@ function harness(batches: unknown[]) {
   } as unknown as MatrixInbound;
 
   const subscribed: string[] = [];
+  let registered: Record<string, unknown> | undefined;
   const client = {
-    register: async () => ({ ok: true, status: 200 }),
+    register: async (reg: Record<string, unknown>) => {
+      registered = reg;
+      return { ok: true, status: 200 };
+    },
     sendPrompt: async (_s: string, prompt: string) => {
       prompts.push(prompt);
       return { ok: true, status: 200 };
@@ -83,7 +87,15 @@ function harness(batches: unknown[]) {
     sleep: () => new Promise<void>(() => {}), // park SSE reconnect after 1 subscribe
   });
 
-  return { bridge, ac, sent, joined, prompts, subscribed };
+  return {
+    bridge,
+    ac,
+    sent,
+    joined,
+    prompts,
+    subscribed,
+    registered: () => registered,
+  };
 }
 
 const textMsg = (roomId: string, sender: string, body: string) => ({
@@ -105,6 +117,18 @@ const textMsg = (roomId: string, sender: string, body: string) => ({
 });
 
 describe('MatrixBridge runner — sync loop', () => {
+  it('registers accurate capabilities (markdown none — plain m.text, no formatted_body)', async () => {
+    const h = harness([]);
+    await h.bridge.start(h.ac.signal);
+    expect(h.registered()).toMatchObject({
+      id: 'matrix',
+      supportsActions: false, // reactions, not buttons
+      supportsMarkdown: 'none', // plain m.text — the correctness fix
+      supportsThreads: false,
+      supportsEdits: true, // m.replace on resolve
+    });
+  });
+
   it('skips replaying timeline history on the initial sync', async () => {
     await rooms.bind('!r:h', 'sess_q');
     const h = harness([

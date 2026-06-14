@@ -48,9 +48,9 @@ sidecar later by changing only its configuration.
   cursor (`EventBus.subscribe` only replays when a cursor is supplied), so a
   reconnect drops chunks emitted _during_ the blip rather than double-posting the
   turn. Catching up on in-blip chunks is a deferrable gap-coverage enhancement.
-- Registration declares `supportsMarkdown: true` rather than the spec's
-  `"limited"` plus `supportsThreads`/`supportsEdits` (the shared `BridgeClient`
-  registration shape is boolean-only today).
+- Registration advertises the full spec capability shape: `supportsMarkdown:
+"full"`, `supportsActions: true`, `supportsThreads: true`, `supportsEdits:
+true`, `maxMessageBytes: 2000`.
 
 ## Setup
 

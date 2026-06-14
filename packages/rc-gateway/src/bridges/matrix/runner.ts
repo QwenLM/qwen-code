@@ -121,7 +121,9 @@ export class MatrixBridge {
       id: MATRIX_BRIDGE_ID,
       displayName: 'Matrix',
       supportsActions: false, // reactions, not buttons
-      supportsMarkdown: true,
+      supportsMarkdown: 'none', // sends plain m.text (no formatted_body/HTML)
+      supportsThreads: false, // m.thread deferred
+      supportsEdits: true, // m.replace edit on resolve
       maxMessageBytes: 65536,
     });
     this.log(

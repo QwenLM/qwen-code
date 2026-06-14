@@ -67,8 +67,10 @@ export class TelegramBridge {
     const reg = await this.cfg.client.register({
       id: TELEGRAM_BRIDGE_ID,
       displayName: 'Telegram',
-      supportsActions: true,
-      supportsMarkdown: true,
+      supportsActions: true, // inline keyboard buttons
+      supportsMarkdown: 'limited', // MarkdownV2 (constrained, escaped)
+      supportsThreads: false, // no thread support
+      supportsEdits: false, // permission_request is not edited on resolve
       maxMessageBytes: 4096,
     });
     this.log(

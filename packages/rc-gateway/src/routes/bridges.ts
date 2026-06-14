@@ -10,6 +10,7 @@ import { OWNER } from '../scopes.js';
 import type {
   BridgeRegistry,
   BridgeRegistration,
+  BridgeMarkdownSupport,
 } from '../bridges/registry.js';
 import type { SubActorBanStore } from '../bridges/subActorBans.js';
 import type { InviteStore } from '../bridges/inviteStore.js';
@@ -32,11 +33,20 @@ const MAX_MESSAGE_BYTES_CAP = 100_000_000;
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
 
+/** The markdown-support values the registration accepts (anything else → none). */
+const MARKDOWN_SUPPORT = new Set<BridgeMarkdownSupport>([
+  'full',
+  'limited',
+  'none',
+]);
+
 interface ParsedRegistration {
   id: string;
   displayName: string;
   supportsActions: boolean;
-  supportsMarkdown: boolean;
+  supportsMarkdown: BridgeMarkdownSupport;
+  supportsThreads: boolean;
+  supportsEdits: boolean;
   maxMessageBytes: number;
 }
 
@@ -59,10 +69,19 @@ function parseRegistration(
   ) {
     return { ok: false, code: 'invalid_display_name' };
   }
-  // Capability flags default to false (conservative — the safest assumption is
-  // "this chat service can't render actions/markdown" until the bridge says so).
+  // Capability flags default conservatively (the safest assumption is "this chat
+  // service can't render actions/threads/edits, and shows plain text" until the
+  // bridge says otherwise). supportsMarkdown is an enum; an unrecognized value
+  // (incl. a stale boolean from an old client) falls back to 'none'.
   const supportsActions = b['supportsActions'] === true;
-  const supportsMarkdown = b['supportsMarkdown'] === true;
+  const supportsThreads = b['supportsThreads'] === true;
+  const supportsEdits = b['supportsEdits'] === true;
+  const md = b['supportsMarkdown'];
+  const supportsMarkdown: BridgeMarkdownSupport = MARKDOWN_SUPPORT.has(
+    md as BridgeMarkdownSupport,
+  )
+    ? (md as BridgeMarkdownSupport)
+    : 'none';
   // maxMessageBytes: optional non-negative integer, clamped; 0 = unknown.
   let maxMessageBytes = 0;
   if (b['maxMessageBytes'] !== undefined) {
@@ -79,6 +98,8 @@ function parseRegistration(
       displayName,
       supportsActions,
       supportsMarkdown,
+      supportsThreads,
+      supportsEdits,
       maxMessageBytes,
     },
   };
@@ -130,6 +151,8 @@ export function createRegisterBridgeRoute(
         displayName: reg.displayName,
         supportsActions: reg.supportsActions,
         supportsMarkdown: reg.supportsMarkdown,
+        supportsThreads: reg.supportsThreads,
+        supportsEdits: reg.supportsEdits,
         maxMessageBytes: reg.maxMessageBytes,
       },
     });

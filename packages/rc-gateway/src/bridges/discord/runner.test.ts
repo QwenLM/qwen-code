@@ -53,7 +53,7 @@ function harness(
   let nextId = 1;
   let nextThread = 1;
   const subscribed: string[] = [];
-  let registered = false;
+  let registered: Record<string, unknown> | undefined;
   let startedHandlers: GatewayHandlers | undefined;
   const timers: Array<() => void> = [];
 
@@ -85,8 +85,8 @@ function harness(
   } as unknown as DiscordRestApi;
 
   const client = {
-    register: async () => {
-      registered = true;
+    register: async (reg: Record<string, unknown>) => {
+      registered = reg;
       return { ok: true, status: 200 };
     },
     redeemInvite: async (_bridgeId: string, token: string) =>
@@ -126,7 +126,8 @@ function harness(
     edited,
     threadsMade,
     subscribed,
-    isRegistered: () => registered,
+    isRegistered: () => !!registered,
+    registration: () => registered,
     handlers: () => startedHandlers,
     fireTimers: () => {
       for (const fn of timers.splice(0)) fn();
@@ -141,6 +142,13 @@ describe('DiscordBridge runner', () => {
     const h = harness();
     await h.bridge.start(new AbortController().signal);
     expect(h.isRegistered()).toBe(true);
+    expect(h.registration()).toMatchObject({
+      id: 'discord',
+      supportsActions: true,
+      supportsMarkdown: 'full',
+      supportsThreads: true, // threads on long streams (built this cycle)
+      supportsEdits: true,
+    });
     expect(h.subscribed).toContain('sess_q');
   });
 

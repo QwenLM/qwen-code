@@ -138,8 +138,10 @@ export class DiscordBridge {
     const reg = await this.cfg.client.register({
       id: DISCORD_BRIDGE_ID,
       displayName: 'Discord',
-      supportsActions: true,
-      supportsMarkdown: true,
+      supportsActions: true, // Approve/Deny buttons
+      supportsMarkdown: 'full', // Discord renders full markdown
+      supportsThreads: true, // threads on long streams
+      supportsEdits: true, // edits the message on resolve
       maxMessageBytes: 2000,
     });
     this.log(

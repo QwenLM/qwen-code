@@ -4,14 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * How richly the chat service renders markdown (`add-bridge-protocol`): `full`
+ * (e.g. Discord), `limited` (a constrained dialect like Telegram MarkdownV2), or
+ * `none` (plain text — e.g. the Matrix bridge sends bare `m.text` with no
+ * `formatted_body`, so markdown is shown literally). Widened from a boolean so
+ * the owner's bridge list reflects the real rendering fidelity.
+ */
+export type BridgeMarkdownSupport = 'full' | 'limited' | 'none';
+
 /** A bridge's advertised capabilities (what the chat service can render). */
 export interface BridgeCapabilities {
   /** Human-facing name shown in the owner's bridge list (e.g. "Telegram"). */
   displayName: string;
   /** Can the bridge render inline action buttons (approve/deny)? */
   supportsActions: boolean;
-  /** Does the chat service render markdown? */
-  supportsMarkdown: boolean;
+  /** How richly the chat service renders markdown. */
+  supportsMarkdown: BridgeMarkdownSupport;
+  /** Can the bridge open threads for long streams (e.g. Discord)? */
+  supportsThreads: boolean;
+  /** Does the bridge edit a sent message in place (e.g. on resolve)? */
+  supportsEdits: boolean;
   /** Max message size the chat service accepts (0 = unknown/unbounded). */
   maxMessageBytes: number;
 }
