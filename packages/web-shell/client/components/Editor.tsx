@@ -1020,6 +1020,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     // Make the trigger characters idempotent so a second click re-opens the
     // menu instead of inserting a duplicate.
     let skipInsert = false;
+    let caretOverride: number | null = null;
     if (text === '/') {
       // The slash-command menu only triggers on a line-leading '/'. If the
       // line already starts with '/', re-open the menu rather than inserting a
@@ -1028,15 +1029,24 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       if (line.text.startsWith('/')) {
         skipInsert = true;
       }
-    } else if (text === '@' && selection.from > 0) {
-      const before = view.state.doc.sliceString(
-        selection.from - 1,
+    } else if (text === '@') {
+      const before =
+        selection.from > 0
+          ? view.state.doc.sliceString(selection.from - 1, selection.from)
+          : '';
+      const after = view.state.doc.sliceString(
         selection.from,
+        selection.from + 1,
       );
-      if (before === '@') {
+      if (after === '@') {
+        // Cursor sits directly before an existing '@'; step over it instead of
+        // inserting a duplicate, so the menu opens on the existing mention.
+        skipInsert = true;
+        caretOverride = selection.from + 1;
+      } else if (before === '@') {
         // Already an '@' right before the cursor — just re-open the menu.
         skipInsert = true;
-      } else if (!/\s/.test(before)) {
+      } else if (before && !/\s/.test(before)) {
         // An @-mention only parses at a token boundary, so when it lands
         // mid-word prepend a space to detach it.
         insert = ' @';
@@ -1046,6 +1056,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       view.dispatch({
         changes: { from: selection.from, to: selection.to, insert },
         selection: { anchor: selection.from + insert.length },
+        scrollIntoView: true,
+      });
+    } else if (caretOverride !== null) {
+      view.dispatch({
+        selection: { anchor: caretOverride },
         scrollIntoView: true,
       });
     }
@@ -1125,16 +1140,28 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     [replaceEditorText],
   );
 
-  // While the reverse-i-search panel is open, a pointer press anywhere outside
-  // it behaves like Escape: cancel the search and restore the original draft.
+  // While the reverse-i-search panel is open, a primary-button / touch press
+  // outside it behaves like Escape: cancel the search and restore the draft.
+  // Mirrors the inline-panel dismissal (Settings/Mode pickers).
   useEffect(() => {
     if (!searchMode) return;
-    const handlePointerDown = (event: MouseEvent) => {
-      if (searchUiRef.current?.contains(event.target as Node)) return;
-      closeSearch(true);
+    const onPointerOutside = (event: Event) => {
+      // Only the primary (left) button dismisses; middle-click pastes and
+      // right-click opens a context menu. Touch events have no button.
+      if (event instanceof MouseEvent && event.button !== 0) return;
+      if (event.defaultPrevented) return;
+      const panel = searchUiRef.current;
+      const target = event.target;
+      if (panel && target instanceof Node && !panel.contains(target)) {
+        closeSearch(true);
+      }
     };
-    document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
+    window.addEventListener('mousedown', onPointerOutside);
+    window.addEventListener('touchstart', onPointerOutside);
+    return () => {
+      window.removeEventListener('mousedown', onPointerOutside);
+      window.removeEventListener('touchstart', onPointerOutside);
+    };
   }, [searchMode, closeSearch]);
 
   const submitSearchMatch = useCallback(

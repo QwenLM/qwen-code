@@ -54,24 +54,33 @@ export function ShortcutsPanel({ onClose }: ShortcutsPanelProps) {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
-  // Dismiss like a popover: Escape, or a pointer press outside the panel.
-  // The listeners are attached after mount, so the click that opened the
-  // panel has already finished and cannot immediately close it.
+  // Dismiss like the other inline panels (Settings/Mode pickers): Escape, or a
+  // primary-button / touch press outside the panel. Listeners attach after
+  // mount, so the press that opened the panel cannot immediately close it.
   useEffect(() => {
-    const handlePointerDown = (event: MouseEvent) => {
-      if (panelRef.current?.contains(event.target as Node)) return;
-      onCloseRef.current?.();
+    const onPointerOutside = (event: Event) => {
+      // Only the primary (left) button dismisses; middle-click pastes and
+      // right-click opens a context menu. Touch events have no button.
+      if (event instanceof MouseEvent && event.button !== 0) return;
+      if (event.defaultPrevented) return;
+      const panel = panelRef.current;
+      const target = event.target;
+      if (panel && target instanceof Node && !panel.contains(target)) {
+        onCloseRef.current?.();
+      }
     };
-    const handleKeyDown = (event: KeyboardEvent) => {
+    const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented) {
         onCloseRef.current?.();
       }
     };
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('mousedown', onPointerOutside);
+    window.addEventListener('touchstart', onPointerOutside);
+    window.addEventListener('keydown', onKeyDown);
     return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('mousedown', onPointerOutside);
+      window.removeEventListener('touchstart', onPointerOutside);
+      window.removeEventListener('keydown', onKeyDown);
     };
   }, []);
 
