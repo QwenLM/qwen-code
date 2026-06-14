@@ -1060,6 +1060,13 @@ export function App({
     setShowShortcuts((prev) => !prev);
   }, []);
 
+  // Idempotent close for the shortcuts panel's outside-press / Escape dismissal.
+  // Must not toggle: on touch, touchstart and the synthesized mousedown both
+  // fire, and a toggle would reopen the panel right after closing it.
+  const handleCloseShortcuts = useCallback(() => {
+    setShowShortcuts(false);
+  }, []);
+
   const workspaceSettingsState = useSettings({
     autoLoad: true,
   });
@@ -2699,7 +2706,7 @@ export function App({
             {!shouldHideComposer &&
               !tasksPanelMessage &&
               (showShortcuts ? (
-                <ShortcutsPanel onClose={handleToggleShortcuts} />
+                <ShortcutsPanel onClose={handleCloseShortcuts} />
               ) : (
                 <StatusBar
                   escapeHint={escapeHintVisible}
