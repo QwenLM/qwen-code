@@ -1,9 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import type { Message, TodoItem } from '../adapters/types';
-import { getFloatingTodos, getTodoStatusIcon, getTodoWindow } from './todos';
+import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
+import {
+  computeTodoTimeline,
+  extractTodosFromToolCall,
+  getFloatingTodos,
+  getTodoStatusIcon,
+  getTodoWindow,
+  isTodoWriteToolName,
+  todoTimelineSignature,
+} from './todos';
 
 function todo(id: string, status: TodoItem['status']): TodoItem {
   return { id, content: `task ${id}`, status };
+}
+
+function item(
+  id: string,
+  content: string,
+  status: TodoItem['status'],
+): TodoItem {
+  return { id, content, status };
 }
 
 function planMessage(id: string, todos: TodoItem[]): Message {
@@ -17,8 +33,9 @@ function todoWriteMessage(id: string, todos: TodoItem[]): Message {
     tools: [
       {
         callId: `call-${id}`,
-        toolName: 'TodoWrite',
+        toolName: 'todo_write',
         status: 'completed',
+        kind: 'think',
         args: { todos },
       },
     ],
@@ -126,6 +143,249 @@ describe('getFloatingTodos', () => {
     expect(state.todos).toHaveLength(2);
     expect(state.allCompleted).toBe(true);
     expect(state.sourceMessageId).toBe('p1');
+  });
+});
+
+describe('computeTodoTimeline', () => {
+  it('emits started and completed events across snapshots', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [todo('1', 'in_progress'), todo('2', 'pending')]),
+      planMessage('p2', [todo('1', 'completed'), todo('2', 'in_progress')]),
+    ]);
+
+    expect(timeline.get('p1')).toEqual({
+      events: [{ kind: 'started', id: '1', content: 'task 1' }],
+    });
+    expect(timeline.get('p2')).toEqual({
+      events: [
+        { kind: 'completed', id: '1', content: 'task 1' },
+        { kind: 'started', id: '2', content: 'task 2' },
+      ],
+    });
+  });
+
+  it('emits a completed event when an item skips in_progress', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [todo('1', 'pending')]),
+      planMessage('p2', [todo('1', 'completed')]),
+    ]);
+
+    expect(timeline.get('p1')?.events).toEqual([]);
+    expect(timeline.get('p2')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'task 1' },
+    ]);
+  });
+
+  it('does not replay completions for items first seen already completed', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [todo('1', 'completed'), todo('2', 'in_progress')]),
+    ]);
+
+    expect(timeline.get('p1')).toEqual({
+      events: [{ kind: 'started', id: '2', content: 'task 2' }],
+    });
+  });
+
+  it('produces no events for an unchanged re-emitted snapshot', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [todo('1', 'in_progress')]),
+      planMessage('p2', [todo('1', 'in_progress')]),
+    ]);
+
+    expect(timeline.get('p2')?.events).toEqual([]);
+  });
+
+  it('tracks todo_write tool-call snapshots, keyed by callId', () => {
+    const timeline = computeTodoTimeline([
+      todoWriteMessage('m1', [todo('1', 'in_progress')]),
+      todoWriteMessage('m2', [todo('1', 'completed')]),
+    ]);
+
+    expect(timeline.get('call-m1')?.events).toEqual([
+      { kind: 'started', id: '1', content: 'task 1' },
+    ]);
+    expect(timeline.get('call-m2')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'task 1' },
+    ]);
+  });
+
+  it('ignores messages that carry no todo snapshot', () => {
+    const timeline = computeTodoTimeline([
+      userMessage('u1'),
+      assistantMessage('a1'),
+      todoWriteMessage('m1', [todo('1', 'in_progress')]),
+    ]);
+
+    expect(timeline.size).toBe(1);
+    expect(timeline.get('call-m1')?.events).toEqual([
+      { kind: 'started', id: '1', content: 'task 1' },
+    ]);
+  });
+
+  it('does not diff a reused id against a previous, unrelated plan', () => {
+    // Both plans number their first item "1" (positional/per-plan numbering),
+    // but they are different tasks. Plan A leaves "1" in_progress; plan B's "1"
+    // must still register its own start and completion rather than being
+    // suppressed by plan A's stale id-"1" status.
+    const timeline = computeTodoTimeline([
+      planMessage('a', [item('1', 'Set up project', 'in_progress')]),
+      userMessage('u1'),
+      planMessage('b1', [item('1', 'Write the report', 'in_progress')]),
+      planMessage('b2', [item('1', 'Write the report', 'completed')]),
+    ]);
+
+    expect(timeline.get('b1')?.events).toEqual([
+      { kind: 'started', id: '1', content: 'Write the report' },
+    ]);
+    expect(timeline.get('b2')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'Write the report' },
+    ]);
+  });
+
+  it('tracks the same item across a tool call and a later plan snapshot', () => {
+    const timeline = computeTodoTimeline([
+      todoWriteMessage('m1', [todo('1', 'in_progress')]),
+      planMessage('p1', [todo('1', 'completed')]),
+    ]);
+
+    expect(timeline.get('call-m1')?.events).toEqual([
+      { kind: 'started', id: '1', content: 'task 1' },
+    ]);
+    expect(timeline.get('p1')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'task 1' },
+    ]);
+  });
+
+  it('tracks an item that carries over and completes in a later turn', () => {
+    // id+content keys the same task across a user turn, so a "continue" turn
+    // that finishes a carried-over item still surfaces the completion (a
+    // user-turn reset would drop this).
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [item('1', 'Build feature', 'in_progress')]),
+      userMessage('u1'),
+      planMessage('p2', [item('1', 'Build feature', 'completed')]),
+    ]);
+
+    expect(timeline.get('p2')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'Build feature' },
+    ]);
+  });
+
+  // Documented limitation of id+content keying: a mid-task reword reads as a new
+  // task, so its completion is treated as first-seen and omitted from the diff.
+  it('omits the completion when a todo is reworded on the same id (known gap)', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('p1', [item('1', 'Write report', 'in_progress')]),
+      planMessage('p2', [item('1', 'Write the final report', 'completed')]),
+    ]);
+
+    expect(timeline.get('p2')?.events).toEqual([]);
+  });
+
+  // Documented limitation: two unrelated plans reusing both id AND content
+  // collide, so the second plan's completion is suppressed.
+  it('collides when unrelated plans reuse the same id and content (known gap)', () => {
+    const timeline = computeTodoTimeline([
+      planMessage('a', [item('1', 'Run tests', 'completed')]),
+      userMessage('u1'),
+      planMessage('b', [item('1', 'Run tests', 'completed')]),
+    ]);
+
+    expect(timeline.get('b')?.events).toEqual([]);
+  });
+});
+
+describe('todoTimelineSignature', () => {
+  it('is unchanged by edits to non-todo messages', () => {
+    const a = todoTimelineSignature([
+      planMessage('p1', [todo('1', 'in_progress')]),
+      assistantMessage('a1'),
+    ]);
+    const b = todoTimelineSignature([
+      planMessage('p1', [todo('1', 'in_progress')]),
+      { id: 'a1', role: 'assistant', content: 'different text' },
+    ]);
+    expect(b).toBe(a);
+  });
+
+  it('changes when an item id, status, or content changes', () => {
+    const base = todoTimelineSignature([
+      planMessage('p1', [todo('1', 'in_progress')]),
+    ]);
+    const status = todoTimelineSignature([
+      planMessage('p1', [todo('1', 'completed')]),
+    ]);
+    const id = todoTimelineSignature([
+      planMessage('p1', [todo('2', 'in_progress')]),
+    ]);
+    const content = todoTimelineSignature([
+      planMessage('p1', [item('1', 'reworded', 'in_progress')]),
+    ]);
+    expect(status).not.toBe(base);
+    expect(id).not.toBe(base);
+    expect(content).not.toBe(base);
+  });
+
+  it('is empty for a transcript with no todo snapshots', () => {
+    expect(todoTimelineSignature([])).toBe('');
+    expect(todoTimelineSignature([userMessage('u1')])).toBe('');
+  });
+});
+
+describe('isTodoWriteToolName', () => {
+  it.each(['todo_write', 'todowrite', 'TodoWrite', 'TODO_WRITE'])(
+    'matches %s',
+    (name) => {
+      expect(isTodoWriteToolName(name)).toBe(true);
+    },
+  );
+
+  it.each(['read', 'edit', 'write_file', ''])('rejects %s', (name) => {
+    expect(isTodoWriteToolName(name)).toBe(false);
+  });
+});
+
+describe('extractTodosFromToolCall', () => {
+  function toolCall(overrides: Partial<ACPToolCall>): ACPToolCall {
+    return {
+      callId: 'c1',
+      toolName: 'todo_write',
+      status: 'completed',
+      kind: 'think',
+      ...overrides,
+    };
+  }
+
+  it('reads todos from args', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({ args: { todos: [item('1', 'A', 'pending')] } }),
+    );
+    expect(todos).toEqual([{ id: '1', content: 'A', status: 'pending' }]);
+  });
+
+  it('reads todos from rawOutput.todos', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({ rawOutput: { todos: [item('1', 'A', 'in_progress')] } }),
+    );
+    expect(todos?.map((t) => t.status)).toEqual(['in_progress']);
+  });
+
+  it('reads todos from rawOutput.entries', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({ rawOutput: { entries: [item('1', 'A', 'completed')] } }),
+    );
+    expect(todos?.map((t) => t.status)).toEqual(['completed']);
+  });
+
+  it('returns undefined for a non-todo tool even if it carries a todos array', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({
+        toolName: 'read',
+        kind: 'read',
+        args: { todos: [item('1', 'A', 'pending')] },
+      }),
+    );
+    expect(todos).toBeUndefined();
   });
 });
 

@@ -5,14 +5,19 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { ACPToolCall } from '../../adapters/types';
 
-// ToolGroup imports App only for CompactModeContext; loading the real App
-// module would pull the whole application graph into this unit test.
+// ToolGroup imports App only for CompactModeContext and TodoTimelineContext;
+// loading the real App module would pull the whole application graph into this
+// unit test.
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
-  return { CompactModeContext: createContext(false) };
+  return {
+    CompactModeContext: createContext(false),
+    TodoTimelineContext: createContext(new Map()),
+  };
 });
 
 const { ToolGroup } = await import('./ToolGroup');
+const { TodoTimelineContext } = await import('../../App');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -321,7 +326,105 @@ describe('auto-collapse on finish', () => {
     render('completed');
     expect(container.textContent).toContain('SubToolMarker');
   });
+});
 
+function makeTodoTool(): ACPToolCall {
+  return {
+    callId: 'call-todo-1',
+    toolName: 'todo_write',
+    status: 'completed',
+    kind: 'think',
+    args: {
+      todos: [
+        { id: '1', content: 'First task', status: 'completed' },
+        { id: '2', content: 'Second task', status: 'in_progress' },
+        { id: '3', content: 'Third task', status: 'pending' },
+      ],
+    },
+  };
+}
+
+function renderTodoTool(
+  tool: ACPToolCall,
+  timeline?: Map<string, unknown>,
+): HTMLElement {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <TodoTimelineContext.Provider value={timeline ?? new Map()}>
+          <ToolGroup tools={[tool]} />
+        </TodoTimelineContext.Provider>
+      </I18nProvider>,
+    );
+  });
+  mounted.push({ root, container });
+  return container;
+}
+
+describe('todo_write tool rendering', () => {
+  it('detects the todo_write wire name and collapses to the current step', () => {
+    const container = renderTodoTool(makeTodoTool());
+    // Collapsed by default: only the current (in_progress) step and the
+    // progress count show; other items stay hidden until expanded.
+    expect(container.textContent).toContain('1/3');
+    expect(container.textContent).toContain('Second task');
+    expect(container.textContent).not.toContain('Third task');
+    expect(container.textContent).toContain('▸');
+  });
+
+  it('expands to the full list on click', () => {
+    const container = renderTodoTool(makeTodoTool());
+    const chevron = [...container.querySelectorAll('span')].find(
+      (s) => s.textContent === '▸',
+    );
+    click(chevron!.parentElement!);
+    expect(container.textContent).toContain('First task');
+    expect(container.textContent).toContain('Second task');
+    expect(container.textContent).toContain('Third task');
+    expect(container.textContent).toContain('▾');
+  });
+
+  it('shows the snapshot diff when a timeline is present', () => {
+    const timeline = new Map<string, unknown>([
+      [
+        'call-todo-1',
+        {
+          events: [
+            { kind: 'completed', id: '1', content: 'First task' },
+            { kind: 'started', id: '2', content: 'Second task' },
+          ],
+        },
+      ],
+    ]);
+    const container = renderTodoTool(makeTodoTool(), timeline);
+    // The collapsed diff: just-completed item (●), just-started item (◐), and
+    // pending items still hidden — same status glyphs as the expanded list.
+    expect(container.textContent).toContain('●');
+    expect(container.textContent).toContain('First task');
+    expect(container.textContent).toContain('◐');
+    expect(container.textContent).toContain('Second task');
+    expect(container.textContent).not.toContain('Third task');
+  });
+
+  it('falls back to the result summary when the todo payload is unparseable', () => {
+    // Malformed args (todos is a string) → no list to render; the row must not
+    // be blank — it shows the raw result summary instead.
+    const container = renderTodoTool({
+      callId: 'call-todo-bad',
+      toolName: 'todo_write',
+      status: 'completed',
+      kind: 'think',
+      args: { todos: 'oops not an array' },
+      rawOutput: { output: 'Todos updated summary line' },
+    });
+    expect(container.textContent).toContain('Todos updated summary line');
+  });
+});
+
+describe('user-expanded tool persistence', () => {
   it('keeps a tool the user manually expanded open when it completes', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
