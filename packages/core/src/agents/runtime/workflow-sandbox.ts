@@ -22,6 +22,33 @@
  * supported — model-authored `meta` should avoid them.
  */
 export function stripExportMeta(source: string): string {
+  const bounds = findMetaBlockBounds(source);
+  if (!bounds) return source;
+  return source.slice(0, bounds.exportIdx) + source.slice(bounds.afterMeta);
+}
+
+/**
+ * Locate the `export const meta = {...}` declaration's bounds in the source.
+ *
+ * Shared by stripExportMeta (P1) and extractAndStripMeta (P4). Anchors at file
+ * start (no `/m` flag — see T33 comment below); walks the brace block while
+ * skipping over comment / regex / string contexts; throws on unbalanced
+ * braces rather than returning a truncated string (T9/T17 — silently
+ * deleting the script body is the worst-case failure mode).
+ *
+ * Returns null when no meta declaration is present at the file start —
+ * callers treat this as "no meta", not an error.
+ */
+function findMetaBlockBounds(source: string): {
+  /** Start offset of the `export const meta` match. */
+  exportIdx: number;
+  /** Offset of the `{` opening the meta object literal. */
+  startBrace: number;
+  /** Offset of the matching `}` closing the literal (inclusive). */
+  endBraceIncl: number;
+  /** Offset past meta + any trailing whitespace + optional `;`. */
+  afterMeta: number;
+} | null {
   // T33 (PR #4732 R4): anchor at file start (no `/m` flag). Per the design
   // doc, `export const meta = {...}` must be the script's FIRST statement.
   // With `/m`, the regex matched every line-start occurrence — including
@@ -29,7 +56,7 @@ export function stripExportMeta(source: string): string {
   // out of the string body, silently corrupting the script.
   const re = /^\s*export\s+const\s+meta\s*=\s*\{/;
   const match = re.exec(source);
-  if (!match) return source;
+  if (!match) return null;
   const exportIdx = match.index;
   const startBrace = source.indexOf('{', exportIdx);
   let depth = 1;
@@ -101,9 +128,170 @@ export function stripExportMeta(source: string): string {
         'the workflow script cannot be safely stripped. Check the meta block syntax.',
     );
   }
+  const endBraceIncl = i - 1;
   // Skip trailing whitespace and an optional semicolon.
   while (i < source.length && /[\s;]/.test(source[i]!)) i++;
-  return source.slice(0, exportIdx) + source.slice(i);
+  return { exportIdx, startBrace, endBraceIncl, afterMeta: i };
+}
+
+/**
+ * The `meta` object shape — verbatim from upstream Claude Code 2.1.168.
+ * `name` and `description` are mandatory; `whenToUse` and `phases` are
+ * optional. Each phase carries a mandatory `title` and optional `detail`
+ * / `model`. P4 surfaces this shape on `WorkflowRunOutcome.meta` so
+ * `/workflows` listing and the phase-tree UI can read it directly.
+ */
+export interface WorkflowMeta {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  phases?: Array<{ title: string; detail?: string; model?: string }>;
+}
+
+/**
+ * Strip `export const meta = {...}` from the script AND extract the meta
+ * object as a plain host-realm value, ready to surface on `WorkflowRunOutcome`.
+ *
+ * Implementation:
+ *   1. `findMetaBlockBounds` (shared with `stripExportMeta`) locates the
+ *      object-literal source range via the brace-walker.
+ *   2. The literal source is evaluated as `(${metaSource})` inside a fresh
+ *      vm context whose globalThis is a null-prototyped object — no
+ *      bridge to the host realm, no access to host primitives like
+ *      `process` / `require` / the workflow-sandbox bridge globals
+ *      (`args` / `agent` / `phase` / `log` / etc.). The vm realm DOES
+ *      provide its own intrinsics (`Object`, `Array`, `Math`, `Date`,
+ *      `JSON`, …) which is fine: meta extraction is a one-shot at tool-
+ *      invocation time, not replayed during resume, so non-determinism in
+ *      the meta literal (a `Date.now()` call in `meta.name`) does not
+ *      break the resume contract that the script body honors.
+ *   3. The vm result is walked field-by-field and copied into a new
+ *      host-realm plain object. No JSON round-trip is needed because every
+ *      contract field is a primitive — strings and arrays of plain
+ *      objects with string fields — so prototype identity on the
+ *      intermediate values is irrelevant.
+ *
+ * Returns `{ stripped, meta: null }` when no meta declaration is present
+ * (callers treat this as "no meta"). Throws when meta is present but
+ * malformed: vm eval failure, missing required field, or wrong field type.
+ * Error messages for the missing-required-field cases match upstream
+ * 2.1.168 verbatim so script authors see one consistent error text.
+ */
+export function extractAndStripMeta(source: string): {
+  stripped: string;
+  meta: WorkflowMeta | null;
+} {
+  const bounds = findMetaBlockBounds(source);
+  if (!bounds) return { stripped: source, meta: null };
+
+  const metaSource = source.slice(bounds.startBrace, bounds.endBraceIncl + 1);
+  const stripped =
+    source.slice(0, bounds.exportIdx) + source.slice(bounds.afterMeta);
+
+  // Null-prototyped globalThis: no host bridge (no `process` / `require`
+  // / `args` / workflow-sandbox bridge globals). The vm realm still
+  // provides its own intrinsics, but that's intentional — see the
+  // docstring above.
+  const metaContext = vm.createContext(Object.create(null));
+  let raw: unknown;
+  try {
+    raw = new vm.Script(`(${metaSource})`).runInContext(metaContext);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `extractAndStripMeta: failed to evaluate meta object literal: ${msg}`,
+    );
+  }
+
+  const meta = validateMeta(raw);
+  return { stripped, meta };
+}
+
+/**
+ * Validate the vm-eval'd meta value and copy it into a fresh host-realm
+ * plain object. Throws on shape violation with the upstream-aligned error
+ * message text for the required-field cases.
+ *
+ * Field rules:
+ *   - `name`           required, non-empty string
+ *   - `description`    required, non-empty string
+ *   - `whenToUse`      optional, string (may be empty)
+ *   - `phases`         optional, Array of plain objects with:
+ *                        `title`   required, non-empty string
+ *                        `detail`  optional, string
+ *                        `model`   optional, string
+ */
+function validateMeta(value: unknown): WorkflowMeta {
+  if (value === null || typeof value !== 'object') {
+    throw new Error('meta must be an object');
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj['name'] !== 'string' || (obj['name'] as string).length === 0) {
+    // Verbatim from upstream Claude Code 2.1.168.
+    throw new Error('meta.name must be a non-empty string');
+  }
+  if (
+    typeof obj['description'] !== 'string' ||
+    (obj['description'] as string).length === 0
+  ) {
+    // Verbatim from upstream Claude Code 2.1.168.
+    throw new Error('meta.description must be a non-empty string');
+  }
+  if (
+    obj['whenToUse'] !== undefined &&
+    typeof obj['whenToUse'] !== 'string'
+  ) {
+    throw new Error('meta.whenToUse must be a string');
+  }
+  let phases:
+    | Array<{ title: string; detail?: string; model?: string }>
+    | undefined;
+  if (obj['phases'] !== undefined) {
+    if (!Array.isArray(obj['phases'])) {
+      throw new Error('meta.phases must be an array');
+    }
+    phases = [];
+    for (const p of obj['phases'] as unknown[]) {
+      if (p === null || typeof p !== 'object') {
+        throw new Error('meta.phases entries must be objects');
+      }
+      const ph = p as Record<string, unknown>;
+      if (
+        typeof ph['title'] !== 'string' ||
+        (ph['title'] as string).length === 0
+      ) {
+        throw new Error('meta.phases[].title must be a non-empty string');
+      }
+      const phase: { title: string; detail?: string; model?: string } = {
+        title: ph['title'] as string,
+      };
+      if (ph['detail'] !== undefined) {
+        if (typeof ph['detail'] !== 'string') {
+          throw new Error('meta.phases[].detail must be a string');
+        }
+        phase.detail = ph['detail'] as string;
+      }
+      if (ph['model'] !== undefined) {
+        if (typeof ph['model'] !== 'string') {
+          throw new Error('meta.phases[].model must be a string');
+        }
+        phase.model = ph['model'] as string;
+      }
+      phases.push(phase);
+    }
+  }
+
+  const out: WorkflowMeta = {
+    name: obj['name'] as string,
+    description: obj['description'] as string,
+  };
+  if (obj['whenToUse'] !== undefined) {
+    out.whenToUse = obj['whenToUse'] as string;
+  }
+  if (phases !== undefined) {
+    out.phases = phases;
+  }
+  return out;
 }
 
 /**
@@ -259,12 +447,22 @@ export interface WorkflowSandbox {
    * Execute the user-authored script source. The script is wrapped as an async
    * IIFE so it may use top-level `await` and `return`. Returns the script's
    * top-level return value.
+   *
+   * `export const meta = {...}` is extracted before parsing and exposed via
+   * `getMeta()` — the script body sees the meta-stripped source.
    */
   run(scriptSource: string): Promise<unknown>;
   /** Phase titles announced by the script in order. */
   getPhases(): string[];
   /** Log lines emitted by the script in order. */
   getLogs(): string[];
+  /**
+   * The script's `export const meta = {...}` declaration, validated and
+   * extracted before the script body runs. `null` when the script omits
+   * the declaration. Throws (during `run`) when the declaration is
+   * present but malformed.
+   */
+  getMeta(): WorkflowMeta | null;
 }
 
 /**
@@ -721,9 +919,15 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
 
   const maxWallClockMs = resolveMaxWallClockMs(opts);
 
+  let extractedMeta: WorkflowMeta | null = null;
   return {
     async run(scriptSource: string): Promise<unknown> {
-      const stripped = stripExportMeta(scriptSource);
+      // P4: extract `export const meta = {...}` once before the body runs.
+      // The stripped source is what the vm executes; the meta object is
+      // surfaced via `getMeta()` after the run (or after a malformed-meta
+      // throw, in which case the caller's catch block sees a clear error).
+      const { stripped, meta } = extractAndStripMeta(scriptSource);
+      extractedMeta = meta;
       const wrapped = `(async () => {\n${stripped}\n})()`;
       const script = new vm.Script(wrapped, {
         filename: 'workflow.js',
@@ -769,5 +973,6 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     },
     getPhases: () => [...phases],
     getLogs: () => [...logs],
+    getMeta: () => extractedMeta,
   };
 }

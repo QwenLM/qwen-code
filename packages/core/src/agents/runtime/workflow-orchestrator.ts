@@ -11,6 +11,7 @@ import { createWorkflowSandbox, debugLogger } from './workflow-sandbox.js';
 import type {
   WorkflowAgentOpts,
   WorkflowAgentResult,
+  WorkflowMeta,
 } from './workflow-sandbox.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
@@ -164,6 +165,13 @@ export class WorkflowExecutionError extends Error {
     message: string,
     readonly phases: string[],
     readonly logs: string[],
+    /**
+     * The extracted meta if it was parsed before the script body threw —
+     * null otherwise (no declaration in the source, or malformed meta
+     * which itself was the failure). Surfaced so the tool's failure
+     * display can still show the workflow's name / description / phases.
+     */
+    readonly meta: WorkflowMeta | null = null,
   ) {
     super(message);
   }
@@ -172,7 +180,7 @@ export class WorkflowExecutionError extends Error {
 // FIX-E (Round 4 ARCH-I1): single source of truth for the dispatch return
 // type is `workflow-sandbox.ts`. Re-exported here so external consumers
 // (WorkflowTool) can import the alias from the orchestrator module.
-export type { WorkflowAgentResult };
+export type { WorkflowAgentResult, WorkflowMeta };
 
 export interface WorkflowRunRequest {
   script: string;
@@ -199,6 +207,14 @@ export interface WorkflowRunOutcome {
   result: unknown;
   phases: string[];
   logs: string[];
+  /**
+   * The script's `export const meta = {...}` declaration (P4). `null` when
+   * the script omits the declaration. Surfaced verbatim from the sandbox's
+   * `getMeta()` so callers (`/workflows` listing, phase-tree UI) can read
+   * the workflow's name / description / phases / whenToUse without
+   * re-parsing the script source.
+   */
+  meta: WorkflowMeta | null;
 }
 
 export type WorkflowAgentDispatch = (
@@ -1091,6 +1107,7 @@ export class WorkflowOrchestrator {
         result,
         phases: sandbox.getPhases(),
         logs: sandbox.getLogs(),
+        meta: sandbox.getMeta(),
       };
     } catch (err) {
       // T19 (PR #4732 R1): preserve phases and logs accumulated before the
@@ -1105,6 +1122,7 @@ export class WorkflowOrchestrator {
         extractErrorMessage(err),
         sandbox.getPhases(),
         sandbox.getLogs(),
+        sandbox.getMeta(),
       );
     }
   }

@@ -163,8 +163,14 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // try/catch with a clear placeholder so a serialization issue
       // degrades gracefully instead of masquerading as a run failure.
       const llmText = safeStringifyResult(outcome.result);
+      // P4: surface the extracted `export const meta` declaration in the
+      // display payload so the user (and future /workflows listing) can
+      // see the workflow's name / description / phases without re-reading
+      // the script. Omitted when the script had no meta declaration to
+      // keep the payload shape minimal.
       const displayJson = safeStringifyDisplayPayload({
         runId: outcome.runId,
+        ...(outcome.meta ? { meta: outcome.meta } : {}),
         phases: outcome.phases,
         logs: outcome.logs,
         result: outcome.result,
@@ -189,9 +195,16 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       const phases =
         err instanceof WorkflowExecutionError ? err.phases : undefined;
       const logs = err instanceof WorkflowExecutionError ? err.logs : undefined;
+      // P4: also surface the extracted meta on the failure path. The script
+      // body may have thrown long after the meta declaration parsed
+      // cleanly; keeping name/description/phases visible on failure helps
+      // the user identify which workflow ran.
+      const meta =
+        err instanceof WorkflowExecutionError ? err.meta : undefined;
       const display =
-        phases || logs
+        phases || logs || meta
           ? `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload({
+              ...(meta ? { meta } : {}),
               phases: phases ?? [],
               logs: logs ?? [],
             })}`

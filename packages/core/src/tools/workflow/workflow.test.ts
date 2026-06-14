@@ -224,6 +224,56 @@ describe('WorkflowTool', () => {
     expect(display).not.toContain('display payload not JSON-serializable');
   });
 
+  // P4: execute() surfaces the extracted `export const meta = {...}` in
+  // the returnDisplay payload so the user (and a future /workflows
+  // listing) can see the workflow's name / description / phases.
+  it('execute() surfaces meta in returnDisplay when the script declares it', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'ignored',
+    });
+    const invocation = tool.build({
+      script: `export const meta = { name: 'demo', description: 'demo workflow', phases: [{ title: 'plan' }] }
+               return 1;`,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const display = String(result.returnDisplay);
+    expect(display).toContain('"meta"');
+    expect(display).toContain('demo workflow');
+    expect(display).toContain('"phases"');
+  });
+
+  it('execute() omits meta key from returnDisplay when the script has no declaration', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'ignored',
+    });
+    const invocation = tool.build({
+      script: 'return 1;',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    const display = String(result.returnDisplay);
+    expect(display).not.toContain('"meta"');
+  });
+
+  // P4: when the script body throws AFTER meta parsed, the meta is still
+  // visible on the failure display via the WorkflowExecutionError.meta
+  // field that the tool's catch block surfaces.
+  it('execute() includes meta in failure returnDisplay when body throws', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'ignored',
+    });
+    const invocation = tool.build({
+      script: `export const meta = { name: 'fails', description: 'will throw' }
+               throw new Error("body boom")`,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    const display = String(result.returnDisplay);
+    expect(display).toContain('Workflow failed');
+    expect(display).toContain('"fails"');
+    expect(display).toContain('will throw');
+  });
+
   // TST-C3: llmContent must be the unwrapped script return value (FIX-7).
   it('execute() strips the JSON wrapper from llmContent (script return is verbatim)', async () => {
     const tool = new WorkflowTool(fakeConfig(), {

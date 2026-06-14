@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { stripExportMeta, createWorkflowSandbox } from './workflow-sandbox.js';
+import {
+  stripExportMeta,
+  extractAndStripMeta,
+  createWorkflowSandbox,
+} from './workflow-sandbox.js';
 
 describe('stripExportMeta', () => {
   it('returns input unchanged when no export meta present', () => {
@@ -136,6 +140,125 @@ return x;`;
   });
 });
 
+describe('extractAndStripMeta', () => {
+  // P4: extracts the `export const meta = {...}` declaration into a typed
+  // object AND strips it from the script source (delegates to the same
+  // brace-walker stripExportMeta uses). `meta: null` when the script has no
+  // declaration; throws when the declaration is present but malformed.
+  it('returns meta: null and unchanged source when no meta declaration', () => {
+    const src = `phase("plan")\nreturn 1`;
+    const { stripped, meta } = extractAndStripMeta(src);
+    expect(stripped).toBe(src);
+    expect(meta).toBeNull();
+  });
+
+  it('extracts the required name + description fields', () => {
+    const src = `export const meta = { name: 'demo', description: 'a demo workflow' }\nreturn 1`;
+    const { stripped, meta } = extractAndStripMeta(src);
+    expect(stripped.trim()).toBe('return 1');
+    expect(meta).toEqual({ name: 'demo', description: 'a demo workflow' });
+  });
+
+  it('extracts optional whenToUse + phases array', () => {
+    const src = `export const meta = {
+      name: 'multi',
+      description: 'multi-phase',
+      whenToUse: 'when the user needs a multi-phase report',
+      phases: [
+        { title: 'collect' },
+        { title: 'analyse', detail: 'aggregate findings', model: 'qwen3-coder-plus' },
+      ],
+    }
+    return 1;`;
+    const { meta } = extractAndStripMeta(src);
+    expect(meta).toEqual({
+      name: 'multi',
+      description: 'multi-phase',
+      whenToUse: 'when the user needs a multi-phase report',
+      phases: [
+        { title: 'collect' },
+        { title: 'analyse', detail: 'aggregate findings', model: 'qwen3-coder-plus' },
+      ],
+    });
+  });
+
+  it('throws upstream-verbatim error when name is missing', () => {
+    const src = `export const meta = { description: 'no name' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /^meta\.name must be a non-empty string$/,
+    );
+  });
+
+  it('throws upstream-verbatim error when description is missing', () => {
+    const src = `export const meta = { name: 'x' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /^meta\.description must be a non-empty string$/,
+    );
+  });
+
+  it('throws when name is empty string', () => {
+    const src = `export const meta = { name: '', description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /^meta\.name must be a non-empty string$/,
+    );
+  });
+
+  it('throws when phases is not an array', () => {
+    const src = `export const meta = { name: 'n', description: 'd', phases: 'oops' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(/phases must be an array/);
+  });
+
+  it('throws when a phase is missing its title', () => {
+    const src = `export const meta = { name: 'n', description: 'd', phases: [{ detail: 'no title here' }] }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /phases\[\]\.title must be a non-empty string/,
+    );
+  });
+
+  // Security regression: the meta-eval vm context has no globals at all
+  // (Object.create(null) prototype), so the model cannot reach host
+  // primitives during meta evaluation — even ones that the script-side
+  // sandbox normally provides (args, agent, phase, log, parallel,
+  // pipeline). Referencing any of them throws ReferenceError.
+  it('rejects meta that references a name that does not exist in the eval context', () => {
+    const src = `export const meta = { name: args.x, description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+  });
+
+  // Security regression: the meta-eval context's globalThis is null-
+  // prototyped, so the model has no bridge to host primitives like
+  // `process`, `require`, or the workflow-sandbox bridge globals
+  // (`args` / `agent` / `phase` / `log` / etc.). The vm realm still
+  // exposes its OWN intrinsics (`Object`, `Math`, `Date`, …) which is
+  // fine — meta extraction is one-shot at tool-invocation time, not
+  // replayed on resume, so it can be non-deterministic without breaking
+  // the resume contract that the script body honors.
+  it('meta source cannot reference a workflow-sandbox bridge global (args)', () => {
+    const src = `export const meta = { name: args.x, description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+  });
+
+  it('meta source cannot reach the host process / require / fs', () => {
+    const src1 = `export const meta = { name: process.version, description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src1)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+    const src2 = `export const meta = { name: 'x', description: require('fs').readFileSync('/etc/passwd', 'utf8') }\nreturn 1`;
+    expect(() => extractAndStripMeta(src2)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+  });
+
+  it('unbalanced braces still throw the stripExportMeta error', () => {
+    const src = `export const meta = { name: 'x'`;
+    expect(() => extractAndStripMeta(src)).toThrow(/unbalanced/i);
+  });
+});
+
 describe('createWorkflowSandbox', () => {
   it('exposes args verbatim', async () => {
     const sandbox = createWorkflowSandbox({
@@ -174,6 +297,45 @@ describe('createWorkflowSandbox', () => {
     });
     const result = await sandbox.run(`return 1 + 2`);
     expect(result).toBe(3);
+  });
+
+  // P4: meta declaration in the script is extracted before the body runs
+  // and exposed via getMeta(). The script body sees the stripped source.
+  it('getMeta() returns null when no export const meta declaration', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await sandbox.run(`return 42`);
+    expect(sandbox.getMeta()).toBeNull();
+  });
+
+  it('getMeta() returns the parsed meta when present', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(
+      `export const meta = { name: 'unit', description: 'unit-test workflow', phases: [{ title: 'one' }] }\nreturn 'done'`,
+    );
+    expect(result).toBe('done');
+    expect(sandbox.getMeta()).toEqual({
+      name: 'unit',
+      description: 'unit-test workflow',
+      phases: [{ title: 'one' }],
+    });
+  });
+
+  it('getMeta() failure on malformed meta propagates as the run rejection', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(
+        `export const meta = { name: 'x' }\nreturn 1`,
+      ),
+    ).rejects.toThrow(/^meta\.description must be a non-empty string$/);
   });
 });
 

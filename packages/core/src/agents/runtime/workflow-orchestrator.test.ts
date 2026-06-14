@@ -177,6 +177,54 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('world');
   });
 
+  // P4: outcome.meta surfaces the extracted `export const meta = {...}`
+  // declaration. Null when the script omits it.
+  it('outcome.meta is null when the script has no meta declaration', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+    const outcome = await orchestrator.run({
+      script: `return 1`,
+      args: undefined,
+    });
+    expect(outcome.meta).toBeNull();
+  });
+
+  it('outcome.meta is the parsed meta when the script declares one', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+    const outcome = await orchestrator.run({
+      script: `export const meta = { name: 'demo', description: 'demo workflow', phases: [{ title: 'plan' }] }
+               return 1`,
+      args: undefined,
+    });
+    expect(outcome.meta).toEqual({
+      name: 'demo',
+      description: 'demo workflow',
+      phases: [{ title: 'plan' }],
+    });
+    expect(outcome.result).toBe(1);
+  });
+
+  // P4: a script body that throws still surfaces the meta on the wrapped
+  // WorkflowExecutionError so the user-facing display can identify which
+  // workflow ran before the body failed.
+  it('WorkflowExecutionError carries meta when the body throws AFTER meta parsed', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `export const meta = { name: 'fails', description: 'will throw' }
+                 throw new Error("body boom")`,
+        args: undefined,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(WorkflowExecutionError);
+    expect((caught as WorkflowExecutionError).meta).toEqual({
+      name: 'fails',
+      description: 'will throw',
+    });
+  });
+
   it('surfaces a thrown error from the script', async () => {
     const orchestrator = new WorkflowOrchestrator(async () => 'unused');
     await expect(
