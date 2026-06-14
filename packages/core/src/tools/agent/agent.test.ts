@@ -224,7 +224,7 @@ describe('AgentTool', () => {
     it('should initialize with correct name and properties', () => {
       expect(agentTool.name).toBe('agent');
       expect(agentTool.displayName).toBe('Agent');
-      expect(agentTool.kind).toBe('other');
+      expect(agentTool.kind).toBe('agent');
     });
 
     it('should load available subagents during initialization', () => {
