@@ -11,6 +11,7 @@ import type {
   GenerateContentResponse,
   Content,
   GenerateContentConfig,
+  FunctionCall,
   SendMessageParameters,
   Part,
   Tool,
@@ -74,8 +75,29 @@ import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import { isSystemReminderContent } from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
+import {
+  collectToolCallIdsFromHistory,
+  normalizeModelToolCallIds,
+} from './toolCallIdUtils.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+
+function syncOwnFunctionCallsField(
+  response: GenerateContentResponse,
+  parts: readonly Part[],
+): void {
+  const descriptor = Object.getOwnPropertyDescriptor(response, 'functionCalls');
+  if (!descriptor || (!descriptor.writable && !descriptor.set)) {
+    return;
+  }
+
+  const functionCalls = parts
+    .map((part) => part.functionCall)
+    .filter((call): call is FunctionCall => Boolean(call));
+  (
+    response as GenerateContentResponse & { functionCalls?: FunctionCall[] }
+  ).functionCalls = functionCalls.length > 0 ? functionCalls : undefined;
+}
 
 /**
  * Replaces the args on a `structured_output` `functionCall` with the
@@ -2779,6 +2801,8 @@ export class GeminiChat {
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
+    const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
+    const rawToolCallIdsInCurrentTurn = new Set<string>();
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let coercedUsage:
       | {
@@ -2810,6 +2834,13 @@ export class GeminiChat {
         if (isValidResponse(chunk)) {
           const content = chunk.candidates?.[0]?.content;
           if (content?.parts) {
+            content.parts = normalizeModelToolCallIds(
+              content.parts,
+              usedToolCallIds,
+              rawToolCallIdsInCurrentTurn,
+            );
+            syncOwnFunctionCallsField(chunk, content.parts);
+
             if (content.parts.some((part) => part.functionCall)) {
               hasToolCall = true;
             }

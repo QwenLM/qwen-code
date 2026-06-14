@@ -1030,6 +1030,86 @@ describe('subagent.ts', () => {
 
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
       });
+
+      it('should execute only the first duplicate functionCall id in one model turn', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'dup_id_0001',
+                name: 'list_files',
+                args: { path: 'a' },
+              },
+              {
+                id: 'dup_id_0001',
+                name: 'list_files',
+                args: { path: 'b' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: 'a' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt',
+            returnDisplay: 'Listed 1 file',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledOnce();
+        const secondCallArgs = mockSendMessageStream.mock.calls[1][1];
+        const parts = secondCallArgs.message as Part[];
+        expect(
+          parts
+            .map((part) => part.functionResponse?.id)
+            .filter((id): id is string => Boolean(id)),
+        ).toEqual(['dup_id_0001']);
+      });
     });
 
     describe('execute - Termination and Recovery', () => {

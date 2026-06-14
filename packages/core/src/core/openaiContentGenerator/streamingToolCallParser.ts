@@ -151,6 +151,15 @@ export class StreamingToolCallParser {
     const currentInString = this.inStrings.get(actualIndex)!;
     const currentEscape = this.escapes.get(actualIndex)!;
 
+    if (id && chunk && currentBuffer.trim() && currentDepth === 0) {
+      try {
+        const parsed = JSON.parse(currentBuffer);
+        return { complete: true, value: parsed };
+      } catch {
+        // Not complete yet; append the incoming chunk below.
+      }
+    }
+
     // Add chunk to buffer
     const newBuffer = currentBuffer + chunk;
     this.buffers.set(actualIndex, newBuffer);
@@ -245,10 +254,18 @@ export class StreamingToolCallParser {
       args: Record<string, unknown>;
       index: number;
     }> = [];
+    const emittedIds = new Set<string>();
 
     for (const [index, buffer] of this.buffers.entries()) {
       const meta = this.toolCallMeta.get(index);
       if (meta?.name && buffer.trim()) {
+        if (meta.id) {
+          if (emittedIds.has(meta.id)) {
+            continue;
+          }
+          emittedIds.add(meta.id);
+        }
+
         let args: Record<string, unknown> = {};
 
         // Try to parse the final buffer

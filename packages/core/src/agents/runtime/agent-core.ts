@@ -51,6 +51,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { dedupeToolCallsById } from '../../core/toolCallIdUtils.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -1092,13 +1093,14 @@ export class AgentCore {
     wasOutputTruncated = false,
   ): Promise<Content[]> {
     const toolResponseParts: Part[] = [];
+    const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
 
     // Filter unauthorized tool calls before scheduling
     const authorizedCalls: FunctionCall[] = [];
-    for (const fc of functionCalls) {
+    for (const fc of uniqueFunctionCalls) {
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
 
       if (!allowedToolNames.has(fc.name)) {

@@ -545,6 +545,7 @@ function processContent(
   const reasoningParts: string[] = [];
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
   let toolCallIndex = 0;
+  const emittedFunctionResponseIds = new Set<string>();
   // When `splitToolMedia` is enabled, media stripped from tool messages is
   // accumulated here and emitted as a single follow-up user message after
   // ALL tool messages in this group have been pushed. OpenAI Chat
@@ -588,6 +589,14 @@ function processContent(
     }
 
     if (part.functionResponse && role === 'user') {
+      const responseId = part.functionResponse.id;
+      if (responseId) {
+        if (emittedFunctionResponseIds.has(responseId)) {
+          continue;
+        }
+        emittedFunctionResponseIds.add(responseId);
+      }
+
       // Create tool message for the function response (with embedded media)
       const toolMessage = createToolMessage(
         part.functionResponse,
@@ -1436,19 +1445,33 @@ function cleanOrphanedToolCalls(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const cleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  const adjacentToolResponseIdsByAssistant = new Map<number, Set<string>>();
+  const validToolCallsByAssistant = new Map<
+    number,
+    OpenAI.Chat.ChatCompletionMessageToolCall[]
+  >();
   const validToolResponseIndexesByAssistant = new Map<number, number[]>();
   const splitMediaIndexesByAssistant = new Map<number, number[]>();
   const emittedWithAssistant = new Set<number>();
+  const survivingToolCallIds = new Set<string>();
 
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (hasToolCalls(message)) {
-      const toolCallIds = new Set(
-        message.tool_calls
-          .map((toolCall) => toolCall.id)
-          .filter((id): id is string => Boolean(id)),
-      );
+      const candidateToolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] =
+        [];
+      const candidateToolCallIds = new Set<string>();
+      for (const toolCall of message.tool_calls) {
+        const id = toolCall.id;
+        if (!id || survivingToolCallIds.has(id)) {
+          continue;
+        }
+        if (candidateToolCallIds.has(id)) {
+          continue;
+        }
+        candidateToolCallIds.add(id);
+        candidateToolCalls.push(toolCall);
+      }
+
       const adjacentToolResponseIds = new Set<string>();
       const toolResponseIndexes: number[] = [];
       const splitMediaIndexes: number[] = [];
@@ -1466,7 +1489,10 @@ function cleanOrphanedToolCalls(
             continue;
           }
 
-          if (toolCallIds.has(nextMessage.tool_call_id)) {
+          if (
+            candidateToolCallIds.has(nextMessage.tool_call_id) &&
+            !adjacentToolResponseIds.has(nextMessage.tool_call_id)
+          ) {
             adjacentToolResponseIds.add(nextMessage.tool_call_id);
             toolResponseIndexes.push(nextIndex);
             lastToolResponseMatchesAssistant = true;
@@ -1493,7 +1519,13 @@ function cleanOrphanedToolCalls(
         break;
       }
 
-      adjacentToolResponseIdsByAssistant.set(index, adjacentToolResponseIds);
+      const validToolCalls = candidateToolCalls.filter((toolCall) =>
+        adjacentToolResponseIds.has(toolCall.id),
+      );
+      for (const toolCall of validToolCalls) {
+        survivingToolCallIds.add(toolCall.id);
+      }
+      validToolCallsByAssistant.set(index, validToolCalls);
       validToolResponseIndexesByAssistant.set(index, toolResponseIndexes);
       splitMediaIndexesByAssistant.set(index, splitMediaIndexes);
     }
@@ -1509,11 +1541,7 @@ function cleanOrphanedToolCalls(
       const reasoningContent = (
         message as ExtendedChatCompletionAssistantMessageParam
       ).reasoning_content;
-      const adjacentToolResponseIds =
-        adjacentToolResponseIdsByAssistant.get(index) ?? new Set<string>();
-      const validToolCalls = message.tool_calls.filter(
-        (toolCall) => toolCall.id && adjacentToolResponseIds.has(toolCall.id),
-      );
+      const validToolCalls = validToolCallsByAssistant.get(index) ?? [];
 
       if (validToolCalls.length > 0) {
         const cleanedMessage = { ...message };

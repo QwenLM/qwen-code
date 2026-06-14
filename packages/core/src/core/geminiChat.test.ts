@@ -8,10 +8,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   Content,
   GenerateContentConfig,
-  GenerateContentResponse,
   Part,
 } from '@google/genai';
-import { ApiError } from '@google/genai';
+import {
+  ApiError,
+  FinishReason,
+  GenerateContentResponse,
+} from '@google/genai';
 import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
 import {
   GeminiChat,
@@ -447,6 +450,238 @@ describe('GeminiChat', async () => {
       const modelTurn = history[1]!;
       expect(modelTurn?.parts?.length).toBe(1); // The empty part is discarded
       expect(modelTurn?.parts![0]!.functionCall).toBeDefined();
+    });
+
+    it('suffixes cross-turn reused functionCall ids before yielding and recording history', async () => {
+      chat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'first' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            functionCalls: [
+              {
+                id: 'dup_id_0001',
+                name: 'read_file',
+                args: { file_path: 'b.ts' },
+              },
+            ],
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'dup_id_0001',
+                        name: 'read_file',
+                        args: { file_path: 'b.ts' },
+                      },
+                    },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'second' },
+        'prompt-id-dup-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const chunk = events.find((event) => event.type === StreamEventType.CHUNK)
+        ?.value as GenerateContentResponse | undefined;
+      expect(chunk?.functionCalls?.map((call) => call.id)).toEqual([
+        'dup_id_0001__qwen_dup_2',
+      ]);
+      expect(
+        chunk?.candidates?.[0]?.content?.parts?.map(
+          (part) => part.functionCall?.id,
+        ),
+      ).toEqual(['dup_id_0001__qwen_dup_2']);
+
+      const history = chat.getHistory();
+      expect(history.at(-1)?.parts?.[0]?.functionCall?.id).toBe(
+        'dup_id_0001__qwen_dup_2',
+      );
+    });
+
+    it('normalizes ids visible through the real GenerateContentResponse functionCalls getter', async () => {
+      chat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      const response = new GenerateContentResponse();
+      response.candidates = [
+        {
+          content: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'b.ts' },
+                },
+              },
+            ],
+          },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield response;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'second' },
+        'prompt-id-real-response-getter',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const chunk = events.find((event) => event.type === StreamEventType.CHUNK)
+        ?.value as GenerateContentResponse | undefined;
+      expect(chunk?.functionCalls?.map((call) => call.id)).toEqual([
+        'dup_id_0001__qwen_dup_2',
+      ]);
+    });
+
+    it('drops same-turn replayed functionCall ids before yielding and recording history', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            functionCalls: [
+              { id: 'dup_id_0001', name: 'read_file', args: {} },
+              { id: 'dup_id_0001', name: 'read_file', args: {} },
+            ],
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'dup_id_0001',
+                        name: 'read_file',
+                        args: {},
+                      },
+                    },
+                    {
+                      functionCall: {
+                        id: 'dup_id_0001',
+                        name: 'read_file',
+                        args: {},
+                      },
+                    },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'run once' },
+        'prompt-id-same-turn-dup-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const chunk = events.find((event) => event.type === StreamEventType.CHUNK)
+        ?.value as GenerateContentResponse | undefined;
+      expect(chunk?.functionCalls?.map((call) => call.id)).toEqual([
+        'dup_id_0001',
+      ]);
+      expect(
+        chunk?.candidates?.[0]?.content?.parts?.map(
+          (part) => part.functionCall?.id,
+        ),
+      ).toEqual(['dup_id_0001']);
+
+      const functionCallIds = chat
+        .getHistory()
+        .at(-1)
+        ?.parts?.map((part) => part.functionCall?.id)
+        .filter((id): id is string => Boolean(id));
+      expect(functionCallIds).toEqual(['dup_id_0001']);
     });
 
     it('should fail if the stream ends with an empty part and has no finishReason', async () => {

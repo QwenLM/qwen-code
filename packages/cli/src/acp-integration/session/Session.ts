@@ -154,6 +154,24 @@ const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 
+function dedupeFunctionCallsById(
+  functionCalls: FunctionCall[],
+): FunctionCall[] {
+  const seenIds = new Set<string>();
+  const deduped: FunctionCall[] = [];
+  for (const functionCall of functionCalls) {
+    const id = functionCall.id;
+    if (id) {
+      if (seenIds.has(id)) {
+        continue;
+      }
+      seenIds.add(id);
+    }
+    deduped.push(functionCall);
+  }
+  return deduped;
+}
+
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
   if (trimmed.length === 0) return '(not set)';
@@ -2788,7 +2806,7 @@ export class Session implements SessionContext {
   ): Promise<Part[]> {
     type Batch = { concurrent: boolean; calls: FunctionCall[] };
     const batches: Batch[] = [];
-    for (const fc of functionCalls) {
+    for (const fc of dedupeFunctionCallsById(functionCalls)) {
       const isAgent = fc.name === ToolNames.AGENT;
       const last = batches[batches.length - 1];
       if (isAgent && last?.concurrent) {
