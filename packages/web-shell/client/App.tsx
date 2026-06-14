@@ -120,7 +120,12 @@ import {
 import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
-import { getFloatingTodos } from './utils/todos';
+import {
+  computeTodoTimeline,
+  getFloatingTodos,
+  todoTimelineSignature,
+  type TodoSnapshotDiff,
+} from './utils/todos';
 import { ThemeProvider } from './themeContext';
 import {
   WebShellThemeId,
@@ -139,6 +144,16 @@ import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
+
+/**
+ * Per-snapshot status diffs (keyed by tool callId or plan message id), so a
+ * history row can render what changed in that snapshot without re-deriving it
+ * from the whole transcript. Empty by default so a row rendered outside the
+ * provider still falls back gracefully.
+ */
+export const TodoTimelineContext = createContext<Map<string, TodoSnapshotDiff>>(
+  new Map(),
+);
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
@@ -672,6 +687,22 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
+  // Keep the timeline Map referentially stable across streaming ticks that
+  // don't touch any todo snapshot. The Map is a context value, so a fresh
+  // reference would re-render every todo/plan row regardless of memoization;
+  // only rebuild when the todo snapshots themselves change.
+  const todoTimelineRef = useRef<{
+    signature: string;
+    timeline: Map<string, TodoSnapshotDiff>;
+  } | null>(null);
+  const todoTimeline = useMemo(() => {
+    const signature = todoTimelineSignature(messages);
+    const cached = todoTimelineRef.current;
+    if (cached && cached.signature === signature) return cached.timeline;
+    const timeline = computeTodoTimeline(messages);
+    todoTimelineRef.current = { signature, timeline };
+    return timeline;
+  }, [messages]);
   const floatingTodos = useStableArray(
     floatingTodosState.todos,
     (t) => `${t.id}:${t.status}:${t.content}`,
@@ -2552,138 +2583,140 @@ export function App({
 
           <WebShellCustomizationProvider value={customization}>
             <CompactModeContext.Provider value={compactMode}>
-              <div
-                className={
-                  showFloatingTodos
-                    ? `${styles.content} ${styles.contentHasMessages}`
-                    : styles.content
-                }
-                style={dialogOpen ? { visibility: 'hidden' } : undefined}
-              >
-                <MessageList
-                  ref={messageListRef}
-                  messages={displayMessages}
-                  pendingApproval={pendingApproval}
-                  onConfirm={handleConfirm}
-                  onShowContextDetail={handleShowContextDetail}
-                  catchingUp={connection.catchingUp}
-                  workspaceCwd={connection.workspaceCwd || ''}
-                  shellOutputMaxLines={shellOutputMaxLines}
-                  showRetryHint={showRetryHint}
-                  onRetryClick={handleRetry}
-                  welcomeHeader={welcomeHeader}
-                  tailContent={
-                    agentsInlineMode ||
-                    memoryInlineOpen ||
-                    modelInlineMode ||
-                    authInlineOpen ||
-                    approvalModeInlineOpen ||
-                    settingsInlineOpen ? (
-                      <>
-                        {authInlineOpen && (
-                          <AuthMessage
-                            onMessage={(text, type = 'status') => {
-                              store.dispatch([
-                                type === 'error'
-                                  ? { type: 'error', text }
-                                  : { type: 'status', text },
-                              ]);
-                            }}
-                            onClose={() => setAuthInlineOpen(false)}
-                          />
-                        )}
-                        {approvalModeInlineOpen && (
-                          <ApprovalModeMessage
-                            currentMode={currentMode}
-                            onSelect={handleSetMode}
-                            onClose={() => setApprovalModeInlineOpen(false)}
-                          />
-                        )}
-                        {modelInlineMode && (
-                          <ModelMessage
-                            mode={modelInlineMode}
-                            onSelect={
-                              modelInlineMode === 'fast'
-                                ? handleFastModelSelect
-                                : handleModelSelect
-                            }
-                            onClose={() => setModelInlineMode(null)}
-                          />
-                        )}
-                        {agentsInlineMode && (
-                          <AgentsMessage
-                            mode={agentsInlineMode}
-                            onMessage={(text) =>
-                              store.dispatch([{ type: 'status', text }])
-                            }
-                            onClose={() => setAgentsInlineMode(null)}
-                          />
-                        )}
-                        {memoryInlineOpen && (
-                          <MemoryMessage
-                            refreshSignal={memoryRefreshSignal}
-                            addSignal={memoryAddSignal}
-                            addScope={memoryAddScope}
-                            portalHost={memoryPortalHost}
-                            onMessage={(text, type = 'status') => {
-                              store.dispatch([{ type, text }]);
-                            }}
-                            onClose={() => setMemoryInlineOpen(false)}
-                          />
-                        )}
-                        {settingsInlineOpen && (
-                          <SettingsMessage
-                            settingsState={workspaceSettingsState}
-                            onClose={() => setSettingsInlineOpen(false)}
-                            onLanguageChange={handleSettingsLanguageChange}
-                            onThemeChange={handleThemeChange}
-                            onSubDialog={(key) => {
-                              setSettingsInlineOpen(false);
-                              if (key === 'fastModel')
-                                setModelInlineMode('fast');
-                              else if (key === 'tools.approvalMode')
-                                setApprovalModeInlineOpen(true);
-                            }}
-                          />
-                        )}
-                      </>
-                    ) : undefined
+              <TodoTimelineContext.Provider value={todoTimeline}>
+                <div
+                  className={
+                    showFloatingTodos
+                      ? `${styles.content} ${styles.contentHasMessages}`
+                      : styles.content
                   }
-                  tailKey={
-                    agentsInlineMode ||
-                    memoryInlineOpen ||
-                    modelInlineMode ||
-                    authInlineOpen ||
-                    approvalModeInlineOpen ||
-                    settingsInlineOpen
-                      ? `inline-${authInlineOpen ? 'auth' : 'none'}-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
-                      : undefined
-                  }
-                  // The approval-mode/model pickers and the settings panel are
-                  // reachable by mouse from the status bar, so they reveal
-                  // themselves when opened while the user is scrolled up; the
-                  // agents/memory panels keep the user's scroll position.
-                  autoScrollTailIntoView={
-                    approvalModeInlineOpen ||
-                    modelInlineMode !== null ||
-                    settingsInlineOpen
-                  }
-                  virtualScrollThreshold={virtualScrollThreshold}
-                />
+                  style={dialogOpen ? { visibility: 'hidden' } : undefined}
+                >
+                  <MessageList
+                    ref={messageListRef}
+                    messages={displayMessages}
+                    pendingApproval={pendingApproval}
+                    onConfirm={handleConfirm}
+                    onShowContextDetail={handleShowContextDetail}
+                    catchingUp={connection.catchingUp}
+                    workspaceCwd={connection.workspaceCwd || ''}
+                    shellOutputMaxLines={shellOutputMaxLines}
+                    showRetryHint={showRetryHint}
+                    onRetryClick={handleRetry}
+                    welcomeHeader={welcomeHeader}
+                    tailContent={
+                      agentsInlineMode ||
+                      memoryInlineOpen ||
+                      modelInlineMode ||
+                      authInlineOpen ||
+                      approvalModeInlineOpen ||
+                      settingsInlineOpen ? (
+                        <>
+                          {authInlineOpen && (
+                            <AuthMessage
+                              onMessage={(text, type = 'status') => {
+                                store.dispatch([
+                                  type === 'error'
+                                    ? { type: 'error', text }
+                                    : { type: 'status', text },
+                                ]);
+                              }}
+                              onClose={() => setAuthInlineOpen(false)}
+                            />
+                          )}
+                          {approvalModeInlineOpen && (
+                            <ApprovalModeMessage
+                              currentMode={currentMode}
+                              onSelect={handleSetMode}
+                              onClose={() => setApprovalModeInlineOpen(false)}
+                            />
+                          )}
+                          {modelInlineMode && (
+                            <ModelMessage
+                              mode={modelInlineMode}
+                              onSelect={
+                                modelInlineMode === 'fast'
+                                  ? handleFastModelSelect
+                                  : handleModelSelect
+                              }
+                              onClose={() => setModelInlineMode(null)}
+                            />
+                          )}
+                          {agentsInlineMode && (
+                            <AgentsMessage
+                              mode={agentsInlineMode}
+                              onMessage={(text) =>
+                                store.dispatch([{ type: 'status', text }])
+                              }
+                              onClose={() => setAgentsInlineMode(null)}
+                            />
+                          )}
+                          {memoryInlineOpen && (
+                            <MemoryMessage
+                              refreshSignal={memoryRefreshSignal}
+                              addSignal={memoryAddSignal}
+                              addScope={memoryAddScope}
+                              portalHost={memoryPortalHost}
+                              onMessage={(text, type = 'status') => {
+                                store.dispatch([{ type, text }]);
+                              }}
+                              onClose={() => setMemoryInlineOpen(false)}
+                            />
+                          )}
+                          {settingsInlineOpen && (
+                            <SettingsMessage
+                              settingsState={workspaceSettingsState}
+                              onClose={() => setSettingsInlineOpen(false)}
+                              onLanguageChange={handleSettingsLanguageChange}
+                              onThemeChange={handleThemeChange}
+                              onSubDialog={(key) => {
+                                setSettingsInlineOpen(false);
+                                if (key === 'fastModel')
+                                  setModelInlineMode('fast');
+                                else if (key === 'tools.approvalMode')
+                                  setApprovalModeInlineOpen(true);
+                              }}
+                            />
+                          )}
+                        </>
+                      ) : undefined
+                    }
+                    tailKey={
+                      agentsInlineMode ||
+                      memoryInlineOpen ||
+                      modelInlineMode ||
+                      authInlineOpen ||
+                      approvalModeInlineOpen ||
+                      settingsInlineOpen
+                        ? `inline-${authInlineOpen ? 'auth' : 'none'}-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
+                        : undefined
+                    }
+                    // The approval-mode/model pickers and the settings panel are
+                    // reachable by mouse from the status bar, so they reveal
+                    // themselves when opened while the user is scrolled up; the
+                    // agents/memory panels keep the user's scroll position.
+                    autoScrollTailIntoView={
+                      approvalModeInlineOpen ||
+                      modelInlineMode !== null ||
+                      settingsInlineOpen
+                    }
+                    virtualScrollThreshold={virtualScrollThreshold}
+                  />
 
-                {btwMessage?.role === 'btw' && (
-                  <div className={styles.btwPanel}>
-                    <BtwMessage
-                      question={btwMessage.question}
-                      answer={btwMessage.answer}
-                      isPending={btwMessage.isPending}
-                    />
-                  </div>
-                )}
+                  {btwMessage?.role === 'btw' && (
+                    <div className={styles.btwPanel}>
+                      <BtwMessage
+                        question={btwMessage.question}
+                        answer={btwMessage.answer}
+                        isPending={btwMessage.isPending}
+                      />
+                    </div>
+                  )}
 
-                <StreamingStatus />
-              </div>
-              <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
+                  <StreamingStatus />
+                </div>
+                <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
+              </TodoTimelineContext.Provider>
             </CompactModeContext.Provider>
           </WebShellCustomizationProvider>
 

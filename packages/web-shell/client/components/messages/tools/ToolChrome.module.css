@@ -191,30 +191,15 @@
   background: var(--info-bg);
 }
 
-.todoList {
-  padding: 6px 0 4px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.todoItem {
-  font-size: 13px;
-  font-family: var(--font-mono);
-  line-height: 1.6;
-  padding-left: 4px;
-}
-
-.todoDone {
-  color: var(--text-primary);
-}
-
-.todoActive {
-  font-weight: 600;
-}
-
-.todoPending {
+.todoProgress {
   color: var(--text-dimmed);
+  font-size: 12px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.todoBody {
+  padding: 4px 0 2px 24px;
 }
 
 .compactGroup {

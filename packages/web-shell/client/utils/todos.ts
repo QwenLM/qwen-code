@@ -1,5 +1,15 @@
 import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
 
+/**
+ * The todo tool is registered as `todo_write` on the wire, but older paths and
+ * the ACP plan bridge use `todowrite`. Match both so detection never hinges on
+ * the (unrelated) tool `kind`, which is `think` for this tool.
+ */
+export function isTodoWriteToolName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return normalized === 'todo_write' || normalized === 'todowrite';
+}
+
 export function parseTodoItemsFromEntries(
   entries: readonly unknown[],
 ): TodoItem[] | undefined {
@@ -22,8 +32,7 @@ export function parseTodoItemsFromEntries(
 export function extractTodosFromToolCall(
   tool: ACPToolCall,
 ): TodoItem[] | undefined {
-  const toolName = tool.toolName.toLowerCase();
-  if (toolName !== 'todowrite' && tool.kind !== 'other') {
+  if (!isTodoWriteToolName(tool.toolName) && tool.kind !== 'other') {
     return undefined;
   }
 
@@ -117,6 +126,133 @@ export function getFloatingTodos(
   // user sends the next prompt.
   if (allCompleted && userMessageAfter) return EMPTY_FLOATING_TODOS;
   return { todos, allCompleted, sourceMessageId, sourceCallId };
+}
+
+/** A status transition surfaced for a single todo snapshot. */
+export interface TodoEvent {
+  kind: 'started' | 'completed';
+  id: string;
+  content: string;
+}
+
+/** What changed in one todo snapshot relative to the conversation so far. */
+export interface TodoSnapshotDiff {
+  events: TodoEvent[];
+}
+
+interface TodoSnapshot {
+  /** Key the diff is stored under: tool callId, or plan message id. */
+  key: string;
+  todos: TodoItem[];
+}
+
+/**
+ * Identity used to track an item across snapshots. Folds content into the key
+ * because todo ids are NOT globally unique: the ACP bridge assigns positional
+ * ids (`plan-0`, `plan-1`, …) and models restart numbering at `1, 2, 3` for each
+ * new `todo_write` plan, so a later, unrelated list reuses an earlier list's
+ * ids. Keying on id alone would diff a new plan's items against a previous
+ * plan's stale terminal status; id+content keeps distinct tasks separate, and —
+ * unlike a user-turn reset — it still tracks a list correctly when it spans
+ * turns (a "continue" turn that completes an item carried over from before).
+ *
+ * Two rare cases this trades for, both only affecting the collapsed diff while
+ * the expanded list stays correct:
+ * - A todo reworded on a stable id reads as a new task. Reworded while still
+ *   `in_progress` it emits a spurious `started`; reworded straight to
+ *   `completed` (`1 "Write report"` → `1 "Write the final report" completed`)
+ *   the completion is treated as first-seen and dropped.
+ * - Two unrelated plans that reuse both the id AND the exact content (a generic
+ *   recurring todo like `"Run tests"`) still collide.
+ */
+function todoStateKey(todo: TodoItem): string {
+  return JSON.stringify([todo.id, todo.content]);
+}
+
+/**
+ * The todo snapshots carried by one message, in order. In the web-shell daemon
+ * path todos arrive as `todo_write` tool calls; the ACP bridge instead emits
+ * `plan` messages. Handle both so the timeline works regardless of source.
+ */
+function todoSnapshotsOf(message: Message): TodoSnapshot[] {
+  if (message.role === 'plan') {
+    return [{ key: message.id, todos: message.todos }];
+  }
+  if (message.role === 'tool_group') {
+    const snapshots: TodoSnapshot[] = [];
+    for (const tool of message.tools) {
+      const todos = extractTodosFromToolCall(tool);
+      if (todos) snapshots.push({ key: tool.callId, todos });
+    }
+    return snapshots;
+  }
+  return [];
+}
+
+/**
+ * Walk the todo snapshots in order and, for each one, derive what changed
+ * relative to the running state: which items just started and which just
+ * completed.
+ *
+ * Keyed by snapshot id (tool callId or plan message id) so a history row can
+ * look up its own diff. Only transitions actually witnessed produce events — an
+ * item first seen already completed (e.g. a restored session's opening
+ * snapshot) is recorded silently so its old completion is not replayed as if it
+ * just happened.
+ */
+export function computeTodoTimeline(
+  messages: readonly Message[],
+): Map<string, TodoSnapshotDiff> {
+  const result = new Map<string, TodoSnapshotDiff>();
+  const lastStatus = new Map<string, TodoItem['status']>();
+
+  for (const message of messages) {
+    for (const { key, todos } of todoSnapshotsOf(message)) {
+      const events: TodoEvent[] = [];
+
+      for (const todo of todos) {
+        const stateKey = todoStateKey(todo);
+        const prev = lastStatus.get(stateKey);
+        if (todo.status === 'in_progress' && prev !== 'in_progress') {
+          events.push({ kind: 'started', id: todo.id, content: todo.content });
+        } else if (
+          todo.status === 'completed' &&
+          prev !== 'completed' &&
+          prev !== undefined
+        ) {
+          events.push({
+            kind: 'completed',
+            id: todo.id,
+            content: todo.content,
+          });
+        }
+        lastStatus.set(stateKey, todo.status);
+      }
+
+      result.set(key, { events });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * A cheap signature of the todo snapshots in a transcript: each snapshot's key
+ * plus its items' id, status, and content. App memoizes the timeline on this so
+ * the context provider value stays referentially stable across unrelated
+ * streaming ticks (which would otherwise re-render every todo/plan row that
+ * consumes the timeline).
+ */
+export function todoTimelineSignature(messages: readonly Message[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    for (const { key, todos } of todoSnapshotsOf(message)) {
+      parts.push(
+        JSON.stringify([key, todos.map((t) => [t.id, t.status, t.content])]),
+      );
+    }
+  }
+  return parts.join('\n');
 }
 
 export interface TodoWindow {
