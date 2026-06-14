@@ -611,10 +611,10 @@ jobs:
             cp "$RESULT" "$QWEN_REVIEW_OUTPUT_FILE"
           fi
 
-      # Publish the review with the write-capable PAT. This step runs NO agent
-      # and reads only either the JSON the agent emitted or the local
-      # review-unavailable gate result above — untrusted PR content cannot reach
-      # it, so holding the PAT here is safe.
+      # Publish the review with the write-capable PAT, or update a regular PR
+      # comment for the local review-unavailable gate result above. This step
+      # runs NO agent and reads only local JSON, so untrusted PR content cannot
+      # reach the PAT.
       - name: 'Publish review'
         # Explicit success(): publish only when Run review either produced a
         # real agent result or intentionally synthesized a review-unavailable
@@ -634,9 +634,32 @@ jobs:
             RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
           fi
           if [ -z "${RESULT:-}" ] || [ ! -f "$RESULT" ]; then
-            echo "::error::Review agent produced no review JSON; nothing to publish"
+            echo "::error::Review stage produced no review JSON; nothing to publish"
             exit 1
           fi
+
+          BODY="$(jq -r '.body // ""' "$RESULT" 2>/dev/null || echo "")"
+          if [[ "$BODY" == *"<!-- qwen-triage:review-unavailable -->"* ]]; then
+            echo "::notice::Publishing review-unavailable comment from $RESULT"
+            BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
+            EXISTING_COMMENT_ID=""
+            if [ -n "$BOT_LOGIN" ]; then
+              EXISTING_COMMENT_ID="$(
+                gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                  --paginate \
+                  -F per_page=100 \
+                  | jq -sr --arg bot "$BOT_LOGIN" \
+                    '[.[][] | select(.user.login == $bot and (.body | contains("<!-- qwen-triage:review-unavailable -->")))] | last | .id // empty'
+              )" || EXISTING_COMMENT_ID=""
+            fi
+            if [ -n "$EXISTING_COMMENT_ID" ]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_COMMENT_ID" -f body="$BODY" >/dev/null
+            else
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$BODY" >/dev/null
+            fi
+            exit 0
+          fi
+
           echo "::notice::Publishing review from $RESULT"
           for attempt in 1 2 3; do
             if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --input "$RESULT"; then
