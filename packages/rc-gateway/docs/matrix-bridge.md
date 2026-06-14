@@ -136,24 +136,38 @@ Rotate the bot access token and the bridge token together if either leaks:
 Room bindings live in `~/.qwen/rc/bridges/matrix/rooms.json` and survive a
 restart.
 
-## Deferred (not yet built)
+## Streaming
 
-This delivery is the **unencrypted approval surface**. Intentionally absent:
+As the agent works, its reply (`session_update`) is streamed into the bound
+room. Chunks are buffered and flushed on a paragraph break / fenced-code close,
+at 16384 bytes, or 1500 ms after the last chunk. Each flush is sent as an
+`m.room.message` with `msgtype: "m.text"`, the raw Markdown as `body`, and a
+rendered HTML `formatted_body` (`format: "org.matrix.custom.html"`) produced by a
+small built-in Markdown converter (bold, italic, inline/fenced code, links, line
+breaks — everything else HTML-escaped; no CommonMark dependency). Matrix's
+65536-byte event limit is ~4× the flush threshold, so a flush is a single event
+(no splitting). After 6 messages in one agent turn, the 7th and later carry an
+`m.relates_to { rel_type: "m.thread", event_id: <first message> }` relation,
+keeping the room readable; a new turn (after a resolve, or the next inbound
+prompt) starts back in the room timeline.
+
+## Deferred (not yet built)
 
 - **End-to-end encryption.** Needs `matrix-bot-sdk`'s olm/megolm crypto (which
   also subsumes the sync loop). Encrypted rooms are detect-and-refused, not
-  decrypted.
-- **`session_update` streaming** (mirroring agent output, with the
-  Markdown→HTML `formatted_body` and 16 KB flush) and **threads on long
-  streams** (`m.thread`). Only `permission_request` is rendered; the room stays
-  quiet otherwise.
-- Registration advertises `supportsMarkdown: "none"` — the bridge sends plain
-  `m.text` with no `formatted_body`, so markdown is shown literally (it would be
-  `"full"` only once HTML `formatted_body` rendering is added). Also
-  `supportsActions: false` (reactions, not buttons), `supportsThreads: false`,
-  `supportsEdits: true` (the `m.replace` edit on resolve).
-- `/sync` and SSE cursors are in-memory (a restart does a fresh full sync, which
-  re-establishes state but does not replay history).
+  decrypted. (Tracked separately.)
+- Only `agent_message_chunk` (the assistant's prose) is streamed; thought and
+  tool-call chunks are skipped to keep rooms readable.
+- A fenced code block that spans a flush boundary (split by the idle timer or the
+  16384-byte cap mid-fence) renders as two separate messages, the first with an
+  unterminated fence — its HTML may look garbled. The paragraph/fence-close flush
+  triggers avoid this for well-formed prose; only an oversized or stalled single
+  fence hits it. Link targets are restricted to `http`/`https`/`mailto`; any other
+  scheme (`javascript:`, `data:`, …) is rendered as plain text, never a live href.
+- A pathological single chunk > 65536 bytes is not split (the 16384 flush
+  threshold makes this effectively impossible for streamed prose).
+- `/sync` is in-memory (a restart does a fresh full sync, which re-establishes
+  state but does not replay history); the SSE echo resumes via `Last-Event-ID`.
 
 ## Troubleshooting
 

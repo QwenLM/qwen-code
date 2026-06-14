@@ -128,6 +128,21 @@ describe('matrix dispatch — message → prompt', () => {
     ]);
   });
 
+  it('signals a turn boundary on an accepted prompt, not on a banned 403', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    const turns: string[] = [];
+    const f = deps({ onTurnBoundary: (s) => turns.push(s) });
+    await handleMessage(msg({ body: 'go' }), f.deps);
+    expect(turns).toEqual(['sess_xyz']);
+
+    f.setPromptResult({ ok: false, status: 403 });
+    await handleMessage(
+      msg({ body: 'x', sender: '@evan:home.example.com' }),
+      f.deps,
+    );
+    expect(turns).toEqual(['sess_xyz']); // 403 → no boundary
+  });
+
   it('ignores the bot’s own messages', async () => {
     await rooms.bind('!abc:home.example.com', 'sess_xyz');
     const f = deps();

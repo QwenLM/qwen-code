@@ -55,6 +55,7 @@ function harness(batches: unknown[]) {
   } as unknown as MatrixInbound;
 
   const subscribed: string[] = [];
+  const timers: Array<() => void> = [];
   let registered: Record<string, unknown> | undefined;
   const client = {
     register: async (reg: Record<string, unknown>) => {
@@ -86,6 +87,13 @@ function harness(batches: unknown[]) {
       return batches[i++];
     },
     sleep: () => new Promise<void>(() => {}), // park SSE reconnect after 1 subscribe
+    setTimer: (_ms, fn) => {
+      timers.push(fn);
+      return () => {
+        const idx = timers.indexOf(fn);
+        if (idx >= 0) timers.splice(idx, 1);
+      };
+    },
   });
 
   return {
@@ -96,6 +104,10 @@ function harness(batches: unknown[]) {
     prompts,
     subscribed,
     registered: () => registered,
+    fireTimers: () => {
+      for (const fn of timers.splice(0)) fn();
+    },
+    drainStream: () => bridge['stream'].whenIdle(),
   };
 }
 
@@ -118,14 +130,14 @@ const textMsg = (roomId: string, sender: string, body: string) => ({
 });
 
 describe('MatrixBridge runner — sync loop', () => {
-  it('registers accurate capabilities (markdown none — plain m.text, no formatted_body)', async () => {
+  it('registers accurate capabilities (full markdown via formatted_body, threads)', async () => {
     const h = harness([]);
     await h.bridge.start(h.ac.signal);
     expect(h.registered()).toMatchObject({
       id: 'matrix',
       supportsActions: false, // reactions, not buttons
-      supportsMarkdown: 'none', // plain m.text — the correctness fix
-      supportsThreads: false,
+      supportsMarkdown: 'full', // streamed prose sent as HTML formatted_body
+      supportsThreads: true, // m.thread relation on long streams
       supportsEdits: true, // m.replace on resolve
     });
   });
@@ -290,14 +302,55 @@ describe('MatrixBridge runner — outbound delivery', () => {
     );
   });
 
-  it('ignores non-permission frames', async () => {
+  it('ignores a session_update with no agent text (rooms stay quiet)', async () => {
     await rooms.bind('!r1:h', 'sess_q');
     const h = harness([]);
     h.bridge.deliverEvent('sess_q', {
       type: 'session_update',
-      data: { text: 'x' },
+      data: { update: { sessionUpdate: 'agent_thought_chunk' } },
     });
-    await new Promise((r) => setTimeout(r, 0));
+    h.fireTimers();
+    await h.drainStream();
     expect(h.sent).toEqual([]);
+  });
+});
+
+describe('MatrixBridge runner — session_update streaming', () => {
+  const chunk = (text: string) => ({
+    type: 'session_update' as const,
+    data: {
+      update: { sessionUpdate: 'agent_message_chunk', content: { text } },
+    },
+  });
+
+  it('streams agent text as m.text with an HTML formatted_body', async () => {
+    await rooms.bind('!r1:h', 'sess_q');
+    const h = harness([]);
+    h.bridge.deliverEvent('sess_q', chunk('**bold** and `code`\n\n'));
+    await h.drainStream();
+    expect(h.sent).toHaveLength(1);
+    const content = h.sent[0].content as Record<string, unknown>;
+    expect(content.msgtype).toBe('m.text');
+    expect(content.format).toBe('org.matrix.custom.html');
+    expect(content.formatted_body).toBe(
+      '<strong>bold</strong> and <code>code</code><br><br>',
+    );
+    expect(content.body).toContain('**bold**'); // plaintext keeps the markdown
+  });
+
+  it('relates the 7th message of a turn into an m.thread off the first', async () => {
+    await rooms.bind('!r1:h', 'sess_q');
+    const h = harness([]);
+    for (let n = 1; n <= 7; n++) {
+      h.bridge.deliverEvent('sess_q', chunk(`line ${n}\n\n`));
+      await h.drainStream();
+    }
+    const first = h.sent[0].content as Record<string, unknown>;
+    const seventh = h.sent[6].content as Record<string, unknown>;
+    expect(first['m.relates_to']).toBeUndefined();
+    expect(seventh['m.relates_to']).toMatchObject({
+      rel_type: 'm.thread',
+      event_id: '$evt_1', // the first message's event id
+    });
   });
 });

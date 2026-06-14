@@ -84,6 +84,12 @@ export interface MatrixDispatchDeps {
   tracked: Map<string, TrackedEvent>;
   /** Command prefix (default `!qwen`). */
   commandPrefix: string;
+  /**
+   * Called when a new inbound prompt is accepted for a session — a turn boundary
+   * (spec: "the next inbound user prompt") so the stream router ends the prior
+   * turn (its m.thread isn't reused). Optional (pure-dispatch tests omit it).
+   */
+  onTurnBoundary?: (sessionId: string) => void;
 }
 
 /** A non-bot `m.room.message` (m.text) in a room, with the sender's power level. */
@@ -159,6 +165,7 @@ export async function handleMessage(
     deps.bans.add(subActor);
     return;
   }
+  if (r.ok) deps.onTurnBoundary?.(sessionId); // a new prompt starts a new turn
   if (r.status === 429) {
     const secs = r.retryAfterSec ?? 'a few';
     await deps.rest.sendMessage(msg.roomId, {

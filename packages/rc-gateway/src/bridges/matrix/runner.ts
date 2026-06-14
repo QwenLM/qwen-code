@@ -7,6 +7,9 @@
 import type { BridgeClient, BridgeEvent } from '../client.js';
 import type { MatrixRoomStore } from './roomStore.js';
 import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
+import { extractAgentText } from '../sessionUpdateText.js';
+import { markdownToHtml } from './markdownHtml.js';
+import { MatrixStreamRouter, type MatrixStreamPoster } from './streamRouter.js';
 import {
   handleMessage,
   handleReaction,
@@ -50,6 +53,8 @@ export interface MatrixBridgeConfig {
   syncOnce: SyncOnce;
   /** Injectable backoff sleep (tests). Resolves early on abort. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** Injectable idle-flush timer for the stream router (tests). */
+  setTimer?: (ms: number, fn: () => void) => () => void;
   log?: (msg: string) => void;
 }
 
@@ -92,6 +97,8 @@ export class MatrixBridge {
   private readonly tracked = new Map<string, TrackedEvent>();
   /** requestId → the sent messages that rendered it (for the resolve edit). */
   private readonly sent = new Map<string, SentRequest[]>();
+  /** Streams agent prose into rooms (buffer + m.thread on long streams). */
+  private readonly stream: MatrixStreamRouter;
   private readonly ctx: RoomStateCtx;
   private readonly log: (msg: string) => void;
 
@@ -103,6 +110,29 @@ export class MatrixBridge {
       botUserId: cfg.botUserId,
       powerLevels: new Map<string, PowerLevelsContent>(),
     };
+    const poster: MatrixStreamPoster = {
+      sendStream: async (roomId, opts) => {
+        const content: Record<string, unknown> = {
+          msgtype: 'm.text',
+          body: opts.text,
+          format: 'org.matrix.custom.html',
+          formatted_body: markdownToHtml(opts.text),
+        };
+        if (opts.threadRootEventId) {
+          content['m.relates_to'] = {
+            rel_type: 'm.thread',
+            event_id: opts.threadRootEventId,
+          };
+        }
+        const r = await this.cfg.rest.sendMessage(roomId, content);
+        return r.ok && r.eventId ? r.eventId : null;
+      },
+    };
+    this.stream = new MatrixStreamRouter({
+      poster,
+      roomsFor: (sessionId) => this.cfg.rooms.roomsFor(sessionId),
+      ...(cfg.setTimer ? { setTimer: cfg.setTimer } : {}),
+    });
   }
 
   private dispatchDeps(): MatrixDispatchDeps {
@@ -115,6 +145,7 @@ export class MatrixBridge {
       encryptedRooms: this.encryptedRooms,
       tracked: this.tracked,
       commandPrefix: this.commandPrefix,
+      onTurnBoundary: (sessionId) => this.stream.bumpTurn(sessionId),
     };
   }
 
@@ -124,8 +155,8 @@ export class MatrixBridge {
       id: MATRIX_BRIDGE_ID,
       displayName: 'Matrix',
       supportsActions: false, // reactions, not buttons
-      supportsMarkdown: 'none', // sends plain m.text (no formatted_body/HTML)
-      supportsThreads: false, // m.thread deferred
+      supportsMarkdown: 'full', // streamed prose sent as formatted_body (HTML)
+      supportsThreads: true, // m.thread relation on long streams
       supportsEdits: true, // m.replace edit on resolve
       maxMessageBytes: 65536,
     });
@@ -254,15 +285,20 @@ export class MatrixBridge {
   }
 
   /**
-   * Outbound: render permission_request frames to every bound room and edit them
-   * (via m.replace) on resolve. Other frames are ignored to keep rooms quiet.
-   * Fire-and-forget. Exposed for unit testing.
+   * Outbound: permission_request → room message (edited via m.replace on
+   * resolve); permission_resolved → the edit AND a turn boundary so the next
+   * stream chunk starts a fresh turn; session_update → stream the agent's prose
+   * (Markdown→HTML, m.thread on long turns). Fire-and-forget. Exposed for testing.
    */
   deliverEvent(sessionId: string, ev: BridgeEvent): void {
     if (ev.type === 'permission_request') {
       void this.deliverPermissionRequest(sessionId, ev.data);
     } else if (ev.type === 'permission_resolved') {
+      this.stream.notePermissionResolved(sessionId); // next chunk = new turn
       void this.deliverPermissionResolved(ev.data);
+    } else if (ev.type === 'session_update') {
+      const text = extractAgentText(ev.data);
+      if (text) this.stream.onChunk(sessionId, text);
     }
   }
 
