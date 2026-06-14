@@ -13,6 +13,18 @@ import type {
   ProviderSettingsAdapter,
 } from './types.js';
 
+const AUTH_TYPE_TO_PROTOCOL: Record<string, Protocol> = {
+  openai: Protocol.OPENAI,
+  'qwen-oauth': Protocol.QWEN_OAUTH,
+  gemini: Protocol.GEMINI,
+  'vertex-ai': Protocol.GEMINI,
+  anthropic: Protocol.ANTHROPIC,
+};
+
+function authTypeToProtocol(authType: AuthType): Protocol {
+  return AUTH_TYPE_TO_PROTOCOL[authType] ?? Protocol.OPENAI;
+}
+
 /**
  * Environment variable names an install plan must never set — they alter
  * process/loader behavior (code injection, PATH hijack, home redirection).
@@ -73,7 +85,7 @@ function applyModelProvidersPatch(
 
   // Preserve the existing provider config (protocol, baseUrl, envKey) and update models
   const updatedProvider: ProviderConfig = {
-    protocol: existingProvider?.protocol ?? Protocol.OPENAI,
+    protocol: existingProvider?.protocol ?? authTypeToProtocol(patch.authType),
     models: updatedModels,
     ...(existingProvider?.baseUrl ? { baseUrl: existingProvider.baseUrl } : {}),
     ...(existingProvider?.envKey ? { envKey: existingProvider.envKey } : {}),
