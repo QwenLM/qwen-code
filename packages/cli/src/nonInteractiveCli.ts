@@ -742,6 +742,19 @@ export async function runNonInteractive(
         setModelOverride: (override: string | undefined) => void,
       ): Promise<Part[]> => {
         const toolResponseParts: Part[] = [];
+        const seenBatchCallIds = new Set<string>();
+        const uniqueBatchRequests = batchRequests.filter((request) => {
+          if (request.callId) {
+            if (seenBatchCallIds.has(request.callId)) {
+              debugLogger.debug(
+                `Dropping duplicate non-interactive tool callId=${request.callId} name=${request.name}`,
+              );
+              return false;
+            }
+            seenBatchCallIds.add(request.callId);
+          }
+          return true;
+        });
 
         // Pre-scan: when --json-schema is active and the model emitted
         // a `structured_output` call alongside other tools in the same
@@ -750,12 +763,14 @@ export async function runNonInteractive(
         // suppress every non-structured sibling. See the multi-shape
         // examples in the main loop's prior comment for the
         // [bad/good/side-effect] permutations.
-        let requestsToExecute = batchRequests;
+        let requestsToExecute = uniqueBatchRequests;
         if (
           config.getJsonSchema() &&
-          batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT)
+          uniqueBatchRequests.some(
+            (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+          )
         ) {
-          requestsToExecute = batchRequests.filter(
+          requestsToExecute = uniqueBatchRequests.filter(
             (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
           );
         }
@@ -886,7 +901,7 @@ export async function runNonInteractive(
         // emitted event log pairs every tool_use with a tool_result
         // AND the retry-turn payload (when reached) doesn't leave
         // Anthropic / OpenAI staring at unpaired tool_use blocks.
-        const unexecutedCalls = batchRequests.filter(
+        const unexecutedCalls = uniqueBatchRequests.filter(
           (r) => !executedCallIds.has(r.callId),
         );
         if (unexecutedCalls.length > 0) {
