@@ -316,9 +316,9 @@ jobs:
             exit 1
           fi
 
-          MODEL_ARGS=()
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
           if [ -n "${OPENAI_MODEL:-}" ]; then
-            MODEL_ARGS=(--model "$OPENAI_MODEL")
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
           fi
 
           # Readable log formatter; fall back to raw passthrough if jq is absent.
@@ -326,10 +326,7 @@ jobs:
           command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
 
           set +e
-          timeout --kill-after=10s 12m qwen \
-            --auth-type openai \
-            --approval-mode yolo \
-            "${MODEL_ARGS[@]}" \
+          timeout --kill-after=10s 12m "${QWEN_CMD[@]}" \
             --prompt "/product-decision ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
             | tee "$RUNNER_TEMP/product-decision-raw.jsonl" \
@@ -526,6 +523,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           # CI optimizations: skip deterministic analysis (ci.yml already runs it),
           # limit reverse audit rounds, reduce timeout pressure
           QWEN_REVIEW_SKIP_DETERMINISTIC: '1'
@@ -554,14 +552,24 @@ jobs:
           # surrounding steps (checkout, verdict check).
           INNER_TIMEOUT_MIN=$((REVIEW_TIMEOUT_MIN - 5))
 
+          write_review_unavailable() {
+            local reason="$1"
+            jq -n \
+              --arg reason "$reason" \
+              --arg run_url "$RUN_URL" \
+              '{event:"COMMENT", body:"<!-- qwen-triage:review-unavailable -->\n_Qwen automated review could not complete in this run, so tmux testing and auto-approval are blocked. Human review is required._\n\nReason: \($reason)\n\nWorkflow logs: \($run_url)"}' \
+              > "$QWEN_REVIEW_OUTPUT_FILE"
+            echo "::notice::Created review-unavailable gate result: ${reason}"
+          }
+
           if ! command -v qwen >/dev/null 2>&1; then
             echo "::error::qwen CLI not found on runner"
             exit 1
           fi
 
-          MODEL_ARGS=()
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
           if [ -n "${OPENAI_MODEL:-}" ]; then
-            MODEL_ARGS=(--model "$OPENAI_MODEL")
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
           fi
 
           # Readable log formatter; fall back to raw passthrough if jq is absent.
@@ -569,10 +577,7 @@ jobs:
           command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
 
           set +e
-          timeout --kill-after=10s "${INNER_TIMEOUT_MIN}m" qwen \
-            --auth-type openai \
-            --approval-mode yolo \
-            "${MODEL_ARGS[@]}" \
+          timeout --kill-after=10s "${INNER_TIMEOUT_MIN}m" "${QWEN_CMD[@]}" \
             --prompt "/review ${REVIEW_URL} --comment" \
             --output-format stream-json \
             | tee "$RUNNER_TEMP/review-raw.jsonl" \
@@ -591,22 +596,30 @@ jobs:
             RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
           fi
           if [ "$EXIT_CODE" -eq 0 ] && { [ -z "${RESULT:-}" ] || [ ! -f "$RESULT" ]; }; then
-            echo "::error::Review agent exited successfully but produced no review JSON"
-            exit 1
+            write_review_unavailable "review agent exited successfully but produced no review JSON"
+            exit 0
           fi
-          # Propagate: a crashed or timed-out review must fail this job, so the
-          # Publish step does not fire on a partial result and the fallback
-          # comment runs instead of waving the PR through unreviewed.
-          exit "$EXIT_CODE"
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            write_review_unavailable "review agent timed out after ${INNER_TIMEOUT_MIN} minutes"
+            exit 0
+          fi
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            write_review_unavailable "review agent exited with code ${EXIT_CODE}"
+            exit 0
+          fi
+          if [ "$RESULT" != "$QWEN_REVIEW_OUTPUT_FILE" ]; then
+            cp "$RESULT" "$QWEN_REVIEW_OUTPUT_FILE"
+          fi
 
       # Publish the review with the write-capable PAT. This step runs NO agent
-      # and reads only the JSON the agent emitted — untrusted PR content cannot
-      # reach it, so holding the PAT here is safe.
+      # and reads only either the JSON the agent emitted or the local
+      # review-unavailable gate result above — untrusted PR content cannot reach
+      # it, so holding the PAT here is safe.
       - name: 'Publish review'
-        # Explicit success(): only publish when the review agent step above
-        # finished cleanly. GitHub would imply success() here anyway, but
-        # spelling it out keeps the "never publish a partial result" guarantee
-        # from depending on that implicit rule.
+        # Explicit success(): publish only when Run review either produced a
+        # real agent result or intentionally synthesized a review-unavailable
+        # gate result. Fatal runner/configuration errors still skip this step
+        # and let fallback-comment surface the workflow failure.
         if: "success() && steps.pr_state.outputs.should_review == 'true'"
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
@@ -660,11 +673,16 @@ jobs:
             RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
           fi
           EVENT=""
+          BODY=""
           if [ -n "${RESULT:-}" ] && [ -f "$RESULT" ]; then
             EVENT="$(jq -r '.event // ""' "$RESULT" 2>/dev/null || echo "")"
+            BODY="$(jq -r '.body // ""' "$RESULT" 2>/dev/null || echo "")"
           fi
 
-          if [ "$EVENT" = "APPROVE" ] || [ "$EVENT" = "COMMENT" ]; then
+          if [[ "$BODY" == *"<!-- qwen-triage:review-unavailable -->"* ]]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "::notice::Review unavailable — skipping tmux testing"
+          elif [ "$EVENT" = "APPROVE" ] || [ "$EVENT" = "COMMENT" ]; then
             echo "verdict=pass" >> "$GITHUB_OUTPUT"
           else
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
@@ -758,9 +776,9 @@ jobs:
             exit 1
           fi
 
-          MODEL_ARGS=()
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
           if [ -n "${OPENAI_MODEL:-}" ]; then
-            MODEL_ARGS=(--model "$OPENAI_MODEL")
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
           fi
 
           FMT_CMD=(jq --unbuffered -Rr "$STREAM_JSON_FMT")
@@ -768,10 +786,7 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/tmux-results"
           set +e
-          timeout --kill-after=10s 15m qwen \
-            --auth-type openai \
-            --approval-mode yolo \
-            "${MODEL_ARGS[@]}" \
+          timeout --kill-after=10s 15m "${QWEN_CMD[@]}" \
             --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
             | tee "$RUNNER_TEMP/tmux-results/output.jsonl" \
