@@ -111,7 +111,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
-import { ApiRetryEvent } from '../telemetry/types.js';
+import { ApiRetryEvent, LoopType } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 
 // Hook types and utilities
@@ -321,10 +321,7 @@ export class GeminiClient {
     this.initializedSessionId = sessionId;
 
     // Clean up stale tool result files from previous sessions (fire-and-forget)
-    void cleanupOldToolResults(
-      Storage.getGlobalTempDir(),
-      24 * 60 * 60 * 1000,
-    );
+    void cleanupOldToolResults(Storage.getGlobalTempDir(), 24 * 60 * 60 * 1000);
   }
 
   /**
@@ -658,10 +655,7 @@ export class GeminiClient {
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
     // Clean up old tool result overflow files on /clear
-    void cleanupOldToolResults(
-      Storage.getGlobalTempDir(),
-      24 * 60 * 60 * 1000,
-    );
+    void cleanupOldToolResults(Storage.getGlobalTempDir(), 24 * 60 * 60 * 1000);
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
@@ -2095,24 +2089,40 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
-        if (!this.config.getSkipLoopDetection()) {
-          if (this.loopDetector.addAndCheck(event)) {
-            const loopType = this.loopDetector.getLastLoopType();
-            yield {
-              type: GeminiEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
-            };
-            if (arenaAgentClient) {
-              await arenaAgentClient.reportError('Loop detected');
-            }
-            this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction)
-              endInteractionSpan('error', { errorMessage: 'loop detected' });
-            // finally cleanup catches this, but cancel explicitly to match
-            // the cleanup pattern at other early-return sites.
-            this.cancelPendingMemoryPrefetch();
-            return turn;
+        const deterministicToolCallLoop =
+          this.loopDetector.addAndCheckDeterministicToolCallLoop(event);
+        const heuristicLoop =
+          !deterministicToolCallLoop &&
+          !this.config.getSkipLoopDetection() &&
+          this.loopDetector.addAndCheckHeuristicLoops(event);
+        if (deterministicToolCallLoop || heuristicLoop) {
+          const loopType = this.loopDetector.getLastLoopType();
+          if (
+            event.type === GeminiEventType.ToolCallRequest &&
+            loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS
+          ) {
+            const repeatedCount =
+              this.loopDetector.getConsecutiveToolCallCount();
+            const repeatedStartIndex = Math.max(
+              0,
+              turn.pendingToolCalls.length - repeatedCount,
+            );
+            turn.pendingToolCalls.splice(repeatedStartIndex);
           }
+          yield {
+            type: GeminiEventType.LoopDetected,
+            ...(loopType && { value: { loopType } }),
+          };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
+          }
+          this.lastApiCompletionTimestamp = Date.now();
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', { errorMessage: 'loop detected' });
+          // finally cleanup catches this, but cancel explicitly to match
+          // the cleanup pattern at other early-return sites.
+          this.cancelPendingMemoryPrefetch();
+          return turn;
         }
         // Update arena status on Finished events — stats are derived
         // automatically from uiTelemetryService by the reporter.
