@@ -541,7 +541,7 @@ describe('StreamingToolCallParser', () => {
   });
 
   describe('Tool call ID collision detection and mapping', () => {
-    it('should handle tool call ID reuse correctly', () => {
+    it('should ignore replay chunks after a tool call ID completes', () => {
       // First tool call with ID 'call_1' at index 0
       const result1 = parser.addChunk(
         0,
@@ -551,24 +551,21 @@ describe('StreamingToolCallParser', () => {
       );
       expect(result1.complete).toBe(true);
 
-      // Second tool call with same ID 'call_1' should reuse the same internal index
-      // and append to the buffer (this is the actual behavior)
+      // Once the ID has complete JSON, later chunks with the same ID are
+      // provider replay and must not mutate the surviving call.
       const result2 = parser.addChunk(
         0,
         '{"param2": "value2"}',
         'call_1',
         'function2',
       );
-      expect(result2.complete).toBe(false); // Not complete because buffer is malformed
+      expect(result2.complete).toBe(false);
 
-      // Should have updated the metadata but appended to buffer
       expect(parser.getToolCallMeta(0)).toEqual({
         id: 'call_1',
-        name: 'function2',
+        name: 'function1',
       });
-      expect(parser.getBuffer(0)).toBe(
-        '{"param1": "value1"}{"param2": "value2"}',
-      );
+      expect(parser.getBuffer(0)).toBe('{"param1": "value1"}');
     });
 
     it('should detect index collision and find new index', () => {

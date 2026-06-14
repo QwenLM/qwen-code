@@ -69,6 +69,7 @@ export class StreamingToolCallParser {
     name?: string,
   ): ToolCallParseResult {
     let actualIndex = index;
+    const isKnownId = Boolean(id && this.idToIndexMap.has(id));
 
     // Handle tool call ID mapping for collision detection
     if (id) {
@@ -140,25 +141,25 @@ export class StreamingToolCallParser {
       this.toolCallMeta.set(actualIndex, {});
     }
 
+    const currentBuffer = this.buffers.get(actualIndex)!;
+    const currentDepth = this.depths.get(actualIndex)!;
+    if (isKnownId && chunk && currentBuffer.trim() && currentDepth === 0) {
+      try {
+        JSON.parse(currentBuffer);
+        return { complete: false };
+      } catch {
+        // Not complete yet; append the incoming chunk below.
+      }
+    }
+
     // Update metadata
     const meta = this.toolCallMeta.get(actualIndex)!;
     if (id) meta.id = id;
     if (name) meta.name = name;
 
     // Get current state for the actual index
-    const currentBuffer = this.buffers.get(actualIndex)!;
-    const currentDepth = this.depths.get(actualIndex)!;
     const currentInString = this.inStrings.get(actualIndex)!;
     const currentEscape = this.escapes.get(actualIndex)!;
-
-    if (id && chunk && currentBuffer.trim() && currentDepth === 0) {
-      try {
-        const parsed = JSON.parse(currentBuffer);
-        return { complete: true, value: parsed };
-      } catch {
-        // Not complete yet; append the incoming chunk below.
-      }
-    }
 
     // Add chunk to buffer
     const newBuffer = currentBuffer + chunk;
