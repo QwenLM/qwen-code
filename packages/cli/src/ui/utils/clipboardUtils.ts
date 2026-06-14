@@ -10,10 +10,52 @@ import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { wrapForMultiplexer } from '../../utils/osc.js';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
 const PROCESS_TIMEOUT_MS = 5000;
+
+/**
+ * Write text to clipboard via OSC 52 escape sequence (works over SSH).
+ * @param text - Text to copy to clipboard
+ * @returns true if sequence was written, false if no TTY available or text too large
+ */
+export function writeOsc52(text: string): boolean {
+  try {
+    // Prevent multi-megabyte escape sequences that can crash/hang terminals.
+    // iTerm2 caps at ~100KB base64, xterm at ~8KB. 75KB utf-8 ~ 100KB base64.
+    const MAX_OSC52_BYTES = 75_000;
+    if (Buffer.byteLength(text, 'utf-8') > MAX_OSC52_BYTES) {
+      debugLogger.warn(
+        `writeOsc52: text too large (${Buffer.byteLength(text, 'utf-8')} bytes), skipping`,
+      );
+      return false;
+    }
+    const base64 = Buffer.from(text, 'utf-8').toString('base64');
+    // OSC 52: \x1b]52;c;<base64>\x07 (c = clipboard)
+    const sequence = wrapForMultiplexer(`\x1b]52;c;${base64}\x07`);
+    // Prefer stderr to avoid Ink's stdout rendering pipeline
+    const stream = process.stderr.isTTY
+      ? process.stderr
+      : process.stdout.isTTY
+        ? process.stdout
+        : null;
+    if (!stream) {
+      debugLogger.warn(
+        'OSC 52 clipboard requires a TTY; stdout/stderr not connected to terminal',
+      );
+      return false;
+    }
+    stream.write(sequence, (err) => {
+      if (err) debugLogger.warn('writeOsc52: async write failed:', err);
+    });
+    return true;
+  } catch (e) {
+    debugLogger.warn('writeOsc52 failed:', e);
+    return false;
+  }
+}
 
 // Track which tool works on Linux to avoid redundant checks/failures
 let linuxClipboardTool: 'wl-paste' | 'xclip' | null | undefined;
