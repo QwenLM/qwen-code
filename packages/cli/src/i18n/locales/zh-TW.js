@@ -833,6 +833,7 @@ export default {
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
   'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
+  'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',
   'Could not retrieve tool registry.': '無法檢索工具註冊表',
   "Successfully authenticated and refreshed tools for '{{name}}'.":

@@ -194,9 +194,6 @@ export function formatClaudeMcpImportResult(
   const skippedExisting = result.skipped
     .filter((entry) => entry.reason === 'already-exists')
     .map((entry) => entry.name);
-  const skippedInvalid = result.skipped
-    .filter((entry) => entry.reason === 'invalid')
-    .map((entry) => entry.name);
   const skippedReserved = result.skipped
     .filter((entry) => entry.reason === 'reserved-name')
     .map((entry) => entry.name);
@@ -227,14 +224,6 @@ export function formatClaudeMcpImportResult(
     );
   }
 
-  if (skippedInvalid.length > 0) {
-    lines.push(
-      t('Skipped invalid server(s): {{names}}', {
-        names: formatNameList([...new Set(skippedInvalid)]),
-      }),
-    );
-  }
-
   if (skippedReserved.length > 0) {
     lines.push(
       t('Skipped unsupported server name(s): {{names}}', {
@@ -258,11 +247,7 @@ export function formatClaudeMcpImportResult(
   }
 
   const messageType =
-    result.errors.length > 0 && result.imported.length === 0
-      ? 'error'
-      : result.errors.length > 0 || result.skipped.length > 0
-        ? 'warning'
-        : 'info';
+    result.errors.length > 0 || result.skipped.length > 0 ? 'warning' : 'info';
 
   return {
     type: 'message',

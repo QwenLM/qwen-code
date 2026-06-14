@@ -41,7 +41,7 @@ export interface ImportedClaudeMcpServer {
 export interface SkippedClaudeMcpServer {
   name: string;
   source: string;
-  reason: 'already-exists' | 'invalid' | 'reserved-name';
+  reason: 'already-exists' | 'reserved-name';
 }
 
 export interface ClaudeMcpImportResult {
@@ -473,11 +473,6 @@ export function importClaudeMcpServers(
     for (const [name, serverConfig] of Object.entries(source.servers)) {
       if (isReservedServerName(name)) {
         skipped.push({ name, source: source.label, reason: 'reserved-name' });
-        continue;
-      }
-
-      if (!isRecord(serverConfig)) {
-        skipped.push({ name, source: source.label, reason: 'invalid' });
         continue;
       }
 

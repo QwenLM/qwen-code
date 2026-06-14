@@ -113,4 +113,28 @@ describe('importConfigCommand', () => {
     expect(message.content).toContain('No new Claude MCP servers imported');
     expect(message.content).toContain('/home/u/.claude.json');
   });
+
+  it('keeps no-op imports with source warnings as warnings', () => {
+    const message = formatClaudeMcpImportResult({
+      scope: 'user',
+      settingScope: SettingScope.User,
+      scanned: [],
+      imported: [],
+      skipped: [
+        {
+          name: 'filesystem',
+          source: 'Claude Code',
+          reason: 'already-exists',
+        },
+      ],
+      errors: [
+        '/home/u/.claude.json: server "broken" is not an object - skipped',
+      ],
+    } satisfies ClaudeMcpImportResult);
+
+    expect(message.messageType).toBe('warning');
+    expect(message.content).toContain('No new Claude MCP servers imported');
+    expect(message.content).toContain('Skipped existing server(s): filesystem');
+    expect(message.content).toContain('Warnings:');
+  });
 });
