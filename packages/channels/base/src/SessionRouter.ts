@@ -89,10 +89,13 @@ export class SessionRouter {
     const key = chatId
       ? this.routingKey(channelName, senderId, chatId)
       : `${channelName}:${senderId}`;
-    // If chatId is provided, do exact lookup; otherwise prefix-scan for any match
+    // If chatId is provided, do exact lookup; otherwise prefix-scan for any match.
+    // The trailing ':' delimiter is required so a sender id is matched as a whole
+    // segment — without it `senderId` "bob" would also match another sender
+    // "bobby" (key `${channelName}:bobby:${chatId}`).
     if (chatId) return this.toSession.has(key);
     for (const k of this.toSession.keys()) {
-      if (k.startsWith(`${channelName}:${senderId}`)) return true;
+      if (k.startsWith(`${channelName}:${senderId}:`)) return true;
     }
     return false;
   }
@@ -111,8 +114,11 @@ export class SessionRouter {
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
     } else {
-      // No chatId: remove all sessions for this sender on this channel
-      const prefix = `${channelName}:${senderId}`;
+      // No chatId: remove all sessions for this sender on this channel.
+      // The trailing ':' delimiter is required so the prefix matches the whole
+      // sender segment — without it, removing sender "bob" would also tear down
+      // a different sender "bobby" (key `${channelName}:bobby:${chatId}`).
+      const prefix = `${channelName}:${senderId}:`;
       for (const k of [...this.toSession.keys()]) {
         if (k.startsWith(prefix)) {
           const sessionId = this.deleteByKey(k);
