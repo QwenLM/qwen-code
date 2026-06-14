@@ -5,6 +5,7 @@
  */
 
 // External dependencies
+import { createUserContent } from '@google/genai';
 import type {
   Content,
   GenerateContentConfig,
@@ -23,6 +24,7 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import {
   microcompactHistory,
   type MicrocompactMeta,
+  type MicrocompactOptions,
 } from '../services/microcompaction/microcompact.js';
 import {
   activeGoalEquals,
@@ -1567,14 +1569,16 @@ export class GeminiClient {
     }
   }
 
-  private async microcompactIdleHistory(
+  private async microcompactHistoryBeforeSend(
     lastCompletionTimestamp: number | null,
+    opts?: MicrocompactOptions,
   ): Promise<boolean> {
     try {
       const mcResult = microcompactHistory(
         this.getHistoryShallow(),
         lastCompletionTimestamp,
         this.config.getClearContextOnIdle(),
+        opts,
       );
       if (!mcResult.meta) {
         return false;
@@ -1583,15 +1587,24 @@ export class GeminiClient {
       const m = mcResult.meta;
       this.getChat().setHistory(mcResult.history);
       await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
-      debugLogger.debug(
-        `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-          `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
-          `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
-      );
+      if (m.triggerReason === 'size') {
+        debugLogger.debug(
+          `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
+            `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
+            `tool result(s) (~${m.tokensSaved} tokens), now ` +
+            `${m.toolResultCharsAfter}, kept ${m.toolsKept} tool result(s)`,
+        );
+      } else {
+        debugLogger.debug(
+          `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+            `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
+            `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
+        );
+      }
       return true;
     } catch (err) {
       debugLogger.error(
-        `[TIME-BASED MC] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
+        `[MICROCOMPACTION] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
     }
@@ -1815,10 +1828,11 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        // Idle cleanup: clear old tool results when idle > threshold.
-        // Runs on user and cron messages. ToolResult and Retry are
-        // excluded; Hook continuations use a separate checkpoint below.
-        const compacted = await this.microcompactIdleHistory(
+        // Pre-send microcompaction: user and cron turns can trigger both
+        // idle-based and cumulative-size cleanup. ToolResult and Retry are
+        // excluded here; ToolResult runs a size-only checkpoint after its
+        // pending content is assembled.
+        const compacted = await this.microcompactHistoryBeforeSend(
           this.lastApiCompletionTimestamp,
         );
         if (messageType === SendMessageType.UserQuery || compacted) {
@@ -1828,7 +1842,7 @@ export class GeminiClient {
         this.lastHookMicrocompactionTimestamp ??=
           this.lastApiCompletionTimestamp ?? Date.now();
         const checkpoint = this.lastHookMicrocompactionTimestamp;
-        if (await this.microcompactIdleHistory(checkpoint)) {
+        if (await this.microcompactHistoryBeforeSend(checkpoint)) {
           this.lastHookMicrocompactionTimestamp = Date.now();
         }
       }
@@ -2061,6 +2075,10 @@ export class GeminiClient {
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
         }
+        await this.microcompactHistoryBeforeSend(null, {
+          sizeOnly: true,
+          pendingContent: createUserContent(requestToSend),
+        });
       }
 
       const activeGoalAtTurnStart = getActiveGoal(this.config.getSessionId());
@@ -2604,7 +2622,7 @@ export class GeminiClient {
    * microcompaction. Falls back to a blanket clear() when any evicted
    * path can't be resolved.
    *
-   * Shared by the time-based microcompaction path and /compress-fast.
+   * Shared by pre-send microcompaction and /compress-fast.
    */
   private async disarmFileReadCacheAfterEviction(
     meta: MicrocompactMeta,

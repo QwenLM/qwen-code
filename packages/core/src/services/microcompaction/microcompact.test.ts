@@ -354,6 +354,166 @@ describe('microcompactHistory', () => {
     ).toBe('batched-grep');
   });
 
+  it('size-compacts old tool results even when the idle trigger has not fired', () => {
+    const history: Content[] = [];
+    for (let i = 0; i < 167; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'Y'.repeat(25_500)),
+      );
+    }
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 5,
+      toolResultsTotalCharsThreshold: 500_000,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolsCleared).toBeGreaterThan(0);
+    expect(result.meta!.toolResultCharsBefore).toBe(4_258_500);
+    expect(result.meta!.toolResultCharsAfter).toBeLessThanOrEqual(500_000);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history.at(-1)!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('Y'.repeat(25_500));
+  });
+
+  it('counts pending content as a virtual tail for size-triggered compaction', () => {
+    const history: Content[] = [];
+    for (let i = 0; i < 4; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'Y'.repeat(120_000)),
+      );
+    }
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 500_000,
+      },
+      {
+        sizeOnly: true,
+        pendingContent: makeToolResult(
+          'run_shell_command',
+          'Y'.repeat(50_000),
+        ),
+      },
+    );
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolResultCharsBefore).toBe(530_000);
+    expect(result.meta!.toolResultCharsAfter).toBeLessThanOrEqual(500_000);
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.history).toHaveLength(history.length);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not clear protected recent results even if they exceed the size threshold', () => {
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'A'.repeat(400_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'B'.repeat(400_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 2,
+      toolResultsTotalCharsThreshold: 500_000,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('does not clear media or non-compactable tool results for size overages', () => {
+    const history: Content[] = [
+      makeInlineImage('image/png', 'A'.repeat(1000)),
+      makeToolCall('ask_user_question'),
+      makeToolResult('ask_user_question', 'answer'.repeat(50_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'old'.repeat(100_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 1,
+      toolResultsTotalCharsThreshold: 50_000,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.mediaCleared).toBe(0);
+    expect(result.history[0]).toBe(history[0]);
+    expect(
+      result.history[2]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('answer'.repeat(50_000));
+    expect(
+      result.history[4]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not size-compact errors or already-cleared results', () => {
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'run_shell_command',
+              response: { error: 'boom', output: 'E'.repeat(500_000) },
+            },
+          },
+        ],
+      },
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', MICROCOMPACT_CLEARED_MESSAGE),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 1,
+      toolResultsTotalCharsThreshold: 10,
+    });
+
+    expect(result.meta).toBeUndefined();
+  });
+
+  it('disables the size trigger when toolResultsTotalCharsThreshold is -1', () => {
+    const history: Content[] = [];
+    for (let i = 0; i < 20; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'Y'.repeat(25_500)),
+      );
+    }
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 5,
+      toolResultsTotalCharsThreshold: -1,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
   it('should not clear tool error responses', () => {
     const history: Content[] = [
       makeToolCall('read_file'),

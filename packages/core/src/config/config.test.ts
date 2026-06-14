@@ -2865,6 +2865,61 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getClearContextOnIdle', () => {
+    it('should default the cumulative tool result threshold to 500000 chars', () => {
+      const config = new Config(baseParams);
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+    });
+
+    it('should use a custom cumulative tool result threshold if provided', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsTotalCharsThreshold: 123_456,
+        },
+      });
+
+      expect(
+        config.getClearContextOnIdle().toolResultsTotalCharsThreshold,
+      ).toBe(123_456);
+    });
+
+    it('should preserve an explicit disabled cumulative tool result threshold', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsTotalCharsThreshold: -1,
+        },
+      });
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: -1,
+      });
+    });
+
+    it('should keep legacy disabled idle cleanup disabled for the size trigger too', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsThresholdMinutes: -1,
+        },
+      });
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: -1,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: -1,
+      });
+    });
+  });
+
   // PR 14b fix (codex round 4 — wenshao gpt-5.5 review): the
   // `Config.setMcpBudgetEventCallback → pendingMcpBudgetCallback →
   // createToolRegistry → registry.getMcpClientManager().setOnBudgetEvent`
