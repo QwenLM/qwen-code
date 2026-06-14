@@ -1026,19 +1026,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     let skipInsert = false;
     let caretOverride: number | null = null;
     if (text === '/') {
-      // The slash-command menu only triggers on a line-leading '/'. If the line
-      // already starts with '/', re-open the menu rather than inserting a second
-      // '/' ("//" would dismiss it). If the editor holds other text, replace it
-      // with '/' so the command parses — a mid-line '/' ("hello/") never matches
-      // the slash source and would leave a stray char with no menu.
+      // The slash-command menu only triggers on a line-leading '/'. Re-open the
+      // menu (don't insert) when the line already starts with '/', and no-op
+      // when the editor holds other text: inserting a mid-line '/' wouldn't open
+      // the menu, and replacing the draft would silently destroy it. The user
+      // can clear the draft themselves to start a command on an empty line.
       const line = view.state.doc.lineAt(selection.head);
-      if (line.text.startsWith('/')) {
-        skipInsert = true;
-      } else if (view.state.doc.length > 0) {
-        view.dispatch({
-          changes: { from: 0, to: view.state.doc.length, insert: '/' },
-          selection: { anchor: 1 },
-        });
+      if (line.text.startsWith('/') || view.state.doc.length > 0) {
         skipInsert = true;
       }
     } else if (text === '@') {
