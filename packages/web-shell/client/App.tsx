@@ -2699,7 +2699,7 @@ export function App({
             {!shouldHideComposer &&
               !tasksPanelMessage &&
               (showShortcuts ? (
-                <ShortcutsPanel />
+                <ShortcutsPanel onClose={handleToggleShortcuts} />
               ) : (
                 <StatusBar
                   escapeHint={escapeHintVisible}
@@ -2715,6 +2715,7 @@ export function App({
                   taskActivityKey={backgroundTaskActivityKey}
                   activeGoal={activeGoal}
                   hideSettings={hideSettings}
+                  onToggleShortcuts={handleToggleShortcuts}
                 />
               ))}
           </div>

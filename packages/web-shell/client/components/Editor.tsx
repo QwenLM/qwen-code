@@ -223,6 +223,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const [searchMatches, setSearchMatches] = useState<string[]>([]);
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchUiRef = useRef<HTMLDivElement>(null);
   const searchDraftRef = useRef('');
   const [pastedImages, setPastedImages] = useState<PromptImage[]>([]);
   const pastedImagesRef = useRef<PromptImage[]>([]);
@@ -265,6 +266,63 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const shellHistoryActionsRef = useRef(shellHistory);
   shellHistoryActionsRef.current = shellHistory;
   pastedImagesRef.current = pastedImages;
+
+  // Open the reverse-i-search history panel. Shared by the Ctrl+R keymap and
+  // the mouse-discoverable history button so both stay in lockstep.
+  const openHistorySearch = useCallback(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const query = view.state.doc.toString();
+    searchDraftRef.current = query;
+    setSearchMode(true);
+    setSearchQuery(query);
+    const history = shellModeRef.current
+      ? shellHistoryActionsRef.current
+      : historyActionsRef.current;
+    setSearchMatches(history.getReverseMatches(query));
+    setSearchActiveIndex(0);
+    history.resetSearch();
+    setTimeout(() => searchInputRef.current?.focus(), 0);
+  }, []);
+  const openHistorySearchRef = useRef(openHistorySearch);
+  openHistorySearchRef.current = openHistorySearch;
+
+  // Fill the editor with the previous history entry (mirrors ArrowUp), used by
+  // the clickable "history" hint so mouse users can walk history too.
+  const navigatePrevHistory = useCallback(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const history = shellModeRef.current
+      ? shellHistoryActionsRef.current
+      : historyActionsRef.current;
+    const current = view.state.doc.toString();
+    const prev = history.navigateUp(current);
+    if (prev !== null) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: prev },
+        selection: { anchor: prev.length },
+      });
+    }
+    view.focus();
+  }, []);
+
+  // Step toward newer history (mirrors ArrowDown); paired with the "previous"
+  // hint so mouse users can walk history in both directions.
+  const navigateNextHistory = useCallback(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const history = shellModeRef.current
+      ? shellHistoryActionsRef.current
+      : historyActionsRef.current;
+    const next = history.navigateDown();
+    if (next !== null) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: next },
+        selection: { anchor: next.length },
+      });
+    }
+    view.focus();
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -527,18 +585,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Ctrl-r',
-        run: (view) => {
-          const query = view.state.doc.toString();
-          searchDraftRef.current = query;
-          setSearchMode(true);
-          setSearchQuery(query);
-          const history = shellModeRef.current
-            ? shellHistoryActionsRef.current
-            : historyActionsRef.current;
-          setSearchMatches(history.getReverseMatches(query));
-          setSearchActiveIndex(0);
-          history.resetSearch();
-          setTimeout(() => searchInputRef.current?.focus(), 0);
+        run: () => {
+          openHistorySearchRef.current();
           return true;
         },
       },
@@ -968,11 +1016,39 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       return;
     }
     const selection = view.state.selection.main;
-    view.dispatch({
-      changes: { from: selection.from, to: selection.to, insert: text },
-      selection: { anchor: selection.from + text.length },
-      scrollIntoView: true,
-    });
+    let insert = text;
+    // Make the trigger characters idempotent so a second click re-opens the
+    // menu instead of inserting a duplicate.
+    let skipInsert = false;
+    if (text === '/') {
+      // The slash-command menu only triggers on a line-leading '/'. If the
+      // line already starts with '/', re-open the menu rather than inserting a
+      // second '/' (which would make "//" and dismiss the menu).
+      const line = view.state.doc.lineAt(selection.head);
+      if (line.text.startsWith('/')) {
+        skipInsert = true;
+      }
+    } else if (text === '@' && selection.from > 0) {
+      const before = view.state.doc.sliceString(
+        selection.from - 1,
+        selection.from,
+      );
+      if (before === '@') {
+        // Already an '@' right before the cursor — just re-open the menu.
+        skipInsert = true;
+      } else if (!/\s/.test(before)) {
+        // An @-mention only parses at a token boundary, so when it lands
+        // mid-word prepend a space to detach it.
+        insert = ' @';
+      }
+    }
+    if (!skipInsert) {
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert },
+        selection: { anchor: selection.from + insert.length },
+        scrollIntoView: true,
+      });
+    }
     view.focus();
     if (text === '/' || text === '@') {
       window.setTimeout(() => {
@@ -1048,6 +1124,18 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     },
     [replaceEditorText],
   );
+
+  // While the reverse-i-search panel is open, a pointer press anywhere outside
+  // it behaves like Escape: cancel the search and restore the original draft.
+  useEffect(() => {
+    if (!searchMode) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (searchUiRef.current?.contains(event.target as Node)) return;
+      closeSearch(true);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [searchMode, closeSearch]);
 
   const submitSearchMatch = useCallback(
     (match: string) => {
@@ -1165,6 +1253,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   ) : (
     <PromptChevron />
   );
+  // A faint, always-on hint row that surfaces the otherwise-hidden input
+  // shortcuts (history search, slash commands, file mentions) so they stay
+  // discoverable even while typing. Hidden only where it would conflict:
+  // shell mode (different prefix), reverse-i-search (its own hint bar), or
+  // when a followup suggestion already occupies the placeholder.
+  const showShortcutHints =
+    !shellMode && !searchMode && !followupState?.isVisible;
 
   return (
     <div className={containerClass} onClick={focus}>
@@ -1174,51 +1269,53 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         )}
       </div>
       {searchMode && (
-        <div className={styles.searchBar}>
-          <span className={styles.searchLabel}>reverse-i-search:</span>
-          <input
-            ref={searchInputRef}
-            className={styles.searchInput}
-            value={searchQuery}
-            onChange={handleSearchInput}
-            onKeyDown={handleSearchKeyDown}
-            placeholder="type to search..."
-          />
-          <span className={styles.searchHint}>
-            ctrl+r next · tab accept · enter send · esc cancel
-          </span>
+        <div ref={searchUiRef}>
+          <div className={styles.searchBar}>
+            <span className={styles.searchLabel}>reverse-i-search:</span>
+            <input
+              ref={searchInputRef}
+              className={styles.searchInput}
+              value={searchQuery}
+              onChange={handleSearchInput}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="type to search..."
+            />
+            <span className={styles.searchHint}>
+              ctrl+r next · tab accept · enter send · esc cancel
+            </span>
+          </div>
+          {searchMatches.length > 0 && (
+            <div className={styles.searchResults}>
+              {visibleSearchMatches.map((match, index) => {
+                const matchIndex = visibleSearchStart + index;
+                return (
+                  <button
+                    key={`${match}-${matchIndex}`}
+                    type="button"
+                    className={`${styles.searchResult} ${
+                      matchIndex === searchActiveIndex
+                        ? styles.searchResultActive
+                        : ''
+                    }`}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      replaceEditorText(match);
+                      closeSearch(false);
+                    }}
+                  >
+                    <span className={styles.searchResultMarker}>
+                      {matchIndex === searchActiveIndex ? '›' : ''}
+                    </span>
+                    <span className={styles.searchResultText}>{match}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {searchMatches.length === 0 && (
+            <div className={styles.searchEmpty}>{t('editor.noHistory')}</div>
+          )}
         </div>
-      )}
-      {searchMode && searchMatches.length > 0 && (
-        <div className={styles.searchResults}>
-          {visibleSearchMatches.map((match, index) => {
-            const matchIndex = visibleSearchStart + index;
-            return (
-              <button
-                key={`${match}-${matchIndex}`}
-                type="button"
-                className={`${styles.searchResult} ${
-                  matchIndex === searchActiveIndex
-                    ? styles.searchResultActive
-                    : ''
-                }`}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  replaceEditorText(match);
-                  closeSearch(false);
-                }}
-              >
-                <span className={styles.searchResultMarker}>
-                  {matchIndex === searchActiveIndex ? '›' : ''}
-                </span>
-                <span className={styles.searchResultText}>{match}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {searchMode && searchMatches.length === 0 && (
-        <div className={styles.searchEmpty}>{t('editor.noHistory')}</div>
       )}
       {pastedImages.length > 0 && (
         <div className={styles.images}>
@@ -1242,6 +1339,74 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         <span className={prefixClass}>{prefixContent}</span>
         <div ref={containerRef} className={styles.wrapper} />
       </div>
+      {showShortcutHints && (
+        <div className={styles.hints}>
+          <button
+            type="button"
+            className={styles.hintItem}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.stopPropagation();
+              navigatePrevHistory();
+            }}
+          >
+            <span className={styles.hintKey}>↑</span>
+            {t('editor.hintPrev')}
+          </button>
+          <span className={styles.hintSep}>·</span>
+          <button
+            type="button"
+            className={styles.hintItem}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.stopPropagation();
+              navigateNextHistory();
+            }}
+          >
+            <span className={styles.hintKey}>↓</span>
+            {t('editor.hintNext')}
+          </button>
+          <span className={styles.hintSep}>·</span>
+          <button
+            type="button"
+            className={styles.hintItem}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.stopPropagation();
+              openHistorySearch();
+            }}
+          >
+            <span className={styles.hintKey}>ctrl+r</span>
+            {t('editor.hintSearch')}
+          </button>
+          <span className={styles.hintSep}>·</span>
+          <button
+            type="button"
+            className={styles.hintItem}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.stopPropagation();
+              insertText('/');
+            }}
+          >
+            <span className={styles.hintKey}>/</span>
+            {t('editor.hintCommands')}
+          </button>
+          <span className={styles.hintSep}>·</span>
+          <button
+            type="button"
+            className={styles.hintItem}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.stopPropagation();
+              insertText('@');
+            }}
+          >
+            <span className={styles.hintKey}>@</span>
+            {t('editor.hintFiles')}
+          </button>
+        </div>
+      )}
       <div className={styles.borderBottom} />
     </div>
   );

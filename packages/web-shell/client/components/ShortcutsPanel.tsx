@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { useI18n } from '../i18n';
 import styles from './ShortcutsPanel.module.css';
 
@@ -38,13 +39,42 @@ const SHORTCUTS: Shortcut[] = [
   { key: 'ctrl+l', descriptionKey: 'help.shortcut.clear' },
   { key: 'ctrl+y', descriptionKey: 'help.shortcut.retry' },
   { key: 'ctrl+o', descriptionKey: 'help.shortcut.compact' },
-  { key: 'ctrl+r', descriptionKey: 'help.shortcut.history' },
+  { key: 'ctrl+r', descriptionKey: 'help.shortcut.searchHistory' },
   { key: '↑ / ↓', descriptionKey: 'help.shortcut.history' },
   { key: '?', descriptionKey: 'help.shortcut.togglePanel' },
 ];
 
-export function ShortcutsPanel() {
+interface ShortcutsPanelProps {
+  onClose?: () => void;
+}
+
+export function ShortcutsPanel({ onClose }: ShortcutsPanelProps) {
   const { t } = useI18n();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  // Dismiss like a popover: Escape, or a pointer press outside the panel.
+  // The listeners are attached after mount, so the click that opened the
+  // panel has already finished and cannot immediately close it.
+  useEffect(() => {
+    const handlePointerDown = (event: MouseEvent) => {
+      if (panelRef.current?.contains(event.target as Node)) return;
+      onCloseRef.current?.();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        onCloseRef.current?.();
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+
   const shortcuts = [
     ...SHORTCUTS.slice(0, -1),
     {
@@ -58,7 +88,7 @@ export function ShortcutsPanel() {
   const col2 = shortcuts.slice(mid);
 
   return (
-    <div className={styles.panel}>
+    <div ref={panelRef} className={styles.panel}>
       <div className={styles.column}>
         {col1.map((s) => (
           <div key={s.key} className={styles.item}>
