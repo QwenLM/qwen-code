@@ -167,25 +167,33 @@ describe('shell tool output expand toggle', () => {
 });
 
 describe('tool description expand toggle', () => {
-  it('keeps a finished command collapsed but reveals it in full on expand', () => {
+  it('relocates the full command from the header into a wrapped block on expand', () => {
     const command = `npm run build && npm run test && npm run lint -- ${'x'.repeat(
       80,
     )}`;
     const container = renderTool(makeShellCommandTool(command));
 
-    // Completed → collapsed: chevron points right. The full command (no longer
-    // hard-capped at one line's worth of characters) is present in the header.
+    // textContent alone can't prove relocation (it concatenates the whole
+    // subtree, so the command is present in either state). Assert the DOM move
+    // instead: collapsed, the full command lives in the header's single-line
+    // arg <span> (CSS-ellipsised); expanded, it is no longer in any leaf <span>
+    // but reflowed into the wrapped block below.
+    const commandInLeafSpan = () =>
+      [...container.querySelectorAll('span')].some(
+        (s) => s.textContent === command,
+      );
+
     expect(container.textContent).toContain('▸');
-    expect(container.textContent).toContain(command);
+    expect(commandInLeafSpan()).toBe(true);
 
     const chevron = [...container.querySelectorAll('span')].find(
       (s) => s.textContent === '▸',
     );
     click(chevron!.parentElement!);
 
-    // Expanded → chevron flips and the full command is reflowed below.
     expect(container.textContent).toContain('▾');
-    expect(container.textContent).toContain(command);
+    expect(commandInLeafSpan()).toBe(false);
+    expect(container.textContent).toContain(command); // still present, in the block
   });
 });
 
