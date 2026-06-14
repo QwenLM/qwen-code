@@ -513,28 +513,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Escape',
-        run: (view) => {
+        run: () => {
           if (shellModeRef.current) {
             setShellMode(false);
             return true;
-          }
-          // If completion is open on a trigger a hint button inserted and the
-          // user never typed past it, Escape removes the trigger too (it was
-          // clicked in, not typed).
-          const trigger = autoTriggerRef.current;
-          if (trigger && completionStatus(view.state) === 'active') {
-            const doc = view.state.doc;
-            const intact =
-              doc.length === trigger.from + trigger.text.length &&
-              doc.sliceString(trigger.from) === trigger.text;
-            if (intact) {
-              autoTriggerRef.current = null;
-              closeCompletion(view);
-              view.dispatch({
-                changes: { from: trigger.from, to: doc.length, insert: '' },
-              });
-              return true;
-            }
           }
           if (queuedMessagesRef.current.length === 0) return false;
           return onClearQueuedMessagesRef.current?.() ?? false;
@@ -717,16 +699,6 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       if (!update.docChanged && !update.selectionSet) {
         return;
       }
-      // Drop the click-inserted trigger marker once the user edits past it, so
-      // a later Escape doesn't wipe content they actually typed.
-      if (update.docChanged && autoTriggerRef.current) {
-        const t = autoTriggerRef.current;
-        const doc = update.state.doc;
-        const intact =
-          doc.length === t.from + t.text.length &&
-          doc.sliceString(t.from) === t.text;
-        if (!intact) autoTriggerRef.current = null;
-      }
       if (update.docChanged && pendingPastesRef.current.size > 0) {
         const nextPasteId = prunePendingPastes(
           pendingPastesRef.current,
@@ -751,6 +723,42 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           startCompletion(view);
         }
       }, 0);
+    });
+
+    // Remove a hint-button-inserted trigger ('/' or '@') when its completion
+    // menu closes for any reason — Escape, click-away, blur — and the user
+    // never typed past it. Watching the completion status covers every
+    // dismissal path, not just the Escape key.
+    let prevCompletionActive = false;
+    const triggerCleanupListener = EditorView.updateListener.of((update) => {
+      const trigger = autoTriggerRef.current;
+      const nowActive = completionStatus(update.state) === 'active';
+      if (trigger) {
+        const doc = update.state.doc;
+        const intact =
+          doc.length === trigger.from + trigger.text.length &&
+          doc.sliceString(trigger.from) === trigger.text;
+        if (!intact) {
+          // The user typed/edited past the trigger — keep their content.
+          autoTriggerRef.current = null;
+        } else if (prevCompletionActive && !nowActive) {
+          autoTriggerRef.current = null;
+          const { view } = update;
+          const { from } = trigger;
+          window.setTimeout(() => {
+            if (viewRef.current !== view) return;
+            const d = view.state.doc;
+            // Re-check in case the user typed between close and this callback.
+            if (
+              d.length === from + trigger.text.length &&
+              d.sliceString(from) === trigger.text
+            ) {
+              view.dispatch({ changes: { from, to: d.length, insert: '' } });
+            }
+          }, 0);
+        }
+      }
+      prevCompletionActive = nowActive;
     });
 
     const state = EditorState.create({
@@ -802,6 +810,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         ),
         inputHighlightTheme,
         slashCompletionRestarter,
+        triggerCleanupListener,
         EditorView.inputHandler.of((view, from, to, insert) => {
           if (
             insert.length > 0 &&
