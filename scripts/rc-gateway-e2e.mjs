@@ -13,6 +13,7 @@ import {
   writeFileSync,
   rmSync,
   existsSync,
+  statSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -31,6 +32,7 @@ import {
   APPROVE,
   WRITE,
   OWNER,
+  BRIDGE,
   resolveForkChatsDir,
 } from '../packages/rc-gateway/dist/index.js';
 
@@ -96,7 +98,15 @@ const daemon = spawn(
 
 let gatewayServer;
 let pump;
+const sidecarProcs = [];
 const cleanup = async () => {
+  for (const p of sidecarProcs) {
+    try {
+      p.kill('SIGKILL');
+    } catch {
+      /* ignore */
+    }
+  }
   try {
     if (pump) await pump.stop();
   } catch {
@@ -183,6 +193,94 @@ try {
         : bad(`gateway unhealthy after pump start (${r.status})`);
     } catch (e) {
       bad(`pump start threw: ${e?.message ?? e}`);
+    }
+  }
+
+  // 2c. Sidecar process-split (add-*-bridge "Bridge process configuration"):
+  //     the standalone `qwen-rc-bridge <kind>` entrypoint reads env-only config,
+  //     fails fast on a missing required var, and talks the gateway ONLY over the
+  //     loopback contract with its operator bridge token. Exercised by spawning
+  //     the real built entrypoint against this gateway.
+  {
+    const sidecar = join(repoRoot, 'packages/rc-gateway/dist/bridge-sidecar.js');
+
+    // Spawn the entrypoint, capturing combined stdout+stderr.
+    const spawnSidecar = (args, env) => {
+      const proc = spawn(process.execPath, [sidecar, ...args], {
+        env: { ...process.env, ...env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      sidecarProcs.push(proc);
+      let out = '';
+      proc.stdout.on('data', (d) => (out += d.toString()));
+      proc.stderr.on('data', (d) => (out += d.toString()));
+      return { proc, output: () => out };
+    };
+
+    // (A) Fail-fast: missing TELEGRAM_BOT_TOKEN -> exit 1 + exact stderr.
+    {
+      const { proc, output } = spawnSidecar(['telegram'], {
+        TELEGRAM_BOT_TOKEN: '',
+        QWEN_DAEMON_URL: gw,
+        QWEN_BRIDGE_TOKEN: 'qwk_whatever',
+        QWEN_BRIDGE_PAIRING_CODE: '',
+      });
+      const exitCode = await new Promise((res) => proc.on('exit', res));
+      exitCode === 1 && output().includes('TELEGRAM_BOT_TOKEN is required')
+        ? ok('sidecar fails fast on missing bot token (exit 1, exact message)')
+        : bad(`sidecar fail-fast exit=${exitCode} out=${output().trim()}`);
+    }
+
+    // (B) Loopback contract + pairing-code bootstrap: the sidecar redeems a
+    //     one-time PAIRING CODE (real POST /rc/pair/redeem), persists the token
+    //     at mode 0600, and registers over the daemon HTTP contract. Passing a
+    //     code (not a pre-redeemed token) exercises the real fetch redeem +
+    //     writeToken(0600) path. We poll the owner bridge list until it shows.
+    {
+      const { code: oc } = pairing.mint([OWNER]);
+      const orr = await fetch(`${gw}/rc/pair/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: oc, label: 'sidecar-owner' }),
+      });
+      const ownerTok = (await orr.json()).token;
+      const { code: pairingCode } = pairing.mint([BRIDGE]);
+      const stateDir = mkdtempSync(join(tmpdir(), 'rc-e2e-sidecar-'));
+
+      spawnSidecar(['telegram'], {
+        TELEGRAM_BOT_TOKEN: 'fake-bot-token',
+        QWEN_DAEMON_URL: gw,
+        QWEN_BRIDGE_TOKEN: '',
+        QWEN_BRIDGE_PAIRING_CODE: pairingCode,
+        QWEN_BRIDGE_STATE_DIR: stateDir,
+      });
+
+      try {
+        await poll(
+          async () => {
+            const r = await fetch(`${gw}/rc/bridges`, {
+              headers: { Authorization: `Bearer ${ownerTok}` },
+            });
+            if (r.status !== 200) return false;
+            const { bridges } = await r.json();
+            return (
+              Array.isArray(bridges) &&
+              bridges.some((b) => b.id === 'telegram')
+            );
+          },
+          10000,
+          'sidecar bridge registration',
+        );
+        ok('sidecar redeems a pairing code and registers over the loopback contract');
+        const mode = statSync(join(stateDir, 'token')).mode & 0o777;
+        mode === 0o600
+          ? ok('sidecar persists the redeemed token at mode 0600')
+          : bad(`persisted token mode ${mode.toString(8)} (want 600)`);
+      } catch {
+        bad('sidecar did not register within 10s');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
     }
   }
 

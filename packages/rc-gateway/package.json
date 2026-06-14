@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "qwen-rc": "dist/cli.js"
+    "qwen-rc": "dist/cli.js",
+    "qwen-rc-bridge": "dist/bridge-sidecar.js"
   },
   "scripts": {
     "build": "tsc --build",

@@ -36,6 +36,7 @@ export {
   APPROVE,
   WRITE,
   SHARE,
+  BRIDGE,
   KNOWN_SCOPES,
   type RcScope,
 } from './scopes.js';
