@@ -394,6 +394,33 @@ describe('edit raw diff rendering', () => {
     expect(truncated.textContent).not.toContain('new');
   });
 
+  it('shows preview and suppresses truncated rawOutput diffs', () => {
+    const fullDiff = '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new';
+    const preview =
+      'Full diff omitted from saved session history for /test/file.ts.';
+    const container = renderTool(
+      makeEditTool({
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: preview },
+          },
+        ],
+        rawOutput: {
+          fileName: '/test/file.ts',
+          newContent: 'preview only',
+          fileDiff: fullDiff,
+          truncatedForSession: true,
+        },
+      }),
+    );
+
+    expandTool(container);
+    expect(container.textContent).toContain(preview);
+    expect(container.textContent).not.toContain('old');
+    expect(container.textContent).not.toContain('new');
+  });
+
   it('renders truncated session preview text when no diff is available', () => {
     const preview =
       'Full diff omitted from saved session history for /test/file.ts.';
