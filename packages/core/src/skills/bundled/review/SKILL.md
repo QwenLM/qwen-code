@@ -183,9 +183,11 @@ Reason: review controller did not produce final review JSON"
 
 Workflow logs: ${RUN_URL}"
   fi
-  jq -n --arg body "$FALLBACK_BODY" '{event:"COMMENT", body:$body}' \
-    > "${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
-  echo "Emit-only: wrote provisional review-unavailable JSON to $QWEN_REVIEW_OUTPUT_FILE"
+  OUTPUT_FILE="${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
+  TMP_OUTPUT="${OUTPUT_FILE}.tmp"
+  jq -n --arg body "$FALLBACK_BODY" '{event:"COMMENT", body:$body}' > "$TMP_OUTPUT"
+  mv "$TMP_OUTPUT" "$OUTPUT_FILE"
+  echo "Emit-only: wrote provisional review-unavailable JSON to $OUTPUT_FILE"
 fi
 ```
 
@@ -604,8 +606,11 @@ mandatory. A completed review must never leave the provisional JSON in
 
 ```bash
 if [ -n "${QWEN_REVIEW_EMIT_ONLY:-}" ]; then
-  cp .qwen/tmp/qwen-review-{target}-review.json "${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
-  echo "Emit-only: wrote review JSON to $QWEN_REVIEW_OUTPUT_FILE (not submitted)"
+  OUTPUT_FILE="${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
+  TMP_OUTPUT="${OUTPUT_FILE}.tmp"
+  cp .qwen/tmp/qwen-review-{target}-review.json "$TMP_OUTPUT"
+  mv "$TMP_OUTPUT" "$OUTPUT_FILE"
+  echo "Emit-only: wrote review JSON to $OUTPUT_FILE (not submitted)"
 else
   gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
     --input .qwen/tmp/qwen-review-{target}-review.json

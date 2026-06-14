@@ -86,6 +86,7 @@ jobs:
           ACK_BODY="<!-- qwen-review-ack -->_Qwen triage request accepted. Queued in [workflow run](${RUN_URL})._"
           EXISTING_ACK_ID="$(
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
               --paginate \
               -F per_page=100 \
               | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
@@ -436,7 +437,7 @@ jobs:
         needs.resolve.outputs.trigger_type == 'review_only'
       )
     # Default 90; workflow_dispatch can override via the timeout_minutes input.
-    timeout-minutes: '${{ fromJSON(needs.resolve.outputs.review_timeout) }}'
+    timeout-minutes: "${{ fromJSON(needs.resolve.outputs.review_timeout || '90') }}"
     # 30-minute wait timer (via environment protection rule) debounces
     # rapid consecutive pushes. Empty string = no environment = no delay.
     environment: '${{ needs.resolve.outputs.review_environment }}'
@@ -554,11 +555,13 @@ jobs:
 
           write_review_unavailable() {
             local reason="$1"
+            local tmp="${QWEN_REVIEW_OUTPUT_FILE}.tmp"
             jq -n \
               --arg reason "$reason" \
               --arg run_url "$RUN_URL" \
               '{event:"COMMENT", body:"<!-- qwen-triage:review-unavailable -->\n_Qwen automated review could not complete in this run, so tmux testing and auto-approval are blocked. Human review is required._\n\nReason: \($reason)\n\nWorkflow logs: \($run_url)"}' \
-              > "$QWEN_REVIEW_OUTPUT_FILE"
+              > "$tmp"
+            mv "$tmp" "$QWEN_REVIEW_OUTPUT_FILE"
             echo "::notice::Created review-unavailable gate result: ${reason}"
           }
 
@@ -607,8 +610,14 @@ jobs:
             write_review_unavailable "review agent exited with code ${EXIT_CODE}"
             exit 0
           fi
+          if ! jq -e 'type == "object" and (.event | type == "string" and length > 0)' "$RESULT" >/dev/null 2>&1; then
+            write_review_unavailable "review agent produced invalid review JSON"
+            exit 0
+          fi
           if [ "$RESULT" != "$QWEN_REVIEW_OUTPUT_FILE" ]; then
-            cp "$RESULT" "$QWEN_REVIEW_OUTPUT_FILE"
+            TMP_RESULT="${QWEN_REVIEW_OUTPUT_FILE}.tmp"
+            cp "$RESULT" "$TMP_RESULT"
+            mv "$TMP_RESULT" "$QWEN_REVIEW_OUTPUT_FILE"
           fi
 
       # Publish the review with the write-capable PAT, or update a regular PR
@@ -646,6 +655,7 @@ jobs:
             if [ -n "$BOT_LOGIN" ]; then
               EXISTING_COMMENT_ID="$(
                 gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                  --method GET \
                   --paginate \
                   -F per_page=100 \
                   | jq -sr --arg bot "$BOT_LOGIN" \
