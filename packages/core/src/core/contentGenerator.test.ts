@@ -54,6 +54,15 @@ vi.mock('../qwen/qwenContentGenerator.js', () => ({
   QwenContentGenerator: class {},
 }));
 
+const anthropicMockState = vi.hoisted(() => ({
+  createAnthropicContentGenerator: vi.fn().mockReturnValue({}),
+}));
+
+vi.mock('./anthropicContentGenerator/index.js', () => ({
+  createAnthropicContentGenerator: (...args: unknown[]) =>
+    anthropicMockState.createAnthropicContentGenerator(...args),
+}));
+
 describe('createContentGenerator', () => {
   it('should create a Gemini content generator', async () => {
     const mockConfig = {
@@ -123,6 +132,70 @@ describe('createContentGenerator', () => {
         },
       },
     });
+    expect(generator).toBeInstanceOf(LoggingContentGenerator);
+  });
+
+  it('should throw when protocol is missing', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => true,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+
+    await expect(
+      createContentGenerator(
+        { model: 'test-model', apiKey: 'test-key' },
+        mockConfig,
+      ),
+    ).rejects.toThrow('must have a protocol');
+  });
+
+  it('should throw for unknown protocol', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => true,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+
+    await expect(
+      createContentGenerator(
+        {
+          model: 'test-model',
+          apiKey: 'test-key',
+          protocol: 'bogus' as Protocol,
+        },
+        mockConfig,
+      ),
+    ).rejects.toThrow('Unknown protocol: bogus');
+  });
+
+  it('should create an Anthropic content generator', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => true,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_ANTHROPIC,
+        protocol: Protocol.ANTHROPIC,
+        baseUrl: 'https://api.anthropic.com',
+      },
+      mockConfig,
+    );
+
+    expect(
+      anthropicMockState.createAnthropicContentGenerator,
+    ).toHaveBeenCalled();
     expect(generator).toBeInstanceOf(LoggingContentGenerator);
   });
 });
