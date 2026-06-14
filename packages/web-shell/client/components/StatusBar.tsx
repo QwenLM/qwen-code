@@ -60,6 +60,8 @@ interface StatusBarProps {
   } | null;
   /** Hide the settings gear button (e.g. when /settings is in hiddenSlashCommands). */
   hideSettings?: boolean;
+  /** Toggle the keyboard-shortcuts panel (same as typing `?` in the editor). */
+  onToggleShortcuts?: () => void;
 }
 
 // Feather "settings" gear, stroke-based like PromptChevron so it inherits
@@ -174,6 +176,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       taskActivityKey,
       activeGoal,
       hideSettings,
+      onToggleShortcuts,
     },
     ref,
   ) {
@@ -353,25 +356,44 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
             <span className={styles.escapeHint}>
               {t('editor.escClearHint')}
             </span>
-          ) : modeIndicator ? (
-            <button
-              type="button"
-              className={styles.modeButton}
-              onClick={onSelectMode}
-              onMouseDown={(e) => e.stopPropagation()}
-              onTouchStart={(e) => e.stopPropagation()}
-              title={t('mode.select')}
-              aria-haspopup="listbox"
-            >
-              <span
-                className={`${styles.modeLabel} ${modeIndicator.className}`}
-              >
-                {modeIndicator.label}
-              </span>
-              <span className={styles.modeHint}>{t('status.modeHint')}</span>
-            </button>
           ) : (
-            <span>{t('status.shortcuts')}</span>
+            <>
+              {modeIndicator && (
+                <button
+                  type="button"
+                  className={styles.modeButton}
+                  onClick={onSelectMode}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onTouchStart={(e) => e.stopPropagation()}
+                  title={t('mode.select')}
+                  aria-haspopup="listbox"
+                >
+                  <span
+                    className={`${styles.modeLabel} ${modeIndicator.className}`}
+                  >
+                    {modeIndicator.label}
+                  </span>
+                  <span className={styles.modeHint}>
+                    {t('status.modeHint')}
+                  </span>
+                </button>
+              )}
+              {onToggleShortcuts ? (
+                <button
+                  type="button"
+                  className={styles.shortcutsButton}
+                  onClick={onToggleShortcuts}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onTouchStart={(e) => e.stopPropagation()}
+                  aria-haspopup="dialog"
+                  aria-label={t('status.shortcuts')}
+                >
+                  {t('status.shortcuts')}
+                </button>
+              ) : (
+                <span>{t('status.shortcuts')}</span>
+              )}
+            </>
           )}
           {taskPillLabel && (
             <>
