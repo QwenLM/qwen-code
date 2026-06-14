@@ -92,6 +92,24 @@
   font-size: 12px;
 }
 
+.shortcutsButton {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-dimmed);
+  cursor: pointer;
+}
+
+.shortcutsButton:hover,
+.shortcutsButton:focus-visible {
+  color: var(--text-primary);
+}
+
 .modelButton {
   display: inline-flex;
   align-items: center;

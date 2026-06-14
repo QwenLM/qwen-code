@@ -81,6 +81,52 @@
   min-width: 0;
 }
 
+.hints {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 1ch;
+  padding: 2px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  user-select: none;
+}
+
+.hintItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4ch;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--text-dimmed);
+  cursor: pointer;
+}
+
+.hintItem:hover,
+.hintItem:focus-visible {
+  color: var(--text-primary);
+}
+
+.hintKey {
+  color: var(--text-secondary);
+}
+
+.hintItem:hover .hintKey,
+.hintItem:focus-visible .hintKey {
+  color: var(--accent-color);
+}
+
+.hintItem:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.hintSep {
+  color: var(--text-dimmed);
+}
+
 .searchBar {
   display: flex;
   align-items: center;
@@ -239,6 +285,34 @@
   border-radius: 6px;
   font-family: var(--font-mono, monospace);
   font-size: 13px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    > ul::-webkit-scrollbar
+) {
+  width: 6px;
+  height: 6px;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    > ul::-webkit-scrollbar-track
+) {
+  background: transparent;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    > ul::-webkit-scrollbar-thumb
+) {
+  background: var(--border-color);
+  border-radius: 3px;
 }
 
 :global([data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li) {
@@ -371,6 +445,31 @@
   line-height: 1.45;
   white-space: pre-line;
   overflow-wrap: anywhere;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip.cm-completionInfo::-webkit-scrollbar
+) {
+  width: 6px;
+  height: 6px;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip.cm-completionInfo::-webkit-scrollbar-track
+) {
+  background: transparent;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip.cm-completionInfo::-webkit-scrollbar-thumb
+) {
+  background: var(--border-color);
+  border-radius: 3px;
 }
 
 :global(

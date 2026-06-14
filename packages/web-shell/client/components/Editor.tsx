@@ -5,6 +5,7 @@ import {
   useRef,
   useCallback,
   useState,
+  type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { EditorView, keymap, placeholder, tooltips } from '@codemirror/view';
 import { EditorState, Compartment, Prec } from '@codemirror/state';
@@ -223,11 +224,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const [searchMatches, setSearchMatches] = useState<string[]>([]);
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchUiRef = useRef<HTMLDivElement>(null);
   const searchDraftRef = useRef('');
   const [pastedImages, setPastedImages] = useState<PromptImage[]>([]);
   const pastedImagesRef = useRef<PromptImage[]>([]);
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const nextPasteIdRef = useRef(1);
+  // Tracks a trigger char ('/' or '@') inserted by a hint button so it can be
+  // removed if the user cancels completion (Escape) without typing past it.
+  const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
 
   const promptHistory = useInputHistory();
   const shellHistory = useInputHistory('qwen-web-shell-command-history');
@@ -265,6 +270,92 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const shellHistoryActionsRef = useRef(shellHistory);
   shellHistoryActionsRef.current = shellHistory;
   pastedImagesRef.current = pastedImages;
+
+  // Open the reverse-i-search history panel. Shared by the Ctrl+R keymap and
+  // the mouse-discoverable history button so both stay in lockstep.
+  const openHistorySearch = useCallback(() => {
+    if (disabledRef.current) return;
+    const view = viewRef.current;
+    if (!view) return;
+    const query = view.state.doc.toString();
+    searchDraftRef.current = query;
+    setSearchMode(true);
+    setSearchQuery(query);
+    const history = shellModeRef.current
+      ? shellHistoryActionsRef.current
+      : historyActionsRef.current;
+    setSearchMatches(history.getReverseMatches(query));
+    setSearchActiveIndex(0);
+    history.resetSearch();
+    setTimeout(() => searchInputRef.current?.focus(), 0);
+  }, []);
+  const openHistorySearchRef = useRef(openHistorySearch);
+  openHistorySearchRef.current = openHistorySearch;
+
+  // Fill the editor with the previous history entry (mirrors ArrowUp), used by
+  // the clickable "history" hint so mouse users can walk history too.
+  const navigatePrevHistory = useCallback(() => {
+    if (disabledRef.current) return;
+    const view = viewRef.current;
+    if (!view) return;
+    // Match the ArrowUp keymap: when the completion menu is open, move its
+    // selection instead of navigating history.
+    if (completionStatus(view.state) === 'active') {
+      moveCompletionSelection(false)(view);
+      view.focus();
+      return;
+    }
+    // ...and leave multi-line input alone rather than replacing a multi-line
+    // draft with a single history entry.
+    if (view.state.doc.lines > 1) {
+      view.focus();
+      return;
+    }
+    const history = shellModeRef.current
+      ? shellHistoryActionsRef.current
+      : historyActionsRef.current;
+    const current = view.state.doc.toString();
+    const prev = history.navigateUp(current);
+    if (prev !== null) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: prev },
+        selection: { anchor: prev.length },
+      });
+    }
+    view.focus();
+  }, []);
+
+  // Step toward newer history (mirrors ArrowDown); paired with the "previous"
+  // hint so mouse users can walk history in both directions.
+  const navigateNextHistory = useCallback(() => {
+    if (disabledRef.current) return;
+    const view = viewRef.current;
+    if (!view) return;
+    // Match the ArrowDown keymap: when the completion menu is open, move its
+    // selection instead of navigating history.
+    if (completionStatus(view.state) === 'active') {
+      moveCompletionSelection(true)(view);
+      view.focus();
+      return;
+    }
+    // ...and leave multi-line input alone rather than replacing a multi-line
+    // draft with a single history entry.
+    if (view.state.doc.lines > 1) {
+      view.focus();
+      return;
+    }
+    const history = shellModeRef.current
+      ? shellHistoryActionsRef.current
+      : historyActionsRef.current;
+    const next = history.navigateDown();
+    if (next !== null) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: next },
+        selection: { anchor: next.length },
+      });
+    }
+    view.focus();
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -527,18 +618,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Ctrl-r',
-        run: (view) => {
-          const query = view.state.doc.toString();
-          searchDraftRef.current = query;
-          setSearchMode(true);
-          setSearchQuery(query);
-          const history = shellModeRef.current
-            ? shellHistoryActionsRef.current
-            : historyActionsRef.current;
-          setSearchMatches(history.getReverseMatches(query));
-          setSearchActiveIndex(0);
-          history.resetSearch();
-          setTimeout(() => searchInputRef.current?.focus(), 0);
+        run: () => {
+          openHistorySearchRef.current();
           return true;
         },
       },
@@ -644,6 +725,42 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       }, 0);
     });
 
+    // Remove a hint-button-inserted trigger ('/' or '@') when its completion
+    // menu closes for any reason — Escape, click-away, blur — and the user
+    // never typed past it. Watching the completion status covers every
+    // dismissal path, not just the Escape key.
+    let prevCompletionActive = false;
+    const triggerCleanupListener = EditorView.updateListener.of((update) => {
+      const trigger = autoTriggerRef.current;
+      const nowActive = completionStatus(update.state) === 'active';
+      if (trigger) {
+        const doc = update.state.doc;
+        const intact =
+          doc.length === trigger.from + trigger.text.length &&
+          doc.sliceString(trigger.from) === trigger.text;
+        if (!intact) {
+          // The user typed/edited past the trigger — keep their content.
+          autoTriggerRef.current = null;
+        } else if (prevCompletionActive && !nowActive) {
+          autoTriggerRef.current = null;
+          const { view } = update;
+          const { from } = trigger;
+          window.setTimeout(() => {
+            if (viewRef.current !== view) return;
+            const d = view.state.doc;
+            // Re-check in case the user typed between close and this callback.
+            if (
+              d.length === from + trigger.text.length &&
+              d.sliceString(from) === trigger.text
+            ) {
+              view.dispatch({ changes: { from, to: d.length, insert: '' } });
+            }
+          }, 0);
+        }
+      }
+      prevCompletionActive = nowActive;
+    });
+
     const state = EditorState.create({
       doc: '',
       extensions: [
@@ -693,6 +810,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         ),
         inputHighlightTheme,
         slashCompletionRestarter,
+        triggerCleanupListener,
         EditorView.inputHandler.of((view, from, to, insert) => {
           if (
             insert.length > 0 &&
@@ -968,13 +1086,70 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       return;
     }
     const selection = view.state.selection.main;
-    view.dispatch({
-      changes: { from: selection.from, to: selection.to, insert: text },
-      selection: { anchor: selection.from + text.length },
-      scrollIntoView: true,
-    });
+    let insert = text;
+    // Make the trigger characters idempotent so a second click re-opens the
+    // menu instead of inserting a duplicate.
+    let skipInsert = false;
+    let caretOverride: number | null = null;
+    // Whether to open the completion menu afterwards. A mid-line '/' no-op
+    // (non-empty draft) must not, since the slash source needs a line-leading
+    // '/' and would otherwise pop an empty/unrelated menu.
+    let openMenu = text === '/' || text === '@';
+    if (text === '/') {
+      // The slash-command menu only triggers on a line-leading '/'. Re-open the
+      // menu (don't insert) when the line already starts with '/', and no-op
+      // when the editor holds other text: inserting a mid-line '/' wouldn't open
+      // the menu, and replacing the draft would silently destroy it. The user
+      // can clear the draft themselves to start a command on an empty line.
+      const line = view.state.doc.lineAt(selection.head);
+      if (line.text.startsWith('/')) {
+        skipInsert = true; // re-open the menu on the existing command
+      } else if (view.state.doc.length > 0) {
+        skipInsert = true;
+        openMenu = false; // no-op on a non-empty draft; don't pop an empty menu
+      }
+    } else if (text === '@') {
+      const before =
+        selection.from > 0
+          ? view.state.doc.sliceString(selection.from - 1, selection.from)
+          : '';
+      const after = view.state.doc.sliceString(
+        selection.from,
+        selection.from + 1,
+      );
+      if (after === '@') {
+        // Cursor sits directly before an existing '@'; step over it instead of
+        // inserting a duplicate, so the menu opens on the existing mention.
+        skipInsert = true;
+        caretOverride = selection.from + 1;
+      } else if (before === '@') {
+        // Already an '@' right before the cursor — just re-open the menu.
+        skipInsert = true;
+      } else if (before && !/\s/.test(before)) {
+        // An @-mention only parses at a token boundary, so when it lands
+        // mid-word prepend a space to detach it.
+        insert = ' @';
+      }
+    }
+    if (!skipInsert) {
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert },
+        selection: { anchor: selection.from + insert.length },
+        scrollIntoView: true,
+      });
+      // Remember the click-inserted trigger so Escape can undo it if the user
+      // never types past it (see the Escape keymap).
+      if (openMenu) {
+        autoTriggerRef.current = { text: insert, from: selection.from };
+      }
+    } else if (caretOverride !== null) {
+      view.dispatch({
+        selection: { anchor: caretOverride },
+        scrollIntoView: true,
+      });
+    }
     view.focus();
-    if (text === '/' || text === '@') {
+    if (openMenu) {
       window.setTimeout(() => {
         const nextView = viewRef.current;
         if (nextView && nextView.hasFocus) {
@@ -1032,7 +1207,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   }, []);
 
   const closeSearch = useCallback(
-    (restoreDraft: boolean) => {
+    (restoreDraft: boolean, keepFocus = true) => {
       if (restoreDraft) {
         replaceEditorText(searchDraftRef.current);
       }
@@ -1044,10 +1219,38 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         ? shellHistoryActionsRef.current
         : historyActionsRef.current;
       history.resetSearch();
-      viewRef.current?.focus();
+      // Outside-click dismissal passes keepFocus=false so focus isn't stolen
+      // from whatever the user clicked (e.g. a button/link in the transcript).
+      if (keepFocus) {
+        viewRef.current?.focus();
+      }
     },
     [replaceEditorText],
   );
+
+  // While the reverse-i-search panel is open, a primary-button / touch press
+  // outside it behaves like Escape: cancel the search and restore the draft.
+  // Mirrors the inline-panel dismissal (Settings/Mode pickers).
+  useEffect(() => {
+    if (!searchMode) return;
+    const onPointerOutside = (event: Event) => {
+      // Only the primary (left) button dismisses; middle-click pastes and
+      // right-click opens a context menu. Touch events have no button.
+      if (event instanceof MouseEvent && event.button !== 0) return;
+      if (event.defaultPrevented) return;
+      const panel = searchUiRef.current;
+      const target = event.target;
+      if (panel && target instanceof Node && !panel.contains(target)) {
+        closeSearch(true, false);
+      }
+    };
+    window.addEventListener('mousedown', onPointerOutside);
+    window.addEventListener('touchstart', onPointerOutside);
+    return () => {
+      window.removeEventListener('mousedown', onPointerOutside);
+      window.removeEventListener('touchstart', onPointerOutside);
+    };
+  }, [searchMode, closeSearch]);
 
   const submitSearchMatch = useCallback(
     (match: string) => {
@@ -1165,6 +1368,35 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   ) : (
     <PromptChevron />
   );
+  // A faint, always-on hint row that surfaces the otherwise-hidden input
+  // shortcuts (history search, slash commands, file mentions) so they stay
+  // discoverable even while typing. Hidden where it would conflict or not
+  // apply: shell mode (different prefix), reverse-i-search (its own hint bar),
+  // a followup suggestion occupying the placeholder, while disabled (the
+  // buttons would otherwise bypass the editor's disabled guard), or while a
+  // dialog is open (matching the Ctrl+R keymap guard).
+  const showShortcutHints =
+    !shellMode &&
+    !searchMode &&
+    !followupState?.isVisible &&
+    !disabled &&
+    !dialogOpen;
+  // Enable/disable the ↑/↓ history hints based on whether there's an older /
+  // newer entry to move to (mirrors the keyboard no-op at the ends).
+  const histNav = (shellMode ? shellHistory : promptHistory).nav;
+  // Shared props for the hint-row buttons: keep focus in the editor
+  // (preventDefault on mousedown) and don't bubble to the container's click-
+  // to-focus handler (stopPropagation on click).
+  const hintProps = (handler: () => void, haspopup?: 'dialog' | 'listbox') => ({
+    type: 'button' as const,
+    className: styles.hintItem,
+    ...(haspopup ? { 'aria-haspopup': haspopup } : {}),
+    onMouseDown: (e: ReactMouseEvent<HTMLButtonElement>) => e.preventDefault(),
+    onClick: (e: ReactMouseEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      handler();
+    },
+  });
 
   return (
     <div className={containerClass} onClick={focus}>
@@ -1174,51 +1406,53 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         )}
       </div>
       {searchMode && (
-        <div className={styles.searchBar}>
-          <span className={styles.searchLabel}>reverse-i-search:</span>
-          <input
-            ref={searchInputRef}
-            className={styles.searchInput}
-            value={searchQuery}
-            onChange={handleSearchInput}
-            onKeyDown={handleSearchKeyDown}
-            placeholder="type to search..."
-          />
-          <span className={styles.searchHint}>
-            ctrl+r next · tab accept · enter send · esc cancel
-          </span>
+        <div ref={searchUiRef}>
+          <div className={styles.searchBar}>
+            <span className={styles.searchLabel}>reverse-i-search:</span>
+            <input
+              ref={searchInputRef}
+              className={styles.searchInput}
+              value={searchQuery}
+              onChange={handleSearchInput}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="type to search..."
+            />
+            <span className={styles.searchHint}>
+              ctrl+r next · tab accept · enter send · esc cancel
+            </span>
+          </div>
+          {searchMatches.length > 0 && (
+            <div className={styles.searchResults}>
+              {visibleSearchMatches.map((match, index) => {
+                const matchIndex = visibleSearchStart + index;
+                return (
+                  <button
+                    key={`${match}-${matchIndex}`}
+                    type="button"
+                    className={`${styles.searchResult} ${
+                      matchIndex === searchActiveIndex
+                        ? styles.searchResultActive
+                        : ''
+                    }`}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      replaceEditorText(match);
+                      closeSearch(false);
+                    }}
+                  >
+                    <span className={styles.searchResultMarker}>
+                      {matchIndex === searchActiveIndex ? '›' : ''}
+                    </span>
+                    <span className={styles.searchResultText}>{match}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {searchMatches.length === 0 && (
+            <div className={styles.searchEmpty}>{t('editor.noHistory')}</div>
+          )}
         </div>
-      )}
-      {searchMode && searchMatches.length > 0 && (
-        <div className={styles.searchResults}>
-          {visibleSearchMatches.map((match, index) => {
-            const matchIndex = visibleSearchStart + index;
-            return (
-              <button
-                key={`${match}-${matchIndex}`}
-                type="button"
-                className={`${styles.searchResult} ${
-                  matchIndex === searchActiveIndex
-                    ? styles.searchResultActive
-                    : ''
-                }`}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  replaceEditorText(match);
-                  closeSearch(false);
-                }}
-              >
-                <span className={styles.searchResultMarker}>
-                  {matchIndex === searchActiveIndex ? '›' : ''}
-                </span>
-                <span className={styles.searchResultText}>{match}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {searchMode && searchMatches.length === 0 && (
-        <div className={styles.searchEmpty}>{t('editor.noHistory')}</div>
       )}
       {pastedImages.length > 0 && (
         <div className={styles.images}>
@@ -1242,6 +1476,37 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         <span className={prefixClass}>{prefixContent}</span>
         <div ref={containerRef} className={styles.wrapper} />
       </div>
+      {showShortcutHints && (
+        <div className={styles.hints}>
+          <button {...hintProps(navigatePrevHistory)} disabled={!histNav.canUp}>
+            <span className={styles.hintKey}>↑</span>
+            {t('editor.hintPrev')}
+          </button>
+          <span className={styles.hintSep}>·</span>
+          <button
+            {...hintProps(navigateNextHistory)}
+            disabled={!histNav.canDown}
+          >
+            <span className={styles.hintKey}>↓</span>
+            {t('editor.hintNext')}
+          </button>
+          <span className={styles.hintSep}>·</span>
+          <button {...hintProps(openHistorySearch, 'dialog')}>
+            <span className={styles.hintKey}>ctrl+r</span>
+            {t('editor.hintSearch')}
+          </button>
+          <span className={styles.hintSep}>·</span>
+          <button {...hintProps(() => insertText('/'), 'listbox')}>
+            <span className={styles.hintKey}>/</span>
+            {t('editor.hintCommands')}
+          </button>
+          <span className={styles.hintSep}>·</span>
+          <button {...hintProps(() => insertText('@'), 'listbox')}>
+            <span className={styles.hintKey}>@</span>
+            {t('editor.hintFiles')}
+          </button>
+        </div>
+      )}
       <div className={styles.borderBottom} />
     </div>
   );
