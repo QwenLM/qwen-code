@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
   ALL_PROVIDERS,
   AuthType,
+  Protocol,
   CUSTOM_API_KEY_ENV_PREFIX,
   Storage,
   applyProviderInstallPlan,
@@ -333,7 +334,7 @@ export function writeCodingPlanConfig(
     envKey: planConfig.envKey,
   }));
   providers[AuthType.USE_OPENAI] = {
-    protocol: 'openai',
+    protocol: Protocol.OPENAI,
     models: [...planModels, ...nonCodingPlan],
   };
 
@@ -403,7 +404,7 @@ export function writeModelProvidersConfig(params: {
   );
   const nonTarget = existing.filter((e) => e.envKey !== 'OPENAI_API_KEY');
   providers[AuthType.USE_OPENAI] = {
-    protocol: 'openai',
+    protocol: Protocol.OPENAI,
     models: [...modelArray, ...nonTarget],
   };
 

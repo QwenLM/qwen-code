@@ -289,8 +289,8 @@ export function resolveModelConfig(
     apiKeyEnvKey,
     baseUrl: baseUrlResult?.value,
     proxy,
-    protocol: authType ? authTypeToProtocol(authType) : undefined,
     ...generationConfig,
+    protocol: authType ? authTypeToProtocol(authType) : undefined,
   };
 
   // Add proxy source
@@ -368,8 +368,8 @@ function resolveQwenOAuthConfig(
     model: resolvedModel,
     apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
     proxy,
-    protocol: authTypeToProtocol(AuthType.QWEN_OAUTH),
     ...generationConfig,
+    protocol: authTypeToProtocol(AuthType.QWEN_OAUTH),
   };
 
   return { config, sources, warnings };

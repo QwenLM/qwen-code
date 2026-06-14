@@ -7,7 +7,7 @@
 import process from 'node:process';
 
 import { AuthType } from '../core/contentGenerator.js';
-import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
+import type { ContentGeneratorConfig , Protocol } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
@@ -569,13 +569,22 @@ export class ModelsConfig {
    * Get generation config for ContentGenerator creation
    */
   getGenerationConfig(): Partial<ContentGeneratorConfig> {
-    if (this.currentAuthType) {
-      const protocol =
-        this.modelRegistry.getProtocolForAuthType(this.currentAuthType) ??
-        authTypeToProtocol(this.currentAuthType);
-      this._generationConfig.protocol = protocol;
-    }
-    return this._generationConfig;
+    if (!this.currentAuthType) return this._generationConfig;
+    return {
+      ...this._generationConfig,
+      protocol: this.getProtocol(this.currentAuthType),
+    };
+  }
+
+  /**
+   * Resolve the Protocol for a given authType.
+   * Two-tier lookup: ModelRegistry first, static fallback second.
+   */
+  getProtocol(authType: string): Protocol {
+    return (
+      this.modelRegistry.getProtocolForAuthType(authType as AuthType) ??
+      authTypeToProtocol(authType as AuthType)
+    );
   }
 
   /**

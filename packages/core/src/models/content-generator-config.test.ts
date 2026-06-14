@@ -24,14 +24,26 @@ vi.mock('../core/contentGenerator.js', async (importOriginal) => {
   };
 });
 
+const DEFAULT_PROTOCOL_LOOKUP = (authType: string): Protocol => {
+  const map: Record<string, Protocol> = {
+    openai: Protocol.OPENAI,
+    anthropic: Protocol.ANTHROPIC,
+    gemini: Protocol.GEMINI,
+    qwen_oauth: Protocol.QWEN_OAUTH,
+  };
+  return map[authType] ?? Protocol.OPENAI;
+};
+
 function createMockConfig(
   parentConfig: ContentGeneratorConfig,
   resolvedModel?: ResolvedModelConfig,
+  protocolOverride?: (authType: string) => Protocol,
 ) {
   return {
     getContentGeneratorConfig: () => parentConfig,
     getModelsConfig: () => ({
       getResolvedModel: vi.fn().mockReturnValue(resolvedModel),
+      getProtocol: protocolOverride ?? DEFAULT_PROTOCOL_LOOKUP,
     }),
   } as unknown as Config;
 }
@@ -130,6 +142,23 @@ describe('buildAgentContentGeneratorConfig', () => {
       });
 
       expect(result.apiKey).toBe('env-anthropic-key');
+    });
+  });
+
+  describe('cross-provider with custom provider (registry-only protocol)', () => {
+    it('should use registry protocol for custom authType not in static map', () => {
+      const customLookup = (authType: string): Protocol => {
+        if (authType === 'my-custom-provider') return Protocol.ANTHROPIC;
+        return DEFAULT_PROTOCOL_LOOKUP(authType);
+      };
+      const config = createMockConfig(parentConfig, undefined, customLookup);
+
+      const result = buildAgentContentGeneratorConfig(config, 'custom-model', {
+        authType: 'my-custom-provider',
+      });
+
+      expect(result.protocol).toBe(Protocol.ANTHROPIC);
+      expect(result.model).toBe('custom-model');
     });
   });
 

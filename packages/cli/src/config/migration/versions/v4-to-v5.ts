@@ -71,7 +71,9 @@ export class V4ToV5Migration implements SettingsMigration {
 
         if (!Object.hasOwn(PROVIDER_KEY_TO_PROTOCOL, key)) {
           warnings.push(
-            `Unknown provider key "${key}", defaulting protocol to "openai".`,
+            `Unknown provider key "${key}", defaulting protocol to "openai". ` +
+              `If this provider uses a different protocol (anthropic, gemini), ` +
+              `edit settings.json to set "protocol" explicitly.`,
           );
         }
 

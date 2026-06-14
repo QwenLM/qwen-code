@@ -14,11 +14,11 @@ import type {
 } from './types.js';
 
 const AUTH_TYPE_TO_PROTOCOL: Record<string, Protocol> = {
-  openai: 'openai' as Protocol,
-  'qwen-oauth': 'qwen-oauth' as Protocol,
-  gemini: 'gemini' as Protocol,
-  'vertex-ai': 'gemini' as Protocol,
-  anthropic: 'anthropic' as Protocol,
+  openai: Protocol.OPENAI,
+  'qwen-oauth': Protocol.QWEN_OAUTH,
+  gemini: Protocol.GEMINI,
+  'vertex-ai': Protocol.GEMINI,
+  anthropic: Protocol.ANTHROPIC,
 };
 
 export function authTypeToProtocol(authType: AuthType): Protocol {
