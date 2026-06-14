@@ -57,6 +57,7 @@ function fakes(updateBatches: TelegramUpdate[][]) {
       token === 'inv_ok'
         ? { ok: true, status: 200, sessionId: 'sess-q' }
         : { ok: false, status: 400, body: { error: 'bad' } },
+    heartbeat: async () => ({ ok: true, status: 200 }),
     sendPrompt: async () => ({ ok: true, status: 200 }),
     vote: async () => ({ ok: true, status: 200 }),
     subscribeEvents: async (sessionId: string) => {

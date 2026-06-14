@@ -9,6 +9,7 @@ import type { TelegramBotApi } from './botApi.js';
 import type { TelegramChatStore } from './chatStore.js';
 import { handleUpdate, type DispatchDeps } from './dispatch.js';
 import { renderPermissionRequest } from './render.js';
+import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
 
 export interface TelegramBridgeConfig {
   botApi: TelegramBotApi;
@@ -61,12 +62,9 @@ export class TelegramBridge {
     };
   }
 
-  /**
-   * Register the bridge, then run the poll loop (which also reconciles SSE
-   * subscriptions each tick) until `signal` aborts. Resolves when the loop ends.
-   */
-  async start(signal: AbortSignal): Promise<void> {
-    const reg = await this.cfg.client.register({
+  /** Register (or re-register) this bridge's capabilities with the gateway. */
+  private registerSelf(): Promise<import('../client.js').WriteResult> {
+    return this.cfg.client.register({
       id: TELEGRAM_BRIDGE_ID,
       displayName: 'Telegram',
       supportsActions: true, // inline keyboard buttons
@@ -75,11 +73,27 @@ export class TelegramBridge {
       supportsEdits: false, // permission_request is not edited on resolve
       maxMessageBytes: 4096,
     });
+  }
+
+  /**
+   * Register, start the heartbeat loop, then run the poll loop (which also
+   * reconciles SSE subscriptions each tick) until `signal` aborts.
+   */
+  async start(signal: AbortSignal): Promise<void> {
+    const reg = await this.registerSelf();
     this.log(
       reg.ok
         ? 'telegram bridge: registered with the gateway'
         : `telegram bridge: registration returned ${reg.status} (continuing)`,
     );
+    void runHeartbeatLoop({
+      heartbeat: (id) => this.cfg.client.heartbeat(id),
+      reRegister: () => this.registerSelf(),
+      bridgeId: TELEGRAM_BRIDGE_ID,
+      intervalMs: heartbeatIntervalMsOf(reg.body),
+      signal,
+      log: this.log,
+    });
     // Subscribe to any sessions already bound from a previous run.
     this.reconcileSubscriptions(signal);
     await this.pollLoop(signal);

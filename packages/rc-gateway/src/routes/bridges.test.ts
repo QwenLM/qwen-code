@@ -19,6 +19,9 @@ import {
   createListBansRoute,
   createMintInviteRoute,
   createRedeemInviteRoute,
+  createHeartbeatRoute,
+  pruneStaleBridges,
+  BRIDGE_STALE_MS,
 } from './bridges.js';
 import { SubActorBanStore } from '../bridges/subActorBans.js';
 import { InviteStore } from '../bridges/inviteStore.js';
@@ -98,6 +101,7 @@ describe('POST /rc/bridges (register/heartbeat)', () => {
       tokenId: 'tkn-bridge',
     });
     expect(typeof json.registeredAt).toBe('number');
+    expect(json.heartbeatIntervalSec).toBe(60); // spec response field
     expect(registry.get('telegram')?.displayName).toBe('Telegram');
     const rec = audit.calls.find((c) => c.action === 'bridge_registered');
     expect(rec?.target).toBe('telegram');
@@ -279,6 +283,129 @@ describe('BridgeRegistry', () => {
     expect(r.remove('a')).toBe(true);
     expect(r.remove('a')).toBe(false);
     expect(r.list().map((x) => x.id)).toEqual(['b']);
+  });
+
+  it('touch refreshes registeredAt; pruneStale drops the missed-heartbeat ones', () => {
+    const r = new BridgeRegistry();
+    const mk = (id: string, at: number) =>
+      r.register({
+        id,
+        tokenId: 't',
+        displayName: id,
+        supportsActions: false,
+        supportsMarkdown: 'none',
+        supportsThreads: false,
+        supportsEdits: false,
+        maxMessageBytes: 0,
+        registeredAt: at,
+      });
+    mk('fresh', 1000);
+    mk('stale', 1000);
+    expect(r.touch('fresh', 115_000)).toBe(true); // a heartbeat lands
+    expect(r.touch('nope', 115_000)).toBe(false); // unknown id
+    // staleMs window 10s relative to now=120000: 'stale' (last 1000) is gone,
+    // 'fresh' (touched at 115000 → 5s ago) survives.
+    const removed = r.pruneStale(120_000, 10_000);
+    expect(removed).toEqual(['stale']);
+    expect(r.get('fresh')).toBeDefined();
+    expect(r.get('stale')).toBeUndefined();
+  });
+});
+
+describe('pruneStaleBridges (reaper helper)', () => {
+  it('removes stale bridges and audits each bridge_stale_deregistered', () => {
+    const r = new BridgeRegistry();
+    const audit = fakeAudit();
+    r.register({
+      id: 'dead',
+      tokenId: 't',
+      displayName: 'dead',
+      supportsActions: false,
+      supportsMarkdown: 'none',
+      supportsThreads: false,
+      supportsEdits: false,
+      maxMessageBytes: 0,
+      registeredAt: 0,
+    });
+    const removed = pruneStaleBridges(r, BRIDGE_STALE_MS + 1, audit);
+    expect(removed).toEqual(['dead']);
+    expect(
+      audit.calls.find((c) => c.action === 'bridge_stale_deregistered')?.target,
+    ).toBe('dead');
+  });
+});
+
+describe('POST /rc/bridges/:id/heartbeat', () => {
+  let hbServer: Server | undefined;
+  let hbBase: string;
+  let reg: BridgeRegistry;
+  let hbAudit: ReturnType<typeof fakeAudit>;
+
+  function mountHb(client: { id: string; scopes: string[] }, t = 5000) {
+    reg = new BridgeRegistry();
+    hbAudit = fakeAudit();
+    reg.register({
+      id: 'telegram',
+      tokenId: 'tkn-bridge',
+      displayName: 'Telegram',
+      supportsActions: true,
+      supportsMarkdown: 'limited',
+      supportsThreads: false,
+      supportsEdits: false,
+      maxMessageBytes: 4096,
+      registeredAt: 1,
+    });
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as { rcClient?: unknown }).rcClient = client;
+      next();
+    });
+    app.post(
+      '/rc/bridges/:id/heartbeat',
+      createHeartbeatRoute(reg, hbAudit, () => t),
+    );
+    return new Promise<void>((resolve) => {
+      hbServer = app.listen(0, '127.0.0.1', () => {
+        hbBase = `http://127.0.0.1:${(hbServer!.address() as AddressInfo).port}`;
+        resolve();
+      });
+    });
+  }
+  afterEach(
+    () =>
+      new Promise<void>((r) => (hbServer ? hbServer.close(() => r()) : r())),
+  );
+
+  const beat = (id: string) =>
+    fetch(`${hbBase}/rc/bridges/${id}/heartbeat`, { method: 'POST' });
+
+  it('self refreshes registeredAt and returns the interval', async () => {
+    await mountHb({ id: 'tkn-bridge', scopes: [BRIDGE, SESSION_READ] }, 5000);
+    const res = await beat('telegram');
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      id: 'telegram',
+      registeredAt: 5000,
+      heartbeatIntervalSec: 60,
+    });
+    expect(reg.get('telegram')?.registeredAt).toBe(5000);
+  });
+
+  it('404s an unknown bridge and audits bridge_heartbeat_unknown', async () => {
+    await mountHb({ id: 'tkn-bridge', scopes: [BRIDGE, SESSION_READ] });
+    const res = await beat('ghost');
+    expect(res.status).toBe(404);
+    expect(
+      hbAudit.calls.some((c) => c.action === 'bridge_heartbeat_unknown'),
+    ).toBe(true);
+  });
+
+  it('403s a different bridge token (not owner, not self)', async () => {
+    await mountHb({ id: 'tkn-other', scopes: [BRIDGE, SESSION_READ] });
+    const res = await beat('telegram');
+    expect(res.status).toBe(403);
   });
 });
 

@@ -55,6 +55,12 @@ beforeEach(() => {
     cap(req);
     res.status(200).json({ ok: true });
   });
+  app.post('/rc/bridges/:id/heartbeat', (req, res) => {
+    cap(req);
+    res
+      .status(200)
+      .json({ id: req.params.id, registeredAt: 1, heartbeatIntervalSec: 60 });
+  });
   app.post('/rc/bridges/:id/invite/redeem', (req, res) => {
     cap(req);
     if (req.body?.token === 'inv_good') {
@@ -131,6 +137,19 @@ describe('BridgeClient (loopback contract)', () => {
       path: '/rc/bridges/telegram/invite/redeem',
       auth: 'Bearer qwk_test',
       body: { token: 'inv_good' },
+    });
+  });
+
+  it('heartbeat POSTs the bridge heartbeat path with the bearer token', async () => {
+    const r = await client().heartbeat('telegram');
+    expect(r.ok).toBe(true);
+    expect(
+      (r.body as { heartbeatIntervalSec?: number }).heartbeatIntervalSec,
+    ).toBe(60);
+    expect(captured[0]).toMatchObject({
+      method: 'POST',
+      path: '/rc/bridges/telegram/heartbeat',
+      auth: 'Bearer qwk_test',
     });
   });
 

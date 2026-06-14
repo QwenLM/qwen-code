@@ -75,4 +75,31 @@ export class BridgeRegistry {
   remove(id: string): boolean {
     return this.byId.delete(id);
   }
+
+  /**
+   * Refresh a bridge's `registeredAt` to `now` (a heartbeat). Returns true if the
+   * id is registered. Used by the heartbeat route to keep a live bridge fresh so
+   * the staleness reaper doesn't drop it.
+   */
+  touch(id: string, now: number): boolean {
+    const reg = this.byId.get(id);
+    if (!reg) return false;
+    reg.registeredAt = now;
+    return true;
+  }
+
+  /**
+   * Remove every bridge whose last register/heartbeat is older than `staleMs`
+   * before `now` (i.e. it missed enough heartbeats). Returns the removed ids so
+   * the caller can audit each `bridge_stale_deregistered`. Pure bookkeeping — no
+   * I/O, never throws.
+   */
+  pruneStale(now: number, staleMs: number): string[] {
+    const removed: string[] = [];
+    for (const [id, reg] of this.byId) {
+      if (now - reg.registeredAt > staleMs) removed.push(id);
+    }
+    for (const id of removed) this.byId.delete(id);
+    return removed;
+  }
 }

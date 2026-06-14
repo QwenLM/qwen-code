@@ -61,6 +61,7 @@ function harness(batches: unknown[]) {
       registered = reg;
       return { ok: true, status: 200 };
     },
+    heartbeat: async () => ({ ok: true, status: 200 }),
     sendPrompt: async (_s: string, prompt: string) => {
       prompts.push(prompt);
       return { ok: true, status: 200 };

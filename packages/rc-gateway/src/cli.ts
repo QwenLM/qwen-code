@@ -25,6 +25,7 @@ import {
   formatRoutingTest,
 } from './routing/test.js';
 import { createGatewayApp } from './server.js';
+import { pruneStaleBridges, HEARTBEAT_INTERVAL_SEC } from './routes/bridges.js';
 import { BridgeClient } from './bridges/client.js';
 import { TelegramBotApi } from './bridges/telegram/botApi.js';
 import { TelegramChatStore } from './bridges/telegram/chatStore.js';
@@ -154,17 +155,27 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       ),
     };
   };
-  const { app, notifier, audit, ownerEvents } = createGatewayApp({
-    daemon: handle.daemon,
-    store,
-    pairing,
-    vapid,
-    pushStore,
-    snooze,
-    routing,
-    idleToggles,
-    idleStatus,
-  });
+  const { app, notifier, audit, ownerEvents, bridgeRegistry } =
+    createGatewayApp({
+      daemon: handle.daemon,
+      store,
+      pairing,
+      vapid,
+      pushStore,
+      snooze,
+      routing,
+      idleToggles,
+      idleStatus,
+    });
+
+  // Bridge staleness reaper: every heartbeat interval, drop bridges that missed
+  // ~3 heartbeats and audit each (bridge_stale_deregistered). Unref'd so it never
+  // keeps the process alive; cleared in shutdown so it doesn't leak.
+  const bridgeReaper = setInterval(
+    () => pruneStaleBridges(bridgeRegistry, Date.now(), audit),
+    HEARTBEAT_INTERVAL_SEC * 1000,
+  );
+  bridgeReaper.unref();
 
   // Load the policy fail-closed, layered over the same workspace cwd resolved
   // for routing above (cycle 38): user ~/.qwen/rc/policy.yaml + workspace
@@ -638,6 +649,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     reloader?.stop();
     routingReloader?.stop();
     if (quietDigestTimer) clearInterval(quietDigestTimer);
+    clearInterval(bridgeReaper);
     telegramAbort?.abort();
     discordAbort?.abort();
     matrixAbort?.abort();

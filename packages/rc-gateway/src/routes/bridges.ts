@@ -23,6 +23,11 @@ const SESSION_ID_MAX = 256;
 /** Spec error text returned verbatim on a bad/expired token (bridges relay it). */
 const INVALID_INVITE_MESSAGE = 'Invalid or expired invite token';
 
+/** How often a bridge SHOULD heartbeat (spec default), returned at registration. */
+export const HEARTBEAT_INTERVAL_SEC = 60;
+/** A bridge is reaped after ~3 missed heartbeats with no register/heartbeat. */
+export const BRIDGE_STALE_MS = 3 * HEARTBEAT_INTERVAL_SEC * 1000;
+
 /** Stable bridge id: alphanumeric-led, safe id charset, bounded (audit-safe). */
 const BRIDGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:._@-]*$/;
 const BRIDGE_ID_MAX = 128;
@@ -156,8 +161,75 @@ export function createRegisterBridgeRoute(
         maxMessageBytes: reg.maxMessageBytes,
       },
     });
-    res.status(200).json(reg);
+    // Spec response carries heartbeatIntervalSec; we return the full reg too
+    // (superset) so the owner sees the recorded capabilities in one round-trip.
+    res
+      .status(200)
+      .json({ ...reg, heartbeatIntervalSec: HEARTBEAT_INTERVAL_SEC });
   };
+}
+
+/**
+ * POST /rc/bridges/:id/heartbeat — a registered bridge refreshes its liveness so
+ * the staleness reaper doesn't drop it. Owner-or-self (same authz as deregister).
+ * 404 when the id is unknown (e.g. it was already reaped) so the bridge knows to
+ * re-register — re-registration needs no re-pairing. Returns the refreshed
+ * `{ id, registeredAt, heartbeatIntervalSec }`.
+ */
+export function createHeartbeatRoute(
+  registry: BridgeRegistry,
+  audit?: AuditRecorder,
+  now: () => number = Date.now,
+): RequestHandler {
+  return (req, res) => {
+    const id = req.params.id;
+    const ownerToken = registry.ownerTokenOf(id);
+    if (ownerToken === undefined) {
+      void audit?.record({
+        action: 'bridge_heartbeat_unknown',
+        actorTokenId: req.rcClient?.id,
+        target: id,
+      });
+      res
+        .status(404)
+        .json({ error: 'No such bridge', code: 'bridge_not_found' });
+      return;
+    }
+    const scopes = req.rcClient?.scopes ?? [];
+    const isOwner = scopes.includes(OWNER);
+    const isSelf = ownerToken === req.rcClient?.id;
+    if (!isOwner && !isSelf) {
+      res
+        .status(403)
+        .json({ error: 'Not your bridge', code: 'not_bridge_owner' });
+      return;
+    }
+    const at = now();
+    registry.touch(id, at);
+    res.status(200).json({
+      id,
+      registeredAt: at,
+      heartbeatIntervalSec: HEARTBEAT_INTERVAL_SEC,
+    });
+  };
+}
+
+/**
+ * Remove bridges that missed ~3 heartbeats and audit each one
+ * (`bridge_stale_deregistered`). Called on an interval by the gateway host (cli),
+ * with an injectable clock. Returns the removed ids.
+ */
+export function pruneStaleBridges(
+  registry: BridgeRegistry,
+  now: number,
+  audit?: AuditRecorder,
+  staleMs: number = BRIDGE_STALE_MS,
+): string[] {
+  const removed = registry.pruneStale(now, staleMs);
+  for (const id of removed) {
+    void audit?.record({ action: 'bridge_stale_deregistered', target: id });
+  }
+  return removed;
 }
 
 /** GET /rc/bridges — owner lists registered bridges. */

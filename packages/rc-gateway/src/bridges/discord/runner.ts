@@ -19,6 +19,8 @@ import {
 import { renderPermissionRequest, type DiscordActionRow } from './render.js';
 import { StreamRouter, type StreamPoster } from './streamRouter.js';
 import { extractAgentText } from './streamFrame.js';
+import { runHeartbeatLoop } from '../heartbeat.js';
+import { heartbeatIntervalMsOf } from '../heartbeat.js';
 
 /**
  * The injected inbound transport. The runner only needs "start the gateway and
@@ -132,12 +134,9 @@ export class DiscordBridge {
     };
   }
 
-  /**
-   * Register the bridge, subscribe to already-bound sessions, then start the
-   * inbound gateway. Resolves when the gateway loop ends (signal aborts).
-   */
-  async start(signal: AbortSignal): Promise<void> {
-    const reg = await this.cfg.client.register({
+  /** Register (or re-register) this bridge's capabilities with the gateway. */
+  private registerSelf(): Promise<import('../client.js').WriteResult> {
+    return this.cfg.client.register({
       id: DISCORD_BRIDGE_ID,
       displayName: 'Discord',
       supportsActions: true, // Approve/Deny buttons
@@ -146,11 +145,29 @@ export class DiscordBridge {
       supportsEdits: true, // edits the message on resolve
       maxMessageBytes: 2000,
     });
+  }
+
+  /**
+   * Register the bridge, start the heartbeat loop, subscribe to already-bound
+   * sessions, then start the inbound gateway. Resolves when the gateway loop ends.
+   */
+  async start(signal: AbortSignal): Promise<void> {
+    const reg = await this.registerSelf();
     this.log(
       reg.ok
         ? 'discord bridge: registered with the gateway'
         : `discord bridge: registration returned ${reg.status} (continuing)`,
     );
+    // The heartbeat loop uses its OWN (abort-aware) timer, not cfg.sleep — keeping
+    // it independent of the SSE reconnect-backoff sleep.
+    void runHeartbeatLoop({
+      heartbeat: (id) => this.cfg.client.heartbeat(id),
+      reRegister: () => this.registerSelf(),
+      bridgeId: DISCORD_BRIDGE_ID,
+      intervalMs: heartbeatIntervalMsOf(reg.body),
+      signal,
+      log: this.log,
+    });
     this.reconcileSubscriptions(signal);
 
     const gateway = this.cfg.makeGateway({

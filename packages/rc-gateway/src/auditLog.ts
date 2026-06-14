@@ -62,7 +62,9 @@ export type AuditAction =
   | 'sub_actor_unbanned'
   | 'bridge_invite_minted'
   | 'bridge_invite_redeemed'
-  | 'bridge_invite_redeem_failed';
+  | 'bridge_invite_redeem_failed'
+  | 'bridge_heartbeat_unknown'
+  | 'bridge_stale_deregistered';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -114,6 +116,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'bridge_invite_minted',
   'bridge_invite_redeemed',
   'bridge_invite_redeem_failed',
+  'bridge_heartbeat_unknown',
+  'bridge_stale_deregistered',
 ];
 
 export interface AuditEntry {

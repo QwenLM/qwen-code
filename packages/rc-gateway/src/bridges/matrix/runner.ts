@@ -6,6 +6,7 @@
 
 import type { BridgeClient, BridgeEvent } from '../client.js';
 import type { MatrixRoomStore } from './roomStore.js';
+import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
 import {
   handleMessage,
   handleReaction,
@@ -117,9 +118,9 @@ export class MatrixBridge {
     };
   }
 
-  /** Register, subscribe to bound sessions, then run the sync loop until abort. */
-  async start(signal: AbortSignal): Promise<void> {
-    const reg = await this.cfg.client.register({
+  /** Register (or re-register) this bridge's capabilities with the gateway. */
+  private registerSelf(): Promise<import('../client.js').WriteResult> {
+    return this.cfg.client.register({
       id: MATRIX_BRIDGE_ID,
       displayName: 'Matrix',
       supportsActions: false, // reactions, not buttons
@@ -128,11 +129,26 @@ export class MatrixBridge {
       supportsEdits: true, // m.replace edit on resolve
       maxMessageBytes: 65536,
     });
+  }
+
+  /** Register, heartbeat, subscribe to bound sessions, then run the sync loop. */
+  async start(signal: AbortSignal): Promise<void> {
+    const reg = await this.registerSelf();
     this.log(
       reg.ok
         ? 'matrix bridge: registered with the gateway'
         : `matrix bridge: registration returned ${reg.status} (continuing)`,
     );
+    // The heartbeat loop uses its OWN (abort-aware) timer, not cfg.sleep — keeping
+    // it independent of the /sync reconnect-backoff sleep.
+    void runHeartbeatLoop({
+      heartbeat: (id) => this.cfg.client.heartbeat(id),
+      reRegister: () => this.registerSelf(),
+      bridgeId: MATRIX_BRIDGE_ID,
+      intervalMs: heartbeatIntervalMsOf(reg.body),
+      signal,
+      log: this.log,
+    });
     this.reconcileSubscriptions(signal);
     await this.syncLoop(signal);
   }

@@ -93,6 +93,7 @@ function harness(
       token === 'inv_new'
         ? { ok: true, status: 200, sessionId: 'sess_new' }
         : { ok: false, status: 400, body: { error: 'bad' } },
+    heartbeat: async () => ({ ok: true, status: 200 }),
     subscribeEvents: async (sessionId: string) => {
       subscribed.push(sessionId);
     },
@@ -202,7 +203,9 @@ describe('DiscordBridge runner', () => {
     const ac = new AbortController();
     const cursors: Array<number | undefined> = [];
     let call = 0;
-    const h = harness({ sleep: async () => {} });
+    const h = harness({
+      sleep: () => new Promise<void>((r) => setTimeout(r, 1)), // yield each cycle
+    });
     (
       h.bridge as unknown as {
         cfg: {

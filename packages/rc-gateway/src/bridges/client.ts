@@ -96,6 +96,15 @@ export class BridgeClient {
     return typeof sessionId === 'string' ? { ...r, sessionId } : r;
   }
 
+  /** Refresh this bridge's liveness (POST /rc/bridges/:id/heartbeat). A 404 means
+   * the gateway no longer knows the bridge (reaped or restarted) → re-register. */
+  async heartbeat(bridgeId: string): Promise<WriteResult> {
+    return this.postJson(
+      `/rc/bridges/${encodeURIComponent(bridgeId)}/heartbeat`,
+      {},
+    );
+  }
+
   /** Send a prompt on behalf of a chat user (POST /rc/session/:id/prompt). */
   async sendPrompt(
     sessionId: string,

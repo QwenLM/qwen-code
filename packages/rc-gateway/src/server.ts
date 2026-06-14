@@ -55,6 +55,7 @@ import {
   createListBansRoute,
   createMintInviteRoute,
   createRedeemInviteRoute,
+  createHeartbeatRoute,
 } from './routes/bridges.js';
 import { BridgeRegistry } from './bridges/registry.js';
 import { InviteStore } from './bridges/inviteStore.js';
@@ -158,6 +159,13 @@ export interface GatewayApp {
    * writes to.
    */
   idleToggles: IdleSessionToggles;
+  /**
+   * The live-bridge registry. Exposed so the boot wiring (cli.ts) can run the
+   * staleness reaper on an interval (auto-deregister bridges that stopped
+   * heartbeating) — kept out of createGatewayApp so no background timer leaks in
+   * tests that construct the app directly.
+   */
+  bridgeRegistry: BridgeRegistry;
 }
 
 export function createGatewayApp(deps: GatewayDeps): GatewayApp {
@@ -335,6 +343,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/bridges/:id',
     requireScope(SESSION_READ, audit),
     createDeregisterBridgeRoute(bridgeRegistry, audit),
+  );
+  // Bridge liveness heartbeat (owner-or-self authz inside the handler).
+  app.post(
+    '/rc/bridges/:id/heartbeat',
+    requireScope(SESSION_READ, audit),
+    createHeartbeatRoute(bridgeRegistry, audit),
   );
   // Bridge invites: the operator mints a one-time invite (OWNER) so a bridge can
   // redeem it (BRIDGE) to learn which session to bind — a chat user never names a
@@ -559,5 +573,5 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  return { app, notifier, audit, ownerEvents, idleToggles };
+  return { app, notifier, audit, ownerEvents, idleToggles, bridgeRegistry };
 }
