@@ -591,8 +591,6 @@ export default {
     '応答またはツール呼び出しの処理中はフォークできません。完了するか、保留中のツール呼び出しを解決してください。',
   'Cannot fork before the first conversation turn.':
     '最初の会話ターンの前にはフォークできません。',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    '/fork コマンドには fork フィーチャーゲートが必要です。有効にするには QWEN_CODE_ENABLE_FORK_SUBAGENT=1 を設定してください。',
   'The agent tool is unavailable; cannot fork.':
     'エージェントツールを利用できないため、フォークできません。',
   'Failed to launch fork: {{error}}': 'フォークの起動に失敗しました: {{error}}',
@@ -878,6 +876,28 @@ export default {
   ', {{inProgress}} in progress': '、{{inProgress}} 進行中',
   'Pending Tasks:': '保留中のタスク:',
   'Current tasks': '現在のタスク',
+  'Background tasks': 'バックグラウンドタスク',
+  'No tasks currently running': '現在実行中のタスクはありません',
+  'No entry to show.': '表示するエントリはありません。',
+  'needs approval': '承認待ち',
+  'Background agent needs approval':
+    'バックグラウンドエージェントが承認待ちです',
+  'Approve or deny the request above':
+    '上のリクエストを承認または拒否してください',
+  Running: '実行中',
+  Paused: '一時停止中',
+  Completed: '完了',
+  Failed: '失敗',
+  Stopped: '停止済み',
+  Shell: 'シェル',
+  Monitor: 'モニター',
+  Command: 'コマンド',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] メモリ統合',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
   '... and {{count}} more': '... 他 {{count}} 件',
   'What would you like to do?': '何をしますか?',
   'Choose how to proceed with your session:':
@@ -1141,6 +1161,21 @@ export default {
     'このセッションではツール呼び出しが行われていません',
   'Session start time is unavailable, cannot calculate stats.':
     'セッション開始時刻が利用できないため、統計を計算できません',
+  Activity: 'アクティビティ',
+  Efficiency: '効率',
+  Today: '今日',
+  'Token Trend': 'Token トレンド',
+  'Cache Hit Rate': 'キャッシュヒット率',
+  'Tool Success': 'ツール成功率',
+  'Tool Leaderboard': 'ツールランキング',
+  Time: '時間',
+  Success: '成功率',
+  Cache: 'キャッシュ',
+  Latency: 'レイテンシ',
+  'Code Impact': 'コード変更',
+  net: '純増',
+  streak: '連続',
+  best: '最長',
   // Loading
   'Waiting for user confirmation...': 'ユーザーの確認を待っています...',
   // Witty Loading Phrases
@@ -1726,4 +1761,40 @@ export default {
   'Attribution: commit': 'コミットの帰属表示',
   '中国 (China)': '中国',
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
+
+  // Stats Dashboard — Category 2 (missing from ja)
+  'Activity Heatmap': 'アクティビティヒートマップ',
+  Less: '少',
+  More: '多',
+  Sessions: 'セッション数',
+  Duration: '所要時間',
+  Projects: 'プロジェクト',
+  'Loading stats...': '統計を読み込み中...',
+  '(no data)': '(データなし)',
+  d: '日',
+  h: '時',
+  m: '分',
+  Input: '入力',
+  Models: 'モデル',
+  'All time': '全期間',
+  'Last 7 days': '過去 7 日間',
+  'Last 30 days': '過去 30 日間',
+  'Show usage statistics dashboard.': '使用統計ダッシュボードを表示する。',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'APIリクエスト',
+  'Tool Calls': 'ツール呼び出し',
+  'Success rate': '成功率',
+  'Code Changes': 'コード変更',
+  Tool: 'ツール',
+  reqs: 'リクエスト',
+  in: '入力',
+  out: '出力',
+  'In/Out': '入力/出力',
 };

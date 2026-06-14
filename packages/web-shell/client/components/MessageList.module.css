@@ -1,0 +1,36 @@
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 24px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+  min-height: 0;
+}
+
+.list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.list::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+.rowFlash {
+  border-radius: 8px;
+  animation: row-flash 1.6s ease-out;
+}
+
+@keyframes row-flash {
+  0%,
+  30% {
+    background: color-mix(in srgb, var(--accent-color) 16%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}

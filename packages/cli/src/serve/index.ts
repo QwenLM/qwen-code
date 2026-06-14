@@ -42,9 +42,12 @@ export {
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
   createIdleAcpPreflightCells,
+  createIdleWorkspaceExtensionsStatus,
+  createIdleWorkspaceHooksStatus,
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceProvidersStatus,
   createIdleWorkspaceSkillsStatus,
+  IDLE_HOOK_EVENTS,
   mapDomainErrorToErrorKind,
   type AcpPreflightKind,
   type ServeEnvCell,
@@ -56,7 +59,14 @@ export {
   type ServePreflightCell,
   type ServePreflightKind,
   type ServeSessionContextStatus,
+  type ServeSessionAgentTaskStatus,
+  type ServeSessionMonitorTaskStatus,
+  type ServeSessionProcessTaskLifecycleStatus,
+  type ServeSessionShellTaskStatus,
   type ServeSessionSupportedCommandsStatus,
+  type ServeSessionTaskLifecycleStatus,
+  type ServeSessionTaskStatus,
+  type ServeSessionTasksStatus,
   type ServeSkillLevel,
   type ServeStatus,
   type ServeStatusCell,
@@ -70,6 +80,18 @@ export {
   type ServeWorkspaceProvidersStatus,
   type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
+  type ServeHookConfig,
+  type ServeHookEntry,
+  type ServeHookEventMeta,
+  type ServeHookMatcherKind,
+  type ServeHookSource,
+  type ServeSessionHooksStatus,
+  type ServeWorkspaceHooksStatus,
+  type ServeExtensionCapabilities,
+  type ServeExtensionEntry,
+  type ServeExtensionInstallType,
+  type ServeExtensionOriginSource,
+  type ServeWorkspaceExtensionsStatus,
 } from './status.js';
 export {
   ENV_NONSECRET_VARS,
@@ -86,17 +108,32 @@ export {
   type MutationGateOptions,
 } from './auth.js';
 export {
+  createAcpSessionBridge,
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
+  // #4297 fold-in 1 (16:32:44-round S2): export every typed error
+  // class that `sendBridgeError` matches via `instanceof`. External
+  // embeds that want to recognize these errors (parallel to how
+  // they already match `WorkspaceInitConflictError` /
+  // `SessionNotFoundError`) need them on the public barrel; without
+  // this they have to deep-import `./acpSessionBridge.js`.
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   SessionNotFoundError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   type AcpChannel,
+  type AcpSessionBridge,
   type BridgeOptions,
   type BridgeSession,
   type BridgeSpawnRequest,
   type ChannelFactory,
   type HttpAcpBridge,
-} from './httpAcpBridge.js';
+} from './acpSessionBridge.js';
 export {
   EventBus,
   EVENT_SCHEMA_VERSION,

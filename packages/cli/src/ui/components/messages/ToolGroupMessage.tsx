@@ -426,7 +426,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         hasPending && (!isShellCommand || !isEmbeddedShellFocused)
       }
       borderColor={borderColor}
-      gap={1}
+      gap={0}
     >
       {/* Memory badge for mixed groups (some memory ops + other ops) */}
       {!isMemoryOnlyGroup &&

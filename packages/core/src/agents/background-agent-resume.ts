@@ -45,6 +45,9 @@ import type {
   AgentTaskRegistration,
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
+import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
+import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from './runtime/agent-core.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type {
   PromptConfig,
   RunConfig,
@@ -68,6 +71,21 @@ const LEGACY_FORK_CAPABILITIES_BLOCKED_REASON =
   'Fork background task cannot be safely resumed because its launch-time runtime constraints are missing.';
 
 type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+
+/**
+ * Returns true when the subagent's effective tool surface will include the
+ * Skill tool. Mirrors `AgentCore.willHaveSkillTool()` for the resume path
+ * where no AgentCore instance exists yet.
+ */
+function subagentWillHaveSkillTool(
+  subagentConfig: SubagentConfig | undefined,
+): boolean {
+  const tools = subagentConfig?.tools;
+  if (!tools || tools.length === 0 || tools.includes('*')) {
+    return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+  }
+  return tools.includes(ToolNames.SKILL);
+}
 
 interface TranscriptRecovery {
   history: Content[];
@@ -542,7 +560,10 @@ export class BackgroundAgentResumeService {
         'default',
       );
       const resolvedApprovalMode = reconcileResumedApprovalMode(
-        normalizeApprovalMode(meta.resolvedApprovalMode, parentApprovalMode),
+        normalizeApprovalMode(
+          meta.resolvedApprovalMode ?? meta.persistedCliFlags?.approvalMode,
+          parentApprovalMode,
+        ),
         parentApprovalMode,
         this.config.isTrustedFolder(),
       );
@@ -558,10 +579,20 @@ export class BackgroundAgentResumeService {
         await createApprovalModeOverride(
           this.config,
           resolvedApprovalMode as ApprovalMode,
+          { persistedCliFlags: meta.persistedCliFlags },
         );
+      // Mirror the launch path's permission-bubbling gate (agent.ts): an
+      // agent whose definition uses `approvalMode: bubble` surfaces
+      // confirmations to the parent UI instead of auto-denying, in
+      // interactive sessions. Without this, a resumed agent of the SAME
+      // definition would silently auto-deny calls the fresh launch bubbles.
+      const shouldBubble = Boolean(
+        target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
+          this.config.isInteractive(),
+      );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bgConfig = Object.create(agentConfig) as any;
-      bgConfig.getShouldAvoidPermissionPrompts = () => true;
+      bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 
       const records = await jsonl.read<ChatRecord>(outputFile);
       const recovery = recoverTranscript(records);
@@ -575,9 +606,14 @@ export class BackgroundAgentResumeService {
             ...(recovery.forkBootstrap?.runtimeHistory ?? []),
           ]
         : [
-            ...(await getInitialChatHistory(bgConfig as Config, undefined, {
-              includeDeferredToolsReminder: false,
-            })),
+            ...(
+              await getInitialChatHistory(bgConfig as Config, undefined, {
+                includeDeferredToolsReminder: false,
+                includeAvailableSkillsReminder: subagentWillHaveSkillTool(
+                  target.subagentConfig,
+                ),
+              })
+            )[0],
             ...recovery.history,
           ];
       const promptMessages = [...operation.continuationMessages];
@@ -618,21 +654,32 @@ export class BackgroundAgentResumeService {
       }
 
       const bgEventEmitter = new AgentEventEmitter();
-      const subagent = target.isFork
-        ? await this.createResumedForkSubagent(
-            bgConfig as Config,
-            bgEventEmitter,
-            resumeHistory ?? [],
-            recovery.forkBootstrap!,
-          )
-        : await this.config
-            .getSubagentManager()
-            .createAgentHeadless(target.subagentConfig!, bgConfig as Config, {
-              eventEmitter: bgEventEmitter,
-              promptConfigOverrides: {
-                initialMessages: resumeHistory,
-              },
-            });
+      // Per-spawn cleanup from `SubagentManager.createAgentHeadless` —
+      // the resume `finally` invokes this so per-agent hook entries and
+      // the force-rebuilt ToolRegistry don't leak across the resume
+      // boundary. Stays undefined on the fork-resume path (forks share
+      // the parent's registry + hook lifecycle).
+      let subagentDispose: (() => Promise<void>) | undefined;
+      let subagent: AgentHeadless;
+      if (target.isFork) {
+        subagent = await this.createResumedForkSubagent(
+          bgConfig as Config,
+          bgEventEmitter,
+          resumeHistory ?? [],
+          recovery.forkBootstrap!,
+        );
+      } else {
+        const result = await this.config
+          .getSubagentManager()
+          .createAgentHeadless(target.subagentConfig!, bgConfig as Config, {
+            eventEmitter: bgEventEmitter,
+            promptConfigOverrides: {
+              initialMessages: resumeHistory,
+            },
+          });
+        subagent = result.subagent;
+        subagentDispose = result.dispose;
+      }
 
       const projectRoot = this.config.getProjectRoot();
       cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
@@ -751,6 +798,12 @@ export class BackgroundAgentResumeService {
       bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
       bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
 
+      // Bridge permission prompts to the parent's Background tasks UI when
+      // bubbling is enabled — same wiring as the launch path in agent.ts.
+      const cleanupApprovalBridge = shouldBubble
+        ? registry.bridgeApprovalEvents(meta.agentId, bgEmitter)
+        : undefined;
+
       const runBody = async () => {
         try {
           await subagent.execute(contextState, bgAbortController.signal);
@@ -828,6 +881,7 @@ export class BackgroundAgentResumeService {
         } finally {
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+          cleanupApprovalBridge?.();
           cleanupOwnedMonitorNotifications?.();
           cleanupJsonl?.();
           // Release the per-subagent ToolRegistry the resumed agent's
@@ -840,6 +894,11 @@ export class BackgroundAgentResumeService {
             .getToolRegistry()
             .stop()
             .catch(() => {});
+          // Per-spawn cleanup from `createAgentHeadless`: releases agent-
+          // scope hook entries and stops the per-agent ToolRegistry that
+          // the force rebuild created for `mcpServers`. Distinct from the
+          // parent registry above (no-op when target.isFork).
+          void subagentDispose?.().catch(() => {});
           // Restore parent PermissionManager's dangerous allow rules if
           // this override stripped them. See createApprovalModeOverride
           // strip-lifecycle comment in agent.ts.

@@ -5,16 +5,22 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Part } from '@google/genai';
 import {
-  formatTruncatedContent,
-  sanitizeTelemetryErrorMessage,
   truncateAndSaveToFile,
-  truncateContentInMemory,
+  truncateToolOutput,
+  truncateLlmContent,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
 } from './truncation.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import type { Config } from '../config/config.js';
+import { logToolOutputTruncated } from '../telemetry/loggers.js';
 
 vi.mock('node:fs/promises');
+vi.mock('../telemetry/loggers.js', () => ({
+  logToolOutputTruncated: vi.fn(),
+}));
 
 describe('truncateAndSaveToFile', () => {
   const mockWriteFile = vi.mocked(fs.writeFile);
@@ -109,7 +115,7 @@ describe('truncateAndSaveToFile', () => {
 
     // Extract just the truncated part (after the instructions)
     const truncatedPart = result.content.split(
-      'Truncated part of the tool output:\n',
+      'Truncated part of the output:\n',
     )[1];
     // The truncated content (excluding the instructions header) should
     // be roughly within the character threshold.
@@ -150,6 +156,7 @@ describe('truncateAndSaveToFile', () => {
     expect(mockWriteFile).toHaveBeenCalledWith(
       path.join(projectTempDir, `${fileName}.output`),
       content,
+      { mode: 0o600 },
     );
 
     // Effective lines = min(1000, 40000/5) = 1000 (line limit is binding)
@@ -164,7 +171,7 @@ describe('truncateAndSaveToFile', () => {
     expect(result.content).toContain(
       'Tool output was too large and has been truncated',
     );
-    expect(result.content).toContain('Truncated part of the tool output:');
+    expect(result.content).toContain('Truncated part of the output:');
     expect(result.content).toContain(expectedTruncated);
   });
 
@@ -190,6 +197,7 @@ describe('truncateAndSaveToFile', () => {
     expect(mockWriteFile).toHaveBeenCalledWith(
       path.join(projectTempDir, `${fileName}.output`),
       content,
+      { mode: 0o600 },
     );
 
     expect(result.content).toContain(
@@ -199,7 +207,7 @@ describe('truncateAndSaveToFile', () => {
 
     // The truncated content should stay near the character threshold
     const truncatedPart = result.content.split(
-      'Truncated part of the tool output:\n',
+      'Truncated part of the output:\n',
     )[1];
     expect(truncatedPart.length).toBeLessThan(THRESHOLD * 1.5);
   });
@@ -228,7 +236,7 @@ describe('truncateAndSaveToFile', () => {
     expect(result.content).toContain('... [CONTENT TRUNCATED] ...');
 
     const truncatedPart = result.content.split(
-      'Truncated part of the tool output:\n',
+      'Truncated part of the output:\n',
     )[1];
     // Should stay within ~1.5x the threshold even with variable line lengths
     expect(truncatedPart.length).toBeLessThan(THRESHOLD * 1.5);
@@ -250,13 +258,8 @@ describe('truncateAndSaveToFile', () => {
     );
 
     expect(result.outputFile).toBeUndefined();
-    expect(result.saveErrorCode).toBe('Error');
-    expect(result.saveErrorMessage).toBe('File write failed');
     expect(result.content).toContain(
-      '[Note: Could not save full tool output to file]',
-    );
-    expect(result.content).toContain(
-      'Tool output was too large and has been truncated',
+      '[Note: Could not save full output to file]',
     );
     expect(mockWriteFile).toHaveBeenCalled();
   });
@@ -278,7 +281,9 @@ describe('truncateAndSaveToFile', () => {
 
     const expectedPath = path.join(projectTempDir, `${fileName}.output`);
     expect(result.outputFile).toBe(expectedPath);
-    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content);
+    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content, {
+      mode: 0o600,
+    });
   });
 
   it('should include helpful instructions in truncated message', async () => {
@@ -299,12 +304,12 @@ describe('truncateAndSaveToFile', () => {
     expect(result.content).toContain(
       'Tool output was too large and has been truncated',
     );
-    expect(result.content).toContain('The full tool output has been saved to:');
+    expect(result.content).toContain('The full output has been saved to:');
     expect(result.content).toContain(
-      'To read the complete tool output, use the read_file tool with the absolute file path above',
+      'To read the complete output, use the read_file tool with the absolute file path above',
     );
     expect(result.content).toContain(
-      'The truncated tool output below shows the beginning and end of the content',
+      'The truncated output below shows the beginning and end of the content',
     );
   });
 
@@ -324,109 +329,319 @@ describe('truncateAndSaveToFile', () => {
     );
 
     const expectedPath = path.join(projectTempDir, 'passwd.output');
-    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content);
+    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content, {
+      mode: 0o600,
+    });
   });
 
-  it('should sanitize Windows-invalid characters from file names', async () => {
-    const content = 'a'.repeat(200_000);
-    const fileName = 'Bash:context|capture';
-    const projectTempDir = '/tmp/safe_dir';
+  describe('keep direction', () => {
+    // 2000 lines, line-limit (1000) is the binding constraint so truncation
+    // fires. Unique markers at both ends let us assert which side is kept.
+    const makeContent = () =>
+      [
+        'FIRST_UNIQUE_LINE',
+        ...Array(1998).fill('filler'),
+        'LAST_UNIQUE_LINE',
+      ].join('\n');
 
-    mockWriteFile.mockResolvedValue(undefined);
-
-    await truncateAndSaveToFile(
-      content,
-      fileName,
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
-    );
-
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      path.join(projectTempDir, 'Bash_context_capture.output'),
-      content,
-    );
-  });
-
-  it('formats custom content labels consistently', async () => {
-    const content = 'a'.repeat(200_000);
-    const projectTempDir = '/tmp';
-
-    mockWriteFile.mockResolvedValue(undefined);
-
-    const result = await truncateAndSaveToFile(
-      content,
-      'custom-label',
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
-      'Combined tool output',
-    );
-
-    expect(result.content).toContain(
-      'Combined tool output was too large and has been truncated',
-    );
-    expect(result.content).toContain('The full combined tool output');
-  });
-});
-
-describe('truncateContentInMemory', () => {
-  it('returns content unchanged below both limits', () => {
-    expect(truncateContentInMemory('short', 100, 10)).toBe('short');
-  });
-
-  it('truncates without requiring file persistence', () => {
-    const content = Array.from({ length: 50 }, (_, i) => `line-${i}`).join(
-      '\n',
-    );
-
-    const result = truncateContentInMemory(content, 80, 10);
-
-    expect(result).toContain('... [CONTENT TRUNCATED] ...');
-    expect(result.length).toBeLessThan(content.length);
-  });
-});
-
-describe('formatTruncatedContent', () => {
-  it('includes a save-failure note without exposing a file path', () => {
-    const result = formatTruncatedContent('head\n...\ntail', {
-      saveFailed: true,
+    beforeEach(() => {
+      mockWriteFile.mockResolvedValue(undefined);
     });
 
-    expect(result).toContain('[Note: Could not save full tool output to file]');
-    expect(result).not.toContain('saved to:');
-  });
-
-  it('uses the content label throughout the truncation envelope', () => {
-    const result = formatTruncatedContent('head\n...\ntail', {
-      contentLabel: 'PostToolUse hook context',
-      outputFile: '/tmp/hook-context.output',
+    it("keep='head' retains only the beginning", async () => {
+      const result = await truncateAndSaveToFile(
+        makeContent(),
+        'f',
+        '/tmp',
+        THRESHOLD,
+        TRUNCATE_LINES,
+        'head',
+      );
+      expect(result.content).toContain('FIRST_UNIQUE_LINE');
+      expect(result.content).not.toContain('LAST_UNIQUE_LINE');
     });
 
-    expect(result).toContain(
-      'PostToolUse hook context was too large and has been truncated.',
-    );
-    expect(result).toContain(
-      'The full posttooluse hook context has been saved to:',
-    );
-    expect(result).toContain('The truncated posttooluse hook context below');
-    expect(result).toContain('Truncated part of the posttooluse hook context:');
-    expect(result).not.toContain('Truncated part of the output:');
+    it("keep='tail' retains only the end", async () => {
+      const result = await truncateAndSaveToFile(
+        makeContent(),
+        'f',
+        '/tmp',
+        THRESHOLD,
+        TRUNCATE_LINES,
+        'tail',
+      );
+      expect(result.content).toContain('LAST_UNIQUE_LINE');
+      expect(result.content).not.toContain('FIRST_UNIQUE_LINE');
+    });
+
+    it("keep='both' (default) retains both ends", async () => {
+      const result = await truncateAndSaveToFile(
+        makeContent(),
+        'f',
+        '/tmp',
+        THRESHOLD,
+        TRUNCATE_LINES,
+      );
+      expect(result.content).toContain('FIRST_UNIQUE_LINE');
+      expect(result.content).toContain('LAST_UNIQUE_LINE');
+    });
+
+    it("keep='tail' does not leak a whole line when the per-line tail budget rounds to zero", async () => {
+      // Regression: slice(-0) === slice(0) returned the ENTIRE line when the
+      // remaining tail budget for the triggering line was <= ellipsis length.
+      // The 58-char C line consumes the tiny budget down to 2, so the 60k B
+      // line hits sliceLen=0 and (pre-fix) leaked whole into the preview.
+      const content =
+        'H'.repeat(50_000) + '\n' + 'B'.repeat(60_000) + '\n' + 'C'.repeat(58);
+      const result = await truncateAndSaveToFile(
+        content,
+        'f',
+        '/tmp',
+        100,
+        TRUNCATE_LINES,
+        'tail',
+      );
+      expect(result.outputFile).toBeDefined();
+      // The bound must hold: the 60k line must NOT appear whole in the preview.
+      expect(result.content.length).toBeLessThan(2_000);
+    });
+  });
+
+  describe('token-aware fallback', () => {
+    beforeEach(() => {
+      mockWriteFile.mockResolvedValue(undefined);
+    });
+
+    it('returns original content when truncation would not save space', async () => {
+      // Content barely over a tiny threshold: the wrapper (instructions +
+      // file pointer) is longer than the original, so truncating wastes
+      // effort and loses recoverability for no benefit.
+      const content = 'x'.repeat(60);
+      const result = await truncateAndSaveToFile(
+        content,
+        'f',
+        '/tmp',
+        50,
+        1000,
+      );
+
+      expect(result).toEqual({ content });
+      expect(result.outputFile).toBeUndefined();
+      expect(mockWriteFile).not.toHaveBeenCalled();
+    });
+
+    it('still truncates when the wrapped output is genuinely smaller', async () => {
+      // Large content: wrapper is far smaller than the original, so the
+      // fallback must NOT trigger.
+      const content = 'a'.repeat(2_000_000);
+      const result = await truncateAndSaveToFile(
+        content,
+        'f',
+        '/tmp',
+        THRESHOLD,
+        TRUNCATE_LINES,
+      );
+
+      expect(result.outputFile).toBeDefined();
+      expect(result.content.length).toBeLessThan(content.length);
+      expect(mockWriteFile).toHaveBeenCalled();
+    });
   });
 });
 
-describe('sanitizeTelemetryErrorMessage', () => {
-  it('redacts Windows paths with spaces', () => {
-    expect(
-      sanitizeTelemetryErrorMessage(
-        'failed to write C:\\Users\\Jiarui Li\\project temp\\tool.output',
-      ),
-    ).toBe('failed to write [path]');
+describe('truncateToolOutput', () => {
+  const mockWriteFile = vi.mocked(fs.writeFile);
+  const mockMkdir = vi.mocked(fs.mkdir);
+  const mockConfig = {
+    getTruncateToolOutputThreshold: () => 25_000,
+    getTruncateToolOutputLines: () => 1000,
+    storage: { getProjectTempDir: () => '/tmp' },
+  } as unknown as Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
   });
 
-  it('redacts POSIX paths', () => {
-    expect(
-      sanitizeTelemetryErrorMessage('failed to write /tmp/project/tool.output'),
-    ).toBe('failed to write [path]');
+  it('skips storage for a char-only no-op (no temp dir resolution needed)', async () => {
+    // Fast path: a char-only budget (lines:Infinity) with content within the
+    // char threshold must return without resolving the temp dir, so a
+    // storage-less config (e.g. some MCP tests) doesn't blow up.
+    const getProjectTempDir = vi.fn(() => '/tmp');
+    const cfg = {
+      getTruncateToolOutputThreshold: () => 25_000,
+      getTruncateToolOutputLines: () => 1000,
+      storage: { getProjectTempDir },
+    } as unknown as Config;
+    const result = await truncateToolOutput(cfg, 'mcp', 'small output', {
+      threshold: 500_000,
+      lines: Number.POSITIVE_INFINITY,
+    });
+    expect(result.content).toBe('small output');
+    expect(result.outputFile).toBeUndefined();
+    expect(getProjectTempDir).not.toHaveBeenCalled();
+  });
+
+  it('uses limits.threshold to override the config threshold', async () => {
+    // The config threshold (25k) would NOT truncate this ~1k content, but the
+    // per-call limits override forces a small threshold that does.
+    const content = 'x'.repeat(500) + '\n' + 'y'.repeat(500);
+    const result = await truncateToolOutput(mockConfig, 'shell', content, {
+      threshold: 100,
+      lines: 1000,
+    });
+    expect(result.outputFile).toBeDefined();
+  });
+
+  it('passes promptId into the telemetry event', async () => {
+    const content = 'a'.repeat(200_000);
+    await truncateToolOutput(
+      mockConfig,
+      'shell',
+      content,
+      undefined,
+      'prompt-123',
+    );
+    expect(logToolOutputTruncated).toHaveBeenCalled();
+    const event = vi.mocked(logToolOutputTruncated).mock.calls[0][1];
+    expect(event.prompt_id).toBe('prompt-123');
+  });
+});
+
+describe('truncateLlmContent', () => {
+  const mockWriteFile = vi.mocked(fs.writeFile);
+  const mockMkdir = vi.mocked(fs.mkdir);
+  const mockConfig = {
+    getTruncateToolOutputThreshold: () => 25_000,
+    getTruncateToolOutputLines: () => 1000,
+    storage: { getProjectTempDir: () => '/tmp' },
+  } as unknown as Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+  });
+
+  it('truncates a large string and returns an outputFile', async () => {
+    const result = await truncateLlmContent(
+      mockConfig,
+      'shell',
+      'a'.repeat(200_000),
+    );
+    expect(typeof result.content).toBe('string');
+    expect(result.outputFile).toBeDefined();
+    expect(result.content as string).toContain(
+      'Tool output was too large and has been truncated',
+    );
+  });
+
+  it('replaces empty output with a no-output marker', async () => {
+    const result = await truncateLlmContent(mockConfig, 'shell', '   ');
+    expect(result.content).toBe('(shell completed with no output)');
+    expect(mockWriteFile).not.toHaveBeenCalled();
+  });
+
+  it('is idempotent when content is already truncated', async () => {
+    const already =
+      'Tool output was too large and has been truncated\nThe full output...';
+    const result = await truncateLlmContent(mockConfig, 'shell', already);
+    expect(result.content).toBe(already);
+    expect(result.outputFile).toBeUndefined();
+    expect(mockWriteFile).not.toHaveBeenCalled();
+  });
+
+  it('truncates text parts but preserves media parts in Part[]', async () => {
+    const content: Part[] = [
+      { text: 'a'.repeat(200_000) },
+      { inlineData: { mimeType: 'image/png', data: 'BASE64DATA' } },
+    ];
+    const result = await truncateLlmContent(mockConfig, 'shell', content);
+
+    expect(Array.isArray(result.content)).toBe(true);
+    const parts = result.content as Part[];
+    // Media part is preserved verbatim.
+    expect(parts.some((p) => p.inlineData?.data === 'BASE64DATA')).toBe(true);
+    // Text part is truncated.
+    const textPart = parts.find((p) => p.text !== undefined);
+    expect(textPart?.text).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(result.outputFile).toBeDefined();
+  });
+
+  it('leaves small Part[] text untouched', async () => {
+    const content: Part[] = [
+      { text: 'small output' },
+      { inlineData: { mimeType: 'image/png', data: 'BASE64DATA' } },
+    ];
+    const result = await truncateLlmContent(mockConfig, 'shell', content);
+    expect(result.outputFile).toBeUndefined();
+    expect(result.content).toEqual(content);
+    expect(mockWriteFile).not.toHaveBeenCalled();
+  });
+
+  it('bounds Part[] text even when the disk write fails', async () => {
+    // On a disk-write failure the Part[] path must still return a bounded
+    // preview (matching the string path) rather than leaking the original
+    // oversized content back into history.
+    mockWriteFile.mockRejectedValue(new Error('ENOSPC'));
+    const content: Part[] = [
+      { text: 'a'.repeat(200_000) },
+      { inlineData: { mimeType: 'image/png', data: 'BASE64DATA' } },
+    ];
+    const result = await truncateLlmContent(mockConfig, 'shell', content);
+
+    const parts = result.content as Part[];
+    const textPart = parts.find((p) => p.text !== undefined);
+    // Bounded: far smaller than the 200k original, carrying the failure note.
+    expect(textPart?.text?.length ?? 0).toBeLessThan(50_000);
+    expect(textPart?.text).toContain('Could not save full output to file');
+    // Media part is still preserved.
+    expect(parts.some((p) => p.inlineData?.data === 'BASE64DATA')).toBe(true);
+  });
+
+  it('still truncates a string when the sentinel appears mid-output, not as a prefix', async () => {
+    // Only a genuine truncation prefix (at position 0) should short-circuit.
+    // A tool whose own output merely contains the phrase somewhere in the
+    // middle must still be truncated — otherwise attacker-controlled output
+    // could embed the phrase to bypass the budget.
+    const body =
+      'normal output line\n'.repeat(100) +
+      `${TOOL_OUTPUT_TRUNCATED_PREFIX}\n` +
+      'b'.repeat(200_000);
+    const result = await truncateLlmContent(mockConfig, 'shell', body);
+    expect(result.outputFile).toBeDefined();
+    expect(typeof result.content).toBe('string');
+  });
+
+  it('truncates a Part[] when the sentinel appears mid-stream, not as a part prefix', async () => {
+    // Part[] idempotency must mirror the string path: only a part that STARTS
+    // with the sentinel counts as already-truncated. A hostile or echoed part
+    // that merely contains the phrase mid-stream must not bypass the budget.
+    const content: Part[] = [
+      {
+        text:
+          'normal intro line\n' +
+          `${TOOL_OUTPUT_TRUNCATED_PREFIX}\n` +
+          'b'.repeat(200_000),
+      },
+    ];
+    const result = await truncateLlmContent(mockConfig, 'mcp_tool', content);
+    expect(result.outputFile).toBeDefined();
+  });
+
+  it('leaves a Part[] untouched when any part already starts with the sentinel', async () => {
+    // A genuinely pre-truncated part (e.g. MCP truncateTextParts output, which
+    // starts with the sentinel) must still short-circuit re-truncation even
+    // when it is not the first part and the combined content is over budget.
+    const content: Part[] = [
+      { text: 'small intro' },
+      { text: `${TOOL_OUTPUT_TRUNCATED_PREFIX}\n` + 'x'.repeat(200_000) },
+    ];
+    const result = await truncateLlmContent(mockConfig, 'mcp_tool', content);
+    expect(result.outputFile).toBeUndefined();
+    expect(result.content).toEqual(content);
   });
 });

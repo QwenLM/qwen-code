@@ -136,6 +136,52 @@ describe('settingsWriter', () => {
       ]);
     });
 
+    it('strips a runtime snapshot prefix before persisting model.name', async () => {
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        env: { TEST_API_KEY: 'sk-test' },
+        // A runtime snapshot id must never reach disk — the adapter's setValue
+        // guard strips it back to the bare model id.
+        modelSelection: { modelId: '$runtime|openai|gpt-4o' },
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: [{ id: 'gpt-4o', envKey: 'TEST_API_KEY' }],
+            mergeStrategy: 'prepend-and-remove-owned',
+            ownsModel: (m) => m.envKey === 'TEST_API_KEY',
+          },
+        ],
+      };
+
+      await applyProviderInstallPlanToFile(plan);
+
+      const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(written.model.name).toBe('gpt-4o');
+    });
+
+    it('collapses stacked runtime snapshot prefixes before persisting model.name', async () => {
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        env: { TEST_API_KEY: 'sk-test' },
+        modelSelection: { modelId: '$runtime|openai|$runtime|openai|gpt-4o' },
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: [{ id: 'gpt-4o', envKey: 'TEST_API_KEY' }],
+            mergeStrategy: 'prepend-and-remove-owned',
+            ownsModel: (m) => m.envKey === 'TEST_API_KEY',
+          },
+        ],
+      };
+
+      await applyProviderInstallPlanToFile(plan);
+
+      const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(written.model.name).toBe('gpt-4o');
+    });
+
     it('rejects __proto__ in install-plan env keys (prototype-pollution guard)', async () => {
       // {__proto__: 'x'} literal sets the object's prototype rather than a
       // real property, so build the env via defineProperty to land an actual

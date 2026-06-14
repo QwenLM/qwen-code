@@ -279,6 +279,14 @@ export function useBackgroundTaskView(
     shellRegistry.setStatusChangeCallback(refreshFromRegistry);
     monitorRegistry.setStatusChangeCallback(refreshFromRegistry);
 
+    // Permission bubbling: a background agent parking (or resolving) a tool
+    // call for approval mutates `pendingApprovals` without a status change,
+    // so subscribe here too. This keeps the footer pill's "needs approval"
+    // hint and the dialog roster fresh. Unlike activity updates (ignored on
+    // purpose to avoid per-tool-call churn), approval changes are rare and
+    // user-actionable, so refreshing the snapshot on them is worthwhile.
+    agentRegistry.setApprovalChangeCallback(refreshFromRegistry);
+
     // Memory listener fires only on dream-task transitions —
     // `subscribe({ taskType: 'dream' })` skips the per-extract notify
     // entirely so we don't pay the per-UserQuery O(n) signature cost
@@ -302,6 +310,7 @@ export function useBackgroundTaskView(
       agentRegistry.setStatusChangeCallback(undefined);
       shellRegistry.setStatusChangeCallback(undefined);
       monitorRegistry.setStatusChangeCallback(undefined);
+      agentRegistry.setApprovalChangeCallback(undefined);
       unsubscribeMemory();
     };
   }, [config]);

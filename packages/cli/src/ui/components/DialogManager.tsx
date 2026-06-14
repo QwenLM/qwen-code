@@ -9,6 +9,7 @@ import { IdeIntegrationNudge } from '../IdeIntegrationNudge.js';
 import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
+import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
@@ -47,6 +48,7 @@ import { SkillsManagerDialog } from './skills/SkillsManagerDialog.js';
 import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
+import { StatsDialog } from './StatsDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { DiffDialog } from './DiffDialog.js';
@@ -127,6 +129,18 @@ export const DialogManager = ({
       <FolderTrustDialog
         onSelect={uiActions.handleFolderTrustSelect}
         isRestarting={uiState.isRestarting}
+      />
+    );
+  }
+  if (uiState.isMcpApprovalDialogOpen && uiState.currentMcpApproval) {
+    return (
+      <MCPServerApprovalDialog
+        serverName={uiState.currentMcpApproval.name}
+        summary={uiState.currentMcpApproval.summary}
+        source={uiState.currentMcpApproval.source}
+        pendingServers={uiState.pendingMcpApprovals}
+        remaining={uiState.mcpApprovalRemaining}
+        onSelect={uiActions.handleMcpApprovalSelect}
       />
     );
   }
@@ -455,6 +469,11 @@ export const DialogManager = ({
   }
   if (uiState.isHooksDialogOpen) {
     return <HooksManagementDialog onClose={uiActions.closeHooksDialog} />;
+  }
+  if (uiState.isStatsDialogOpen) {
+    return (
+      <StatsDialog onClose={uiActions.closeStatsDialog} width={mainAreaWidth} />
+    );
   }
   if (uiState.isMcpDialogOpen) {
     return <MCPManagementDialog onClose={uiActions.closeMcpDialog} />;

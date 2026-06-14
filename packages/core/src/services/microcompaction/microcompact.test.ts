@@ -833,3 +833,72 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta).toBeUndefined();
   });
 });
+
+describe('microcompactHistory — force option', () => {
+  afterEach(clearEnv);
+
+  it('force: true skips time-based trigger (fires even with recent timestamp)', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content that is very long'),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'recent content'),
+    ];
+
+    // Date.now() would normally prevent the trigger from firing,
+    // but force: true bypasses the check entirely.
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS, {
+      force: true,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBeGreaterThanOrEqual(1);
+  });
+
+  it('force: false behaves the same as not passing opts', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'content'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS, {
+      force: false,
+    });
+
+    expect(result.meta).toBeUndefined();
+  });
+
+  it('force: true works even when threshold is disabled (-1)', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content that is very long'),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'recent content'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      null,
+      { toolResultsThresholdMinutes: -1, toolResultsNumToKeep: 1 },
+      { force: true },
+    );
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBeGreaterThanOrEqual(1);
+  });
+
+  it('force: true returns history unchanged when nothing to clear', () => {
+    const history: Content[] = [
+      makeUserMessage('hello'),
+      makeModelMessage('hi'),
+    ];
+
+    const result = microcompactHistory(history, null, DEFAULT_SETTINGS, {
+      force: true,
+    });
+
+    // No compactable tools → no meta
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toEqual(history);
+  });
+});

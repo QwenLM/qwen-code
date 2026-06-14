@@ -10,13 +10,19 @@
  * external dependencies, making it compatible with Docker sandbox mode.
  */
 
-import { describe, it, beforeAll, expect } from 'vitest';
+import { describe, it, beforeAll, afterAll, expect } from 'vitest';
 import { TestRig, validateModelOutput } from '../test-helper.js';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { writeFileSync } from 'node:fs';
+import { hashMcpServerConfig } from '@qwen-code/qwen-code-core';
 
 // Create a minimal MCP server that doesn't require external dependencies
 // This implements the MCP protocol directly using Node.js built-ins
+const INTEGRATION_TOKEN = 'qwen-mcp-tool-token-7f31d0';
+const additionServerConfig = {
+  command: 'node',
+  args: ['mcp-server.cjs'],
+};
 const serverScript = `#!/usr/bin/env node
 /**
  * @license
@@ -123,20 +129,18 @@ rpc.on('initialize', async (params) => {
   };
 });
 
+const INTEGRATION_TOKEN = ${JSON.stringify(INTEGRATION_TOKEN)};
+
 // Handle tools/list
 rpc.on('tools/list', async () => {
   debug('Handling tools/list request');
   return {
     tools: [{
-      name: 'add',
-      description: 'Add two numbers',
+      name: 'get_integration_token',
+      description: 'Return the integration-test token',
       inputSchema: {
         type: 'object',
-        properties: {
-          a: { type: 'number', description: 'First number' },
-          b: { type: 'number', description: 'Second number' }
-        },
-        required: ['a', 'b']
+        properties: {}
       }
     }]
   };
@@ -145,12 +149,11 @@ rpc.on('tools/list', async () => {
 // Handle tools/call
 rpc.on('tools/call', async (params) => {
   debug(\`Handling tools/call request for tool: \${params.name}\`);
-  if (params.name === 'add') {
-    const { a, b } = params.arguments;
+  if (params.name === 'get_integration_token') {
     return {
       content: [{
         type: 'text',
-        text: String(a + b)
+        text: INTEGRATION_TOKEN
       }]
     };
   }
@@ -166,6 +169,7 @@ rpc.send({
 
 describe('simple-mcp-server', () => {
   const rig = new TestRig();
+  let previousMcpApprovalsPath: string | undefined;
 
   beforeAll(async () => {
     // Force the pre-#3994 synchronous MCP discovery path: under progressive
@@ -179,13 +183,29 @@ describe('simple-mcp-server', () => {
     await rig.setup('simple-mcp-server', {
       settings: {
         mcpServers: {
-          'addition-server': {
-            command: 'node',
-            args: ['mcp-server.cjs'],
-          },
+          'addition-server': additionServerConfig,
         },
       },
     });
+
+    previousMcpApprovalsPath = process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
+    const approvalsPath = join(rig.testDir!, '.qwen', 'mcpApprovals.json');
+    process.env['QWEN_CODE_MCP_APPROVALS_PATH'] = approvalsPath;
+    writeFileSync(
+      approvalsPath,
+      JSON.stringify(
+        {
+          [resolve(rig.testDir!)]: {
+            'addition-server': {
+              hash: hashMcpServerConfig(additionServerConfig),
+              status: 'approved',
+            },
+          },
+        },
+        null,
+        2,
+      ),
+    );
 
     // Create server script in the test directory
     const testServerPath = join(rig.testDir!, 'mcp-server.cjs');
@@ -217,22 +237,35 @@ describe('simple-mcp-server', () => {
     }
   });
 
-  it('should add two numbers', async () => {
+  afterAll(() => {
+    if (previousMcpApprovalsPath === undefined) {
+      delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
+    } else {
+      process.env['QWEN_CODE_MCP_APPROVALS_PATH'] = previousMcpApprovalsPath;
+    }
+  });
+
+  it('should call an MCP tool and return its result', async () => {
     // Test directory is already set up in before hook
     // Just run the command - MCP server config is in settings.json
-    const output = await rig.run('add 5 and 10, use tool if you can.');
-
-    const foundToolCall = await rig.waitForToolCall(
-      'mcp__addition-server__add',
+    const output = await rig.run(
+      'Use the get_integration_token tool and print the returned token. Do not guess it.',
     );
 
-    expect(foundToolCall, 'Expected to find an add tool call').toBeTruthy();
+    const foundToolCall = await rig.waitForToolCall(
+      'mcp__addition-server__get_integration_token',
+    );
+
+    expect(
+      foundToolCall,
+      'Expected to find a get_integration_token tool call',
+    ).toBeTruthy();
 
     // Validate model output - will throw if no output, fail if missing expected content
-    validateModelOutput(output, '15', 'MCP server test');
+    validateModelOutput(output, INTEGRATION_TOKEN, 'MCP server test');
     expect(
-      output.includes('15'),
-      'Expected output to contain the sum (15)',
+      output.includes(INTEGRATION_TOKEN),
+      'Expected output to contain the MCP tool token',
     ).toBeTruthy();
   });
 });

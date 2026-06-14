@@ -24,8 +24,7 @@ import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarning
  * listener is up so yargs `parse()` never resolves — if it did, the
  * top-level CLI would fall through to the interactive (TUI) entry point
  * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
- * route. Named so a future maintainer doesn't read the bare
- * `new Promise<never>(() => {})` as a bug (BRQQZ).
+ * route.
  */
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
@@ -36,16 +35,30 @@ interface ServeArgs {
   hostname: string;
   token?: string;
   'max-sessions': number;
+  'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
   workspace?: string;
   'require-auth': boolean;
+  'enable-session-shell': boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
   'http-bridge': boolean;
   'mcp-client-budget'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
+  'allow-origin'?: string[];
+  'allow-private-auth-base-url': boolean;
+  'prompt-deadline-ms'?: number;
+  'writer-idle-timeout-ms'?: number;
+  'channel-idle-timeout-ms'?: number;
+  'session-reap-interval-ms'?: number;
+  'session-idle-timeout-ms'?: number;
+  'rate-limit'?: boolean;
+  'rate-limit-prompt'?: number;
+  'rate-limit-mutation'?: number;
+  'rate-limit-read'?: number;
+  'rate-limit-window-ms'?: number;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -78,6 +91,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
       })
+      .option('max-pending-prompts-per-session', {
+        type: 'number',
+        default: 5,
+        description:
+          'Per-session cap on accepted prompts waiting or running. ' +
+          'New prompts beyond this return 503. Set to 0 to disable.',
+      })
       .option('workspace', {
         type: 'string',
         description:
@@ -106,15 +126,21 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'requires Authorization when enabled (no loopback exemption — ' +
           'k8s/Compose probes must pass the bearer too).',
       })
+      .option('enable-session-shell', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+      })
       .option('event-ring-size', {
         type: 'number',
-        // Single source of truth — `DEFAULT_RING_SIZE` (currently 8000,
-        // #3803 §02) is also what the bridge falls back to when the
+        // Single source of truth — `DEFAULT_RING_SIZE` is also what
+        // the bridge falls back to when the
         // option is undefined. Importing here keeps a future bump in
         // one place rather than drifting between CLI and bus.
         default: DEFAULT_RING_SIZE,
         description:
-          'Per-session SSE replay ring depth (#3803 §02 target). Sets the ' +
+          'Per-session SSE replay ring depth. Sets the ' +
           'replay backlog available to `GET /session/:id/events` reconnects ' +
           'that send a `Last-Event-ID: N` header. Larger = more reconnect ' +
           'headroom at the cost of a few hundred KB extra RAM per session. ' +
@@ -133,7 +159,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'number',
         description:
           'Cap on live MCP clients spawned inside the ACP child for the bound ' +
-          'workspace (issue #4175 PR 14). Positive integer. Combine with ' +
+          'workspace. Positive integer. Combine with ' +
           '--mcp-budget-mode to control behavior at the cap. When unset, ' +
           'mode defaults to off (no accounting-driven enforcement, but ' +
           'GET /workspace/mcp still reports `clientCount`). Distinct from ' +
@@ -143,12 +169,84 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('mcp-budget-mode', {
         choices: ['enforce', 'warn', 'off'] as const,
         description:
-          'How --mcp-client-budget is enforced (issue #4175 PR 14). ' +
+          'How --mcp-client-budget is enforced. ' +
           '`warn` (default when budget set): no refusal, snapshot surfaces ' +
           'warning at >=75% of budget. `enforce`: connects past the cap are ' +
           'refused (`disabledReason: "budget"`, deterministic by mcpServers ' +
           'declaration order). `off`: pure observability. Boot rejects ' +
           '`enforce` without a budget.',
+      })
+      .option('allow-origin', {
+        type: 'string',
+        array: true,
+        description: 'Cross-origin allowlist for browser webui clients.',
+      })
+      .option('allow-private-auth-base-url', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Allow /workspace/auth/provider to install localhost/private-network baseUrl values. ' +
+          'Use only for local development with trusted clients.',
+      })
+      .option('prompt-deadline-ms', {
+        type: 'number',
+        description:
+          'Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
+          'Falls back to QWEN_SERVE_PROMPT_DEADLINE_MS. Positive integer.',
+      })
+      .option('writer-idle-timeout-ms', {
+        type: 'number',
+        description:
+          'Per-SSE-connection idle deadline (ms). ' +
+          'Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
+      })
+      .option('channel-idle-timeout-ms', {
+        type: 'number',
+        description:
+          'Milliseconds to keep ACP child alive after last session closes. ' +
+          '0 or unset = immediate kill (default).',
+      })
+      .option('session-reap-interval-ms', {
+        type: 'number',
+        description:
+          'Session reaper scan interval (ms). 0 = disabled. Default: 60000.',
+      })
+      .option('session-idle-timeout-ms', {
+        type: 'number',
+        description:
+          'Idle timeout before a disconnected session is reaped (ms). ' +
+          '0 = disabled. Default: 1800000 (30 min).',
+      })
+      .option('rate-limit', {
+        type: 'boolean',
+        description:
+          'Enable per-tier HTTP rate limiting. Tiers: prompt (10/min), ' +
+          'mutation (30/min), read (120/min). Health, heartbeat, SSE, ' +
+          'and /acp are exempt.',
+      })
+      .option('rate-limit-prompt', {
+        type: 'number',
+        description:
+          'Max prompt requests per window per client (default 10). ' +
+          'Requires --rate-limit.',
+      })
+      .option('rate-limit-mutation', {
+        type: 'number',
+        description:
+          'Max mutation requests per window per client (default 30). ' +
+          'Requires --rate-limit.',
+      })
+      .option('rate-limit-read', {
+        type: 'number',
+        description:
+          'Max read requests per window per client (default 120). ' +
+          'Requires --rate-limit.',
+      })
+      .option('rate-limit-window-ms', {
+        type: 'number',
+        description:
+          'Rate limit window duration in ms (default 60000). ' +
+          'Requires --rate-limit.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
@@ -168,7 +266,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'deployment.',
       );
     }
-    // PR 14: validate budget + mode combination at boot, before we
+    // Validate budget + mode combination at boot, before we
     // lazy-load the serve module. Yargs already constrains `choices`
     // for mcp-budget-mode, so we only have to police the budget value
     // and the `enforce` ⇒ budget invariant.
@@ -194,8 +292,20 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     }
     const resolvedMcpMode: 'enforce' | 'warn' | 'off' =
       mcpBudgetMode ?? (mcpClientBudget !== undefined ? 'warn' : 'off');
+    const maxPendingPromptsPerSession = argv['max-pending-prompts-per-session'];
+    if (
+      maxPendingPromptsPerSession !== Number.POSITIVE_INFINITY &&
+      (!Number.isFinite(maxPendingPromptsPerSession) ||
+        !Number.isInteger(maxPendingPromptsPerSession) ||
+        maxPendingPromptsPerSession < 0)
+    ) {
+      writeStderrLine(
+        'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).',
+      );
+      process.exit(1);
+    }
     if (mcpClientBudget !== undefined) {
-      // Mirror PR 15's `--require-auth` breadcrumb: surface the active
+      // Mirror the `--require-auth` breadcrumb: surface the active
       // policy in stderr (journald / docker logs) so operators don't
       // have to parse /capabilities or /workspace/mcp to confirm it.
       writeStderrLine(
@@ -239,6 +349,57 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       // path will report the same error to the user via Session.
     }
 
+    // Rate limit resolution: --rate-limit / --no-rate-limit override env var.
+    // With no default, argv['rate-limit'] is undefined when neither flag is passed.
+    const rateLimit =
+      argv['rate-limit'] ??
+      (process.env['QWEN_SERVE_RATE_LIMIT'] === '1' ||
+        process.env['QWEN_SERVE_RATE_LIMIT'] === 'true');
+    let rateLimitPrompt: number | undefined;
+    let rateLimitMutation: number | undefined;
+    let rateLimitRead: number | undefined;
+    let rateLimitWindowMs: number | undefined;
+    if (rateLimit) {
+      const envInt = (key: string): number | undefined => {
+        const v = process.env[key];
+        return v ? Number(v) : undefined;
+      };
+      rateLimitPrompt =
+        argv['rate-limit-prompt'] ?? envInt('QWEN_SERVE_RATE_LIMIT_PROMPT');
+      rateLimitMutation =
+        argv['rate-limit-mutation'] ?? envInt('QWEN_SERVE_RATE_LIMIT_MUTATION');
+      rateLimitRead =
+        argv['rate-limit-read'] ?? envInt('QWEN_SERVE_RATE_LIMIT_READ');
+      rateLimitWindowMs =
+        argv['rate-limit-window-ms'] ??
+        envInt('QWEN_SERVE_RATE_LIMIT_WINDOW_MS');
+
+      for (const [name, value] of [
+        ['--rate-limit-prompt', rateLimitPrompt],
+        ['--rate-limit-mutation', rateLimitMutation],
+        ['--rate-limit-read', rateLimitRead],
+      ] as const) {
+        if (
+          value !== undefined &&
+          (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0)
+        ) {
+          writeStderrLine(`qwen serve: ${name} must be a positive integer.`);
+          process.exit(1);
+        }
+      }
+      if (
+        rateLimitWindowMs !== undefined &&
+        (!Number.isFinite(rateLimitWindowMs) ||
+          !Number.isInteger(rateLimitWindowMs) ||
+          rateLimitWindowMs < 1000)
+      ) {
+        writeStderrLine(
+          'qwen serve: --rate-limit-window-ms must be an integer >= 1000.',
+        );
+        process.exit(1);
+      }
+    }
+
     // Lazy-load the serve module so non-serve invocations don't pay for
     // express + body-parser + qs in their startup path.
     const { runQwenServe } = await import('../serve/index.js');
@@ -249,12 +410,38 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
+        maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
+        enableSessionShell: argv['enable-session-shell'],
+        allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
+        ...(argv['allow-origin'] && argv['allow-origin'].length > 0
+          ? { allowOrigins: argv['allow-origin'] }
+          : {}),
+        ...(argv['prompt-deadline-ms'] !== undefined
+          ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
+          : {}),
+        ...(argv['writer-idle-timeout-ms'] !== undefined
+          ? { writerIdleTimeoutMs: argv['writer-idle-timeout-ms'] }
+          : {}),
+        ...(argv['channel-idle-timeout-ms'] !== undefined
+          ? { channelIdleTimeoutMs: argv['channel-idle-timeout-ms'] }
+          : {}),
+        ...(argv['session-reap-interval-ms'] !== undefined
+          ? { sessionReapIntervalMs: argv['session-reap-interval-ms'] }
+          : {}),
+        ...(argv['session-idle-timeout-ms'] !== undefined
+          ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
+          : {}),
+        ...(rateLimit ? { rateLimit: true } : {}),
+        ...(rateLimitPrompt !== undefined ? { rateLimitPrompt } : {}),
+        ...(rateLimitMutation !== undefined ? { rateLimitMutation } : {}),
+        ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
+        ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
       });
     } catch (err) {
       writeStderrLine(

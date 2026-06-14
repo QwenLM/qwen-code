@@ -33,9 +33,7 @@
  * as `acp-integration.test.ts` / `cron-tools.test.ts`.
  */
 
-import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -48,10 +46,19 @@ import {
   countDescendants,
   percentiles,
   writeWorkspaceSettings,
+  gitHead,
+  makeTempWorkspace,
+  sleep,
   type SpawnedDaemon,
   type DescendantCount,
   type Percentiles,
 } from './_daemon-harness.js';
+import {
+  resolveOutputDir,
+  formatPercentiles,
+  writeSnapshotArtifacts,
+  collectPlatformInfo,
+} from './_daemon-perf-report.js';
 
 // Minimal type-shape for the SSE backpressure unit suite — we only assert
 // `.type`, so we avoid coupling tests to the full BridgeEvent surface.
@@ -107,10 +114,7 @@ const MCP_FIXTURE_PGREP_FILTER = 'idle-mcp/server\\.mjs';
 const MCP_DESCENDANT_WAIT_TIMEOUT_MS = 10_000;
 const MCP_DESCENDANT_POLL_MS = 250;
 const RSS_DROPPED_SAMPLE_RATIO_MAX = 0.2;
-const RUN_TS = new Date().toISOString().replace(/[:.]/g, '').replace(/Z$/, '');
-const OUTPUT_DIR =
-  process.env['INTEGRATION_TEST_FILE_DIR'] ??
-  path.join(process.cwd(), '.integration-tests', `baseline-${RUN_TS}`);
+const OUTPUT_DIR = resolveOutputDir('baseline');
 
 // Catastrophic-regression upper bounds. These are intentionally loose —
 // tightening them is a deliberate one-line PR after a regression is
@@ -184,11 +188,7 @@ const snapshot: SnapshotShape = {
   version: 1,
   capturedAt: new Date().toISOString(),
   gitCommit: gitHead(),
-  platform: {
-    os: process.platform,
-    arch: process.arch,
-    nodeVersion: process.version,
-  },
+  platform: collectPlatformInfo(),
   notes: [
     'Daemon defaults to sessionScope: "single", so N successive ' +
       'createOrAttachSession calls against the same workspace return the ' +
@@ -206,27 +206,6 @@ const snapshot: SnapshotShape = {
     heavy: HEAVY,
   },
 };
-
-function gitHead(): string | null {
-  try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], {
-      encoding: 'utf8',
-      timeout: 2_000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {
-    return null;
-  }
-}
-
-function makeTempWorkspace(label: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `qwen-baseline-${label}-`));
-  return dir;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -464,41 +443,35 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
       }, 120_000);
 
       // PR 14b cross-check: validate the daemon's in-process MCP
-      // accounting on `GET /workspace/mcp` (`clientCount`, the field
-      // SDK consumers and dashboards see, and the same source the
-      // push-event channel — `mcp_budget_warning` /
-      // `mcp_child_refused_batch` — reads) against external `pgrep -P`
+      // accounting on `GET /workspace/mcp` against external `pgrep -P`
       // measurement.
       //
-      // Architectural note (PR 22a): a `qwen serve` ACP child runs
-      // two `Config` objects, each carrying its own
-      // `McpClientManager`. The bootstrap Config (`runAcpAgent` →
-      // `config.initialize`) discovers MCP servers when the child
-      // starts, and `/workspace/mcp` reads its manager via
-      // `buildWorkspaceMcpStatus(this.config)` (`acpAgent.ts:1399`).
-      // The per-session Config (`newSessionConfig` →
-      // `config.initialize`) spawns a SECOND set of MCP children for
-      // the SAME servers — its accounting is NOT what the
-      // workspace-level snapshot reflects. So pgrep observes
-      // `(1 + sessionCount) * MCP_SERVERS_CONFIGURED` grandchildren
-      // while `clientCount` stays at `MCP_SERVERS_CONFIGURED`.
+      // Architectural note (F2 workspace pool): the daemon hosts a
+      // workspace-shared MCP transport pool (`QwenAgent.mcpPool`).
+      // All sessions of a workspace share ONE transport per configured
+      // server, so pgrep observes exactly `MCP_SERVERS_CONFIGURED`
+      // grandchildren regardless of session count. (Pre-F2, bootstrap
+      // + per-session Configs each ran their own `McpClientManager`,
+      // and this test asserted the historical 2×N duplication.)
+      // Pool accounting surfaces per server cell as `entryCount` /
+      // `entrySummary`; the top-level `clientCount` field reflects the
+      // workspace budget controller's reserved count — 0 when budgets
+      // are off (this suite), NOT the live transport count.
       //
       // What this test validates:
-      // 1. `clientCount` is exactly the configured server count
-      //    (bootstrap manager accounting is honest).
-      // 2. pgrep observes the architectural 2×N grandchildren after
-      //    one session is created — encoded literally so a future
-      //    refactor that unifies bootstrap + session managers (#4175
-      //    follow-up to drop the duplicate discovery) fails this
-      //    assertion and forces a deliberate test update.
+      // 1. pgrep observes exactly N grandchildren after a session is
+      //    created — encoded literally so a refactor that reintroduces
+      //    per-session MCP children fails this assertion and forces a
+      //    deliberate test update (same tripwire spirit as the pre-F2
+      //    2×N assertion this replaces).
+      // 2. Pool accounting is honest: per-server `entryCount` sums to
+      //    the observed pgrep count (no amplification slack at idle —
+      //    the fixtures are stdio-only).
       // 3. `clientCount` NEVER exceeds the observed pgrep count —
       //    the original "snapshot must never over-report" guard.
       //
-      // Skip-gated like the parent describe (POSIX, non-sandbox);
-      // idle MCP fixtures are stdio-only so the relationship between
-      // `clientCount` and pgrep is exact (no amplification slack
-      // required at idle).
-      it('clientCount matches external pgrep observation', async () => {
+      // Skip-gated like the parent describe (POSIX, non-sandbox).
+      it('pool accounting matches external pgrep observation', async () => {
         const ws = makeTempWorkspace('mcp-counter');
         let daemon: SpawnedDaemon | undefined;
         try {
@@ -511,28 +484,35 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
           daemon = await spawnDaemon({ workspaceCwd: ws });
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
 
-          // Wait until the OS sees the FULL post-session set
-          // (`MCP_SERVERS_CONFIGURED * 2` grandchildren — see the
+          // Wait until the OS sees the full pooled set
+          // (`MCP_SERVERS_CONFIGURED` grandchildren — see the
           // architectural note above), then read the snapshot.
           // pgrep first to lock the comparison floor; snapshot
           // second so the daemon can't sneak in a new connect
           // between the two reads.
-          const expectedGrandchildren = MCP_SERVERS_CONFIGURED * 2;
           const observed = await waitForMcpGrandchildren(
             daemon.daemon.pid!,
-            expectedGrandchildren,
+            MCP_SERVERS_CONFIGURED,
           );
           const snapshot = await daemon.client.workspaceMcp();
 
-          // (1) Bootstrap manager accounting is honest.
-          expect(snapshot.clientCount).toBe(MCP_SERVERS_CONFIGURED);
-          // (2) pgrep observes both managers' children. If a future
-          // refactor unifies them, change this to
-          // `MCP_SERVERS_CONFIGURED` (and update the architectural
-          // note above).
-          expect(observed.mcpGrandchildren.length).toBe(expectedGrandchildren);
-          // (3) Snapshot never over-reports OS reality. Holds under
-          // both the current 2× regime and the unified 1× future.
+          // (1) One pooled transport per configured server — no
+          // per-session amplification. If this fails with MORE
+          // children, per-session MCP spawning has been reintroduced;
+          // update the architectural note above deliberately.
+          expect(observed.mcpGrandchildren.length).toBe(MCP_SERVERS_CONFIGURED);
+          // (2) Pool accounting is honest: entryCount sums to the
+          // observed process count. Structural narrowing: the daemon
+          // emits `entryCount` on pool-backed cells but the SDK's
+          // `DaemonWorkspaceMcpServerStatus` doesn't carry the F2
+          // pool fields yet.
+          const pooledEntries = snapshot.servers.reduce(
+            (sum, server) =>
+              sum + ((server as { entryCount?: number }).entryCount ?? 0),
+            0,
+          );
+          expect(pooledEntries).toBe(observed.mcpGrandchildren.length);
+          // (3) Snapshot never over-reports OS reality.
           expect(snapshot.clientCount).toBeLessThanOrEqual(
             observed.mcpGrandchildren.length,
           );
@@ -704,25 +684,19 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
 
     afterAll(() => {
       if (SKIP) return;
-      fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-      const jsonPath = path.join(OUTPUT_DIR, 'perf-baseline.json');
-      fs.writeFileSync(jsonPath, JSON.stringify(snapshot, null, 2));
-      fs.writeFileSync(
-        path.join(OUTPUT_DIR, 'perf-baseline.md'),
+      writeSnapshotArtifacts(
+        OUTPUT_DIR,
+        'perf-baseline',
+        snapshot,
         renderMarkdown(snapshot),
+        'baseline',
       );
-      // Echo the path so a reviewer / CI logs surface where the artifact
-      // landed.
-      console.log(`[baseline] perf-baseline.json written to ${jsonPath}`);
     });
   },
 );
 
 function renderMarkdown(s: SnapshotShape): string {
-  const fmt = (p: Percentiles | null | undefined): string =>
-    p
-      ? `p50=${p.p50.toFixed(0)} p90=${p.p90.toFixed(0)} p99=${p.p99.toFixed(0)} mean=${p.mean.toFixed(0)} (n=${p.count})`
-      : 'n/a';
+  const fmt = formatPercentiles;
   return [
     `# qwen serve daemon — perf baseline`,
     ``,

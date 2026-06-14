@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ChatCompressionService,
+  COMPACT_MAX_OUTPUT_TOKENS,
   computeThresholds,
   MAX_CONSECUTIVE_FAILURES,
   MAX_HOOK_INSTRUCTIONS_CHARS,
@@ -914,7 +915,108 @@ describe('ChatCompressionService', () => {
     expect(result.newHistory).toBeNull();
   });
 
-  it('should return FAILED if usage metadata is missing', async () => {
+  it('should use estimated token count if usage metadata is missing', async () => {
+    const largeMessage = 'x'.repeat(4_000);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: largeMessage }] },
+      { role: 'model', parts: [{ text: largeMessage }] },
+      { role: 'user', parts: [{ text: largeMessage }] },
+      { role: 'model', parts: [{ text: largeMessage }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      5_000,
+    );
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 6_000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+    const debug = vi.fn();
+    (
+      mockConfig as unknown as {
+        getDebugLogger: () => {
+          warn: ReturnType<typeof vi.fn>;
+          debug: typeof debug;
+        };
+      }
+    ).getDebugLogger = () => ({
+      warn: vi.fn(),
+      debug,
+    });
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      // Some OpenAI-compatible providers (for example MiniMax-2.7) may omit
+      // usage on the compression side-query even when they return a summary.
+      usage: undefined,
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.originalTokenCount).toBe(5_000);
+    expect(result.info.newTokenCount).toBeGreaterThan(1_000);
+    expect(result.info.newTokenCount).toBeLessThan(1_100);
+    expect(result.newHistory).not.toBeNull();
+    expect(result.newHistory![0].parts![0].text).toContain('Summary');
+    expect(debug).toHaveBeenCalledWith(
+      expect.stringContaining('usage metadata missing'),
+    );
+    expect(debug).toHaveBeenCalledWith(
+      expect.stringContaining('API-reported non-visible remainder (1000)'),
+    );
+  });
+
+  it('should reject inflated local delta if usage metadata is missing', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'short user message' }] },
+      { role: 'model', parts: [{ text: 'short model response' }] },
+      { role: 'user', parts: [{ text: 'another short user message' }] },
+      { role: 'model', parts: [{ text: 'another short model response' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 6_000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: 'x'.repeat(40_000),
+      usage: undefined,
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+    );
+    expect(result.info.originalTokenCount).toBe(800);
+    expect(result.info.newTokenCount).toBeGreaterThan(800);
+    expect(result.newHistory).toBeNull();
+  });
+
+  it('should reject cap-sized summaries even if usage metadata is missing', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -922,15 +1024,28 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      180_000,
+    );
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 200_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
+    const warn = vi.fn();
+    (
+      mockConfig as unknown as {
+        getDebugLogger: () => {
+          warn: typeof warn;
+          debug: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).getDebugLogger = () => ({
+      warn,
+      debug: vi.fn(),
+    });
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
-      // No usage -> keep original token count
+      text: 'x'.repeat(COMPACT_MAX_OUTPUT_TOKENS * 4),
       usage: undefined,
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -947,11 +1062,72 @@ describe('ChatCompressionService', () => {
     });
 
     expect(result.info.compressionStatus).toBe(
-      CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
     );
-    expect(result.info.originalTokenCount).toBe(800);
-    expect(result.info.newTokenCount).toBe(800);
     expect(result.newHistory).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('local estimate'),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+    );
+  });
+
+  it('should reject CJK cap-sized summaries when usage metadata is missing', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      180_000,
+    );
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 200_000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const warn = vi.fn();
+    (
+      mockConfig as unknown as {
+        getDebugLogger: () => {
+          warn: typeof warn;
+          debug: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).getDebugLogger = () => ({
+      warn,
+      debug: vi.fn(),
+    });
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: '\u4e00'.repeat(Math.ceil(COMPACT_MAX_OUTPUT_TOKENS / 1.5)),
+      usage: undefined,
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: false,
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('local estimate'),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+    );
   });
 
   it('should return FAILED if summary is empty string', async () => {
@@ -1883,12 +2059,21 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
 });
 
 describe('computeThresholds', () => {
-  it('32K window — proportional fallback for all tiers, hard degrades to auto', () => {
+  it('32K window — proportional fallback for all tiers, hard = auto + HARD_BUFFER', () => {
     const t = computeThresholds(32_000);
     expect(t.warn).toBe(19_200); // 0.6 * 32K
     expect(t.auto).toBe(22_400); // 0.7 * 32K
-    expect(t.hard).toBe(22_400); // max(window-23K=9K, auto=22.4K) = auto
+    expect(t.hard).toBe(25_400); // auto + HARD_BUFFER = 22.4K + 3K
     expect(t.effectiveWindow).toBe(12_000);
+  });
+
+  it('60K window — hard no longer equals auto (issue #4945)', () => {
+    const t = computeThresholds(60_000);
+    expect(t.warn).toBe(36_000); // 0.6 * 60K
+    expect(t.auto).toBe(42_000); // 0.7 * 60K (pct wins: 42K vs ew-13K=27K)
+    expect(t.hard).toBe(45_000); // auto + HARD_BUFFER = 42K + 3K
+    expect(t.hard).toBeGreaterThan(t.auto);
+    expect(t.effectiveWindow).toBe(40_000);
   });
 
   it('128K window — mixed (warn=pct, auto/hard=abs)', () => {
@@ -1933,11 +2118,13 @@ describe('computeThresholds', () => {
     expect(t.hard).toBe(0);
   });
 
-  it('thresholds always satisfy warn <= auto <= hard', () => {
-    for (const w of [32_000, 64_000, 128_000, 200_000, 256_000, 1_000_000]) {
+  it('thresholds always satisfy warn <= auto < hard for non-zero windows', () => {
+    for (const w of [
+      10_000, 32_000, 60_000, 64_000, 128_000, 200_000, 256_000, 1_000_000,
+    ]) {
       const t = computeThresholds(w);
       expect(t.warn).toBeLessThanOrEqual(t.auto);
-      expect(t.auto).toBeLessThanOrEqual(t.hard);
+      expect(t.auto).toBeLessThan(t.hard);
     }
   });
 });

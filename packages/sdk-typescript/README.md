@@ -496,7 +496,7 @@ Version 0.1.0 requires [Qwen Code](https://github.com/QwenLM/qwen-code) **>= 0.4
 
 ```bash
 # Install Qwen Code globally
-npm install -g qwen-code@^0.4.0
+npm install -g @qwen-code/qwen-code@latest
 ```
 
 **Note**: From version **0.1.1** onwards, the CLI is bundled with the SDK, so no separate Qwen Code installation is needed.

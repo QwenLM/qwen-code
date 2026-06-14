@@ -8,10 +8,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   Content,
   GenerateContentConfig,
-  GenerateContentResponse,
   Part,
 } from '@google/genai';
-import { ApiError } from '@google/genai';
+import {
+  ApiError,
+  FinishReason,
+  GenerateContentResponse,
+} from '@google/genai';
 import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
 import {
   GeminiChat,
@@ -77,6 +80,24 @@ const { mockLogContentRetry, mockLogContentRetryFailure } = vi.hoisted(() => ({
   mockLogContentRetryFailure: vi.fn(),
 }));
 
+const { mockDebugLoggerWarn } = vi.hoisted(() => ({
+  mockDebugLoggerWarn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: vi.fn(() => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: mockDebugLoggerWarn,
+      error: vi.fn(),
+    })),
+  };
+});
+
 vi.mock('../telemetry/loggers.js', () => ({
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
@@ -102,24 +123,6 @@ const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
 vi.mock('../services/sleepInhibitor.js', () => ({
   acquireSleepInhibitor: mockAcquireSleepInhibitor,
 }));
-
-const { mockDebugLoggerWarn } = vi.hoisted(() => ({
-  mockDebugLoggerWarn: vi.fn(),
-}));
-
-vi.mock('../utils/debugLogger.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/debugLogger.js')>();
-  return {
-    ...actual,
-    createDebugLogger: () => ({
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: mockDebugLoggerWarn,
-      error: vi.fn(),
-    }),
-  };
-});
 
 describe('GeminiChat', async () => {
   let mockContentGenerator: ContentGenerator;
@@ -447,6 +450,238 @@ describe('GeminiChat', async () => {
       const modelTurn = history[1]!;
       expect(modelTurn?.parts?.length).toBe(1); // The empty part is discarded
       expect(modelTurn?.parts![0]!.functionCall).toBeDefined();
+    });
+
+    it('suffixes cross-turn reused functionCall ids before yielding and recording history', async () => {
+      chat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'first' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            functionCalls: [
+              {
+                id: 'dup_id_0001',
+                name: 'read_file',
+                args: { file_path: 'b.ts' },
+              },
+            ],
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'dup_id_0001',
+                        name: 'read_file',
+                        args: { file_path: 'b.ts' },
+                      },
+                    },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'second' },
+        'prompt-id-dup-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const chunk = events.find((event) => event.type === StreamEventType.CHUNK)
+        ?.value as GenerateContentResponse | undefined;
+      expect(chunk?.functionCalls?.map((call) => call.id)).toEqual([
+        'dup_id_0001__qwen_dup_2',
+      ]);
+      expect(
+        chunk?.candidates?.[0]?.content?.parts?.map(
+          (part) => part.functionCall?.id,
+        ),
+      ).toEqual(['dup_id_0001__qwen_dup_2']);
+
+      const history = chat.getHistory();
+      expect(history.at(-1)?.parts?.[0]?.functionCall?.id).toBe(
+        'dup_id_0001__qwen_dup_2',
+      );
+    });
+
+    it('normalizes ids visible through the real GenerateContentResponse functionCalls getter', async () => {
+      chat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      const response = new GenerateContentResponse();
+      response.candidates = [
+        {
+          content: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'b.ts' },
+                },
+              },
+            ],
+          },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield response;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'second' },
+        'prompt-id-real-response-getter',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const chunk = events.find((event) => event.type === StreamEventType.CHUNK)
+        ?.value as GenerateContentResponse | undefined;
+      expect(chunk?.functionCalls?.map((call) => call.id)).toEqual([
+        'dup_id_0001__qwen_dup_2',
+      ]);
+    });
+
+    it('drops same-turn replayed functionCall ids before yielding and recording history', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            functionCalls: [
+              { id: 'dup_id_0001', name: 'read_file', args: {} },
+              { id: 'dup_id_0001', name: 'read_file', args: {} },
+            ],
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'dup_id_0001',
+                        name: 'read_file',
+                        args: {},
+                      },
+                    },
+                    {
+                      functionCall: {
+                        id: 'dup_id_0001',
+                        name: 'read_file',
+                        args: {},
+                      },
+                    },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'run once' },
+        'prompt-id-same-turn-dup-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const chunk = events.find((event) => event.type === StreamEventType.CHUNK)
+        ?.value as GenerateContentResponse | undefined;
+      expect(chunk?.functionCalls?.map((call) => call.id)).toEqual([
+        'dup_id_0001',
+      ]);
+      expect(
+        chunk?.candidates?.[0]?.content?.parts?.map(
+          (part) => part.functionCall?.id,
+        ),
+      ).toEqual(['dup_id_0001']);
+
+      const functionCallIds = chat
+        .getHistory()
+        .at(-1)
+        ?.parts?.map((part) => part.functionCall?.id)
+        .filter((id): id is string => Boolean(id));
+      expect(functionCallIds).toEqual(['dup_id_0001']);
     });
 
     it('should fail if the stream ends with an empty part and has no finishReason', async () => {
@@ -2847,6 +3082,82 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('stops hard-rescue after repeated compressed results are still oversized', async () => {
+      const originalHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn: vi.fn(),
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      chatWithRecording.setHistory(originalHistory);
+      chatWithRecording.setLastPromptTokenCount(176_999);
+
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'still large summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ],
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 177_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('after bounded compressed hard-rescue'),
+      );
+
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: `still-oversized-after-compression-${i}` },
+            `prompt-hard-rescue-compressed-bound-${i}`,
+          ),
+        ).rejects.toThrow(/compression status: COMPRESSED/i);
+      }
+
+      const callsBeforeBound = compressSpy.mock.calls.length;
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'send after bounded compressed hard-rescue' },
+        'prompt-hard-rescue-after-compressed-bound',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(callsBeforeBound);
+      expect(callsBeforeBound).toBe(MAX_CONSECUTIVE_FAILURES);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES).fill(true),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('hardRescueFailureCount=1'),
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('hard-tier rescue skipped'),
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'prompt_id=prompt-hard-rescue-after-compressed-bound',
+        ),
+      );
+    });
+
     it('rejects when compressed history is below hard but the pending user message pushes it over', async () => {
       const originalHistory: Content[] = [
         { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
@@ -2897,6 +3208,203 @@ describe('GeminiChat', async () => {
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(175_500);
       expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
         originalHistory[0].parts?.[0].text,
+      );
+    });
+
+    it('stops pre-send hard-rescue after repeated failed hard-tier compactions', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse('after failed rescue'),
+      );
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `hard-rescue-${i}` },
+            `prompt-hard-rescue-bound-${i}`,
+          ),
+        ).rejects.toThrow(
+          /compression status: COMPRESSION_FAILED_EMPTY_SUMMARY/i,
+        );
+      }
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after bounded hard-rescue failures' },
+        'prompt-hard-rescue-after-failures',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES).fill(true),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('hard-tier rescue skipped'),
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('prompt_id=prompt-hard-rescue-after-failures'),
+      );
+    });
+
+    it('falls back to reactive overflow recovery after the hard-rescue bound is exhausted', async () => {
+      const failedRescueResult = {
+        newHistory: null,
+        info: {
+          originalTokenCount: 178_000,
+          newTokenCount: 178_000,
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+        },
+      };
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary after overflow' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce(failedRescueResult)
+        .mockResolvedValueOnce(failedRescueResult)
+        .mockResolvedValueOnce(failedRescueResult)
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(
+          new Error('prompt is too long: 180000 tokens > 128000 maximum'),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('after reactive fallback'));
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `failed-hard-rescue-${i}` },
+            `prompt-hard-rescue-before-reactive-${i}`,
+          ),
+        ).rejects.toThrow(
+          /compression status: COMPRESSION_FAILED_EMPTY_SUMMARY/i,
+        );
+      }
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after hard-rescue bound' },
+        'prompt-hard-rescue-reactive-fallback',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES + 1);
+      expect(
+        compressSpy.mock.calls
+          .slice(0, MAX_CONSECUTIVE_FAILURES)
+          .map(([, opts]) => opts.force),
+      ).toEqual(Array(MAX_CONSECUTIVE_FAILURES).fill(true));
+      expect(compressSpy.mock.calls[MAX_CONSECUTIVE_FAILURES][1].force).toBe(
+        true,
+      );
+      expect(
+        compressSpy.mock.calls[MAX_CONSECUTIVE_FAILURES][1].originalTokenCount,
+      ).toBe(180_000);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('does not count thrown hard-rescue attempts toward the retry bound', async () => {
+      const compressionError = new Error('compression side-query failed');
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockRejectedValue(compressionError);
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 1; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `throwing-hard-rescue-${i}` },
+            `prompt-hard-rescue-throw-${i}`,
+          ),
+        ).rejects.toThrow(compressionError);
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES + 1);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
+
+    it('stops hard-rescue after repeated NOOP results are still oversized', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `noop-hard-rescue-${i}` },
+            `prompt-hard-rescue-noop-${i}`,
+          ),
+        ).rejects.toThrow(/compression status: NOOP/i);
+      }
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('after bounded noop hard-rescue'),
+      );
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after bounded noop hard-rescue' },
+        'prompt-hard-rescue-after-noop-bound',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES).fill(true),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('hard-tier rescue skipped'),
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'prompt_id=prompt-hard-rescue-after-noop-bound',
+        ),
       );
     });
 
@@ -4066,6 +4574,75 @@ describe('GeminiChat', async () => {
                 'Success after Retry-After',
           ),
         ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should pass configured retry error codes into streamed retry diagnostics', async () => {
+      vi.useFakeTimers();
+
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_OPENAI,
+          model: 'test-model',
+          retryErrorCodes: [4999],
+        });
+        const providerThrottle = Object.assign(
+          new StreamContentError('Provider-specific throttle'),
+          { status: 4999 },
+        );
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw providerThrottle;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Success after custom code retry' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-custom-retry-code',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+
+        const secondPromise = iterator.next();
+        await vi.advanceTimersByTimeAsync(60_000);
+        await secondPromise;
+
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+        }
+
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Rate limit retry scheduled',
+          expect.objectContaining({
+            classificationDiagnosis: 'retryable',
+            classificationReason: 'rate-limit',
+            errorKind: 'provider',
+          }),
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -5908,6 +6485,37 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('should not re-escalate when the request already uses the escalated output limit', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStream([makeChunk([{ text: 'still partial' }], 'MAX_TOKENS')]),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        {
+          message: 'continue the agent task',
+          config: { maxOutputTokens: 65_536 },
+        },
+        'prompt-sticky-escalation',
+      );
+
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.RETRY &&
+            event.maxOutputTokensEscalated !== undefined,
+        ),
+      ).toBe(false);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+
     it('should coalesce overlapping recovery continuation text', async () => {
       const streams = [
         makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
@@ -7480,6 +8088,140 @@ describe('GeminiChat', async () => {
       // Next unforced call: counter is back to 0.
       await chat.tryCompress('p3', 'm1');
       expect(compressSpy.mock.calls[3][1].consecutiveFailures).toBe(0);
+    });
+  });
+
+  describe('compressFast', () => {
+    const userMsg = (text: string): Content => ({
+      role: 'user' as const,
+      parts: [{ text }],
+    });
+    const modelMsg = (text: string): Content => ({
+      role: 'model' as const,
+      parts: [{ text }],
+    });
+    const modelMsgWithThinking = (
+      text: string | null,
+      thinking: string,
+    ): Content => ({
+      role: 'model' as const,
+      parts: [{ thought: true, text: thinking }, ...(text ? [{ text }] : [])],
+    });
+    const toolCall = (name: string): Content => ({
+      role: 'model' as const,
+      parts: [{ functionCall: { name, args: {} } }],
+    });
+    const toolResult = (name: string, output: string): Content => ({
+      role: 'user' as const,
+      parts: [{ functionResponse: { name, response: { output } } }],
+    });
+
+    beforeEach(() => {
+      (mockConfig as unknown as Record<string, unknown>)[
+        'getClearContextOnIdle'
+      ] = vi.fn().mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+      });
+    });
+
+    it('strips thinking from model turns', () => {
+      chat.setHistory([
+        userMsg('hello'),
+        modelMsgWithThinking('response text', 'internal reasoning'),
+        userMsg('next'),
+        modelMsg('plain reply'),
+      ]);
+      chat.setLastPromptTokenCount(1000);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      // Thinking parts should be stripped from the first model message
+      const history = chat.getHistory();
+      const firstModel = history.find((c) => c.role === 'model');
+      expect(firstModel?.parts).toEqual([{ text: 'response text' }]);
+    });
+
+    it('NOOP when nothing is compressible', () => {
+      chat.setHistory([
+        userMsg('hello'),
+        modelMsg('hi'),
+        userMsg('how are you'),
+        modelMsg('good'),
+      ]);
+      chat.setLastPromptTokenCount(1000);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    });
+
+    it('clears old tool results via microcompaction', () => {
+      const history: Content[] = [];
+      // Create many tool calls so keepRecent=5 kicks in
+      for (let i = 0; i < 8; i++) {
+        history.push(toolCall('read_file'));
+        history.push(
+          toolResult('read_file', `content for file ${i} `.repeat(50)),
+        );
+      }
+      history.push(userMsg('final'));
+      history.push(modelMsg('done'));
+      chat.setHistory(history);
+      chat.setLastPromptTokenCount(5000);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.microcompactMeta).toBeDefined();
+      expect(result.microcompactMeta!.toolsCleared).toBeGreaterThan(0);
+    });
+
+    it('adjusts lastPromptTokenCount by estimated delta on COMPRESSED', () => {
+      const history: Content[] = [];
+      for (let i = 0; i < 5; i++) {
+        history.push(
+          userMsg(`question ${i}`),
+          modelMsgWithThinking(
+            `response ${i}`,
+            `very long internal reasoning for turn ${i} `.repeat(100),
+          ),
+        );
+      }
+      chat.setHistory(history);
+      const apiBaseline = 50000;
+      chat.setLastPromptTokenCount(apiBaseline);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.newTokenCount).toBeLessThan(apiBaseline);
+      expect(result.info.newTokenCount).toBeGreaterThan(0);
+      expect(chat.getLastPromptTokenCount()).toBe(result.info.newTokenCount);
+    });
+
+    it('falls back to estimateContentTokens when lastPromptTokenCount is 0', () => {
+      const history: Content[] = [];
+      for (let i = 0; i < 5; i++) {
+        history.push(
+          userMsg(`question ${i}`),
+          modelMsgWithThinking(
+            `response ${i}`,
+            `very long internal reasoning for turn ${i} `.repeat(100),
+          ),
+        );
+      }
+      chat.setHistory(history);
+      chat.setLastPromptTokenCount(0);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.originalTokenCount).toBeGreaterThan(0);
+      expect(result.info.newTokenCount).toBeLessThan(
+        result.info.originalTokenCount,
+      );
     });
   });
 });

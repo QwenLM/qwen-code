@@ -14,6 +14,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import { getPendingGatedMcpServers } from '../../config/mcpApprovals.js';
+import { assembleMcpServers } from '../../config/mcpServers.js';
 
 async function getMcpServersFromConfig(
   extensionManager?: ExtensionManager,
@@ -30,7 +32,10 @@ async function getMcpServersFromConfig(
     await extManager.refreshCache();
   }
   const extensions = extManager.getLoadedExtensions();
-  const mcpServers = { ...(settings.merged.mcpServers || {}) };
+  const mcpServers: Record<string, MCPServerConfig> = assembleMcpServers(
+    settings.merged.mcpServers,
+    process.cwd(),
+  );
   for (const extension of extensions) {
     if (extension.isActive) {
       Object.entries(extension.config.mcpServers || {}).forEach(
@@ -53,13 +58,15 @@ async function createMinimalConfig(): Promise<Config> {
   const settings = loadSettings();
   const cwd = process.cwd();
   const fileService = new FileDiscoveryService(cwd);
+  const mcpServers = await getMcpServersFromConfig();
 
   const config = new Config({
     sessionId: 'mcp-reconnect',
     targetDir: cwd,
     cwd,
     debugMode: false,
-    mcpServers: settings.merged.mcpServers || {},
+    mcpServers,
+    pendingMcpServers: getPendingGatedMcpServers(mcpServers, cwd),
     fileDiscoveryService: fileService,
     mcpServerCommand: settings.merged.mcp?.serverCommand,
   });

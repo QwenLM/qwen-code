@@ -1072,4 +1072,136 @@ describe('HookAggregator', () => {
       ).toBe('single context');
     });
   });
+
+  describe('terminalSequence merging', () => {
+    it('preserves single terminalSequence in OR-logic events', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'echo test' },
+          eventName: HookEventName.Notification,
+          success: true,
+          output: { terminalSequence: '\x07' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.Notification,
+      );
+      expect(result.finalOutput?.terminalSequence).toBe('\x07');
+    });
+
+    it('concatenates terminalSequence from multiple outputs', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'hook1' },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { terminalSequence: '\x07' },
+          duration: 10,
+        },
+        {
+          hookConfig: { type: HookType.Command, command: 'hook2' },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { terminalSequence: '\x1b]9;hello\x07' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PreToolUse,
+      );
+      expect(result.finalOutput?.terminalSequence).toBe('\x07\x1b]9;hello\x07');
+    });
+
+    it('omits terminalSequence when no outputs have it', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'echo test' },
+          eventName: HookEventName.Stop,
+          success: true,
+          output: { continue: true },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(results, HookEventName.Stop);
+      expect(result.finalOutput?.terminalSequence).toBeUndefined();
+    });
+
+    it('preserves terminalSequence in simple merge events', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'hook1' },
+          eventName: HookEventName.SessionStart,
+          success: true,
+          output: { terminalSequence: '\x1b]0;title\x07' },
+          duration: 10,
+        },
+        {
+          hookConfig: { type: HookType.Command, command: 'hook2' },
+          eventName: HookEventName.SessionStart,
+          success: true,
+          output: { terminalSequence: '\x07' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.SessionStart,
+      );
+      expect(result.finalOutput?.terminalSequence).toBe('\x1b]0;title\x07\x07');
+    });
+
+    it('preserves terminalSequence in PermissionRequest merge', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'hook1' },
+          eventName: HookEventName.PermissionRequest,
+          success: true,
+          output: {
+            terminalSequence: '\x07',
+            hookSpecificOutput: {
+              decision: { behavior: 'allow' },
+            },
+          },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PermissionRequest,
+      );
+      expect(result.finalOutput?.terminalSequence).toBe('\x07');
+    });
+
+    it('does not affect decision fields when terminalSequence is present', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'hook1' },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: {
+            decision: 'block',
+            reason: 'blocked',
+            terminalSequence: '\x07',
+          },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PreToolUse,
+      );
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe('blocked');
+      expect(result.finalOutput?.terminalSequence).toBe('\x07');
+    });
+  });
 });

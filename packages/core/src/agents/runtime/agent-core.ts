@@ -51,6 +51,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { dedupeToolCallsById } from '../../core/toolCallIdUtils.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -76,18 +77,30 @@ import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
+import {
+  isTeammate,
+  getTeammateContext,
+  runWithTeammateIdentity,
+} from '../team/identity.js';
+import type { TeammateIdentity } from '../team/types.js';
 
 /**
  * Result of a single reasoning loop invocation.
  */
 /**
- * Tools that must never be available to subagents (including forked agents).
+ * Tools that must never be available to non-team subagents (including
+ * forked agents spawned via the Agent tool).
  * - AgentTool prevents recursive subagent spawning.
  * - Cron tools are session-scoped and should only run from the main session.
  * - TaskStop and SendMessage are parent-side control-plane tools for managing
  *   background subagents; subagents have no agent IDs to manage natively, so
  *   exposing them only widens the surface for cross-agent interference if an
  *   ID leaks via prompt or transcript.
+ * - Team management (team_create/team_delete) and task coordination
+ *   (task_create/task_update/task_list) are leader/teammate tools. A
+ *   non-team Agent subagent has no teammate identity, so isTeammate()
+ *   returns false and these tools would treat it as the leader — letting
+ *   it delete or rewrite the active team.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
@@ -96,10 +109,43 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_DELETE,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+  ToolNames.TASK_CREATE,
+  ToolNames.TASK_UPDATE,
+  ToolNames.TASK_LIST,
   // Worktree management belongs to the parent session — a subagent must
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
+  // fan-out: a subagent spawned by Workflow that calls Workflow would create
+  // O(k^n) subagents.
+  ToolNames.WORKFLOW,
+]);
+
+/**
+ * Tools excluded from teammates. Teammates need send_message and the
+ * task_* coordination tools to do their job, but they must not be able
+ * to create or destroy the team itself — only the leader can do that.
+ */
+const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ToolNames.CRON_CREATE,
+  ToolNames.CRON_LIST,
+  ToolNames.CRON_DELETE,
+  ToolNames.TASK_STOP,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+  // Worktree management belongs to the parent session.
+  ToolNames.ENTER_WORKTREE,
+  ToolNames.EXIT_WORKTREE,
+  // Same recursion guard as EXCLUDED_TOOLS_FOR_SUBAGENTS: the teammate
+  // identity propagates through AsyncLocalStorage into anything it
+  // spawns, so prepareTools() would keep choosing THIS exclusion set
+  // for nested agents — without WORKFLOW here, a teammate-launched
+  // workflow re-arms the O(k^n) fan-out the subagent set prevents.
+  ToolNames.WORKFLOW,
 ]);
 
 /**
@@ -325,10 +371,12 @@ export class AgentCore {
     const hasInitialMessages =
       !!this.promptConfig.initialMessages &&
       this.promptConfig.initialMessages.length > 0;
-    const envHistory = hasInitialMessages
-      ? []
+    const hasSkillTool = this.willHaveSkillTool();
+    const [envHistory] = hasInitialMessages
+      ? [[]]
       : await getInitialChatHistory(this.runtimeContext, undefined, {
           includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: hasSkillTool,
         });
 
     const startHistory = [
@@ -381,6 +429,25 @@ export class AgentCore {
   // ─── Tool Preparation ─────────────────────────────────────
 
   /**
+   * Returns true if this agent's effective tool surface will include the Skill
+   * tool. Used before `prepareTools()` to decide whether to inject the
+   * `<available_skills>` snapshot.
+   */
+  private willHaveSkillTool(): boolean {
+    if (!this.toolConfig) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    const asStrings = this.toolConfig.tools.filter(
+      (t): t is string => typeof t === 'string',
+    );
+    const hasWildcard = asStrings.includes('*');
+    if (hasWildcard || asStrings.length === 0) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    return asStrings.includes(ToolNames.SKILL);
+  }
+
+  /**
    * Prepares the list of tools available to this agent.
    *
    * If no explicit toolConfig or it contains "*" or is empty,
@@ -391,7 +458,9 @@ export class AgentCore {
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
+    const excludedFromSubagents = isTeammate()
+      ? EXCLUDED_TOOLS_FOR_TEAMMATES
+      : EXCLUDED_TOOLS_FOR_SUBAGENTS;
     // When a subagent has an explicit tools list (not wildcard), only the
     // recursive-spawn guard (AgentTool) is enforced.
     const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
@@ -530,6 +599,15 @@ export class AgentCore {
    * from the parent UI chain, after the subagent's AsyncLocalStorage frame
    * has unwound.
    *
+   * `inheritedTeammateIdentity` restores the in-process teammate identity
+   * frame (`teammateIdentityStore`). Deferred approval needs it for the
+   * same reason as the others: when a teammate's `send_message` /
+   * `task_update` resumes from the UI chain, `getAgentName()` would
+   * otherwise be undefined and the tool would mis-attribute the message
+   * to the leader (forged `from="leader"` envelope) and slip past the
+   * leader-only `isTeammate()` guard. No-op on the reasoning-loop path,
+   * where TeamManager already establishes this frame.
+   *
    * Exposed (rather than inlined twice) so the contract stays testable in
    * isolation; see `agent-core.test.ts`.
    */
@@ -537,13 +615,18 @@ export class AgentCore {
     fn: () => Promise<T>,
     inheritedView?: RuntimeContentGeneratorView,
     inheritedAgentId?: string,
+    inheritedTeammateIdentity?: TeammateIdentity,
   ): Promise<T> {
-    return subagentNameContext.run(this.name, () => {
-      const runWithView = () => this.withRuntimeView(fn, inheritedView);
-      return inheritedAgentId
-        ? runWithAgentContext(inheritedAgentId, runWithView)
-        : runWithView();
-    });
+    const runInner = () =>
+      subagentNameContext.run(this.name, () => {
+        const runWithView = () => this.withRuntimeView(fn, inheritedView);
+        return inheritedAgentId
+          ? runWithAgentContext(inheritedAgentId, runWithView)
+          : runWithView();
+      });
+    return inheritedTeammateIdentity
+      ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
+      : runInner();
   }
 
   /**
@@ -572,6 +655,7 @@ export class AgentCore {
     let turnCounter = 0;
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
+    let stickyMaxOutputTokens: number | undefined;
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -607,6 +691,9 @@ export class AgentCore {
           config: {
             abortSignal: roundAbortController.signal,
             tools: [{ functionDeclarations: toolsList }],
+            ...(stickyMaxOutputTokens !== undefined
+              ? { maxOutputTokens: stickyMaxOutputTokens }
+              : {}),
           },
         };
 
@@ -646,6 +733,9 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            if (streamEvent.maxOutputTokensEscalated !== undefined) {
+              stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
+            }
             functionCalls.length = 0;
             roundText = '';
             roundThoughtText = '';
@@ -1010,13 +1100,14 @@ export class AgentCore {
     wasOutputTruncated = false,
   ): Promise<Content[]> {
     const toolResponseParts: Part[] = [];
+    const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
 
     // Filter unauthorized tool calls before scheduling
     const authorizedCalls: FunctionCall[] = [];
-    for (const fc of functionCalls) {
+    for (const fc of uniqueFunctionCalls) {
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
 
       if (!allowedToolNames.has(fc.name)) {
@@ -1201,6 +1292,11 @@ export class AgentCore {
             // restore it. See `runInAgentFrames` for the wiring.
             const inheritedView = getRuntimeContentGenerator();
             const inheritedAgentId = getCurrentAgentId();
+            // Capture the teammate identity frame too, while the loop
+            // frame is still live, so the deferred-approval continuation
+            // can restore it. See `runInAgentFrames` for why this matters
+            // (mis-attributed `from="leader"` + leader-guard bypass).
+            const inheritedTeammateIdentity = getTeammateContext();
             this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
               subagentId: this.subagentId,
               round: currentRound,
@@ -1210,6 +1306,7 @@ export class AgentCore {
                 waiting.request.name,
                 waiting.request.args,
               ),
+              args: waiting.request.args,
               confirmationDetails: rest,
               respond: async (
                 outcome: ToolConfirmationOutcome,
@@ -1229,6 +1326,7 @@ export class AgentCore {
                   () => waiting.confirmationDetails.onConfirm(outcome, payload),
                   inheritedView,
                   inheritedAgentId ?? undefined,
+                  inheritedTeammateIdentity,
                 );
               },
               timestamp: Date.now(),

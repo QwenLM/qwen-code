@@ -195,16 +195,15 @@ describe('ShellTool', () => {
       expect(error).toBeNull();
     });
 
-    it('should not suggest the intentional sleep comment for sleep chains', async () => {
+    it('should guide model to split and use intentional-sleep for sleep chains', async () => {
       const error = shellTool.validateToolParams({
         command: 'sleep 5 && echo ok',
         is_background: false,
       });
 
-      expect(error).toContain(
-        'intentional-sleep escape hatch only applies to standalone sleep commands',
-      );
-      expect(error).not.toContain('# intentional-sleep:');
+      expect(error).toContain('Split into two calls');
+      expect(error).toContain('intentional-sleep:');
+      expect(error).toContain('reason');
     });
 
     it('should throw an error for a relative directory path', async () => {
@@ -1466,6 +1465,42 @@ describe('ShellTool', () => {
         const hintIdx = content.indexOf('foreground command ran for');
         expect(outputIdx).toBeGreaterThanOrEqual(0);
         expect(hintIdx).toBeGreaterThan(outputIdx);
+      });
+
+      it('truncates shell output char-only so the line cap cannot undercut the char budget', async () => {
+        // Regression (C2): the in-tool truncateToolOutput call omitted `lines`,
+        // so it fell back to the config line cap (default 1000). Many-short-line
+        // output (find /, ls -R) then got line-truncated while the 30k char
+        // budget still had room — contradicting the per-tool char-only contract.
+        // Pin that shell declares lines: Infinity.
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({ content: 'unused', outputFile: undefined });
+        try {
+          const invocation = shellTool.build({
+            command: 'find /',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          await vi.advanceTimersByTimeAsync(1_000);
+          resolveShellExecution({
+            output: 'short line\n'.repeat(50),
+            exitCode: 0,
+          });
+          await promise;
+
+          // Shell must pass lines: Infinity so the global line cap can't
+          // undercut its declared 30k char budget.
+          expect(spy).toHaveBeenCalledWith(
+            expect.anything(),
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({ lines: Number.POSITIVE_INFINITY }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
       });
 
       it('threshold scales with the user-supplied timeout (not the default)', async () => {

@@ -111,6 +111,7 @@ export default {
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
   'Open the skills panel (browse, search, toggle, pick).':
     '打开技能面板（浏览、搜索、启停、选择）。',
+  'Move this session to a new working directory': '将此会话移动到新的工作目录',
   // SkillsManagerDialog (`/skills` 弹出的面板)
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能配置已保存。',
@@ -217,12 +218,14 @@ export default {
   'Clear conversation history and free up context': '清除对话历史并释放上下文',
   'Compresses the context by replacing it with a summary.':
     '通过摘要替换来压缩上下文',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    '无需 AI 的快速上下文压缩。清理旧工具输出并剥离思考过程。',
   'open full Qwen Code documentation in your browser':
     '在浏览器中打开完整的 Qwen Code 文档',
   'Configuration not available.': '配置不可用',
   'Connect an LLM provider': '连接 LLM 提供商',
-  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
-    '将最近的 AI 回复复制到剪贴板（/copy N 复制倒数第 N 条）',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    '复制到剪贴板：AI 回复、代码块（可按语言筛选）、LaTeX 或 Mermaid。N 为倒数第 N 条消息，index 为代码块序号',
   'Show working-tree change stats versus HEAD':
     '显示工作区相对 HEAD 的变更统计',
   'Could not determine current working directory.': '无法确定当前工作目录。',
@@ -492,8 +495,7 @@ export default {
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
-  'check session stats. Usage: /stats [model|tools]':
-    '检查会话统计信息。用法：/stats [model|tools]',
+  'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
   'exit the cli': '退出命令行界面',
@@ -588,6 +590,7 @@ export default {
   'The name of the extension to update.': '要更新的扩展名称。',
   'Either an extension name or --all must be provided':
     '必须提供扩展名称或 --all',
+  'List installed extensions': '列出已安装的扩展',
   'Lists installed extensions.': '列出已安装的扩展。',
   'Path:': '路径：',
   'Source:': '来源：',
@@ -921,6 +924,7 @@ export default {
   'No managed auto-memory entries matched: {{query}}':
     '没有匹配的托管自动记忆条目：{{query}}',
   'Consolidate managed auto-memory topic files.': '整理托管自动记忆主题文件',
+  'Import MCP servers from Claude configs': '从 Claude 配置导入 MCP 服务器',
   'Open MCP management dialog': '打开 MCP 管理对话框',
   'Could not retrieve tool registry.': '无法检索工具注册表',
   "Successfully authenticated and refreshed tools for '{{name}}'.":
@@ -1200,7 +1204,7 @@ export default {
   'Time remaining:': '剩余时间：',
   'Qwen OAuth Authentication Timeout': 'Qwen OAuth 认证超时',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
-    'OAuth 令牌已过期（超过 {{seconds}} 秒）。请重新选择认证方法',
+    'OAuth token 已过期（超过 {{seconds}} 秒）。请重新选择认证方法',
   'Press any key to return to authentication type selection.':
     '按任意键返回认证类型选择',
   'Waiting for Qwen OAuth authentication...': '正在等待 Qwen OAuth 认证...',
@@ -1423,22 +1427,41 @@ export default {
   'Tool Time:': '工具时间：',
   'Session Stats': '会话统计',
   'Model Usage': '模型使用情况',
-  Reqs: '请求数',
   'Input Tokens': '输入 token 数',
   'Output Tokens': '输出 token 数',
   'Savings Highlight:': '节省亮点：',
   'of input tokens were served from the cache, reducing costs.':
     '从缓存载入 token ，降低了成本',
   'Tip: For a full token breakdown, run `/stats model`.':
-    '提示：要查看完整的令牌明细，请运行 `/stats model`',
+    '提示：要查看完整的 token 明细，请运行 `/stats model`',
   'Model Stats For Nerds': '模型统计（技术细节）',
   'Tool Stats For Nerds': '工具统计（技术细节）',
   Metric: '指标',
   API: 'API',
+  Session: '会话',
+  Activity: '概览',
+  Efficiency: '性能',
+  Success: '成功率',
+  Today: '今天',
+  'Token Trend': 'Token 趋势',
+  'Cache Hit Rate': '缓存命中率',
+  'Tool Success': '工具成功率',
+  'Tool Leaderboard': '工具排行',
+  Calls: '调用次数',
+  Time: '耗时',
+  Reqs: '请求',
+  Cache: '缓存',
+  Latency: '延迟',
+  'In/Out': '输入/输出',
+  'Code Impact': '代码变更',
+  'Failed to load stats. Press r to retry.': '加载统计失败，按 r 重试。',
+  net: '净增',
+  streak: '连续',
+  best: '最长',
   Requests: '请求数',
   Errors: '错误数',
   'Avg Latency': '平均延迟',
-  Tokens: '令牌',
+  Tokens: 'Token',
   Total: '总计',
   Prompt: '提示',
   Cached: '缓存',
@@ -1447,7 +1470,6 @@ export default {
   'No API calls have been made in this session.':
     '本次会话中未进行任何 API 调用',
   'Tool Name': '工具名称',
-  Calls: '调用次数',
   'Success Rate': '成功率',
   'Avg Duration': '平均耗时',
   'User Decision Summary': '用户决策摘要',
@@ -1800,6 +1822,9 @@ export default {
   'Background tasks': '后台任务',
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',
+  'needs approval': '待审批',
+  'Background agent needs approval': '后台 agent 等待审批',
+  'Approve or deny the request above': '请批准或拒绝上方的请求',
   Running: '运行中',
   Paused: '已暂停',
   Completed: '已完成',
@@ -1840,10 +1865,74 @@ export default {
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     '调度门控未看到本次记忆整理的时间戳；下一轮记忆整理可能会比平时更早重新触发。',
 
+  // ============================================================================
+  // Stats
+  // ============================================================================
+
+  // statsCommand non-interactive output
+  'Session duration: {{duration}}': '会话时长：{{duration}}',
+  'Prompts: {{count}}': '提示次数：{{count}}',
+  'API requests: {{count}}': 'API 请求数：{{count}}',
+  'Tokens — prompt: {{prompt}}, output: {{output}}':
+    'Tokens — 输入：{{prompt}}，输出：{{output}}',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    '工具调用：{{total}}（{{success}} 成功，{{fail}} 失败）',
+  'Files: +{{added}} / -{{removed}} lines':
+    '文件：+{{added}} / -{{removed}} 行',
+  prompt: '输入',
+  output: '输出',
+  cached: '缓存',
+  'Estimated cost: ${{cost}}': '预估费用：${{cost}}',
+  'No model usage data yet.': '暂无模型使用数据。',
+  'No tool usage data yet.': '暂无工具使用数据。',
+
+  // StatsDialog
+  Models: '模型',
+  'All time': '所有时间',
+  'Last 7 days': '最近 7 天',
+  'Last 30 days': '最近 30 天',
+  'N/A': '无',
+  Sessions: '会话数',
+  days: '天',
+  Input: '输入',
+  'Tool calls': '工具调用',
+  'Code changes': '代码变更',
+  Projects: '项目统计',
+  Name: '名称',
+  Duration: '时长',
+  'Activity Heatmap': '用量热力统计',
+  'Loading stats...': '加载统计数据...',
+  '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close':
+    '\u2191 tab 切换标签 \u00b7 r 切换时间范围 \u00b7 esc 关闭',
+  Cost: '费用',
+  Less: '少',
+  More: '多',
+  '(no data)': '（无数据）',
+  d: '天',
+  h: '时',
+  m: '分',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API 请求',
+  'Tool Calls': '工具调用',
+  'Success rate': '成功率',
+  'Code Changes': '代码变更',
+  Tool: '工具',
+  reqs: '请求',
+  in: '输入',
+  out: '输出',
+
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型注册表中）',
   'start server': '启动服务器',
   '中国 (China)': '中国',
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
+  'No compression needed.': '无需压缩。',
 };
