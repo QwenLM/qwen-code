@@ -5126,6 +5126,51 @@ describe('Session', () => {
       ]);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledOnce();
     });
+
+    it('does not dedupe function calls with empty ids in one batch', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'result',
+        returnDisplay: 'result',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read File',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { file_path: 'a.ts' },
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      const parts = await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-empty',
+        [
+          {
+            id: '',
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+          },
+          {
+            id: '',
+            name: 'read_file',
+            args: { file_path: 'b.ts' },
+          },
+        ],
+      );
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(parts).toHaveLength(2);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
+        2,
+      );
+    });
   });
 
   describe('dispose', () => {

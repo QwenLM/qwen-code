@@ -139,10 +139,17 @@ function dedupeRequestsByCallId(
   const seenCallIds = new Set<string>();
   const deduped: ToolCallRequestInfo[] = [];
   for (const request of requests) {
-    if (seenCallIds.has(request.callId)) {
-      continue;
+    if (request.callId) {
+      if (seenCallIds.has(request.callId)) {
+        debugLogger.debug(
+          'dedupeRequestsByCallId: dropping duplicate callId=%s name=%s',
+          request.callId,
+          request.name,
+        );
+        continue;
+      }
+      seenCallIds.add(request.callId);
     }
-    seenCallIds.add(request.callId);
     deduped.push(request);
   }
   return deduped;

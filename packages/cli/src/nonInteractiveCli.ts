@@ -744,10 +744,12 @@ export async function runNonInteractive(
         const toolResponseParts: Part[] = [];
         const seenBatchCallIds = new Set<string>();
         const uniqueBatchRequests = batchRequests.filter((request) => {
-          if (seenBatchCallIds.has(request.callId)) {
-            return false;
+          if (request.callId) {
+            if (seenBatchCallIds.has(request.callId)) {
+              return false;
+            }
+            seenBatchCallIds.add(request.callId);
           }
-          seenBatchCallIds.add(request.callId);
           return true;
         });
 
