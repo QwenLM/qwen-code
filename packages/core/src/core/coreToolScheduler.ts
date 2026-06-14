@@ -3405,7 +3405,12 @@ export class CoreToolScheduler {
             this.config,
             toolName,
             content,
-            { threshold: perToolMax, lines: perToolLines, keep: perToolKeep },
+            {
+              threshold: perToolMax,
+              lines: perToolLines,
+              keep: perToolKeep,
+              callId,
+            },
             promptIdForTruncation,
           );
           content = truncated.content;
@@ -3460,6 +3465,7 @@ export class CoreToolScheduler {
                   threshold: baseThreshold * 2,
                   lines: combinedLines,
                   keep: perToolKeep,
+                  callId,
                 },
                 promptIdForTruncation,
               );

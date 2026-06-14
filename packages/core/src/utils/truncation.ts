@@ -200,6 +200,7 @@ export async function truncateToolOutput(
     threshold?: number;
     lines?: number;
     keep?: 'head' | 'tail' | 'both';
+    callId?: string;
   },
   promptId?: string,
 ): Promise<{ content: string; outputFile?: string }> {
@@ -234,16 +235,18 @@ export async function truncateToolOutput(
     keep,
   );
 
-  if (result.outputFile) {
+  if (result.content !== content) {
     try {
       logToolOutputTruncated(
         config,
         new ToolOutputTruncatedEvent(promptId ?? '', {
+          callId: limits?.callId,
           toolName,
           originalContentLength: originalLength,
           truncatedContentLength: result.content.length,
           threshold,
           lines,
+          outputFileSaved: Boolean(result.outputFile),
         }),
       );
     } catch {
@@ -271,6 +274,7 @@ export async function truncateLlmContent(
     threshold?: number;
     lines?: number;
     keep?: 'head' | 'tail' | 'both';
+    callId?: string;
   },
   promptId?: string,
 ): Promise<{ content: PartListUnion; outputFile?: string }> {

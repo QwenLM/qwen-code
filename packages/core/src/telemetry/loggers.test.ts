@@ -1311,11 +1311,15 @@ describe('loggers', () => {
 
     it('should log a tool output truncated event', () => {
       const event = new ToolOutputTruncatedEvent('prompt-id-1', {
+        callId: 'call-id-1',
         toolName: 'test-tool',
         originalContentLength: 1000,
         truncatedContentLength: 100,
         threshold: 500,
         lines: 10,
+        outputFileSaved: false,
+        saveErrorCode: 'EACCES',
+        saveErrorMessage: 'permission denied',
       });
 
       logToolOutputTruncated(mockConfig, event);
@@ -1328,11 +1332,15 @@ describe('loggers', () => {
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           eventName: 'tool_output_truncated',
           prompt_id: 'prompt-id-1',
+          call_id: 'call-id-1',
           tool_name: 'test-tool',
           original_content_length: 1000,
           truncated_content_length: 100,
           threshold: 500,
           lines: 10,
+          output_file_saved: false,
+          save_error_code: 'EACCES',
+          save_error_message: 'permission denied',
         },
       });
     });

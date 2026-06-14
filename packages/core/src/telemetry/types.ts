@@ -765,24 +765,36 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
   threshold: number;
   lines: number;
   prompt_id: string;
+  call_id?: string;
+  output_file_saved: boolean;
+  save_error_code?: string;
+  save_error_message?: string;
 
   constructor(
     prompt_id: string,
     details: {
+      callId?: string;
       toolName: string;
       originalContentLength: number;
       truncatedContentLength: number;
       threshold: number;
       lines: number;
+      outputFileSaved?: boolean;
+      saveErrorCode?: string;
+      saveErrorMessage?: string;
     },
   ) {
     this['event.name'] = this.eventName;
     this.prompt_id = prompt_id;
+    this.call_id = details.callId;
     this.tool_name = details.toolName;
     this.original_content_length = details.originalContentLength;
     this.truncated_content_length = details.truncatedContentLength;
     this.threshold = details.threshold;
     this.lines = details.lines;
+    this.output_file_saved = details.outputFileSaved ?? true;
+    this.save_error_code = details.saveErrorCode;
+    this.save_error_message = details.saveErrorMessage;
   }
 }
 
