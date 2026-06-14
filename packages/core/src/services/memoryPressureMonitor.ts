@@ -245,7 +245,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   private readonly coreConfig: Config;
 
   private pendingCheck = false;
-  private lastCheckTime = 0;
+  private lastCheckTime = Date.now();
   private checkGeneration = 0;
   private onStarvationCallback?: () => void;
   private cleanupInProgress = false;

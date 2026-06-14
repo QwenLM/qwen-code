@@ -8,9 +8,8 @@ import { useCallback, useEffect, useRef } from 'react';
 import process from 'node:process';
 import os from 'node:os';
 import v8 from 'v8';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { type HistoryItemWithoutId, MessageType } from '../types.js';
-import { useConfig } from '../contexts/ConfigContext.js';
 
 const debugLogger = createDebugLogger('MEMORY_MONITOR');
 
@@ -30,15 +29,16 @@ export const UI_COMPACT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 interface MemoryMonitorOptions {
   addItem: (item: HistoryItemWithoutId, timestamp: number) => void;
   compactOldItems?: () => void;
+  config: Config;
 }
 
 export const useMemoryMonitor = ({
   addItem,
   compactOldItems,
+  config,
 }: MemoryMonitorOptions) => {
   const lastCompactRef = useRef(0);
   const lastIntervalRunRef = useRef(Date.now());
-  const config = useConfig();
 
   const runMemoryCheck = useCallback(() => {
     const memUsage = process.memoryUsage();

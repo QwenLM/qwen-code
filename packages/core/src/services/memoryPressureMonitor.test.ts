@@ -611,6 +611,78 @@ describe('MemoryPressureMonitor', () => {
 
       vi.restoreAllMocks();
     });
+
+    it('falls back to synchronous check when microtask is starved ≥ 60 s', () => {
+      setOsTotalmem(16 * 1024 * 1024 * 1024);
+      const evictSpy = vi.fn().mockReturnValue(0);
+      const starvationCb = vi.fn();
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          fileReadCache: { evictNotAccessedSince: evictSpy },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+      monitor.setOnStarvationCallback(starvationCb);
+
+      vi.spyOn(process, 'memoryUsage').mockReturnValue({
+        rss: 9 * 1024 * 1024 * 1024, // soft pressure
+        heapTotal: 0,
+        heapUsed: 0,
+        external: 0,
+        arrayBuffers: 0,
+      });
+
+      // First call queues a microtask (which we do NOT drain).
+      monitor.scheduleCheck();
+
+      // Advance Date.now past the 60 s starvation threshold.
+      const base = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(base + 61_000);
+
+      // Second call detects starvation and runs performCheck synchronously.
+      monitor.scheduleCheck();
+
+      expect(evictSpy).toHaveBeenCalledTimes(1);
+      expect(starvationCb).toHaveBeenCalledTimes(1);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('[STARVATION]'),
+      );
+
+      vi.restoreAllMocks();
+    });
+
+    it('swallows onStarvationCallback errors', () => {
+      setOsTotalmem(16 * 1024 * 1024 * 1024);
+      const monitor = new MemoryPressureMonitor(createMockConfig(), {
+        ...DEFAULT_PRESSURE_CONFIG,
+        cleanupCooldownMs: 0,
+      });
+      monitor.setOnStarvationCallback(() => {
+        throw new Error('callback boom');
+      });
+
+      vi.spyOn(process, 'memoryUsage').mockReturnValue({
+        rss: 9 * 1024 * 1024 * 1024,
+        heapTotal: 0,
+        heapUsed: 0,
+        external: 0,
+        arrayBuffers: 0,
+      });
+
+      monitor.scheduleCheck();
+
+      // Advance Date.now past the 60 s starvation threshold.
+      const base = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(base + 61_000);
+
+      // Should not throw despite the callback error.
+      expect(() => monitor.scheduleCheck()).not.toThrow();
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('onStarvation callback failed: callback boom'),
+      );
+
+      vi.restoreAllMocks();
+    });
   });
 
   describe('performCheck with cleanup', () => {

@@ -311,7 +311,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // handlers can read the latest snapshot at call time without reactive deps.
   const historyRef = useRef(historyManager.history);
   historyRef.current = historyManager.history;
-  useMemoryMonitor(historyManager);
+  useMemoryMonitor({ ...historyManager, config });
   const [debugMessage, setDebugMessage] = useState<string>('');
   const [quittingMessages, setQuittingMessages] = useState<
     HistoryItem[] | null

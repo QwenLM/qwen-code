@@ -20,14 +20,14 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
+import type { Config } from '@qwen-code/qwen-code-core';
+
 const mockSetOnStarvationCallback = vi.fn();
-vi.mock('../contexts/ConfigContext.js', () => ({
-  useConfig: () => ({
-    getMemoryPressureMonitor: () => ({
-      setOnStarvationCallback: mockSetOnStarvationCallback,
-    }),
+const mockConfig = {
+  getMemoryPressureMonitor: () => ({
+    setOnStarvationCallback: mockSetOnStarvationCallback,
   }),
-}));
+} as unknown as Config;
 
 import {
   useMemoryMonitor,
@@ -57,7 +57,7 @@ describe('useMemoryMonitor', () => {
     memoryUsageSpy.mockReturnValue({
       rss: MEMORY_WARNING_THRESHOLD / 2,
     } as NodeJS.MemoryUsage);
-    renderHook(() => useMemoryMonitor({ addItem }));
+    renderHook(() => useMemoryMonitor({ addItem, config: mockConfig }));
     vi.advanceTimersByTime(10000);
     expect(addItem).not.toHaveBeenCalled();
   });
@@ -66,7 +66,7 @@ describe('useMemoryMonitor', () => {
     memoryUsageSpy.mockReturnValue({
       rss: MEMORY_WARNING_THRESHOLD * 1.5,
     } as NodeJS.MemoryUsage);
-    renderHook(() => useMemoryMonitor({ addItem }));
+    renderHook(() => useMemoryMonitor({ addItem, config: mockConfig }));
     vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
     expect(addItem).toHaveBeenCalledTimes(1);
     expect(addItem).toHaveBeenCalledWith(
@@ -82,7 +82,9 @@ describe('useMemoryMonitor', () => {
     memoryUsageSpy.mockReturnValue({
       rss: MEMORY_WARNING_THRESHOLD * 1.5,
     } as NodeJS.MemoryUsage);
-    const { rerender } = renderHook(() => useMemoryMonitor({ addItem }));
+    const { rerender } = renderHook(() =>
+      useMemoryMonitor({ addItem, config: mockConfig }),
+    );
     vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
     expect(addItem).toHaveBeenCalledTimes(1);
 
@@ -102,7 +104,9 @@ describe('useMemoryMonitor', () => {
       heapUsed: MEMORY_UI_COMPACT_THRESHOLD() + 1,
       heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
     } as NodeJS.MemoryUsage);
-    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+    renderHook(() =>
+      useMemoryMonitor({ addItem, compactOldItems, config: mockConfig }),
+    );
     vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
     expect(compactOldItems).toHaveBeenCalledTimes(1);
   });
@@ -114,7 +118,9 @@ describe('useMemoryMonitor', () => {
       heapUsed: MEMORY_UI_COMPACT_THRESHOLD() - 1,
       heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
     } as NodeJS.MemoryUsage);
-    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+    renderHook(() =>
+      useMemoryMonitor({ addItem, compactOldItems, config: mockConfig }),
+    );
     vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
     expect(compactOldItems).not.toHaveBeenCalled();
   });
@@ -126,7 +132,9 @@ describe('useMemoryMonitor', () => {
       heapUsed: MEMORY_UI_COMPACT_THRESHOLD() + 1,
       heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
     } as NodeJS.MemoryUsage);
-    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+    renderHook(() =>
+      useMemoryMonitor({ addItem, compactOldItems, config: mockConfig }),
+    );
 
     // First call triggers compaction
     vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
@@ -149,7 +157,9 @@ describe('useMemoryMonitor', () => {
       heapUsed: MEMORY_UI_COMPACT_THRESHOLD() - 1,
       heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
     } as NodeJS.MemoryUsage);
-    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+    renderHook(() =>
+      useMemoryMonitor({ addItem, compactOldItems, config: mockConfig }),
+    );
 
     // Warning fires and self-destructs
     vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
@@ -179,7 +189,9 @@ describe('useMemoryMonitor', () => {
     } as NodeJS.MemoryUsage);
     mockDebugLogger.error.mockClear();
 
-    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+    renderHook(() =>
+      useMemoryMonitor({ addItem, compactOldItems, config: mockConfig }),
+    );
 
     // First tick — compactOldItems throws, error is caught
     vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
@@ -192,5 +204,73 @@ describe('useMemoryMonitor', () => {
     // Advance past cooldown + one more interval tick — compactOldItems is called again and succeeds
     vi.advanceTimersByTime(UI_COMPACT_COOLDOWN_MS + MEMORY_DEBUG_INTERVAL);
     expect(compactOldItems).toHaveBeenCalledTimes(2);
+  });
+
+  describe('starvation heartbeat', () => {
+    it('triggers runMemoryCheck when interval has not run for > 60 s', () => {
+      memoryUsageSpy.mockReturnValue({
+        rss: 1024,
+        heapUsed: 100,
+        heapTotal: 200,
+      } as NodeJS.MemoryUsage);
+
+      // Freeze Date.now at hook-init time so we can control the elapsed
+      // time seen by the starvation callback independently of the timer
+      // queue (vi.advanceTimersByTime only advances the queue, not Date.now).
+      const initTime = 1_000_000;
+      let nowTime = initTime;
+      const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowTime);
+
+      renderHook(() => useMemoryMonitor({ addItem, config: mockConfig }));
+
+      const starvationCallback = mockSetOnStarvationCallback.mock.calls[0]![0]!;
+
+      // Advance the timer queue past 60 s WITHOUT firing intervals
+      // (Date.now is still frozen at initTime, so intervals see the same
+      // timestamp and their elapsed-time guard doesn't trip).
+      vi.advanceTimersByTime(61_000);
+
+      // Now jump Date.now forward so the starvation guard trips.
+      nowTime = initTime + 61_001;
+      memoryUsageSpy.mockClear();
+      starvationCallback();
+
+      // runMemoryCheck calls process.memoryUsage().
+      expect(memoryUsageSpy).toHaveBeenCalled();
+
+      dateSpy.mockRestore();
+    });
+
+    it('skips runMemoryCheck when interval ran recently', () => {
+      memoryUsageSpy.mockReturnValue({
+        rss: 1024,
+        heapUsed: 100,
+        heapTotal: 200,
+      } as NodeJS.MemoryUsage);
+      renderHook(() => useMemoryMonitor({ addItem, config: mockConfig }));
+
+      const starvationCallback = mockSetOnStarvationCallback.mock.calls[0]![0]!;
+
+      // Don't advance time — interval is fresh (just ran at init).
+      memoryUsageSpy.mockClear();
+      starvationCallback();
+
+      expect(memoryUsageSpy).not.toHaveBeenCalled();
+    });
+
+    it('unregisters callback on unmount', () => {
+      memoryUsageSpy.mockReturnValue({
+        rss: 1024,
+        heapUsed: 100,
+        heapTotal: 200,
+      } as NodeJS.MemoryUsage);
+      const { unmount } = renderHook(() =>
+        useMemoryMonitor({ addItem, config: mockConfig }),
+      );
+
+      unmount();
+
+      expect(mockSetOnStarvationCallback).toHaveBeenLastCalledWith(undefined);
+    });
   });
 });
