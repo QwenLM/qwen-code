@@ -6,10 +6,8 @@
 
 import type { Content, Part } from '@google/genai';
 
-import {
-  DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
-  type ClearContextOnIdleSettings,
-} from '../../config/config.js';
+import type { ClearContextOnIdleSettings } from '../../config/config.js';
+import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames } from '../../tools/tool-names.js';
 
@@ -284,7 +282,9 @@ function buildKeepRefs(refs: PartRef[], keepRecent: number): Set<string> {
   return new Set(refs.slice(-keepRecent).map(refKey));
 }
 
-function buildClearMap(clearRefs: PartRef[]): Map<number, Map<number, PartKind>> {
+function buildClearMap(
+  clearRefs: PartRef[],
+): Map<number, Map<number, PartKind>> {
   const clearMap = new Map<number, Map<number, PartKind>>();
   for (const ref of clearRefs) {
     let parts = clearMap.get(ref.contentIndex);
@@ -485,8 +485,7 @@ export function microcompactHistory(
     clearRefs = sizePlan.clearRefs;
     toolResultCharsBefore = sizePlan.toolResultCharsBefore;
     toolResultCharsAfter = sizePlan.toolResultCharsAfter;
-    toolResultsTotalCharsThreshold =
-      sizePlan.toolResultsTotalCharsThreshold;
+    toolResultsTotalCharsThreshold = sizePlan.toolResultsTotalCharsThreshold;
   }
 
   if (clearRefs.length === 0) {

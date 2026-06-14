@@ -145,6 +145,7 @@ import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 } from './constants.js';
+import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
@@ -357,11 +358,12 @@ export interface ChatCompressionSettings {
   screenshotTriggerThreshold?: number;
 }
 
+export { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
+
 /**
  * Settings for clearing stale or oversized tool-result context.
  * Threshold values of -1 mean "never clear" (disabled).
  */
-export const DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD = 500_000;
 
 export interface ClearContextOnIdleSettings {
   /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
