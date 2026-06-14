@@ -1,4 +1,4 @@
-import { memo, useContext, useEffect, useMemo, useState } from 'react';
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   ACPToolCall,
@@ -81,6 +81,27 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
   return false;
 }
 
+// Tools whose expanded row renders a kind-specific detail view (shell output /
+// diff / file content / Q&A). Must stay in sync with the renderers in
+// ToolLine's lineDetail block below. Tools NOT in this set have nothing extra
+// to show when expanded, so they keep their one-line result summary instead of
+// hiding it behind an empty detail area.
+function hasDetailView(tool: ACPToolCall): boolean {
+  const name = tool.toolName.toLowerCase();
+  return (
+    isShellToolName(name) ||
+    name === 'write_file' ||
+    name === 'writefile' ||
+    name === 'edit' ||
+    name === 'write' ||
+    name === 'editfile' ||
+    name === 'read' ||
+    name === 'read_file' ||
+    name === 'readfile' ||
+    isAskUserQuestionToolName(tool.toolName)
+  );
+}
+
 function hasDiffContent(tool: ACPToolCall): boolean {
   if (tool.content?.some((b) => b.type === 'diff')) return true;
   if (tool.rawOutput && typeof tool.rawOutput === 'object') {
@@ -153,6 +174,10 @@ function buildUnifiedDiff(oldText: string, newText: string): string {
 
 const MAX_BASH_LINE_CHARS = 150;
 const MAX_READ_LINES = 25;
+
+// A description longer than this is likely ellipsised on a normal-width row, so
+// the row becomes expandable to re-flow the full text into a wrapped block.
+const DESCRIPTION_EXPAND_THRESHOLD = 60;
 
 export function resolveShellOutputMaxLines(
   settings: readonly DaemonSettingDescriptor[],
@@ -411,6 +436,14 @@ function getAgentDisplayInfo(
 }
 
 function shouldAutoExpand(tool: ACPToolCall): boolean {
+  // Only the verbose tool kinds below (shell/edit/write/ask) auto-expand, and
+  // only while pending/in-progress or after failing: a successful completion
+  // collapses them to a one-line summary so the transcript stays scannable
+  // (click to reopen), while a failure of those kinds stays expanded so its
+  // error output is visible without a click. Every other tool kind is collapsed
+  // by default regardless of status — its summary line already shows the
+  // outcome and it stays click-to-expand.
+  if (tool.status === 'completed') return false;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return true;
   if (name === 'write_file' || name === 'writefile') return true;
@@ -462,6 +495,27 @@ function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
       description={info.description}
       elapsed={info.elapsed}
     />
+  );
+}
+
+function isDescriptionExpandable(description: string): boolean {
+  return (
+    description.length > DESCRIPTION_EXPAND_THRESHOLD ||
+    description.includes('\n')
+  );
+}
+
+function ToggleChevron({
+  expandable,
+  expanded,
+}: {
+  expandable: boolean;
+  expanded: boolean;
+}) {
+  return (
+    <span className={styles.lineToggle} aria-hidden="true">
+      {expandable ? (expanded ? '▾' : '▸') : ''}
+    </span>
   );
 }
 
@@ -586,11 +640,16 @@ export const ToolLine = memo(function ToolLine({
   const [expanded, setExpanded] = useState(
     () => !compactMode && shouldAutoExpand(tool),
   );
+  // Set once the user explicitly toggles this row, so auto-collapse-on-
+  // completion never silently overrides their choice.
+  const userToggledRef = useRef(false);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(
     () => {
       setExpanded(compactMode ? false : shouldAutoExpand(tool));
+      // A new tool identity (or compact-mode toggle) resets the manual latch.
+      userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [compactMode, tool.callId, tool.toolName],
@@ -610,6 +669,17 @@ export const ToolLine = memo(function ToolLine({
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [isRunningAgent]);
+
+  // Collapse a regular tool to its one-line summary once it completes
+  // successfully — unless the user explicitly toggled this row, in which case
+  // their choice wins. Agents are excluded (they keep whatever expand state the
+  // user chose, driven from their own panel) and failures stay open so the
+  // error output remains visible.
+  useEffect(() => {
+    if (!isAgent && tool.status === 'completed' && !userToggledRef.current) {
+      setExpanded(false);
+    }
+  }, [isAgent, tool.status]);
 
   if (isAgent) {
     if (hasApproval && onConfirm) {
@@ -712,10 +782,20 @@ export const ToolLine = memo(function ToolLine({
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''
       : formatElapsed(tool.startTime, tool.endTime);
-  const expandable = hasExpandableContent(tool);
 
   const name = tool.toolName.toLowerCase();
   const isTodo = name === 'todowrite';
+  // A row expands when it has detail output (bash/diff/read content) or when
+  // its description is long enough to be ellipsised. When a long description is
+  // expanded we move it out of the header into a wrapped block below, so the
+  // header drops its single-line copy.
+  const descExpandable = !isTodo && isDescriptionExpandable(description);
+  const expandable = !isTodo && (hasExpandableContent(tool) || descExpandable);
+  const relocateDescription = expanded && descExpandable;
+  // Whether the expanded row renders a kind-specific detail view. When it does
+  // not (e.g. grep/glob/web_fetch with a long description), keep the result
+  // summary visible instead of replacing it with an empty detail area.
+  const detailView = hasDetailView(tool);
 
   if (hasApproval && onConfirm) {
     return (
@@ -729,8 +809,16 @@ export const ToolLine = memo(function ToolLine({
     <div className={styles.line}>
       <div
         className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
-        onClick={expandable ? () => setExpanded(!expanded) : undefined}
+        onClick={
+          expandable
+            ? () => {
+                userToggledRef.current = true;
+                setExpanded((value) => !value);
+              }
+            : undefined
+        }
       >
+        <ToggleChevron expandable={expandable} expanded={expanded} />
         <StatusIcon status={tool.status} />
         <span className={styles.lineName}>{displayName}</span>
         <ToolHeaderExtra
@@ -738,17 +826,20 @@ export const ToolLine = memo(function ToolLine({
             kind: getToolHeaderKind(tool),
             tool,
             displayName,
-            description,
+            description: relocateDescription ? '' : description,
             elapsed,
             workspaceCwd,
           }}
         />
       </div>
       {isTodo && <TodoWriteContent tool={tool} />}
-      {!isTodo && !expanded && result && (
+      {relocateDescription && (
+        <div className={styles.lineFullArg}>{description}</div>
+      )}
+      {!isTodo && result && (!expanded || !detailView) && (
         <div className={styles.lineOutput}>{result}</div>
       )}
-      {!isTodo && expanded && (
+      {!isTodo && expanded && detailView && (
         <div className={styles.lineDetail}>
           {isShellToolName(name) && (
             <ExpandedBashOutput tool={tool} maxLines={shellOutputMaxLines} />
