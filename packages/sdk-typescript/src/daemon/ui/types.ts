@@ -211,6 +211,8 @@ export interface DaemonUiModelChangedEvent extends DaemonUiEventBase {
 export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   type: 'status' | 'debug';
   text: string;
+  source?: string;
+  data?: unknown;
 }
 
 export interface DaemonUiErrorEvent extends DaemonUiEventBase {
@@ -744,7 +746,8 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   code?: string;
   promptId?: string;
-  source?: 'turn_error';
+  source?: string;
+  data?: unknown;
 }
 
 export interface DaemonPromptCancelledTranscriptBlock

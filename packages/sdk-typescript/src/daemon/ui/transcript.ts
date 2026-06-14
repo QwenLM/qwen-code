@@ -928,6 +928,13 @@ function appendStatusBlock(
     ...(event?.type === 'error' && event.source
       ? { source: event.source }
       : {}),
+    ...((event?.type === 'status' || event?.type === 'debug') && event.source
+      ? { source: event.source }
+      : {}),
+    ...((event?.type === 'status' || event?.type === 'debug') &&
+    event.data !== undefined
+      ? { data: event.data }
+      : {}),
   };
   appendBlock(state, block);
   if (opts.clearActiveText !== false) clearActiveText(state);

@@ -18,6 +18,8 @@ import styles from './SystemMessage.module.css';
 interface SystemMessageProps {
   content: string;
   variant: 'info' | 'error' | 'warning';
+  source?: string;
+  data?: unknown;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   isLatest?: boolean;
@@ -28,6 +30,8 @@ interface SystemMessageProps {
 export const SystemMessage = memo(function SystemMessage({
   content,
   variant,
+  source,
+  data,
   onShowContextDetail,
   isLatest = false,
   showRetryHint = false,
@@ -85,7 +89,11 @@ export const SystemMessage = memo(function SystemMessage({
   }
 
   const goalStatus =
-    variant === 'info' ? parseGoalStatusMessage(content) : null;
+    variant === 'info'
+      ? source === 'goal'
+        ? parseGoalStatusMessage(data)
+        : parseGoalStatusMessage(content)
+      : null;
   if (goalStatus) {
     return (
       <div className={styles.flushMessage}>

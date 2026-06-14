@@ -126,6 +126,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
+import { MessageType, type HistoryItemGoalStatus } from '../../ui/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
@@ -586,6 +587,14 @@ export class Session implements SessionContext {
           `Failed to emit goal terminal update: ${this.#formatError(error)}`,
         );
       });
+    });
+  }
+
+  emitGoalStatus(status: Omit<HistoryItemGoalStatus, 'id' | 'type'>): void {
+    void this.messageEmitter.emitGoalStatus(status).catch((error) => {
+      debugLogger.warn(
+        `Failed to emit goal status update: ${this.#formatError(error)}`,
+      );
     });
   }
 
@@ -3701,6 +3710,30 @@ export class Session implements SessionContext {
     }
   }
 
+  #emitGoalStatusItems(result: NonInteractiveSlashCommandResult): void {
+    if (!('outputHistoryItems' in result)) {
+      return;
+    }
+    for (const item of result.outputHistoryItems ?? []) {
+      if (item.type === MessageType.GOAL_STATUS) {
+        this.emitGoalStatus({
+          kind: item.kind,
+          condition: item.condition,
+          ...(item.iterations !== undefined
+            ? { iterations: item.iterations }
+            : {}),
+          ...(item.setAt !== undefined ? { setAt: item.setAt } : {}),
+          ...(item.durationMs !== undefined
+            ? { durationMs: item.durationMs }
+            : {}),
+          ...(item.lastReason !== undefined
+            ? { lastReason: item.lastReason }
+            : {}),
+        });
+      }
+    }
+  }
+
   /**
    * Processes the result of a slash command execution.
    *
@@ -3721,6 +3754,8 @@ export class Session implements SessionContext {
     result: NonInteractiveSlashCommandResult,
     originalPrompt: ContentBlock[],
   ): Promise<Part[] | null> {
+    this.#emitGoalStatusItems(result);
+
     switch (result.type) {
       case 'submit_prompt':
         // Command wants to submit a prompt to the model

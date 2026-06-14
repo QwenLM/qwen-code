@@ -5799,6 +5799,14 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const cleared = unregisterGoalHook(config, sessionId);
+        if (cleared) {
+          session.emitGoalStatus({
+            kind: 'cleared',
+            condition: cleared.condition,
+            iterations: cleared.iterations,
+            durationMs: Date.now() - cleared.setAt,
+          });
+        }
         debugLogger.info(
           `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
         );

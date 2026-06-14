@@ -107,6 +107,8 @@ export interface DaemonSystemMessage extends DaemonMessageMeta {
   content: string;
   variant: 'info' | 'error' | 'warning';
   retryable?: boolean;
+  source?: string;
+  data?: unknown;
 }
 
 export interface DaemonUserShellMessage extends DaemonMessageMeta {
