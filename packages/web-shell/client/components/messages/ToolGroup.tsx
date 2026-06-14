@@ -1,4 +1,4 @@
-import { memo, useContext, useEffect, useMemo, useState } from 'react';
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   ACPToolCall,
@@ -415,9 +415,13 @@ function getAgentDisplayInfo(
 }
 
 function shouldAutoExpand(tool: ACPToolCall): boolean {
-  // Once a tool completes successfully, collapse it to its one-line summary so
-  // the transcript stays scannable; the user can click to reopen it. Failures
-  // stay expanded so the error output remains visible without an extra click.
+  // Only the verbose tool kinds below (shell/edit/write/ask) auto-expand, and
+  // only while pending/in-progress or after failing: a successful completion
+  // collapses them to a one-line summary so the transcript stays scannable
+  // (click to reopen), while a failure of those kinds stays expanded so its
+  // error output is visible without a click. Every other tool kind is collapsed
+  // by default regardless of status — its summary line already shows the
+  // outcome and it stays click-to-expand.
   if (tool.status === 'completed') return false;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return true;
@@ -615,11 +619,16 @@ export const ToolLine = memo(function ToolLine({
   const [expanded, setExpanded] = useState(
     () => !compactMode && shouldAutoExpand(tool),
   );
+  // Set once the user explicitly toggles this row, so auto-collapse-on-
+  // completion never silently overrides their choice.
+  const userToggledRef = useRef(false);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(
     () => {
       setExpanded(compactMode ? false : shouldAutoExpand(tool));
+      // A new tool identity (or compact-mode toggle) resets the manual latch.
+      userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [compactMode, tool.callId, tool.toolName],
@@ -641,11 +650,14 @@ export const ToolLine = memo(function ToolLine({
   }, [isRunningAgent]);
 
   // Collapse a regular tool to its one-line summary once it completes
-  // successfully. Agents are excluded — they keep whatever expand state the
-  // user chose, driven from their own panel — and failures stay open so the
+  // successfully — unless the user explicitly toggled this row, in which case
+  // their choice wins. Agents are excluded (they keep whatever expand state the
+  // user chose, driven from their own panel) and failures stay open so the
   // error output remains visible.
   useEffect(() => {
-    if (!isAgent && tool.status === 'completed') setExpanded(false);
+    if (!isAgent && tool.status === 'completed' && !userToggledRef.current) {
+      setExpanded(false);
+    }
   }, [isAgent, tool.status]);
 
   if (isAgent) {
@@ -772,7 +784,14 @@ export const ToolLine = memo(function ToolLine({
     <div className={styles.line}>
       <div
         className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
-        onClick={expandable ? () => setExpanded(!expanded) : undefined}
+        onClick={
+          expandable
+            ? () => {
+                userToggledRef.current = true;
+                setExpanded((value) => !value);
+              }
+            : undefined
+        }
       >
         <ToggleChevron expandable={expandable} expanded={expanded} />
         <StatusIcon status={tool.status} />

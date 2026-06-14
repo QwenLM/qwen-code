@@ -271,4 +271,46 @@ describe('auto-collapse on finish', () => {
     render('completed');
     expect(container.textContent).toContain('SubToolMarker');
   });
+
+  it('keeps a tool the user manually expanded open when it completes', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    // Long command → the row is expandable/clickable even while running.
+    const command = `echo ${'z'.repeat(80)}`;
+    const renderStatus = (status: ACPToolCall['status']) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ToolGroup
+              tools={[
+                {
+                  callId: 'call-usertoggle',
+                  toolName: 'run_shell_command',
+                  status,
+                  args: { command },
+                  rawOutput: { output: 'done' },
+                },
+              ]}
+            />
+          </I18nProvider>,
+        );
+      });
+
+    renderStatus('in_progress');
+    const chevron = () =>
+      [...container.querySelectorAll('span')].find(
+        (s) => s.textContent === '▾' || s.textContent === '▸',
+      );
+    // Toggle twice → marks the row user-controlled, ending in the expanded state.
+    click(chevron()!.parentElement!);
+    click(chevron()!.parentElement!);
+    expect(container.textContent).toContain('▾');
+
+    // Completion must NOT override the user's explicit expand.
+    renderStatus('completed');
+    expect(container.textContent).toContain('▾');
+  });
 });
