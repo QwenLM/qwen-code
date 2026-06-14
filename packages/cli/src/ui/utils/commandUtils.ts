@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { writeOsc52 } from './clipboardUtils.js';
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -148,9 +149,14 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             fallbackError instanceof Error &&
             (fallbackError as NodeJS.ErrnoException).code === 'ENOENT';
           if (xclipNotFound && xselNotFound) {
-            throw new Error(
-              'Please ensure xclip or xsel is installed and configured.',
-            );
+            // Neither xclip nor xsel available — try OSC 52 escape sequence
+            // (works over SSH without X11 display server).
+            if (!writeOsc52(text)) {
+              throw new Error(
+                'Clipboard unavailable: xclip/xsel not found and OSC 52 requires a TTY. Try running inside a terminal emulator.',
+              );
+            }
+            return;
           }
 
           let primaryMsg =
@@ -168,8 +174,11 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             fallbackMsg = `xsel not found`;
           }
 
+          // Tools exist but failed — try OSC 52 before giving up
+          if (writeOsc52(text)) return;
+
           throw new Error(
-            `All copy commands failed. "${primaryMsg}", "${fallbackMsg}". `,
+            `Clipboard unavailable: xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
           );
         }
       }

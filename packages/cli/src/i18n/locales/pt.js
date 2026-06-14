@@ -809,12 +809,9 @@ export default {
     'Não é possível criar um fork enquanto uma resposta ou chamada de ferramenta está em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
   'Cannot fork before the first conversation turn.':
     'Não é possível criar um fork antes da primeira rodada da conversa.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'O comando /fork requer o feature gate de fork. Defina QWEN_CODE_ENABLE_FORK_SUBAGENT=1 para ativá-lo.',
   'The agent tool is unavailable; cannot fork.':
     'A ferramenta de agente está indisponível; não é possível criar um fork.',
-  'Failed to launch fork: {{error}}':
-    'Falha ao iniciar o fork: {{error}}',
+  'Failed to launch fork: {{error}}': 'Falha ao iniciar o fork: {{error}}',
   'User launched a background fork via /fork: {{directive}}':
     'O usuário iniciou um fork em segundo plano via /fork: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
@@ -1438,6 +1435,21 @@ export default {
     'Nenhuma chamada de ferramenta foi feita nesta sessão.',
   'Session start time is unavailable, cannot calculate stats.':
     'Hora de início da sessão indisponível, não é possível calcular estatísticas.',
+  Activity: 'Atividade',
+  Efficiency: 'Eficiência',
+  Today: 'Hoje',
+  'Token Trend': 'Tendência de Tokens',
+  'Cache Hit Rate': 'Taxa de cache',
+  'Tool Success': 'Sucesso de ferramentas',
+  'Tool Leaderboard': 'Ranking de ferramentas',
+  Time: 'Tempo',
+  Success: 'Sucesso',
+  Cache: 'Cache',
+  Latency: 'Latência',
+  'Code Impact': 'Impacto no código',
+  net: 'líquido',
+  streak: 'sequência',
+  best: 'recorde',
 
   // ============================================================================
   // Command Format Migration
@@ -1448,6 +1460,27 @@ export default {
   'Found {{count}} TOML command files:':
     'Encontrados {{count}} arquivos de comando TOML:',
   'Current tasks': 'Tarefas atuais',
+  'Background tasks': 'Tarefas em segundo plano',
+  'No tasks currently running': 'Nenhuma tarefa em execução',
+  'No entry to show.': 'Nenhuma entrada para mostrar.',
+  'needs approval': 'precisa de aprovação',
+  'Background agent needs approval':
+    'Agente em segundo plano precisa de aprovação',
+  'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
+  Running: 'Em execução',
+  Paused: 'Pausado',
+  Completed: 'Concluído',
+  Failed: 'Falhou',
+  Stopped: 'Parado',
+  Shell: 'Shell',
+  Monitor: 'Monitor',
+  Command: 'Comando',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidação de memória',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidação de memória (revisando {{count}} sessão)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidação de memória (revisando {{count}} sessões)',
   '... and {{count}} more': '... e mais {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'O formato TOML está obsoleto. Você gostaria de migrá-los para o formato Markdown?',
@@ -1952,4 +1985,40 @@ export default {
   Use: 'Uso',
   '中国 (China)': 'China',
   '中国 (China) - 阿里云百炼': 'China - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': 'Mapa de Atividade',
+  Less: 'Menos',
+  More: 'Mais',
+  Sessions: 'Sessões',
+  Duration: 'Duração',
+  Projects: 'Projetos',
+  'Loading stats...': 'Carregando estatísticas...',
+  '(no data)': '(sem dados)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+  Input: 'Entrada',
+  Models: 'Modelos',
+  'All time': 'Todo o período',
+  'Last 7 days': 'Últimos 7 dias',
+  'Last 30 days': 'Últimos 30 dias',
+  'Show usage statistics dashboard.': 'Exibir painel de estatísticas de uso.',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'Requisições API',
+  'Tool Calls': 'Chamadas de Ferramenta',
+  'Success rate': 'Taxa de sucesso',
+  'Code Changes': 'Alterações de Código',
+  Tool: 'Ferramenta',
+  reqs: 'reqs',
+  in: 'ent.',
+  out: 'saída',
+  'In/Out': 'Ent/Saída',
 };

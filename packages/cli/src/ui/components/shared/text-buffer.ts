@@ -1397,9 +1397,29 @@ function textBufferReducerLogic(
             } else if (newVisualRow > 0) {
               newVisualRow--;
               newVisualCol = cpLen(visualLines[newVisualRow] ?? '');
+              const previousMapping = visualToLogicalMap[newVisualRow];
+              if (previousMapping) {
+                const [previousLogRow, previousLogStartCol] = previousMapping;
+                const previousCursorCol = previousLogStartCol + newVisualCol;
+                if (
+                  previousLogRow === cursorRow &&
+                  previousCursorCol === cursorCol &&
+                  newVisualCol > 0
+                ) {
+                  newVisualCol--;
+                }
+              }
             }
             break;
           case 'right':
+            // No stall-fix needed here (unlike 'left' above): the cursor
+            // resolver (calculateVisualCursorFromLayout) selects segments with
+            // a strict `logicalCol < nextStartColInLogical`, so a cursor at a
+            // hard-wrap boundary always lands at the START of the next visual
+            // row, not the end of the current one — wrapping right never maps
+            // back to the same logical position. If that segment selection ever
+            // changes (e.g. `<` → `<=`), a symmetric decrement would be needed
+            // here to avoid a mirror-image right-movement stall.
             newPreferredCol = null;
             if (newVisualCol < currentVisLineLen) {
               newVisualCol++;
@@ -1769,6 +1789,21 @@ function textBufferReducerLogic(
           ...nextState,
           lines: newLines,
           cursorCol: 0,
+          preferredCol: null,
+        };
+      } else if (cursorRow > 0) {
+        const nextState = pushUndoLocal(state);
+        const prevLineContent = currentLine(cursorRow - 1);
+        const currentLineContent = currentLine(cursorRow);
+        const newCol = cpLen(prevLineContent);
+        const newLines = [...nextState.lines];
+        newLines[cursorRow - 1] = prevLineContent + currentLineContent;
+        newLines.splice(cursorRow, 1);
+        return {
+          ...nextState,
+          lines: newLines,
+          cursorRow: cursorRow - 1,
+          cursorCol: newCol,
           preferredCol: null,
         };
       }

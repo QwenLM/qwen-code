@@ -58,6 +58,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ChatRecordingService: MockChatRecordingService,
     uiTelemetryService: {
       getMetrics: vi.fn(),
+      getMetricsForSession: vi.fn(),
     },
   };
 });
@@ -99,7 +100,6 @@ describe('runNonInteractive', () => {
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
   };
-  let mockGetDebugResponses: Mock;
 
   beforeEach(async () => {
     // Reset module-level state from any prior test in this file. Without
@@ -149,8 +149,6 @@ describe('runNonInteractive', () => {
       abortAll: vi.fn(),
     };
 
-    mockGetDebugResponses = vi.fn(() => []);
-
     mockGeminiClient = {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
@@ -161,9 +159,7 @@ describe('runNonInteractive', () => {
         recordMessageTokens: vi.fn(),
         recordToolCalls: vi.fn(),
       })),
-      getChat: vi.fn(() => ({
-        getDebugResponses: mockGetDebugResponses,
-      })),
+      getChat: vi.fn(() => ({})),
     };
 
     let currentModel = 'test-model';
@@ -202,6 +198,8 @@ describe('runNonInteractive', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getCronScheduler: vi.fn().mockReturnValue(null),
+      getTeamManager: vi.fn().mockReturnValue(null),
+      onTeamManagerChange: vi.fn(),
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
       getAutoSkillEnabled: vi.fn().mockReturnValue(false),
@@ -292,6 +290,9 @@ describe('runNonInteractive', () => {
   function setupMetricsMock(overrides?: Partial<SessionMetrics>): void {
     const mockMetrics = createMockMetrics(overrides);
     vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(mockMetrics);
+    vi.mocked(uiTelemetryService.getMetricsForSession).mockReturnValue(
+      mockMetrics,
+    );
   }
 
   async function* createStreamFromEvents(
@@ -1819,14 +1820,6 @@ describe('runNonInteractive', () => {
       }
       return true;
     });
-
-    const usageMetadata = {
-      promptTokenCount: 11,
-      candidatesTokenCount: 5,
-      totalTokenCount: 16,
-      cachedContentTokenCount: 3,
-    };
-    mockGetDebugResponses.mockReturnValue([{ usageMetadata }]);
 
     const nowSpy = vi.spyOn(Date, 'now');
     let current = 0;

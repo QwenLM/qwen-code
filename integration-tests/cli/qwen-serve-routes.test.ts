@@ -70,7 +70,26 @@ beforeAll(async () => {
       '--workspace',
       REPO_ROOT,
     ],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Strip the env toggles that flip conditional capability tags
+      // (`prompt_absolute_deadline`, `writer_idle_timeout`,
+      // `rate_limit`, and the pool tags via the kill switch). The
+      // capabilities baseline below assumes their default state; a
+      // dev machine exporting any of these would otherwise fail the
+      // exact-equality assertion.
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([k]) =>
+            ![
+              'QWEN_SERVE_PROMPT_DEADLINE_MS',
+              'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS',
+              'QWEN_SERVE_RATE_LIMIT',
+              'QWEN_SERVE_NO_MCP_POOL',
+            ].includes(k),
+        ),
+      ),
+    },
   );
   // Read stdout until we see the listening line + parse the port.
   port = await new Promise<number>((resolve, reject) => {
@@ -187,12 +206,22 @@ describe('qwen serve — capabilities envelope', () => {
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
     // `packages/cli/src/serve/capabilities.ts` and the unit-level
     // baseline features in `packages/cli/src/serve/server.test.ts`.
+    //
+    // Conditional tags absent under this suite's spawn flags (no
+    // `--require-auth` / `--allow-origin` / deadline env vars /
+    // rate-limit opt-in): `require_auth`, `allow_origin`,
+    // `prompt_absolute_deadline`, `writer_idle_timeout`, `rate_limit`.
+    // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
+    // because the workspace MCP pool is on by default, as are
+    // `workspace_settings` / `workspace_reload` (the CLI serve path
+    // always wires `persistSetting` and the workspace service).
     expect(caps.features).toEqual([
       'health',
       'capabilities',
       'session_create',
       'session_scope_override',
       'session_load',
+      'session_resume',
       'unstable_session_resume',
       'session_list',
       'session_prompt',
@@ -208,24 +237,45 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_mcp',
       'workspace_skills',
       'workspace_providers',
+      'auth_provider_install',
       'workspace_memory',
       'workspace_agents',
+      'workspace_agent_generate',
       'workspace_env',
       'workspace_preflight',
       'session_context',
+      'session_context_usage',
       'session_supported_commands',
+      'session_tasks',
+      'session_stats',
       'session_close',
       'session_metadata',
       'mcp_guardrails',
+      'workspace_mcp_manage',
       'mcp_guardrail_events',
+      'mcp_server_runtime_mutation',
       'workspace_file_read',
       'workspace_file_bytes',
       'workspace_file_write',
       'session_approval_mode_control',
       'workspace_tool_toggle',
+      'workspace_settings',
       'workspace_init',
       'workspace_mcp_restart',
+      'session_recap',
+      'session_btw',
+      'mcp_workspace_pool',
+      'mcp_pool_restart',
       'auth_device_flow',
+      'permission_mediation',
+      'non_blocking_prompt',
+      'session_language',
+      'session_rewind',
+      'workspace_hooks',
+      'session_hooks',
+      'workspace_extensions',
+      'session_branch',
+      'workspace_reload',
     ]);
   });
 });

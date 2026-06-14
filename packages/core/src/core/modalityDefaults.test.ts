@@ -218,6 +218,43 @@ describe('defaultModalities', () => {
     });
   });
 
+  describe('ByteDance Doubao', () => {
+    it('returns image for doubao-seed-2.0-pro (issue #4876)', () => {
+      const m = defaultModalities('doubao-seed-2.0-pro');
+      expect(m.image).toBe(true);
+      expect(m.video).toBeUndefined();
+      expect(m.audio).toBeUndefined();
+    });
+
+    it('returns image for doubao-seed-1.6', () => {
+      expect(defaultModalities('doubao-seed-1.6').image).toBe(true);
+    });
+
+    it('returns image for doubao-1.5-vision-pro', () => {
+      expect(defaultModalities('doubao-1.5-vision-pro').image).toBe(true);
+    });
+
+    it('returns image for doubao-vision', () => {
+      expect(defaultModalities('doubao-vision').image).toBe(true);
+    });
+
+    it('returns text-only for doubao-seedance (text→video generation model)', () => {
+      expect(defaultModalities('doubao-seedance-1.0-pro')).toEqual({});
+    });
+
+    it('returns text-only for doubao-seedream (text→image generation model)', () => {
+      expect(defaultModalities('doubao-seedream-3.0')).toEqual({});
+    });
+
+    it('returns text-only for doubao-pro-32k', () => {
+      expect(defaultModalities('doubao-pro-32k')).toEqual({});
+    });
+
+    it('returns text-only for doubao-lite-4k', () => {
+      expect(defaultModalities('doubao-lite-4k')).toEqual({});
+    });
+  });
+
   describe('unknown models', () => {
     it('returns text-only for unrecognized models', () => {
       expect(defaultModalities('some-random-model-xyz')).toEqual({});

@@ -11,7 +11,6 @@ import * as os from 'os';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
-import * as yaml from 'yaml';
 import type {
   SkillConfig,
   SkillLevel,
@@ -22,8 +21,10 @@ import type {
 import {
   SkillError,
   SkillErrorCode,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
+  parseUserInvocableField,
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
@@ -173,9 +174,9 @@ export class SkillManager {
    * Notifies all registered change listeners and awaits any returned
    * promises. Sync listeners resolve immediately; async listeners (e.g.
    * `SkillTool.refreshSkills`) hold the activation pipeline until their
-   * downstream tool descriptions are refreshed, eliminating the race where
-   * a system-reminder announces a skill before the model can actually see
-   * it in `<available_skills>`.
+   * downstream validation state is refreshed, so by the time the inline
+   * activation reminder is appended the runtime already accepts the newly
+   * activated skill.
    *
    * Listeners run in parallel via `Promise.allSettled`. They're
    * independent reads (each rebuilds its own derived state from the
@@ -187,8 +188,8 @@ export class SkillManager {
    */
   private async notifyChangeListeners(): Promise<void> {
     // Cap each listener at 30s. Without this, a hung listener (e.g.
-    // `SkillTool.refreshSkills` → `setTools()` blocked on a network
-    // call inside the gemini client) would permanently stall
+    // `SkillTool.refreshSkills` blocked on a slow skill reload) would
+    // permanently stall
     // `matchAndActivateByPaths` and `refreshCache`. The activation
     // registry itself has already been mutated synchronously in the
     // caller, so dropping a slow listener after the timeout is the
@@ -512,9 +513,9 @@ export class SkillManager {
    * Returns the names of skills newly activated by this call. When at least
    * one skill activates, change listeners are notified and awaited — so by
    * the time this method resolves, downstream consumers (notably
-   * `SkillTool.refreshSkills` updating the model-facing tool description)
-   * have applied the new state. Callers can therefore announce the
-   * activation in the same turn without racing against a stale tool list.
+   * `SkillTool.refreshSkills` updating validation state) have applied the
+   * new state. Callers can therefore announce the activation in the same
+   * turn without racing against stale validation data.
    *
    * The activation registry reference is captured at call entry; if a
    * concurrent `refreshCache` rebuilds the registry mid-call, this
@@ -531,8 +532,7 @@ export class SkillManager {
    * an array of file paths and fire change listeners exactly once across
    * all of them. Used by `coreToolScheduler` so a single tool call that
    * names N paths (e.g. ripGrep with multiple `paths:` entries) does not
-   * trigger N successive `SkillTool.refreshSkills` /
-   * `geminiClient.setTools()` round-trips.
+   * trigger N successive `SkillTool.refreshSkills` listener round-trips.
    */
   async matchAndActivateByPaths(
     filePaths: readonly string[],
@@ -691,34 +691,18 @@ export class SkillManager {
       const description = String(descriptionRaw);
 
       // Extract optional fields
-      const allowedToolsRaw = frontmatter['allowedTools'] as
-        | unknown[]
-        | undefined;
-      let allowedTools: string[] | undefined;
-
-      if (allowedToolsRaw !== undefined) {
-        if (Array.isArray(allowedToolsRaw)) {
-          allowedTools = allowedToolsRaw.map(String);
-        } else {
-          throw new Error('"allowedTools" must be an array');
-        }
-      }
+      const allowedTools = parseAllowedToolsField(frontmatter);
 
       // Extract hooks configuration
-      // Use full YAML parser for hooks as they have nested structures
       let hooks: SkillHooksSettings | undefined;
-      if (frontmatterYaml.includes('hooks:')) {
-        // Re-parse with full YAML parser to get nested hooks structure
-        const fullFrontmatter = yaml.parse(frontmatterYaml) as Record<
-          string,
-          unknown
-        >;
-        const hooksRaw = fullFrontmatter['hooks'] as
-          | Record<string, unknown>
-          | undefined;
-        if (hooksRaw !== undefined) {
-          hooks = this.parseHooksConfig(hooksRaw);
-        }
+      const hooksRaw = frontmatter['hooks'];
+      if (
+        hooksRaw !== undefined &&
+        typeof hooksRaw === 'object' &&
+        hooksRaw !== null &&
+        !Array.isArray(hooksRaw)
+      ) {
+        hooks = this.parseHooksConfig(hooksRaw as Record<string, unknown>);
       }
 
       // Set skillRoot to the directory containing SKILL.md
@@ -726,7 +710,8 @@ export class SkillManager {
       // Extract optional model field
       const model = parseModelField(frontmatter);
 
-      // Extract argument-hint, when_to_use, and disable-model-invocation
+      // Extract argument-hint, when_to_use, disable-model-invocation, and
+      // user-invocable
       const argumentHint =
         typeof frontmatter['argument-hint'] === 'string'
           ? frontmatter['argument-hint']
@@ -741,6 +726,7 @@ export class SkillManager {
         disableModelInvocationRaw === 'true'
           ? true
           : undefined;
+      const userInvocable = parseUserInvocableField(frontmatter);
 
       // Optional `paths` frontmatter: glob patterns that gate when this skill
       // is offered to the model (conditional skill).
@@ -767,6 +753,7 @@ export class SkillManager {
         body: body.trim(),
         whenToUse,
         disableModelInvocation,
+        userInvocable,
         paths,
         priority,
       };

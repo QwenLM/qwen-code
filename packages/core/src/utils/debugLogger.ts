@@ -37,9 +37,9 @@ const sessionContext = new AsyncLocalStorage<DebugLogSession>();
 
 function isDebugLogFileEnabled(): boolean {
   const value = process.env['QWEN_DEBUG_LOG_FILE'];
-  if (!value) return true;
+  if (!value) return false;
   const normalized = value.trim().toLowerCase();
-  return !['0', 'false', 'off', 'no'].includes(normalized);
+  return !['', '0', 'false', 'off', 'no'].includes(normalized);
 }
 
 function getActiveSession(): DebugLogSession | null {
@@ -118,7 +118,7 @@ function writeLog(
     // and the module already tracks `hasWriteFailure` for the
     // degraded-mode UI. Kernel page-cache flush is sufficient here.
     // (JSONL session writes via writeLine/writeLineSync DO use
-    // flush:true — those are the actual #3681 closure target.)
+    // flush:true — those are the actual closure target.)
     .then(() => fs.appendFile(logFilePath, line, 'utf8'))
     .catch(() => {
       hasWriteFailure = true;

@@ -13,7 +13,9 @@
  * On agent tabs, the tab bar uses an exclusive-focus model:
  *   - Down arrow at the input's bottom edge focuses the tab bar
  *   - Left/Right switch tabs only when the tab bar is focused
- *   - Up arrow or typing returns focus to the input
+ *   - Up arrow: on Main with bg sub-agents → live agent panel; otherwise
+ *     (agent tab, or no roster) → input. Typing also returns focus to input.
+ *   - Down arrow is a no-op — the tab bar is the bottom of the focus chain
  *
  * Tab indicators:  running,  idle/completed,  failed,  cancelled
  */
@@ -33,6 +35,7 @@ import {
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { theme } from '../../semantic-colors.js';
+import { isLiveAgentPanelVisibleEntry } from '../background-view/liveAgentPanelVisibility.js';
 
 // ─── Status Indicators ──────────────────────────────────────
 
@@ -63,16 +66,13 @@ function statusIndicator(agent: RegisteredAgent): {
 export const AgentTabBar: React.FC = () => {
   const { activeView, agents, agentShellFocused, agentTabBarFocused } =
     useAgentViewState();
-  const {
-    switchToNext,
-    switchToPrevious,
-    switchToMain,
-    setAgentTabBarFocused,
-  } = useAgentViewActions();
+  const { switchToNext, switchToPrevious, setAgentTabBarFocused } =
+    useAgentViewActions();
   const { entries: bgEntries } = useBackgroundTaskViewState();
   const { setLivePanelFocused } = useBackgroundTaskViewActions();
   const { embeddedShellFocused } = useUIState();
-  const hasBgAgents = bgEntries.length > 0;
+  const hasVisibleBgAgentRoster = () =>
+    bgEntries.some((e) => isLiveAgentPanelVisibleEntry(e, Date.now()));
 
   useKeypress(
     (key) => {
@@ -85,12 +85,15 @@ export const AgentTabBar: React.FC = () => {
         switchToNext();
       } else if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
         setAgentTabBarFocused(false);
-      } else if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
-        if (hasBgAgents) {
-          setAgentTabBarFocused(false);
-          switchToMain();
+        // On Main, ascend to the live agent panel above the tab bar. On agent
+        // tabs the panel isn't rendered, so ↑ just returns to the composer
+        // (keeping AgentComposer's ↓/↑ round-trip symmetric).
+        if (activeView === 'main' && hasVisibleBgAgentRoster()) {
           setLivePanelFocused(true);
         }
+      } else if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
+        // No-op: the tab bar is the bottom of the chain
+        // (input → panel → tab bar); the panel is reached via ↑.
       } else if (
         key.sequence &&
         key.sequence.length === 1 &&

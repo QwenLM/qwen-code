@@ -16,11 +16,11 @@ import type { ToolName } from '../../utils/tool-utils.js';
 import type { Config } from '../../config/config.js';
 
 /**
- * Register all 9 computer-use tools as lazy factories. Each tool is
- * deferred (`shouldDefer=true`), so they surface only via ToolSearch
- * keyword match. The first invocation triggers the bootstrap state
- * machine (install confirm → install → permission flow) before
- * forwarding to the upstream MCP server.
+ * Register the full cua-driver computer-use tool surface as lazy factories.
+ * Each tool is deferred (`shouldDefer=true`), so they surface only via
+ * ToolSearch keyword match. The first invocation triggers the bootstrap state
+ * machine (install confirm → install → permission flow) before forwarding to
+ * the cua-driver MCP server.
  *
  * Caller MUST supply the `registerLazy` helper from
  * `Config.createToolRegistry()` (NOT the bare `registry.registerFactory`)

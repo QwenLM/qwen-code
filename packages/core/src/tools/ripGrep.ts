@@ -18,6 +18,7 @@ import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { recordGrepResultFileReads } from './grepReadTracking.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
@@ -366,6 +367,7 @@ class GrepToolInvocation extends BaseToolInvocation<
           ),
         ),
       );
+      await recordGrepResultFileReads(this.config, resultFilePaths);
 
       return {
         llmContent: llmContent.trim(),
@@ -489,6 +491,10 @@ export class RipGrepTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static readonly Name = ToolNames.GREP;
+
+  override get maxOutputChars(): number {
+    return 20_000;
+  }
 
   constructor(private readonly config: Config) {
     super(
