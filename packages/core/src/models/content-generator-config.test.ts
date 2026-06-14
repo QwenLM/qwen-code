@@ -10,7 +10,7 @@ import {
   createRuntimeContentGeneratorView,
   resolveCredentialField,
 } from './content-generator-config.js';
-import { createContentGenerator } from '../core/contentGenerator.js';
+import { createContentGenerator, Protocol } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { Config } from '../config/config.js';
 import type { ResolvedModelConfig } from './types.js';
@@ -43,6 +43,7 @@ describe('buildAgentContentGeneratorConfig', () => {
     apiKey: 'parent-key',
     apiKeyEnvKey: 'PARENT_KEY_ENV',
     baseUrl: 'https://parent.example.com',
+    protocol: Protocol.OPENAI,
     samplingParams: { temperature: 0.7, top_p: 0.9 },
     reasoning: { effort: 'high' as const },
     timeout: 30000,
@@ -61,6 +62,7 @@ describe('buildAgentContentGeneratorConfig', () => {
 
       expect(result.model).toBe('custom-model');
       expect(result.authType).toBe('openai');
+      expect(result.protocol).toBe(Protocol.OPENAI);
       expect(result.apiKey).toBe('parent-key');
       expect(result.baseUrl).toBe('https://parent.example.com');
       expect(result.apiKeyEnvKey).toBe('PARENT_KEY_ENV');
@@ -84,6 +86,7 @@ describe('buildAgentContentGeneratorConfig', () => {
 
       expect(result.model).toBe('claude-sonnet');
       expect(result.authType).toBe('anthropic');
+      expect(result.protocol).toBe(Protocol.ANTHROPIC);
       // Generation config cleared
       expect(result.samplingParams).toBeUndefined();
       expect(result.reasoning).toBeUndefined();

@@ -13,6 +13,7 @@ import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
+import { authTypeToProtocol } from '../providers/install.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -569,9 +570,9 @@ export class ModelsConfig {
    */
   getGenerationConfig(): Partial<ContentGeneratorConfig> {
     if (this.currentAuthType) {
-      const protocol = this.modelRegistry.getProtocolForAuthType(
-        this.currentAuthType,
-      );
+      const protocol =
+        this.modelRegistry.getProtocolForAuthType(this.currentAuthType) ??
+        authTypeToProtocol(this.currentAuthType);
       this._generationConfig.protocol = protocol;
     }
     return this._generationConfig;

@@ -2745,3 +2745,38 @@ describe('ModelsConfig', () => {
     });
   });
 });
+
+describe('getGenerationConfig protocol fallback', () => {
+  it('should resolve protocol for env-var users without modelProviders', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+    });
+
+    const config = modelsConfig.getGenerationConfig();
+    expect(config.protocol).toBe(Protocol.OPENAI);
+  });
+
+  it('should resolve protocol for anthropic env-var users', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_ANTHROPIC,
+    });
+
+    const config = modelsConfig.getGenerationConfig();
+    expect(config.protocol).toBe(Protocol.ANTHROPIC);
+  });
+
+  it('should prefer registry protocol over fallback', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+      },
+    });
+
+    const config = modelsConfig.getGenerationConfig();
+    expect(config.protocol).toBe(Protocol.OPENAI);
+  });
+});

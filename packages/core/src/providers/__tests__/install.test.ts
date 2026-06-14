@@ -588,3 +588,38 @@ describe('applyProviderInstallPlan', () => {
     expect(process.env['TEST_API_KEY']).toBe('before');
   });
 });
+
+describe('v4-format backward compat', () => {
+  it('should convert v4 array-format to v5 ProviderConfig when applying patch', async () => {
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [
+        { id: 'old-model', envKey: 'OLD_KEY' },
+      ] as unknown as ModelProvidersConfig[string],
+    });
+
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: { TEST_API_KEY: 'sk-new' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'new-model', envKey: 'TEST_API_KEY' }],
+          mergeStrategy: 'append',
+        },
+      ],
+    };
+
+    await applyProviderInstallPlan(plan, { settings: adapter });
+
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'modelProviders.openai',
+      expect.objectContaining({
+        protocol: Protocol.OPENAI,
+        models: expect.arrayContaining([
+          expect.objectContaining({ id: 'new-model' }),
+        ]),
+      }),
+    );
+  });
+});

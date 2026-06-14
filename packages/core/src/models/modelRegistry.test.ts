@@ -1091,3 +1091,32 @@ describe('modelRegistryKey', () => {
     expect(key1).toBe(key2);
   });
 });
+
+describe('getProtocolForAuthType', () => {
+  it('should return correct protocol for registered authType', () => {
+    const registry = new ModelRegistry({
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [{ id: 'gpt-4', name: 'GPT-4' }],
+      },
+    });
+
+    expect(registry.getProtocolForAuthType(AuthType.USE_OPENAI)).toBe(
+      Protocol.OPENAI,
+    );
+  });
+
+  it('should return undefined for unregistered authType', () => {
+    const registry = new ModelRegistry();
+    expect(
+      registry.getProtocolForAuthType(AuthType.USE_OPENAI),
+    ).toBeUndefined();
+  });
+
+  it('should always have qwen-oauth registered', () => {
+    const registry = new ModelRegistry();
+    expect(registry.getProtocolForAuthType(AuthType.QWEN_OAUTH)).toBe(
+      Protocol.QWEN_OAUTH,
+    );
+  });
+});

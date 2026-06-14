@@ -69,14 +69,16 @@ export class V4ToV5Migration implements SettingsMigration {
           continue;
         }
 
-        if (!(key in PROVIDER_KEY_TO_PROTOCOL)) {
+        if (!Object.hasOwn(PROVIDER_KEY_TO_PROTOCOL, key)) {
           warnings.push(
             `Unknown provider key "${key}", defaulting protocol to "openai".`,
           );
         }
 
         providers[key] = {
-          protocol: PROVIDER_KEY_TO_PROTOCOL[key] ?? 'openai',
+          protocol: Object.hasOwn(PROVIDER_KEY_TO_PROTOCOL, key)
+            ? PROVIDER_KEY_TO_PROTOCOL[key]
+            : 'openai',
           models: value,
         };
       }

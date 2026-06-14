@@ -14,15 +14,17 @@ import type {
 } from './types.js';
 
 const AUTH_TYPE_TO_PROTOCOL: Record<string, Protocol> = {
-  openai: Protocol.OPENAI,
-  'qwen-oauth': Protocol.QWEN_OAUTH,
-  gemini: Protocol.GEMINI,
-  'vertex-ai': Protocol.GEMINI,
-  anthropic: Protocol.ANTHROPIC,
+  openai: 'openai' as Protocol,
+  'qwen-oauth': 'qwen-oauth' as Protocol,
+  gemini: 'gemini' as Protocol,
+  'vertex-ai': 'gemini' as Protocol,
+  anthropic: 'anthropic' as Protocol,
 };
 
 export function authTypeToProtocol(authType: AuthType): Protocol {
-  return AUTH_TYPE_TO_PROTOCOL[authType] ?? Protocol.OPENAI;
+  return Object.hasOwn(AUTH_TYPE_TO_PROTOCOL, authType)
+    ? AUTH_TYPE_TO_PROTOCOL[authType]
+    : Protocol.OPENAI;
 }
 
 /**
