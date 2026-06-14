@@ -5,6 +5,7 @@ import {
   useRef,
   useCallback,
   useState,
+  type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { EditorView, keymap, placeholder, tooltips } from '@codemirror/view';
 import { EditorState, Compartment, Prec } from '@codemirror/state';
@@ -270,6 +271,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   // Open the reverse-i-search history panel. Shared by the Ctrl+R keymap and
   // the mouse-discoverable history button so both stay in lockstep.
   const openHistorySearch = useCallback(() => {
+    if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
     const query = view.state.doc.toString();
@@ -290,6 +292,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   // Fill the editor with the previous history entry (mirrors ArrowUp), used by
   // the clickable "history" hint so mouse users can walk history too.
   const navigatePrevHistory = useCallback(() => {
+    if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
     const history = shellModeRef.current
@@ -309,6 +312,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   // Step toward newer history (mirrors ArrowDown); paired with the "previous"
   // hint so mouse users can walk history in both directions.
   const navigateNextHistory = useCallback(() => {
+    if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
     const history = shellModeRef.current
@@ -1022,11 +1026,19 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     let skipInsert = false;
     let caretOverride: number | null = null;
     if (text === '/') {
-      // The slash-command menu only triggers on a line-leading '/'. If the
-      // line already starts with '/', re-open the menu rather than inserting a
-      // second '/' (which would make "//" and dismiss the menu).
+      // The slash-command menu only triggers on a line-leading '/'. If the line
+      // already starts with '/', re-open the menu rather than inserting a second
+      // '/' ("//" would dismiss it). If the editor holds other text, replace it
+      // with '/' so the command parses — a mid-line '/' ("hello/") never matches
+      // the slash source and would leave a stray char with no menu.
       const line = view.state.doc.lineAt(selection.head);
       if (line.text.startsWith('/')) {
+        skipInsert = true;
+      } else if (view.state.doc.length > 0) {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: '/' },
+          selection: { anchor: 1 },
+        });
         skipInsert = true;
       }
     } else if (text === '@') {
@@ -1123,7 +1135,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   }, []);
 
   const closeSearch = useCallback(
-    (restoreDraft: boolean) => {
+    (restoreDraft: boolean, keepFocus = true) => {
       if (restoreDraft) {
         replaceEditorText(searchDraftRef.current);
       }
@@ -1135,7 +1147,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         ? shellHistoryActionsRef.current
         : historyActionsRef.current;
       history.resetSearch();
-      viewRef.current?.focus();
+      // Outside-click dismissal passes keepFocus=false so focus isn't stolen
+      // from whatever the user clicked (e.g. a button/link in the transcript).
+      if (keepFocus) {
+        viewRef.current?.focus();
+      }
     },
     [replaceEditorText],
   );
@@ -1153,7 +1169,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       const panel = searchUiRef.current;
       const target = event.target;
       if (panel && target instanceof Node && !panel.contains(target)) {
-        closeSearch(true);
+        closeSearch(true, false);
       }
     };
     window.addEventListener('mousedown', onPointerOutside);
@@ -1282,11 +1298,24 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   );
   // A faint, always-on hint row that surfaces the otherwise-hidden input
   // shortcuts (history search, slash commands, file mentions) so they stay
-  // discoverable even while typing. Hidden only where it would conflict:
-  // shell mode (different prefix), reverse-i-search (its own hint bar), or
-  // when a followup suggestion already occupies the placeholder.
+  // discoverable even while typing. Hidden where it would conflict or not
+  // apply: shell mode (different prefix), reverse-i-search (its own hint bar),
+  // a followup suggestion occupying the placeholder, or while disabled — the
+  // buttons would otherwise bypass the editor's disabled guard.
   const showShortcutHints =
-    !shellMode && !searchMode && !followupState?.isVisible;
+    !shellMode && !searchMode && !followupState?.isVisible && !disabled;
+  // Shared props for the hint-row buttons: keep focus in the editor
+  // (preventDefault on mousedown) and don't bubble to the container's click-
+  // to-focus handler (stopPropagation on click).
+  const hintProps = (handler: () => void) => ({
+    type: 'button' as const,
+    className: styles.hintItem,
+    onMouseDown: (e: ReactMouseEvent<HTMLButtonElement>) => e.preventDefault(),
+    onClick: (e: ReactMouseEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      handler();
+    },
+  });
 
   return (
     <div className={containerClass} onClick={focus}>
@@ -1368,67 +1397,27 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       </div>
       {showShortcutHints && (
         <div className={styles.hints}>
-          <button
-            type="button"
-            className={styles.hintItem}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={(e) => {
-              e.stopPropagation();
-              navigatePrevHistory();
-            }}
-          >
+          <button {...hintProps(navigatePrevHistory)}>
             <span className={styles.hintKey}>↑</span>
             {t('editor.hintPrev')}
           </button>
           <span className={styles.hintSep}>·</span>
-          <button
-            type="button"
-            className={styles.hintItem}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={(e) => {
-              e.stopPropagation();
-              navigateNextHistory();
-            }}
-          >
+          <button {...hintProps(navigateNextHistory)}>
             <span className={styles.hintKey}>↓</span>
             {t('editor.hintNext')}
           </button>
           <span className={styles.hintSep}>·</span>
-          <button
-            type="button"
-            className={styles.hintItem}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={(e) => {
-              e.stopPropagation();
-              openHistorySearch();
-            }}
-          >
+          <button {...hintProps(openHistorySearch)}>
             <span className={styles.hintKey}>ctrl+r</span>
             {t('editor.hintSearch')}
           </button>
           <span className={styles.hintSep}>·</span>
-          <button
-            type="button"
-            className={styles.hintItem}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={(e) => {
-              e.stopPropagation();
-              insertText('/');
-            }}
-          >
+          <button {...hintProps(() => insertText('/'))}>
             <span className={styles.hintKey}>/</span>
             {t('editor.hintCommands')}
           </button>
           <span className={styles.hintSep}>·</span>
-          <button
-            type="button"
-            className={styles.hintItem}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={(e) => {
-              e.stopPropagation();
-              insertText('@');
-            }}
-          >
+          <button {...hintProps(() => insertText('@'))}>
             <span className={styles.hintKey}>@</span>
             {t('editor.hintFiles')}
           </button>
