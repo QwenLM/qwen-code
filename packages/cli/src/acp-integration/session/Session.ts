@@ -3306,6 +3306,11 @@ export class Session implements SessionContext {
                   locations: invocation.toolLocations(),
                   kind: mappedKind,
                   rawInput: args,
+                  // Carry the tool name so consumers can give specific tools
+                  // (e.g. the Agent tool) dedicated permission UI without
+                  // relying on a protocol `kind` ACP can't carry. The tool_call
+                  // frame already ships _meta.toolName; mirror it here.
+                  _meta: { toolName },
                 },
               };
 

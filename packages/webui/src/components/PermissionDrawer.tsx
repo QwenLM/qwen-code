@@ -17,6 +17,12 @@ export interface PermissionOption {
 export interface PermissionToolCall {
   title?: string;
   kind?: string;
+  /**
+   * Canonical tool name (from the ACP frame's `_meta.toolName`). Lets the
+   * drawer give specific tools dedicated UI (e.g. the Agent tool) without
+   * depending on a protocol `kind` ACP can't carry.
+   */
+  toolName?: string;
   toolCallId?: string;
   rawInput?: {
     command?: string;
@@ -106,6 +112,9 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
     }
     if (toolCall.kind === 'switch_mode') {
       return 'Would you like to proceed?';
+    }
+    if (toolCall.toolName === 'agent') {
+      return 'Launch this agent?';
     }
     return toolCall.title || 'Permission Required';
   };
@@ -236,7 +245,8 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
             toolCall.kind === 'write' ||
             toolCall.kind === 'read' ||
             toolCall.kind === 'execute' ||
-            toolCall.kind === 'bash') &&
+            toolCall.kind === 'bash' ||
+            toolCall.toolName === 'agent') &&
             toolCall.title && (
               <div
                 /* 13px, normal font weight; normal whitespace wrapping + long word breaking; maximum 3 lines with overflow ellipsis */

@@ -829,6 +829,21 @@ export const useWebViewMessages = ({
         }
 
         case 'permissionRequest': {
+          // Surface the canonical tool name (the ACP frame's `_meta.toolName`)
+          // onto the PermissionToolCall so the drawer can render tool-specific
+          // UI (e.g. the Agent tool's "Launch this agent?" prompt) without
+          // depending on a protocol `kind` ACP can't carry.
+          const incomingToolCall = message.data?.toolCall as
+            | (PermissionToolCall & { _meta?: { toolName?: string } })
+            | undefined;
+          if (
+            incomingToolCall &&
+            incomingToolCall.toolName === undefined &&
+            typeof incomingToolCall._meta?.toolName === 'string'
+          ) {
+            incomingToolCall.toolName = incomingToolCall._meta.toolName;
+          }
+
           handlers.handlePermissionRequest(message.data);
 
           const permToolCall = message.data?.toolCall as {
