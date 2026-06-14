@@ -4537,6 +4537,121 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('should commit thought to history when ToolCallRequest arrives', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning tool usage' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then tool call');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('planning tool usage'),
+          durationMs: expect.any(Number),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should commit thought to history on non-continuation Retry', async () => {
+      vi.useFakeTimers();
+      try {
+        let emitRetry: (() => void) | undefined;
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'reasoning before retry' },
+            };
+            // Wait for the buffered thought to be flushed to state before
+            // the Retry event discards remaining buffered events.
+            await new Promise<void>((resolve) => {
+              emitRetry = resolve;
+            });
+            yield {
+              type: ServerGeminiEventType.Retry,
+              isContinuation: false,
+            };
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'retried response',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+        const { result } = renderTestHook();
+
+        await act(async () => {
+          void result.current.submitQuery('think then retry');
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        // Advance past STREAM_UPDATE_THROTTLE_MS (60ms) so the thought
+        // buffer flushes and populates pendingThoughtItem state.
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+          await Promise.resolve();
+        });
+
+        // Now emit the Retry event; commitPendingThought should find the
+        // flushed thought in pendingThoughtItemRef.
+        await act(async () => {
+          emitRetry?.();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+          await Promise.resolve();
+        });
+
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before retry'),
+            durationMs: expect.any(Number),
+          }),
+          expect.any(Number),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should show a retry countdown and update pending history over time', async () => {
       vi.useFakeTimers();
       try {
