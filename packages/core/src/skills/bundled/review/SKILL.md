@@ -159,6 +159,36 @@ Assign severity based on the tool's own categorization:
 
 ## Step 4: Parallel multi-dimensional review
 
+**CI emit-only fallback before parallel agents:** If `QWEN_REVIEW_EMIT_ONLY`
+is set, immediately write a provisional review-unavailable JSON to
+`QWEN_REVIEW_OUTPUT_FILE` **before** launching any `task` tools. This is a
+last-resort gate result for the case where the controller is interrupted while
+starting or waiting for the parallel review agents. Later, if review completes,
+Step 9 MUST overwrite the same file with the real review JSON.
+
+The provisional JSON MUST be a `COMMENT` event whose body contains the hidden
+marker `<!-- qwen-triage:review-unavailable -->`, explains that automated review
+did not complete, and includes `RUN_URL` when that environment variable is set.
+Do not submit this JSON yourself in emit-only mode; CI publishes or updates the
+comment in a separate privileged step.
+
+```bash
+if [ -n "${QWEN_REVIEW_EMIT_ONLY:-}" ]; then
+  FALLBACK_BODY="<!-- qwen-triage:review-unavailable -->
+_Qwen automated review could not complete in this run, so tmux testing and auto-approval are blocked. Human review is required._
+
+Reason: review controller did not produce final review JSON"
+  if [ -n "${RUN_URL:-}" ]; then
+    FALLBACK_BODY="${FALLBACK_BODY}
+
+Workflow logs: ${RUN_URL}"
+  fi
+  jq -n --arg body "$FALLBACK_BODY" '{event:"COMMENT", body:$body}' \
+    > "${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
+  echo "Emit-only: wrote provisional review-unavailable JSON to $QWEN_REVIEW_OUTPUT_FILE"
+fi
+```
+
 Launch review agents by invoking all `task` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **9 agents** for same-repo reviews (Agent 6 has three persona variants 6a/6b/6c that each count as a separate parallel agent), or **8 agents** (skip Agent 7: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each agent should focus exclusively on its dimension.
 
 **IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste the full diff — give each agent:
@@ -567,6 +597,10 @@ Rules:
 Then submit.
 
 **CI publish-separation mode** — if the environment variable `QWEN_REVIEW_EMIT_ONLY` is set, the review agent must hold no write credential: do NOT call the submit API. Instead copy the review JSON to `QWEN_REVIEW_OUTPUT_FILE` and STOP Step 9 — a separate privileged CI step posts it. This applies to the no-findings case below too. The copied file is read by CI, so do not rely on Step 11 cleanup removing it (it lives outside `.qwen/tmp`).
+
+If Step 4 wrote the provisional review-unavailable JSON, overwriting it here is
+mandatory. A completed review must never leave the provisional JSON in
+`QWEN_REVIEW_OUTPUT_FILE`.
 
 ```bash
 if [ -n "${QWEN_REVIEW_EMIT_ONLY:-}" ]; then
