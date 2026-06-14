@@ -315,7 +315,6 @@ const MEMORY_PRESSURE_ENV_KEYS = [
   'QWEN_MEMORY_PRESSURE_SOFT',
   'QWEN_MEMORY_PRESSURE_HARD',
   'QWEN_MEMORY_PRESSURE_CRITICAL',
-  'QWEN_MEMORY_ENABLE_GC',
 ];
 
 vi.mock('../core/baseLlmClient.js');
@@ -669,8 +668,7 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
-    it('enables explicit GC when requested by env', async () => {
-      process.env['QWEN_MEMORY_ENABLE_GC'] = '1';
+    it('explicit GC is enabled by default', async () => {
       const globalWithGc = global as typeof global & { gc?: () => void };
       const originalGc = globalWithGc.gc;
       const gcSpy = vi.fn();

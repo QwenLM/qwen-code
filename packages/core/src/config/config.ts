@@ -988,8 +988,12 @@ function loadMemoryPressureConfig(): MemoryPressureConfig {
       config.criticalRatio,
     );
 
-    if (process.env['QWEN_MEMORY_ENABLE_GC'] === '1') {
-      config.enableExplicitGC = true;
+    const enableGC = process.env['QWEN_MEMORY_ENABLE_GC'];
+    if (
+      enableGC &&
+      ['0', 'false', 'off', 'no'].includes(enableGC.trim().toLowerCase())
+    ) {
+      config.enableExplicitGC = false;
     }
 
     validateMemoryPressureConfig(config);

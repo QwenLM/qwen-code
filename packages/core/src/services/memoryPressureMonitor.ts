@@ -209,7 +209,7 @@ export const DEFAULT_PRESSURE_CONFIG: MemoryPressureConfig = {
   hardPressureRatio: 0.65,
   criticalRatio: 0.8,
   cleanupCooldownMs: 5_000,
-  enableExplicitGC: false,
+  enableExplicitGC: true,
 };
 
 // Validation
