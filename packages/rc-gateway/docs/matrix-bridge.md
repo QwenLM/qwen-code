@@ -13,12 +13,13 @@ sidecar later by changing only its configuration.
 > fork's zero-edit boundary (everything lives under `packages/rc-gateway/`), the
 > bridge is built in-process at `src/bridges/matrix/` and this doc lives here.
 
-> **⚠️ End-to-end encryption is NOT supported in this build.** The bridge talks
-> the plain client-server API over `fetch` (no `matrix-bot-sdk` / olm crypto), so
-> it cannot read messages in encrypted rooms. When the bot lands in an encrypted
-> room it posts a notice and **refuses to bind** that room — it does not silently
-> fail. Use an **unencrypted** room. E2EE support is deferred (see "Deferred"
-> below).
+> **⚠️ Encrypted rooms are still refused at runtime in this build.** The default
+> bridge talks the plain client-server API over `fetch`; in an encrypted room it
+> posts a notice and **refuses to bind** rather than silently fail. Use an
+> **unencrypted** room. The `matrix-bot-sdk` + olm crypto adapter IS now built and
+> compile-checked (see "End-to-end encryption" below), but its live decrypt and
+> dispatch routing are an unverified residual integration — so encrypted rooms are
+> not yet functionally delivered.
 
 ## What it does
 
@@ -151,34 +152,51 @@ breaks — everything else HTML-escaped; no CommonMark dependency). Matrix's
 keeping the room readable; a new turn (after a resolve, or the next inbound
 prompt) starts back in the room timeline.
 
-## End-to-end encryption (scaffolding only)
+## End-to-end encryption (compile-checked adapter; live crypto unverified)
 
 E2EE is a **second transport, opt-in and OFF by default** (`MATRIX_ENABLE_E2EE`).
-The tested fetch path stays the default and continues to detect-and-refuse
-encrypted rooms, so enabling crypto can never destabilize the working unencrypted
-bridge. The pure layer is in place: the flag, the olm-store convention
-(`$QWEN_BRIDGE_STATE_DIR/olm/`), the `olm_store_missing` warn on first boot, and
-the per-room transport decision (`decideMatrixTransport`). The native crypto
-adapter (`matrix-bot-sdk` + `@matrix-org/matrix-sdk-crypto-nodejs`, an
-`optionalDependency`, dynamically imported) is a separate quarantined slice and is
-**not built in this release** — so even with `MATRIX_ENABLE_E2EE` set, encrypted
-rooms are still refused (the bridge logs that plainly at boot). The native module
-loads in this environment, so when the adapter lands it is compile-checked against
-the real SDK types; the live decrypt/encrypt round-trip remains
-verified-locally-only (no homeserver in CI).
+The tested fetch path stays the default for plain rooms, so enabling crypto can
+never destabilize the working unencrypted bridge.
 
-## Deferred (not yet built)
+**Pure layer (unit-tested):** the flag (`parseE2eeEnabled`), the olm-store
+convention (`$QWEN_BRIDGE_STATE_DIR/olm/`), `olmStorePresent` (a real fs check),
+the truthful first-boot `olm_store_missing` re-key decision (`shouldWarnOlmMissing`
+— warns only when E2EE is on AND no store exists), and the per-room transport
+decision (`decideMatrixTransport`).
 
-- **The E2EE crypto adapter** (the actual decrypt/encrypt transport). The
-  scaffolding above is in place; the SDK-backed adapter is the next slice. It also
-  carries these enumerated requirements, deferred with it:
-  - **`olmStorePresent` on a bridge healthz** (spec "Healthz reflects olm store
-    status") — the in-process bridge has no HTTP listener, so this is its own slice.
-  - **`olm_store_missing` warn on first boot** — emitted only once decryption is
-    active (in the scaffolding state rooms are refused, not re-keyed).
+**Crypto adapter (`cryptoAdapter.ts`, compile-checked ceiling):**
+`createMatrixCryptoAdapter` constructs a `matrix-bot-sdk` `MatrixClient` with a
+`RustSdkCryptoStorageProvider` (SQLite olm store at `<stateDir>/olm/`), prepares
+crypto for the joined rooms, and exposes `start`/`stop`/`sendEncrypted`/`onMessage`.
+matrix-bot-sdk is an `optionalDependency`, dynamically imported (absent → adapter
+returns `null`, E2EE stays off, plain bridge unaffected). The construction is typed
+against the **real** SDK — the ctor calls are signature-checked by tsc (proven via
+a deliberate-wrong-argument test that makes the build go red), **not** hand-rolled
+`*Like` shapes. The sidecar constructs the adapter (initializing the persistent olm
+store) when `MATRIX_ENABLE_E2EE` is set, and logs honestly.
+
+**Verification ceiling:** the live olm/megolm decrypt/encrypt round-trip is NOT
+exercised — it needs a homeserver, an encrypted room, and a verified device, none
+of which exist in CI. The adapter is therefore **constructed but not started** by
+the sidecar.
+
+## Residual integration (the one unverified edge)
+
+- **Routing decrypted events into dispatch.** The SDK client runs its own `/sync`
+  loop; the runner runs a separate fetch `/sync` loop. Reconciling the two (or
+  letting the SDK client subsume the fetch loop for crypto-enabled deployments) and
+  feeding `onMessage` into the existing tested dispatch is the remaining wiring.
+  Until then the adapter initializes the store and is construct-checked, but live
+  encrypted-room messages are not yet delivered to sessions.
+- **`olmStorePresent` on a bridge healthz** (spec "Healthz reflects olm store
+  status") — the in-process bridge has no HTTP listener; `olmStorePresent` is built
+  and tested and ready to surface when a bridge healthz endpoint is added.
 - **`MATRIX_ENABLE_E2EE` is sidecar-only today.** The in-process path (`cli.ts`)
   reads Matrix env directly and does not yet know the flag; it gains it with the
   `cli.ts` → `startBridge` de-dup.
+
+## Other deferred (not yet built)
+
 - Only `agent_message_chunk` (the assistant's prose) is streamed; thought and
   tool-call chunks are skipped to keep rooms readable.
 - A fenced code block that spans a flush boundary (split by the idle timer or the

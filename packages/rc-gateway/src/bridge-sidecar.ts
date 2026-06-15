@@ -39,6 +39,7 @@ import {
 } from './bridges/tokenBootstrap.js';
 import { startBridge } from './bridges/start.js';
 import { MatrixRestApi } from './bridges/matrix/restApi.js';
+import { setupMatrixCrypto } from './bridges/matrix/cryptoAdapter.js';
 
 /* eslint-disable no-console */
 
@@ -112,20 +113,24 @@ async function main(): Promise<void> {
     const mismatch = checkMxid(who.userId, cfg.userId);
     if (mismatch) fail(mismatch);
 
-    // E2EE scaffolding (opt-in, OFF by default). The olm/megolm crypto adapter
-    // is not built yet, so an enabled flag still falls back to refusing encrypted
-    // rooms (decideMatrixTransport with cryptoAvailable=false) — say so plainly
-    // rather than let an operator think ciphertext is being read. The
-    // olm_store_missing warn is intentionally NOT emitted here: with no adapter,
-    // rooms are refused (not re-keyed), so it would describe behavior that does
-    // not happen yet — it lands with the crypto adapter slice.
-    if (cfg.e2eeEnabled) {
-      console.warn(
-        'qwen-rc-bridge: MATRIX_ENABLE_E2EE is set but the encrypted-room ' +
-          'crypto transport is not built in this release — encrypted rooms are ' +
-          'still refused. Use an unencrypted room.',
-      );
-    }
+    // E2EE crypto transport (opt-in, OFF by default). A PARALLEL path that can
+    // NEVER crash the plain bridge below: setupMatrixCrypto gates on the flag and
+    // degrades any construction failure to null. It is constructed (initializing
+    // the persistent <stateDir>/olm/ store) but NOT started — reconciling the
+    // SDK's /sync with the runner's fetch /sync and routing decrypted events into
+    // dispatch is the documented residual integration (docs/matrix-bridge.md).
+    await setupMatrixCrypto(
+      {
+        e2eeEnabled: cfg.e2eeEnabled,
+        homeserverUrl: cfg.homeserverUrl,
+        accessToken: cfg.accessToken,
+        stateDir: cfg.stateDir,
+      },
+      {
+        log: (m) => console.log(`qwen-rc-bridge: ${m}`),
+        warn: (m) => console.warn(`qwen-rc-bridge: ${m}`),
+      },
+    );
   }
 
   const bridge = await startBridge(cfg, { token, log: (m) => console.log(m) });
