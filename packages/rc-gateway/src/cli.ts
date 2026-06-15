@@ -7,6 +7,7 @@
 import { watch, type FSWatcher } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { startDaemon } from './daemonSupervisor.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
@@ -45,10 +46,17 @@ import {
   RateTableHolder,
   loadRateTableFile,
   rateTablePath,
+  createRateTableReloader,
 } from './cost/rateTable.js';
 import { UsageIngester, UsageTickCoalescer } from './cost/ingester.js';
 import { SessionAttributionMap } from './cost/sessionAttribution.js';
 import { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
+import { formatUsageCsv, type UsageResponseRow } from './cost/usageQuery.js';
+import {
+  parseUsageArgs,
+  parsePruneArgs,
+  formatUsageTable,
+} from './cost/usageCli.js';
 import {
   resolveSuggestConfig,
   createChatTransport,
@@ -181,6 +189,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const sessionAttribution = new SessionAttributionMap();
   const usageBroadcaster = new UsageTickBroadcaster();
   let usageIngester: UsageIngester | undefined;
+  let rateReloader: { stop(): void; trigger(): void } | undefined;
 
   const { app, notifier, audit, ownerEvents, bridgeRegistry } =
     createGatewayApp({
@@ -402,6 +411,30 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       } catch {
         // Missing/unwatchable dir → no hot-reload for that layer.
       }
+    }
+  }
+
+  // Rate-table hot-reload (add-cost-tracking): watch ~/.qwen/rc for
+  // model-rates.yaml; a valid edit swaps the live table within the 250ms debounce,
+  // a malformed edit retains the previous table and audits rate_table_parse_failed.
+  if (usageStore) {
+    rateReloader = createRateTableReloader(rateTablePath(), rates, {
+      onParseFailed: (message) =>
+        void audit.record({
+          action: 'rate_table_parse_failed',
+          detail: { message },
+        }),
+    });
+    try {
+      watchers.push(
+        watch(join(homedir(), '.qwen', 'rc'), (_event, filename) => {
+          if (filename === null || filename === 'model-rates.yaml') {
+            rateReloader!.trigger();
+          }
+        }),
+      );
+    } catch {
+      // Missing/unwatchable dir → rate table simply won't hot-reload.
     }
   }
 
@@ -714,6 +747,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     for (const w of watchers) w.close();
     reloader?.stop();
     routingReloader?.stop();
+    rateReloader?.stop();
     if (quietDigestTimer) clearInterval(quietDigestTimer);
     clearInterval(bridgeReaper);
     telegramAbort?.abort();
@@ -795,6 +829,19 @@ async function openUsageStore(): Promise<
     // eslint-disable-next-line no-console
     console.warn('cost tracking disabled: failed to open usage store:', msg);
     return undefined;
+  }
+}
+
+/** Prompt the operator for a y/N confirmation on stdin (prune without --yes). */
+async function confirm(question: string): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await new Promise<string>((resolve) =>
+      rl.question(question, resolve),
+    );
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
   }
 }
 
@@ -1027,6 +1074,98 @@ if (process.argv[2] === 'serve') {
   })().catch((err: unknown) => {
     // eslint-disable-next-line no-console
     console.error(`reindex: ${(err as Error).message}`);
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'usage' && process.argv[3] === 'prune') {
+  // `qwen-rc usage prune --before <iso> [--yes]` — delete usage rows older than a
+  // timestamp (add-cost-tracking "Operator CLI"). Prompts unless --yes.
+  void (async () => {
+    const store = await openUsageStore();
+    if (!store) {
+      // eslint-disable-next-line no-console
+      console.error('cost tracking unavailable (better-sqlite3 not built)');
+      process.exit(1);
+    }
+    let args;
+    try {
+      args = parsePruneArgs(process.argv.slice(4));
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`usage prune: ${(e as Error).message}`);
+      process.exit(2);
+    }
+    if (!args.yes) {
+      const ok = await confirm(
+        `Delete usage rows before ${new Date(args.beforeMs).toISOString()}? [y/N] `,
+      );
+      if (!ok) {
+        // eslint-disable-next-line no-console
+        console.log('aborted');
+        process.exit(0);
+      }
+    }
+    const removed = store.prune(args.beforeMs);
+    store.close();
+    // eslint-disable-next-line no-console
+    console.log(`${removed} rows removed`);
+    process.exit(0);
+  })().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error(`usage prune: ${(err as Error).message}`);
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'usage') {
+  // `qwen-rc usage [--since <d>] [--group-by <axis>] [--sub-actor <s>]
+  // [--format json|csv|table]` — query aggregated usage (add-cost-tracking). Reads
+  // the same ~/.qwen/rc/usage.db the gateway writes; daemon-free.
+  void (async () => {
+    const store = await openUsageStore();
+    if (!store) {
+      // eslint-disable-next-line no-console
+      console.error('cost tracking unavailable (better-sqlite3 not built)');
+      process.exit(1);
+    }
+    let args;
+    try {
+      args = parseUsageArgs(process.argv.slice(3), Date.now());
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`usage: ${(e as Error).message}`);
+      process.exit(2);
+    }
+    const rates = new RateTableHolder(DEFAULT_RATE_TABLE);
+    try {
+      rates.set(await loadRateTableFile(rateTablePath()));
+    } catch {
+      // keep defaults
+    }
+    const rows = store.aggregate({
+      sinceMs: args.sinceMs,
+      untilMs: Date.now(),
+      groupBy: args.groupBy,
+      subActor: args.subActor,
+    });
+    store.close();
+    const out: UsageResponseRow[] = rows.map((r) => ({
+      key: r.key,
+      displayLabel: r.key,
+      tokensIn: r.tokensIn,
+      tokensOut: r.tokensOut,
+      tokensCached: r.tokensCached,
+      costCents: r.costCents,
+    }));
+    // eslint-disable-next-line no-console
+    console.log(
+      args.format === 'json'
+        ? JSON.stringify(out, null, 2)
+        : args.format === 'csv'
+          ? formatUsageCsv(out)
+          : formatUsageTable(out, rates.current().currencyLabel),
+    );
+    process.exit(0);
+  })().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error(`usage: ${(err as Error).message}`);
     process.exit(1);
   });
 }

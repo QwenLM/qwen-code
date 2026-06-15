@@ -60,8 +60,20 @@ Last-Event-ID cursor. `GET /rc/capabilities` advertises
 gateway's `/rc`-prefixed surface, since the daemon's `/capabilities` is
 un-editable under the fork boundary).
 
-## Not yet wired (follow-up slice)
+## Operator CLI
 
-- The `qwen-rc usage` / `usage prune` operator CLI.
-- Rate-table hot-reload file-watch wiring (the debounced reloader is built and
-  tested; only the `~/.qwen/rc` watch dispatch for `model-rates.yaml` remains).
+```
+qwen-rc usage [--since 24h] [--group-by session|client|sub_actor|model] \
+              [--sub-actor <s>] [--format json|csv|table]
+qwen-rc usage prune --before <iso-8601> [--yes]
+```
+
+Both are daemon-free — they open the same `~/.qwen/rc/usage.db` the gateway writes.
+`usage` defaults to a 24h / by-session / table view; `prune` deletes rows older
+than `--before` (prompting unless `--yes`) and prints `<n> rows removed`.
+
+## Rate-table hot-reload
+
+The gateway watches `~/.qwen/rc` for `model-rates.yaml`: a valid edit swaps the
+live table within a 250 ms debounce (no restart); a malformed edit retains the
+previous table and audits `rate_table_parse_failed`.

@@ -51,6 +51,8 @@ export interface AggregateQuery {
   groupBy: GroupBy;
   /** When set, only rows with this attribution token id (scope filtering). */
   attributionTokenId?: string;
+  /** When set, only rows with this exact sub_actor (the CLI `--sub-actor`). */
+  subActor?: string;
 }
 
 export interface AggregateRow {
@@ -173,6 +175,10 @@ export class UsageStore {
     if (q.attributionTokenId !== undefined) {
       where += ' AND attribution_token_id = ?';
       params.push(q.attributionTokenId);
+    }
+    if (q.subActor !== undefined) {
+      where += ' AND sub_actor = ?';
+      params.push(q.subActor);
     }
     const rows = this.db
       .prepare(
