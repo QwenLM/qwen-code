@@ -31,8 +31,6 @@ export interface UseCompletionReturn {
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   /** Dismisses the completion dropdown and prevents re-open until query changes. */
   dismissCompletion: () => void;
-  /** Clears the dismissed flag so the dropdown can re-open. */
-  clearDismissed: () => void;
   resetCompletionState: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
@@ -63,17 +61,14 @@ export function useCompletion(
     setShowSuggestions(false);
     setIsLoadingSuggestions(false);
     setIsPerfectMatch(false);
+    setDismissed(false);
   }, []);
 
   const dismissCompletion = useCallback(() => {
+    resetCompletionState();
     setDismissed(true);
     skipNextClearRef.current = true;
-    resetCompletionState();
   }, [resetCompletionState]);
-
-  const clearDismissed = useCallback(() => {
-    setDismissed(false);
-  }, []);
 
   // Clear dismissed flag when the completion query changes (user typed more).
   // Skip the clear on the render immediately following a dismiss, since
@@ -84,11 +79,11 @@ export function useCompletion(
       if (skipNextClearRef.current) {
         skipNextClearRef.current = false;
       } else {
-        clearDismissed();
+        setDismissed(false);
       }
       prevQueryRef.current = options.query;
     }
-  }, [options.query, clearDismissed]);
+  }, [options.query]);
 
   const navigateUp = useCallback(() => {
     if (suggestions.length === 0) return;
@@ -167,7 +162,6 @@ export function useCompletion(
 
     resetCompletionState,
     dismissCompletion,
-    clearDismissed,
     navigateUp,
     navigateDown,
   };
