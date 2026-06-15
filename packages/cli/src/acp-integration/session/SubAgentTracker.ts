@@ -45,6 +45,10 @@ const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
 export class SubAgentTracker {
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly messageEmitter: MessageEmitter;
+  private readonly subagentMeta: {
+    parentToolCallId: string;
+    subagentType: string;
+  };
   private readonly toolStates = new Map<
     string,
     {
@@ -57,21 +61,12 @@ export class SubAgentTracker {
   constructor(
     private readonly ctx: SessionContext,
     private readonly client: AgentSideConnection,
-    private readonly parentToolCallId: string,
-    private readonly subagentType: string,
+    parentToolCallId: string,
+    subagentType: string,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
-  }
-
-  /**
-   * Gets the subagent metadata to attach to all events.
-   */
-  private getSubagentMeta() {
-    return {
-      parentToolCallId: this.parentToolCallId,
-      subagentType: this.subagentType,
-    };
+    this.subagentMeta = { parentToolCallId, subagentType };
   }
 
   /**
@@ -146,7 +141,7 @@ export class SubAgentTracker {
         toolName: event.name,
         callId: event.callId,
         args: event.args,
-        subagentMeta: this.getSubagentMeta(),
+        subagentMeta: this.subagentMeta,
       });
     };
   }
@@ -171,7 +166,7 @@ export class SubAgentTracker {
         message: event.responseParts ?? [],
         resultDisplay: event.resultDisplay,
         args: state?.args,
-        subagentMeta: this.getSubagentMeta(),
+        subagentMeta: this.subagentMeta,
       });
 
       // Clean up state
@@ -213,6 +208,12 @@ export class SubAgentTracker {
           locations,
           kind,
           rawInput: state?.args,
+          // Mirror the tool name so consumers can give specific tools (e.g. the
+          // Agent tool) dedicated permission UI without relying on a protocol
+          // `kind` ACP can't carry. This is the second producer path (nested
+          // sub-agent tool calls); Session.ts adds the same _meta on the primary
+          // path.
+          _meta: { toolName: event.name },
         },
       };
 
@@ -255,7 +256,7 @@ export class SubAgentTracker {
         event.usage,
         '',
         event.durationMs,
-        this.getSubagentMeta(),
+        this.subagentMeta,
       );
     };
   }
@@ -277,7 +278,7 @@ export class SubAgentTracker {
         'assistant',
         event.thought ?? false,
         undefined,
-        this.getSubagentMeta(),
+        this.subagentMeta,
       );
     };
   }

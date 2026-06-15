@@ -1,0 +1,232 @@
+.question {
+  margin: 8px 0 12px 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-color);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.titleLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.icon {
+  color: var(--accent-color);
+  font-weight: bold;
+  font-size: 14px;
+}
+
+.toolName {
+  font-weight: bold;
+  color: var(--text-primary);
+}
+
+.toolDesc {
+  color: var(--text-secondary);
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.tabActive {
+  background: var(--accent-color);
+  color: #fff;
+  border-color: var(--accent-color);
+}
+
+.tabCheck {
+  color: var(--success-color, #4caf50);
+}
+
+.tabActive .tabCheck {
+  color: #fff;
+}
+
+.header {
+  font-size: 13px;
+  font-weight: bold;
+  color: var(--accent-color);
+  margin-bottom: 6px;
+}
+
+.text {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+}
+
+.multiHint {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 4px;
+}
+
+.option {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 0;
+  cursor: pointer;
+}
+
+.optionActive .optionLabel,
+.optionSelected .optionLabel {
+  font-weight: bold;
+  color: var(--accent-color);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-color);
+  text-underline-offset: 3px;
+}
+
+.pointer {
+  width: 12px;
+  flex-shrink: 0;
+  color: var(--accent-color);
+  font-weight: bold;
+}
+
+.checkbox {
+  font-size: 14px;
+  font-weight: bold;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  min-width: 24px;
+}
+
+.optionSelected .checkbox {
+  color: var(--accent-color);
+}
+
+.optionNum {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  min-width: 18px;
+}
+
+.optionContent {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.optionLabel {
+  color: var(--text-primary);
+}
+
+.optionPlaceholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+.optionDesc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding-left: 16px;
+}
+
+.customInput {
+  flex: 1;
+  padding: 2px 6px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--accent-color);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+}
+
+.customInput:focus {
+  border-bottom-color: var(--accent-color);
+}
+
+.submitTab {
+  margin-top: 4px;
+}
+
+.summary {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: var(--bg-secondary, rgba(255, 255, 255, 0.03));
+}
+
+.summaryRow {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.summaryLabel {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.summaryValue {
+  color: var(--accent-color);
+  font-weight: bold;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.button {
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.submitButton {
+  background: var(--accent-color);
+  color: #fff;
+}
+
+.footer {
+  margin-top: 14px;
+  padding-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}

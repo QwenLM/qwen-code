@@ -30,6 +30,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import type { ExtensionUpdateState } from '../state/extensions.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 
@@ -93,6 +94,10 @@ export interface UIState {
   shouldShowCommandMigrationNudge: boolean;
   commandMigrationTomlFiles: string[];
   isFolderTrustDialogOpen: boolean;
+  isMcpApprovalDialogOpen: boolean;
+  currentMcpApproval: PendingMcpServer | undefined;
+  pendingMcpApprovals: PendingMcpServer[];
+  mcpApprovalRemaining: number;
   isTrustedFolder: boolean | undefined;
   constrainHeight: boolean;
   ideContextState: IdeContext | undefined;

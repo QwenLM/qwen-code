@@ -94,6 +94,9 @@ integration-tests/concurrent-runner/task-*
 
 integration-tests/terminal-capture/scenarios/screenshots/
 
+# Test-built worker artifact (fzfWorkerHandle.test.ts builds this on-the-fly)
+packages/core/src/utils/filesearch/fzfWorker.js
+
 # storybook
 *storybook.log
 storybook-static

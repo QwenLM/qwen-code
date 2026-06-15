@@ -21,6 +21,7 @@ const mockSettings = {
 describe('useBranchCommand', () => {
   let forkSession: ReturnType<typeof vi.fn>;
   let loadSession: ReturnType<typeof vi.fn>;
+  let removeSession: ReturnType<typeof vi.fn>;
   let finalize: ReturnType<typeof vi.fn>;
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
@@ -64,6 +65,7 @@ describe('useBranchCommand', () => {
     forkSession = vi
       .fn()
       .mockResolvedValue({ filePath: '/tmp/new.jsonl', copiedCount: 2 });
+    removeSession = vi.fn().mockResolvedValue(true);
     loadSession = vi.fn().mockResolvedValue({
       conversation: {
         messages: [userRecord('help me fix the login bug')],
@@ -86,6 +88,7 @@ describe('useBranchCommand', () => {
       getSessionService: () => ({
         forkSession,
         loadSession,
+        removeSession,
         findSessionTitlesByPrefix,
       }),
       getChatRecordingService: () => ({ finalize, recordCustomTitle }),
@@ -364,6 +367,7 @@ describe('useBranchCommand', () => {
     expect(loadHistory).not.toHaveBeenCalled();
     expect(startNewSessionUI).not.toHaveBeenCalled();
     expect(setSessionName).not.toHaveBeenCalled();
+    expect(removeSession).toHaveBeenCalledTimes(1);
     // User sees the failure.
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -404,6 +408,7 @@ describe('useBranchCommand', () => {
       oldSessionId,
       expect.any(Object),
     );
+    expect(removeSession).toHaveBeenCalledTimes(1);
     expect(debugWarn).toHaveBeenCalledWith(
       expect.stringContaining('Rollback after failed /branch init failed'),
     );
@@ -475,6 +480,7 @@ describe('useBranchCommand', () => {
     });
 
     expect(forkSession).toHaveBeenCalledTimes(1);
+    expect(removeSession).toHaveBeenCalledTimes(1);
     expect(clearItems).not.toHaveBeenCalled();
     expect(loadHistory).not.toHaveBeenCalled();
     expect(startNewSessionUI).not.toHaveBeenCalled();

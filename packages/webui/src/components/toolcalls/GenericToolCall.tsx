@@ -14,6 +14,7 @@ import {
   LocationsList,
   safeTitle,
   groupContent,
+  mapToolStatusToContainerStatus,
 } from './shared/index.js';
 import type { BaseToolCallProps } from './shared/index.js';
 import { getToolDisplayLabel } from './labelUtils.js';
@@ -107,10 +108,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
     }
 
     // Short output - compact format
-    const statusFlag: 'success' | 'error' | 'warning' | 'loading' | 'default' =
-      toolCall.status === 'in_progress' || toolCall.status === 'pending'
-        ? 'loading'
-        : 'success';
+    const statusFlag = mapToolStatusToContainerStatus(toolCall.status);
     return (
       <ToolCallContainer
         label={displayLabel}
@@ -126,10 +124,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
 
   // Success with files: show operation + file list in compact format
   if (locations && locations.length > 0) {
-    const statusFlag: 'success' | 'error' | 'warning' | 'loading' | 'default' =
-      toolCall.status === 'in_progress' || toolCall.status === 'pending'
-        ? 'loading'
-        : 'success';
+    const statusFlag = mapToolStatusToContainerStatus(toolCall.status);
     return (
       <ToolCallContainer
         label={displayLabel}
@@ -145,10 +140,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
 
   // No output - show just the operation
   if (operationText) {
-    const statusFlag: 'success' | 'error' | 'warning' | 'loading' | 'default' =
-      toolCall.status === 'in_progress' || toolCall.status === 'pending'
-        ? 'loading'
-        : 'success';
+    const statusFlag = mapToolStatusToContainerStatus(toolCall.status);
     return (
       <ToolCallContainer
         label={displayLabel}

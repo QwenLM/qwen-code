@@ -118,8 +118,34 @@ Notes:
 
 - Globs are matched relative to the project root with [picomatch](https://github.com/micromatch/picomatch); files outside the project root never trigger activation.
 - A path-gated Skill **stays activated for the rest of the session** once a matching file is touched. A new session, or a `refreshCache` triggered by editing any Skill file, resets activations.
-- `paths:` only gates **model** discovery, and only at the SkillTool listing level. You can always invoke a path-gated Skill yourself via `/<skill-name>` or the `/skills` picker — that user path runs the Skill body regardless of activation state. The model side, however, stays gated until a matching file is touched: a slash invocation does **not** unlock model-side activation, so if you want the model to chain off your invocation (call `Skill { skill: ... }` itself), also access a file matching the skill's `paths:` first.
+- `paths:` only gates **model** discovery, and only at the SkillTool listing level. Unless `user-invocable: false` is set, you can always invoke a path-gated Skill yourself via `/<skill-name>` or the `/skills` picker — that user path runs the Skill body regardless of activation state. The model side, however, stays gated until a matching file is touched: a slash invocation does **not** unlock model-side activation, so if you want the model to chain off your invocation (call `Skill { skill: ... }` itself), also access a file matching the skill's `paths:` first.
 - Combining `paths:` with `disable-model-invocation: true` is allowed but the gate has no effect — the Skill is hidden from the model regardless, so path activation never advertises it.
+
+### Optional: control user and model invocation
+
+Skills are user-invocable by default. To hide a Skill from direct slash-command use while keeping it available for model invocation, set `user-invocable: false`:
+
+```yaml
+---
+name: model-only-helper
+description: Helper the model can call when appropriate
+user-invocable: false
+---
+```
+
+This removes the Skill from `/<skill-name>` invocation and `/skills` picker results. It does not hide the Skill from the model.
+
+To hide a Skill from model invocation while keeping direct user invocation available, set `disable-model-invocation: true`:
+
+```yaml
+---
+name: manual-helper
+description: Helper you invoke manually
+disable-model-invocation: true
+---
+```
+
+You can combine both fields, but then the Skill is not reachable through the normal user or model invocation paths.
 
 ## Add supporting files
 
@@ -170,9 +196,9 @@ To view available Skills, ask Qwen Code directly:
 What Skills are available?
 ```
 
-> **Heads up — model vs. user view.** Asking the model only surfaces Skills the model can currently see. If a Skill uses `paths:` (see "Optional: gate a Skill on file paths" above), it stays out of that listing until a matching file has been touched. The full set is always visible to you via the `/skills` slash command and on disk.
+> **Heads up — model vs. user view.** Asking the model only surfaces Skills the model can currently see. If a Skill uses `paths:` (see "Optional: gate a Skill on file paths" above), it stays out of that listing until a matching file has been touched. The `/skills` slash command shows Skills you can invoke directly; Skills with `user-invocable: false` remain visible on disk and may still be visible to the model.
 
-Or browse the full list with the slash command (always shows every Skill, including path-gated ones that have not activated yet):
+Or browse the user-invocable list with the slash command (including path-gated Skills that have not activated yet):
 
 ```text
 /skills

@@ -163,6 +163,21 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('MockMarkdown:Test result');
   });
 
+  it('renders tool results directly below the header row', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} contentWidth={100} />,
+      StreamingState.Idle,
+    );
+    const lines = (lastFrame() ?? '').split('\n');
+    const headerLine = lines.findIndex((line) => line.includes('test-tool'));
+    const resultLine = lines.findIndex((line) =>
+      line.includes('MockMarkdown:Test result'),
+    );
+
+    expect(headerLine).toBeGreaterThanOrEqual(0);
+    expect(resultLine).toBe(headerLine + 1);
+  });
+
   it('hides result output in compact mode (compactMode=true)', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,

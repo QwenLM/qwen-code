@@ -45,7 +45,6 @@ describe('forkCommand', () => {
       getHistoryShallow: () => historyWithTurn,
     }),
     getModel: () => 'test-model',
-    isForkSubagentEnabled: () => true,
     getToolRegistry: () => ({ getTool: mockGetTool }),
     ...overrides,
   });
@@ -149,23 +148,6 @@ describe('forkCommand', () => {
     expect(result).toMatchObject({
       messageType: 'error',
       content: 'Cannot fork before the first conversation turn.',
-    });
-    expect(mockBuild).not.toHaveBeenCalled();
-  });
-
-  it('refuses to fork when the fork feature gate is disabled', async () => {
-    const disabled = createMockCommandContext({
-      services: {
-        config: createConfig({
-          isForkSubagentEnabled: () => false,
-        }),
-      },
-    });
-    const result = await forkCommand.action!(disabled, 'do something');
-    expect(result).toMatchObject({
-      messageType: 'error',
-      content:
-        'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
     });
     expect(mockBuild).not.toHaveBeenCalled();
   });

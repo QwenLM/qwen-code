@@ -112,6 +112,13 @@ export interface SkillConfig {
   disableModelInvocation?: boolean;
 
   /**
+   * Whether users can invoke this skill directly via `/<skill-name>`.
+   * Defaults to true. Parsed from the `user-invocable` frontmatter field in
+   * SKILL.md.
+   */
+  userInvocable?: boolean;
+
+  /**
    * Optional glob patterns that gate when this skill is offered to the model.
    * When present and non-empty, the skill is a "conditional skill": it stays
    * out of the SkillTool listing until a tool invocation touches a file path
@@ -154,6 +161,28 @@ export function parseModelField(
     return undefined;
   }
   return trimmed;
+}
+
+/**
+ * Parse the `user-invocable` field from skill frontmatter.
+ * Returns `undefined` when omitted or set to an invalid value, preserving the
+ * command-layer default that skills are user-invocable unless explicitly
+ * disabled.
+ */
+export function parseUserInvocableField(
+  frontmatter: Record<string, unknown>,
+): boolean | undefined {
+  const raw = frontmatter['user-invocable'];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === true || raw === 'true') {
+    return true;
+  }
+  if (raw === false || raw === 'false') {
+    return false;
+  }
+  return undefined;
 }
 
 /**

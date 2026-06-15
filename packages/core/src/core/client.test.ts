@@ -32,7 +32,7 @@ import {
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { type GeminiChat } from './geminiChat.js';
+import { GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import {
@@ -49,6 +49,7 @@ import {
   Turn,
   type ServerGeminiStreamEvent,
 } from './turn.js';
+import { LoopType } from '../telemetry/types.js';
 
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
@@ -65,11 +66,15 @@ import {
   buildAddedMcpToolsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
+import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
+import type { AvailableSkillEntry } from '../tools/skill-utils.js';
+import { ToolNames } from '../tools/tool-names.js';
 import {
   __resetActiveGoalStoreForTests,
   clearActiveGoal,
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
+import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -155,6 +160,14 @@ vi.mock('../utils/gitUtils.js', async (importOriginal) => {
 vi.mock('../utils/nextSpeakerChecker', () => ({
   checkNextSpeaker: vi.fn().mockResolvedValue(null),
 }));
+vi.mock('../tools/skill-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../tools/skill-utils.js')>();
+  return {
+    ...actual,
+    collectAvailableSkillEntries: vi.fn(),
+  };
+});
 vi.mock('../utils/environmentContext', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/environmentContext.js')>();
@@ -163,16 +176,22 @@ vi.mock('../utils/environmentContext', async (importOriginal) => {
     getEnvironmentContext: vi
       .fn()
       .mockResolvedValue([{ text: 'Mocked env context' }]),
+    getDirectoryContextString: vi
+      .fn()
+      .mockResolvedValue('Mocked directory context'),
     getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-      {
-        role: 'user',
-        parts: [
-          {
-            text: '<system-reminder>\nMocked env context\n</system-reminder>',
-          },
-        ],
-      },
-      ...(extraHistory ?? []),
+      [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nMocked env context\n</system-reminder>',
+            },
+          ],
+        },
+        ...(extraHistory ?? []),
+      ],
+      [],
     ]),
     buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
       tools.length === 0
@@ -226,7 +245,9 @@ vi.mock('../utils/generateContentResponseUtilities', () => ({
 const mockUiTelemetryService = vi.hoisted(() => ({
   setLastPromptTokenCount: vi.fn(),
   getLastPromptTokenCount: vi.fn(),
+  setLastCachedContentTokenCount: vi.fn(),
   reset: vi.fn(),
+  resetSession: vi.fn(),
   addEvent: vi.fn(),
 }));
 vi.mock('../telemetry/tracer.js', () => ({
@@ -251,6 +272,8 @@ vi.mock('../telemetry/loggers.js', () => ({
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
   logApiRequest: vi.fn(),
+  logLoopDetected: vi.fn(),
+  logLoopDetectionDisabled: vi.fn(),
 }));
 
 const { mockClientDebugLogger } = vi.hoisted(() => ({
@@ -348,6 +371,12 @@ describe('Gemini Client (client.ts)', () => {
   let mockConfig: Config;
   let client: GeminiClient;
   let mockGenerateContentFn: Mock;
+  let mockFileHistoryService: {
+    makeSnapshot: ReturnType<typeof vi.fn>;
+    getSnapshots: ReturnType<typeof vi.fn>;
+    restoreFromSnapshots: ReturnType<typeof vi.fn>;
+    rewind: ReturnType<typeof vi.fn>;
+  };
   let mockMemoryManager: {
     scheduleExtract: ReturnType<typeof vi.fn>;
     scheduleDream: ReturnType<typeof vi.fn>;
@@ -387,6 +416,12 @@ describe('Gemini Client (client.ts)', () => {
     mockGenerateContentFn = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '{"key": "value"}' }] } }],
     });
+    mockFileHistoryService = {
+      makeSnapshot: vi.fn().mockResolvedValue(undefined),
+      getSnapshots: vi.fn().mockReturnValue([]),
+      restoreFromSnapshots: vi.fn(),
+      rewind: vi.fn(),
+    };
 
     // Disable 429 simulation for tests
     setSimulate429(false);
@@ -472,6 +507,7 @@ describe('Gemini Client (client.ts)', () => {
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
+      getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
@@ -487,6 +523,10 @@ describe('Gemini Client (client.ts)', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
+      getSkillManager: vi.fn().mockReturnValue(undefined),
+      consumeInlineAnnouncedSkillKeys: vi
+        .fn()
+        .mockReturnValue(new Set<string>()),
       getDebugLogger: vi.fn().mockReturnValue({
         isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
@@ -556,6 +596,109 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
+    });
+
+    it('seeds resumed chat with previous response output token count', async () => {
+      const seedResumeTokenCountsSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'seedResumeTokenCounts',
+      );
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              uuid: 'assistant-1',
+              parentUuid: null,
+              sessionId: 'resumed-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'assistant',
+              cwd: '/test/project',
+              version: '1.0.0',
+              message: { role: 'model', parts: [{ text: 'done' }] },
+              usageMetadata: {
+                promptTokenCount: 200,
+                candidatesTokenCount: 60,
+                thoughtsTokenCount: 20,
+                totalTokenCount: 280,
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80);
+    });
+
+    it('seeds recently completed tools from resumed history', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_read',
+                      name: 'read_file',
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'call_read',
+                      name: 'read_file',
+                      response: { ok: true },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_pending',
+                      name: 'write_file',
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
     });
 
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
@@ -1018,7 +1161,7 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([]);
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[], []]);
 
       await client.refreshStartupContextReminder();
 
@@ -1056,7 +1199,10 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([newPrelude]);
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [newPrelude],
+        [],
+      ]);
 
       await client.refreshStartupContextReminder();
 
@@ -1438,6 +1584,29 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('resetChat', () => {
+    it('refreshes the live system instruction after the working directory changes', async () => {
+      vi.mocked(getRecentGitStatus)
+        .mockReturnValueOnce('Git snapshot A')
+        .mockReturnValueOnce('Git snapshot B');
+      vi.mocked(getRecentGitStatus).mockClear();
+
+      await client.startChat();
+      expect(client.getChat()['generationConfig'].systemInstruction).toContain(
+        'Git snapshot A',
+      );
+
+      await client.addWorkingDirectoryChangedContext(
+        '/test/project/root',
+        '/test/other/root',
+      );
+
+      const systemInstruction = client.getChat()['generationConfig']
+        .systemInstruction as string;
+      expect(systemInstruction).not.toContain('Git snapshot A');
+      expect(systemInstruction).toContain('Git snapshot B');
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
+    });
+
     it('clears cached git status so it can be recomputed for the next session', async () => {
       vi.mocked(getRecentGitStatus)
         .mockReturnValueOnce('Git snapshot A')
@@ -1595,6 +1764,14 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(client['lastHookMicrocompactionTimestamp']).toBeNull();
+    });
+
+    it('clears recently completed tools', async () => {
+      client.recordCompletedToolCall('read_file');
+
+      await client.resetChat();
+
+      expect(client['recentCompletedToolNames']).toEqual([]);
     });
   });
 
@@ -2598,6 +2775,144 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('tryCompressChatFast', () => {
+    let mcTmpDir: string;
+
+    // Real on-disk files so client.ts's `fsPromises.stat(filePath)` succeeds.
+    // `node:fs` is mocked but `node:fs/promises` is not.
+    beforeEach(async () => {
+      mcTmpDir = await mkdtemp(join(tmpdir(), 'qwen-compress-fast-'));
+    });
+    afterEach(async () => {
+      await rm(mcTmpDir, { recursive: true, force: true });
+    });
+
+    it('returns early on NOOP without touching FileReadCache', async () => {
+      const { clear } = mockFileReadCacheStub();
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 100,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.NOOP);
+      expect(compressFast).toHaveBeenCalledOnce();
+      expect(clear).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(false);
+    });
+
+    it('calls clear() when unresolvedEvictedReads > 0 on COMPRESSED', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 2,
+          evictedReadPaths: [],
+          toolsCleared: 3,
+          mediaCleared: 0,
+          tokensSaved: 800,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(clear).toHaveBeenCalledOnce();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('performs surgical disarm and falls back to clear() on inode miss', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockReturnValueOnce(false); // inode mismatch
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 300,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 0,
+          evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          toolsCleared: 2,
+          mediaCleared: 0,
+          tokensSaved: 700,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
+      expect(clear).toHaveBeenCalledOnce();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('succeeds with surgical disarm when all inodes match (no clear)', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockReturnValue(true); // all match
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 400,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 0,
+          evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          toolsCleared: 1,
+          mediaCleared: 0,
+          tokensSaved: 600,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
+      expect(clear).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+  });
+
   // tryCompressChat is now a thin wrapper around GeminiChat.tryCompress.
   // The compression logic itself is exercised in chatCompressionService.test.ts
   // (token math, threshold checks, hook firing) and geminiChat.test.ts (history
@@ -3443,6 +3758,7 @@ hello
         getHistory: vi.fn().mockReturnValue([]),
       };
       client['chat'] = mockChat as GeminiChat;
+      client.recordCompletedToolCall('mcp__ata__article-list-query');
 
       const stream = client.sendMessageStream(
         [{ text: 'Please answer tersely' }],
@@ -3459,6 +3775,7 @@ hello
         expect.objectContaining({
           config: mockConfig,
           excludedFilePaths: expect.any(Set),
+          recentTools: ['mcp__ata__article-list-query'],
         }),
       );
       expect(mockTurnRunFn).toHaveBeenCalledWith(
@@ -3837,7 +4154,7 @@ hello
 
       // Force LoopDetector to trip on the first event.
       const loopDetector = client['loopDetector'];
-      vi.spyOn(loopDetector, 'addAndCheck').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops').mockReturnValue(true);
       vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(null);
 
       mockTurnRunFn.mockReturnValue(
@@ -5753,14 +6070,15 @@ Other open files:
       expect(mockCheckNextSpeaker).not.toHaveBeenCalled();
     });
 
-    it('does not run loop checks when skipLoopDetection is true', async () => {
+    it('keeps deterministic tool-call checks when skipLoopDetection is true', async () => {
       // Arrange
       // Ensure config returns true for skipLoopDetection
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
 
       // Replace loop detector with spies
       const ldMock = {
-        addAndCheck: vi.fn().mockReturnValue(false),
+        addAndCheckDeterministicToolCallLoop: vi.fn().mockReturnValue(false),
+        addAndCheckHeuristicLoops: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       };
       // @ts-expect-error override private for testing
@@ -5788,8 +6106,49 @@ Other open files:
         // consume stream
       }
 
-      // Assert - loop detection methods should not be called when skipLoopDetection is true
-      expect(ldMock.addAndCheck).not.toHaveBeenCalled();
+      expect(ldMock.addAndCheckDeterministicToolCallLoop).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(ldMock.addAndCheckHeuristicLoops).not.toHaveBeenCalled();
+    });
+
+    it('hard-stops identical tool calls even when skipLoopDetection is true', async () => {
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          for (let i = 0; i < 5; i++) {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: `repeat-${i}`,
+                name: 'run_shell_command',
+                args: { command: 'echo repeated' },
+              },
+            };
+          }
+        })(),
+      );
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'repeat a tool' }],
+          new AbortController().signal,
+          'prompt-id-skip-loop-identical',
+        ),
+      );
+
+      expect(events.at(-1)).toEqual({
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
+      });
+      expect(events).toHaveLength(5);
     });
 
     describe('retry sendMessageType', () => {
@@ -6376,6 +6735,103 @@ Other open files:
         expect(recordAttributionSnapshot).not.toHaveBeenCalled();
       });
     });
+
+    describe('file history snapshot persistence', () => {
+      let recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
+      const latestSnapshot: FileHistorySnapshot = {
+        promptId: 'prompt-uq',
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {
+          'a.txt': {
+            backupFileName: 'backup-a',
+            version: 1,
+            backupTime: new Date('2026-06-13T00:00:01.000Z'),
+          },
+        },
+      };
+
+      beforeEach(() => {
+        recordFileHistorySnapshot = vi.fn();
+        mockFileHistoryService.makeSnapshot.mockResolvedValue(undefined);
+        mockFileHistoryService.getSnapshots.mockReturnValue([latestSnapshot]);
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot,
+          recordUserMessage: vi.fn(),
+          recordCronPrompt: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+      });
+
+      async function collectStream(
+        messageType: SendMessageType,
+        promptId = 'prompt-uq',
+      ): Promise<ServerGeminiStreamEvent[]> {
+        const stream = client.sendMessageStream(
+          [{ text: 'user' }],
+          new AbortController().signal,
+          promptId,
+          { type: messageType },
+        );
+        const chunks: ServerGeminiStreamEvent[] = [];
+        for await (const chunk of stream) {
+          chunks.push(chunk);
+        }
+        return chunks;
+      }
+
+      it('calls makeSnapshot for UserQuery turns', async () => {
+        await collectStream(SendMessageType.UserQuery, 'prompt-file-history');
+
+        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
+          'prompt-file-history',
+        );
+      });
+
+      it('records the latest snapshot after a UserQuery snapshot', async () => {
+        await collectStream(SendMessageType.UserQuery);
+
+        expect(recordFileHistorySnapshot).toHaveBeenCalledWith(latestSnapshot);
+      });
+
+      it('does not call makeSnapshot for ToolResult and Retry turns', async () => {
+        await collectStream(SendMessageType.ToolResult, 'prompt-tool-result');
+        await collectStream(SendMessageType.Retry, 'prompt-retry');
+
+        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+      });
+
+      it('swallows makeSnapshot rejection and still yields content', async () => {
+        mockFileHistoryService.makeSnapshot.mockRejectedValueOnce(
+          new Error('snapshot failed'),
+        );
+
+        const chunks = await collectStream(SendMessageType.UserQuery);
+
+        expect(chunks).toContainEqual({
+          type: GeminiEventType.Content,
+          value: 'ok',
+        });
+      });
+
+      it('swallows recordFileHistorySnapshot errors and still yields content', async () => {
+        recordFileHistorySnapshot.mockImplementationOnce(() => {
+          throw new Error('record failed');
+        });
+
+        const chunks = await collectStream(SendMessageType.UserQuery);
+
+        expect(chunks).toContainEqual({
+          type: GeminiEventType.Content,
+          value: 'ok',
+        });
+      });
+    });
   });
 
   describe('generateContent', () => {
@@ -6402,6 +6858,25 @@ Other open files:
           contents,
         }),
         'test-session-id',
+      );
+    });
+
+    it('forwards configured retryErrorCodes to retryWithBackoff', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        retryErrorCodes: [4999],
+      } as unknown as ContentGeneratorConfig);
+
+      await client.generateContent(
+        [{ role: 'user', parts: [{ text: 'hi' }] }],
+        {},
+        new AbortController().signal,
+        client['config'].getModel(),
+      );
+
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({ extraRetryErrorCodes: [4999] }),
       );
     });
 
@@ -7030,5 +7505,379 @@ Other open files:
       );
       expect(createContentGenerator).toHaveBeenCalledTimes(2);
     });
+  });
+
+  describe('drainSkillAndCommandReminders', () => {
+    const makeEntries = (
+      names: string[],
+      level: 'project' | 'bundled' = 'project',
+    ): AvailableSkillEntry[] =>
+      names.map((name) => ({ name, description: `desc-${name}`, level }));
+
+    const mockSkillManager = {
+      listSkills: vi.fn().mockResolvedValue([]),
+      getActivatedSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+    };
+
+    const mockChat = {
+      addHistory: vi.fn(),
+      getHistory: vi.fn().mockReturnValue([]),
+      setHistory: vi.fn(),
+    };
+
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const priv = () => client as any;
+
+    async function drain() {
+      await priv().drainSkillAndCommandReminders();
+    }
+
+    beforeEach(() => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set<string>(),
+      );
+      vi.mocked(mockConfig.getSkillManager).mockReturnValue(
+        mockSkillManager as unknown as ReturnType<Config['getSkillManager']>,
+      );
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
+        name === ToolNames.SKILL ? ({} as any) : undefined,
+      );
+      priv().chat = mockChat;
+      priv().announcedSkillReminderKeys = new Set();
+      priv().skillRemindersInitialized = false;
+      mockChat.addHistory.mockClear();
+    });
+
+    it('first drain without snapshot seed announces all entries as new', async () => {
+      // When seedSkillReminderDedupFromSnapshot was never called (edge-case
+      // construction path), the first drain treats every entry as genuinely
+      // new rather than silently swallowing them as "already announced".
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a', 'skill-b']),
+      });
+
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(true);
+      expect(priv().announcedSkillReminderKeys.size).toBe(2);
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+      expect(addedContent.parts[0].text).toContain('skill-b');
+    });
+
+    it('first drain with snapshot seed emits nothing for seeded entries', async () => {
+      // When seedSkillReminderDedupFromSnapshot was called (normal path),
+      // the first drain does not re-announce entries already in the snapshot.
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-a', 'skill-b']),
+      );
+
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a', 'skill-b']),
+      });
+
+      await drain();
+
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('drain with a genuinely new skill emits a reminder', async () => {
+      // Seed from snapshot (normal startChat path)
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
+      // Drain: skill-b is new
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a', 'skill-b']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-b');
+      // Already-seeded skill-a should not appear in the reminder
+      expect(addedContent.parts[0].text).not.toContain('desc-skill-a');
+    });
+
+    it('drain with no new skills after seed emits nothing', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
+      const entries = makeEntries(['skill-a']);
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries,
+      });
+
+      await drain(); // same skills as seed
+
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('removed skill prunes its key so re-adding re-announces', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
+      // Second drain: skill-a removed (user disabled)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+      await drain();
+
+      expect(priv().announcedSkillReminderKeys.size).toBe(0);
+
+      // Third drain: skill-a re-added (user re-enabled)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('path-activated skill is announced by drain (no suppression based on shared activation set)', async () => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set(['skill-a']),
+      );
+
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-existing']),
+      );
+
+      // Drain: skill-a appears — announced by drain because it was not
+      // in the snapshot, regardless of getActivatedSkillNames state.
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing', 'skill-a']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('path-activated skill re-announces after disable/re-enable', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
+      // Second drain: skill-a removed (user disabled)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+      await drain();
+
+      // Third drain: skill-a re-added (user re-enabled) — SHOULD re-announce
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('returns early when Skill tool is not registered', async () => {
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockReturnValue(undefined);
+
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(false);
+    });
+
+    it('returns early and logs when collectAvailableSkillEntries throws', async () => {
+      vi.mocked(collectAvailableSkillEntries).mockRejectedValue(
+        new Error('load failed'),
+      );
+
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(false);
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('command entries use cmd: key prefix and are not suppressed by activatedConditional', async () => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set(['mcp-prompt-a']),
+      );
+
+      // Seed from snapshot with a file-based skill
+      priv().seedSkillReminderDedupFromSnapshot([
+        {
+          name: 'existing-skill',
+          description: 'desc',
+          level: 'project' as const,
+        },
+      ]);
+
+      // Second drain: add a command entry (no level — MCP prompt/command)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [
+          {
+            name: 'existing-skill',
+            description: 'desc',
+            level: 'project' as const,
+          },
+          { name: 'mcp-prompt-a', description: 'a command' },
+        ],
+      });
+      await drain();
+
+      // Command entries (no level) should NOT be suppressed by activatedConditional
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('mcp-prompt-a');
+    });
+
+    it('command entry prunes and re-announces correctly', async () => {
+      // Seed from snapshot with a command
+      priv().seedSkillReminderDedupFromSnapshot([
+        { name: 'cmd-a', description: 'desc' },
+      ]);
+
+      // Second drain: command removed
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+      await drain();
+
+      expect(priv().announcedSkillReminderKeys.has('cmd:cmd-a')).toBe(false);
+
+      // Third drain: command re-added
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [{ name: 'cmd-a', description: 'desc' }],
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('cmd-a');
+    });
+
+    it('seedSkillReminderDedupFromSnapshot seeds from provided entries', async () => {
+      const entries = makeEntries(['skill-a', 'skill-b']);
+
+      priv().seedSkillReminderDedupFromSnapshot(entries);
+
+      expect(priv().skillRemindersInitialized).toBe(true);
+      expect(priv().announcedSkillReminderKeys.size).toBe(2);
+      expect(priv().announcedSkillReminderKeys.has('skill:skill-a')).toBe(true);
+      expect(priv().announcedSkillReminderKeys.has('skill:skill-b')).toBe(true);
+    });
+
+    it('seedSkillReminderDedupFromSnapshot with empty entries resets state', () => {
+      // Seed with some data first
+      priv().announcedSkillReminderKeys = new Set(['skill:old']);
+      priv().skillRemindersInitialized = false;
+
+      priv().seedSkillReminderDedupFromSnapshot([]);
+
+      expect(priv().skillRemindersInitialized).toBe(true);
+      expect(priv().announcedSkillReminderKeys.size).toBe(0);
+    });
+
+    it('inline-announced skills consumed from config are not re-announced by drain', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-existing']),
+      );
+
+      // Simulate coreToolScheduler recording inline-announced skills
+      vi.mocked(mockConfig.consumeInlineAnnouncedSkillKeys).mockReturnValue(
+        new Set(['skill:skill-inline']),
+      );
+
+      // Drain sees skill-inline as a new entry but it was already announced
+      // inline by coreToolScheduler, so it should not be re-announced.
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing', 'skill-inline']),
+      });
+      await drain();
+
+      // skill-inline should be in announcedSkillReminderKeys but NOT in the
+      // reminder (no addHistory call since all new entries were consumed)
+      expect(priv().announcedSkillReminderKeys.has('skill:skill-inline')).toBe(
+        true,
+      );
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('inline-announced does not suppress genuinely new skills', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-existing']),
+      );
+
+      // Only skill-inline was announced inline
+      vi.mocked(mockConfig.consumeInlineAnnouncedSkillKeys).mockReturnValue(
+        new Set(['skill:skill-inline']),
+      );
+
+      // Both skill-inline and skill-new appear; only skill-new should be
+      // announced since skill-inline was already handled inline.
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing', 'skill-inline', 'skill-new']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-new');
+      expect(addedContent.parts[0].text).not.toContain('desc-skill-inline');
+    });
+    /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 });

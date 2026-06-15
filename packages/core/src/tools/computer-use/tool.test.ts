@@ -7,13 +7,13 @@ import {
   buildLlmContent,
   buildDisplayText,
   coerceTypes,
+  isHighRiskCall,
 } from './tool.js';
 import { ComputerUseClient } from './client.js';
 import { COMPUTER_USE_SCHEMAS } from './schemas.js';
 import { saveInstallState, isPackageSpecApproved } from './install-state.js';
-import { resolveComputerUsePackageSpec } from './constants.js';
+import { approvalKey } from './constants.js';
 import { ToolConfirmationOutcome } from '../tools.js';
-import { ApprovalMode, type Config } from '../../config/config.js';
 import type { Part } from '@google/genai';
 
 function makeFakeClient(
@@ -86,7 +86,7 @@ describe('ComputerUseTool', () => {
     ComputerUseClient.setSharedForTest(fake);
 
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    const invocation = tool.build({ app: 'TextEdit' });
+    const invocation = tool.build({ pid: 123 });
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.error).toBeDefined();
@@ -99,7 +99,18 @@ describe('ComputerUseTool', () => {
 // ---------------------------------------------------------------------------
 
 describe('coerceTypes', () => {
-  const schema = COMPUTER_USE_SCHEMAS.click.parameterSchema;
+  // Inline fixture so this tests the generic helper, decoupled from any one
+  // tool's evolving schema. `x`/`y` are number-typed, `label` is string-typed —
+  // exercising both coercion directions.
+  const schema = {
+    type: 'object',
+    properties: {
+      x: { type: 'number' },
+      y: { type: 'number' },
+      label: { type: 'string' },
+      app: { type: 'string' },
+    },
+  } as Record<string, unknown>;
 
   // Direction 1: string → number (schema wants number, model sent string)
   it('coerces string x/y coordinates to numbers (schema type: number)', () => {
@@ -111,16 +122,16 @@ describe('coerceTypes', () => {
   });
 
   // Direction 2: number → string (schema wants string, model sent number)
-  it('coerces integer element_index to string (schema type: string)', () => {
-    const result = coerceTypes({ app: 'X', element_index: 11 }, schema);
-    expect(result['element_index']).toBe('11');
-    expect(typeof result['element_index']).toBe('string');
+  it('coerces integer label to string (schema type: string)', () => {
+    const result = coerceTypes({ app: 'X', label: 11 }, schema);
+    expect(result['label']).toBe('11');
+    expect(typeof result['label']).toBe('string');
   });
 
-  it('leaves string element_index unchanged (already correct type)', () => {
-    const result = coerceTypes({ app: 'X', element_index: '11' }, schema);
-    expect(result['element_index']).toBe('11');
-    expect(typeof result['element_index']).toBe('string');
+  it('leaves string label unchanged (already correct type)', () => {
+    const result = coerceTypes({ app: 'X', label: '11' }, schema);
+    expect(result['label']).toBe('11');
+    expect(typeof result['label']).toBe('string');
   });
 
   it('does not coerce garbage strings — they remain strings and fail validation', () => {
@@ -155,23 +166,19 @@ describe('ComputerUseTool.build() coercion integration', () => {
     delete process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'];
   });
 
-  it('build() succeeds when element_index is a string (schema type: string)', () => {
+  it('build() succeeds when a numeric coordinate is a string (coerces to number)', () => {
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    // element_index is type: "string" in upstream schema — "11" is already correct
-    expect(() =>
-      tool.build({ app: 'TextEdit', element_index: '11' }),
-    ).not.toThrow();
+    // cua-driver click x/y are type "number"; a numeric string coerces cleanly.
+    expect(() => tool.build({ pid: 1, x: '500', y: '920' })).not.toThrow();
   });
 
-  it('build() succeeds when element_index is an integer (coerces to string)', () => {
+  it('build() succeeds when element_index is a numeric string (coerces to integer)', () => {
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    // qwen3.6 may send element_index: 11 (integer); coerceTypes converts to "11"
-    expect(() =>
-      tool.build({ app: 'TextEdit', element_index: 11 }),
-    ).not.toThrow();
+    // qwen3.6 may send element_index: "11" (string); coerceTypes -> 11 (integer).
+    expect(() => tool.build({ pid: 1, element_index: '11' })).not.toThrow();
   });
 
-  it('build() forwards string element_index to client', async () => {
+  it('build() forwards the coerced integer element_index to the client', async () => {
     const fake = makeFakeClient(async () => ({
       content: [{ type: 'text', text: 'clicked' }],
       isError: false,
@@ -179,23 +186,20 @@ describe('ComputerUseTool.build() coercion integration', () => {
     ComputerUseClient.setSharedForTest(fake);
 
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    // Pass integer 11 — coercion should stringify it to "11" before forwarding
-    const invocation = tool.build({ app: 'TextEdit', element_index: 11 });
+    // Pass string "11" — coercion should turn it into integer 11 before forwarding.
+    const invocation = tool.build({ pid: 1, element_index: '11' });
     await invocation.execute(new AbortController().signal);
 
-    // The client must receive the string "11", not the integer 11
     expect(fake.callTool).toHaveBeenCalledWith(
       'click',
-      expect.objectContaining({ element_index: '11' }),
+      expect.objectContaining({ element_index: 11 }),
     );
   });
 
-  it('build() accepts any string for element_index (string schema does not restrict values)', () => {
+  it('build() rejects a non-numeric element_index (fails integer validation)', () => {
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    // "abc" is a valid string — the schema only requires type: string, not numeric format
-    expect(() =>
-      tool.build({ app: 'TextEdit', element_index: 'abc' }),
-    ).not.toThrow();
+    // "abc" is not coercible to an integer and must fail schema validation.
+    expect(() => tool.build({ pid: 1, element_index: 'abc' })).toThrow();
   });
 });
 
@@ -257,7 +261,7 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     // implementations conflated the two and granted blanket approval for
     // all desktop actions after a single install confirmation. See PR
     // #4590 review (DragonnZhang).
-    const packageSpec = resolveComputerUsePackageSpec();
+    const packageSpec = approvalKey();
     await saveInstallState(tmpHome, {
       approvedPackageSpec: packageSpec,
       approvedAtIso: new Date().toISOString(),
@@ -287,7 +291,7 @@ describe('ComputerUseInvocation confirmation pathway', () => {
       expect(details.title).toContain('list_apps');
       expect(details.prompt).toContain('computer_use__list_apps');
       // Install variant mentions the ~50MB download
-      expect(details.prompt).toContain('50MB');
+      expect(details.prompt).toContain('20MB');
       expect(details.permissionRules).toContain('computer_use__list_apps');
     }
   });
@@ -297,14 +301,14 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     // to a compact per-action prompt naming THIS specific action — so the
     // user can decide on each mutating call (click / type_text / drag /
     // set_value / press_key / scroll / perform_secondary_action).
-    const packageSpec = resolveComputerUsePackageSpec();
+    const packageSpec = approvalKey();
     await saveInstallState(tmpHome, {
       approvedPackageSpec: packageSpec,
       approvedAtIso: new Date().toISOString(),
     });
 
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    const invocation = tool.build({ app: 'TextEdit', element_index: '5' });
+    const invocation = tool.build({ pid: 4567 });
     const details = await invocation.getConfirmationDetails(
       new AbortController().signal,
     );
@@ -314,8 +318,8 @@ describe('ComputerUseInvocation confirmation pathway', () => {
       expect(details.title).toContain('click');
       expect(details.prompt).toContain('computer_use__click');
       // Per-action variant shows args and does NOT mention the install size
-      expect(details.prompt).toContain('TextEdit');
-      expect(details.prompt).not.toContain('50MB');
+      expect(details.prompt).toContain('4567');
+      expect(details.prompt).not.toContain('20MB');
       // Same per-tool permission rule — user can ProceedAlwaysTool to skip
       // future confirmations for THIS tool only (not all 9).
       expect(details.permissionRules).toContain('computer_use__click');
@@ -334,7 +338,7 @@ describe('ComputerUseInvocation confirmation pathway', () => {
 
     await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
 
-    const packageSpec = resolveComputerUsePackageSpec();
+    const packageSpec = approvalKey();
     const approved = await isPackageSpecApproved(tmpHome, packageSpec);
     expect(approved).toBe(true);
   });
@@ -351,7 +355,7 @@ describe('ComputerUseInvocation confirmation pathway', () => {
 
     await details.onConfirm(ToolConfirmationOutcome.Cancel);
 
-    const packageSpec = resolveComputerUsePackageSpec();
+    const packageSpec = approvalKey();
     const approved = await isPackageSpecApproved(tmpHome, packageSpec);
     expect(approved).toBe(false);
   });
@@ -368,7 +372,7 @@ describe('ComputerUseInvocation confirmation pathway', () => {
 
     await details.onConfirm(ToolConfirmationOutcome.ProceedAlwaysUser);
 
-    const packageSpec = resolveComputerUsePackageSpec();
+    const packageSpec = approvalKey();
     const approved = await isPackageSpecApproved(tmpHome, packageSpec);
     expect(approved).toBe(true);
   });
@@ -380,73 +384,66 @@ describe('ComputerUseInvocation confirmation pathway', () => {
   //   - YOLO       → needsConfirmation() returns false, dialog never built.
   //   - AUTO_EDIT  → isAutoEditApproved() approves info-type tools, skips onConfirm.
   //   - AUTO       → classifier-approved calls skip onConfirm.
-  it.each([ApprovalMode.YOLO, ApprovalMode.AUTO_EDIT, ApprovalMode.AUTO])(
-    'execute() under %s auto-approves install instead of declining (no dialog, no env var)',
-    async (mode) => {
-      const fake = makeFakeClient(async () => ({
-        content: [{ type: 'text', text: '[]' }],
-        isError: false,
-      }));
-      ComputerUseClient.setSharedForTest(fake);
+  // The install-gate / autoApproveInstall behavior moved to bootstrap.test.ts
+  // (runBootstrap with depsOverride + a cold client) — the correct layer to
+  // assert it. After review round 1, `autoApproveInstall = !!this.config`:
+  // reaching execute() with a Config means the scheduler already approved THIS
+  // call (dialog, always-allow rule, or auto-approve mode), so there is no
+  // longer a per-mode gate decision to assert through the tool wrapper. The
+  // warm-client tests above never reach the gate because runBootstrap
+  // short-circuits on a started client before the install step.
 
-      const config = {
-        getApprovalMode: () => mode,
-      } as unknown as Config;
+  // ---- high-risk auto-approve gating (review round 1, ⑧) ----
 
-      const tool = new ComputerUseTool(
-        'list_apps',
-        COMPUTER_USE_SCHEMAS.list_apps,
-        config,
-      );
-      const invocation = tool.build({});
-      const result = await invocation.execute(new AbortController().signal);
+  it('flags destructive / sensitive tools as high-risk', () => {
+    for (const name of [
+      'kill_app',
+      'launch_app',
+      'start_recording',
+      'set_config',
+      'replay_trajectory',
+    ]) {
+      expect(isHighRiskCall(name, {})).toBe(true);
+    }
+    expect(isHighRiskCall('page', { action: 'execute_javascript' })).toBe(true);
+    expect(
+      isHighRiskCall('page', { action: 'enable_javascript_apple_events' }),
+    ).toBe(true);
+  });
 
-      expect(result.error).toBeUndefined();
-      expect(fake.callTool).toHaveBeenCalledWith('list_apps', {});
-      // Approval persisted so later (interactive) calls also skip the prompt.
-      const approved = await isPackageSpecApproved(
-        tmpHome,
-        resolveComputerUsePackageSpec(),
-      );
-      expect(approved).toBe(true);
-    },
-  );
-
-  it('execute() under DEFAULT mode does NOT auto-approve install (still gated)', async () => {
-    // Negative guard for the false-branch of autoApproveInstall: DEFAULT (and
-    // PLAN) must NOT be auto-approved — DEFAULT shows the install dialog. If the
-    // condition were ever widened (e.g. `mode !== ApprovalMode.PLAN`), DEFAULT
-    // would silently auto-install a desktop-control binary; this test locks
-    // that lower boundary so such a regression fails CI.
-    delete process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'];
-    const fake = makeFakeClient(async () => ({
-      content: [{ type: 'text', text: '[]' }],
-      isError: false,
-    }));
-    ComputerUseClient.setSharedForTest(fake);
-
-    const config = {
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-    } as unknown as Config;
-
-    const tool = new ComputerUseTool(
+  it('does NOT flag ordinary tools (or page with a non-JS action)', () => {
+    for (const name of [
+      'click',
+      'type_text',
       'list_apps',
-      COMPUTER_USE_SCHEMAS.list_apps,
-      config,
-    );
-    const invocation = tool.build({});
+      'get_window_state',
+      'page',
+    ]) {
+      expect(isHighRiskCall(name, {})).toBe(false);
+    }
+    expect(isHighRiskCall('page', { action: 'get_text' })).toBe(false);
+  });
 
-    // No install state + no env var → bootstrap's headless fallback refuses
-    // rather than auto-approving.
-    await expect(
-      invocation.execute(new AbortController().signal),
-    ).rejects.toThrow(/declined/i);
-    expect(fake.callTool).not.toHaveBeenCalled();
-    const approved = await isPackageSpecApproved(
-      tmpHome,
-      resolveComputerUsePackageSpec(),
+  it('high-risk tools surface as mcp type so AUTO_EDIT cannot auto-approve them', async () => {
+    // 'mcp' is excluded from isAutoEditApproved's (edit|info) allow-list, so
+    // AUTO_EDIT shows the dialog instead of silently approving. Args are NOT in
+    // the mcp title (no confirmation surface renders it — review round 3); they
+    // reach the user via the tool-header line, i.e. getDescription().
+    const tool = new ComputerUseTool('kill_app', COMPUTER_USE_SCHEMAS.kill_app);
+    const invocation = tool.build({ pid: 123 });
+    const details = await invocation.getConfirmationDetails(
+      new AbortController().signal,
     );
-    expect(approved).toBe(false);
+    expect(details.type).toBe('mcp');
+    expect(invocation.getDescription()).toContain('123'); // args via tool-header
+  });
+
+  it('ordinary tools keep info type (auto-approved in AUTO_EDIT as before)', async () => {
+    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
+    const details = await tool
+      .build({ pid: 123 })
+      .getConfirmationDetails(new AbortController().signal);
+    expect(details.type).toBe('info');
   });
 });
 
@@ -460,7 +457,7 @@ describe('buildLlmContent', () => {
       { type: 'text' as const, text: 'hello' },
       { type: 'text' as const, text: 'world' },
     ];
-    const result = buildLlmContent(content, 'get_app_state');
+    const result = buildLlmContent(content, 'get_window_state');
     expect(typeof result).toBe('string');
     expect(result).toBe('hello\nworld');
   });
@@ -474,7 +471,7 @@ describe('buildLlmContent', () => {
         data: 'base64data==',
       },
     ];
-    const result = buildLlmContent(content, 'get_app_state');
+    const result = buildLlmContent(content, 'get_window_state');
     expect(Array.isArray(result)).toBe(true);
 
     const parts = result as Part[];
@@ -512,6 +509,37 @@ describe('buildLlmContent', () => {
   it('returns empty string for empty content', () => {
     const result = buildLlmContent([], 'noop');
     expect(result).toBe('');
+  });
+
+  it('forwards structuredContent (real window_ids) the terse text omits', () => {
+    // Regression: list_windows content is just "Found N window(s)"; the real
+    // window_id / bounds / is_on_screen live ONLY in structuredContent.
+    const content = [{ type: 'text' as const, text: 'Found 11 window(s).' }];
+    const structured = {
+      windows: [
+        { window_id: 358, is_on_screen: true, title: 'DingTalk' },
+        { window_id: 8967, is_on_screen: true, title: '' },
+      ],
+    };
+    const result = buildLlmContent(content, 'list_windows', structured);
+    expect(typeof result).toBe('string');
+    expect(result as string).toContain('358');
+    expect(result as string).toContain('is_on_screen');
+  });
+
+  it('strips tree_markdown from structuredContent (already in the text)', () => {
+    const content = [
+      { type: 'text' as const, text: 'window_id=358 pid=717 elements=457' },
+    ];
+    const structured = {
+      window_id: 358,
+      element_count: 457,
+      tree_markdown: 'X'.repeat(5000), // the duplicate AX tree
+    };
+    const result = buildLlmContent(content, 'get_window_state', structured);
+    const text = result as string;
+    expect(text).toContain('"window_id":358');
+    expect(text).not.toContain('XXXX'); // tree_markdown was dropped
   });
 });
 
@@ -555,10 +583,10 @@ describe('execute() image content forwarding', () => {
     ComputerUseClient.setSharedForTest(fake);
 
     const tool = new ComputerUseTool(
-      'get_app_state',
-      COMPUTER_USE_SCHEMAS.get_app_state,
+      'get_window_state',
+      COMPUTER_USE_SCHEMAS.get_window_state,
     );
-    const invocation = tool.build({ app: 'TextEdit' });
+    const invocation = tool.build({ pid: 123, window_id: 1 });
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.error).toBeUndefined();
@@ -578,7 +606,7 @@ describe('execute() image content forwarding', () => {
     ComputerUseClient.setSharedForTest(fake);
 
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    const invocation = tool.build({ app: 'TextEdit', element_index: 1 });
+    const invocation = tool.build({ pid: 123, element_index: 1 });
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.error).toBeUndefined();
@@ -597,7 +625,7 @@ describe('execute() image content forwarding', () => {
     ComputerUseClient.setSharedForTest(fake);
 
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    const invocation = tool.build({ app: 'TextEdit', element_index: 0 });
+    const invocation = tool.build({ pid: 123, element_index: 0 });
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.error).toBeDefined();

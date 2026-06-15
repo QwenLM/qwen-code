@@ -7,7 +7,12 @@
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SubagentMeta } from '../types.js';
 import type { Usage } from '@agentclientprotocol/sdk';
+import {
+  getActiveGoal,
+  type GoalTerminalEvent,
+} from '@qwen-code/qwen-code-core';
 import { BaseEmitter } from './BaseEmitter.js';
+import type { HistoryItemGoalStatus } from '../../../ui/types.js';
 
 /**
  * Handles emission of text message chunks (user, agent, thought).
@@ -30,6 +35,7 @@ export class MessageEmitter extends BaseEmitter {
     reasons: string[],
     stopHookCount: number,
   ): Promise<void> {
+    const activeGoal = getActiveGoal(this.sessionId);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: '' },
@@ -38,10 +44,43 @@ export class MessageEmitter extends BaseEmitter {
           iterationCount,
           reasons,
           stopHookCount,
+          ...(activeGoal
+            ? {
+                goal: {
+                  condition: activeGoal.condition,
+                  iterations: activeGoal.iterations,
+                  setAt: activeGoal.setAt,
+                  lastReason: activeGoal.lastReason,
+                },
+              }
+            : {}),
         },
       },
     });
   }
+
+  async emitGoalTerminal(event: GoalTerminalEvent): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalTerminal: event,
+      },
+    });
+  }
+
+  async emitGoalStatus(
+    status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
+  ): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalStatus: status,
+      },
+    });
+  }
+
   /**
    * Emits a user message chunk.
    *
@@ -71,15 +110,14 @@ export class MessageEmitter extends BaseEmitter {
     timestamp?: string | number,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const epochMs = BaseEmitter.toEpochMs(timestamp);
-    const meta = {
-      ...subagentMeta,
-      ...(epochMs != null && { timestamp: epochMs }),
-    };
+    const _meta = this.buildChunkMeta(
+      BaseEmitter.toEpochMs(timestamp),
+      subagentMeta,
+    );
     await this.sendUpdate({
       sessionUpdate: 'agent_thought_chunk',
       content: { type: 'text', text },
-      ...(Object.keys(meta).length > 0 && { _meta: meta }),
+      ...(_meta ? { _meta } : {}),
     });
   }
 
@@ -94,15 +132,14 @@ export class MessageEmitter extends BaseEmitter {
     timestamp?: string | number,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const epochMs = BaseEmitter.toEpochMs(timestamp);
-    const meta = {
-      ...subagentMeta,
-      ...(epochMs != null && { timestamp: epochMs }),
-    };
+    const _meta = this.buildChunkMeta(
+      BaseEmitter.toEpochMs(timestamp),
+      subagentMeta,
+    );
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
-      ...(Object.keys(meta).length > 0 && { _meta: meta }),
+      ...(_meta ? { _meta } : {}),
     });
   }
 
@@ -157,5 +194,21 @@ export class MessageEmitter extends BaseEmitter {
     return isThought
       ? this.emitAgentThought(text, timestamp, subagentMeta)
       : this.emitAgentMessage(text, timestamp, subagentMeta);
+  }
+
+  private buildChunkMeta(
+    epochMs: number | undefined,
+    subagentMeta?: SubagentMeta,
+  ): Record<string, unknown> | undefined {
+    const meta: Record<string, unknown> = {
+      ...(subagentMeta?.parentToolCallId
+        ? { parentToolCallId: subagentMeta.parentToolCallId }
+        : {}),
+      ...(subagentMeta?.subagentType
+        ? { subagentType: subagentMeta.subagentType }
+        : {}),
+      ...(epochMs != null ? { timestamp: epochMs } : {}),
+    };
+    return Object.keys(meta).length > 0 ? meta : undefined;
   }
 }

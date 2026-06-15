@@ -42,7 +42,7 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   SdkControlServerTransport,
   type SdkControlServerTransportOptions,
-} from '../mcp/SdkControlServerTransport.js';
+} from '../daemon-mcp/SdkControlServerTransport.js';
 import { ControlRequestType } from '../types/protocol.js';
 
 interface PendingControlRequest {

@@ -83,6 +83,50 @@ describe('MessageEmitter', () => {
     });
   });
 
+  describe('emitGoalTerminal', () => {
+    it('should send a goal terminal update in metadata', async () => {
+      const event = {
+        kind: 'achieved' as const,
+        condition: 'ship goal support',
+        iterations: 2,
+        durationMs: 1234,
+        lastReason: 'The requested support is complete.',
+      };
+
+      await emitter.emitGoalTerminal(event);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalTerminal: event,
+        },
+      });
+    });
+  });
+
+  describe('emitGoalStatus', () => {
+    it('should send a goal status update in metadata', async () => {
+      const status = {
+        kind: 'set' as const,
+        condition: 'ship goal support',
+        setAt: 1234,
+      };
+
+      await emitter.emitGoalStatus(status);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalStatus: status,
+        },
+      });
+    });
+  });
+
   describe('emitAgentThought', () => {
     it('should send agent_thought_chunk update with text content', async () => {
       await emitter.emitAgentThought('Let me think about this...');
