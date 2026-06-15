@@ -20,7 +20,10 @@ import {
   StreamEventType,
   type StreamEvent,
 } from './geminiChat.js';
-import { StreamContentError } from './openaiContentGenerator/pipeline.js';
+import {
+  StreamContentError,
+  StreamIdleTimeoutError,
+} from './openaiContentGenerator/pipeline.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -5424,6 +5427,92 @@ describe('GeminiChat', async () => {
       );
     }
     expect(turn2.parts[0].text).toBe('Successful response after empty');
+  });
+  it('retries the stream once when it stalls mid-flight (StreamIdleTimeoutError)', async () => {
+    // 1. First call yields a partial chunk then the idle watchdog fires;
+    //    second call returns a valid stream.
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(
+        async () =>
+          (async function* () {
+            yield {
+              candidates: [{ content: { parts: [{ text: 'partial' }] } }],
+            } as unknown as GenerateContentResponse;
+            throw new StreamIdleTimeoutError(1234);
+          })(),
+      )
+      .mockImplementationOnce(
+        async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'recovered response' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+      );
+
+    // 2. Consume the stream.
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test idle retry' },
+      'prompt-id-idle-retry',
+    );
+    const chunks: StreamEvent[] = [];
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+    }
+
+    // 3. Assert: exactly one re-stream, a RETRY event surfaced, the recovered
+    //    response delivered, and the discarded partial absent from history.
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(chunks.some((c) => c.type === StreamEventType.RETRY)).toBe(true);
+    expect(
+      chunks.some(
+        (c) =>
+          c.type === StreamEventType.CHUNK &&
+          c.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+            'recovered response',
+      ),
+    ).toBe(true);
+
+    const history = chat.getHistory();
+    expect(history.length).toBe(2);
+    const turn2 = history[1];
+    if (!turn2?.parts?.[0] || !('text' in turn2.parts[0])) {
+      throw new Error('Test setup error: second turn is not a valid text part.');
+    }
+    expect(turn2.parts[0].text).toBe('recovered response');
+  });
+  it('propagates StreamIdleTimeoutError after the retry budget is exhausted', async () => {
+    // Every attempt stalls mid-stream — the bounded retry must give up and
+    // surface the error rather than looping or hanging.
+    vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+      async () =>
+        (async function* () {
+          yield {
+            candidates: [{ content: { parts: [{ text: 'partial' }] } }],
+          } as unknown as GenerateContentResponse;
+          throw new StreamIdleTimeoutError(1234);
+        })(),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test idle exhausted' },
+      'prompt-id-idle-exhausted',
+    );
+    const consume = async () => {
+      for await (const _chunk of stream) {
+        // drain
+      }
+    };
+    await expect(consume()).rejects.toBeInstanceOf(StreamIdleTimeoutError);
+    // 1 initial + 1 retry = 2 attempts (INVALID_CONTENT_RETRY_OPTIONS.maxAttempts).
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
   });
   it('should queue a subsequent sendMessageStream call until the first stream is fully consumed', async () => {
     // 1. Create a promise to manually control the stream's lifecycle

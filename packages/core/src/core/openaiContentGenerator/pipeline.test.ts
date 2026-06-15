@@ -10,7 +10,11 @@ import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
 import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { ErrorHandler, PipelineConfig } from './types.js';
-import { ContentGenerationPipeline, StreamContentError } from './pipeline.js';
+import {
+  ContentGenerationPipeline,
+  StreamContentError,
+  StreamIdleTimeoutError,
+} from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -1362,6 +1366,146 @@ describe('ContentGenerationPipeline', () => {
           signal: undefined,
         }),
       );
+    });
+
+    it('aborts and throws StreamIdleTimeoutError when the stream stalls mid-flight', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      // Short inactivity budget so the test resolves quickly.
+      mockContentGeneratorConfig.streamIdleTimeoutMs = 50;
+
+      const mockChunk1 = {
+        id: 'chunk-1',
+        choices: [{ delta: { content: 'Hello' }, finish_reason: null }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+
+      const returnSpy = vi.fn(() =>
+        Promise.resolve({ value: undefined, done: true as const }),
+      );
+      let sent = false;
+      const mockStream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              if (!sent) {
+                sent = true;
+                return Promise.resolve({ value: mockChunk1, done: false });
+              }
+              // Provider opened the stream then went silent forever.
+              return new Promise<
+                IteratorResult<OpenAI.Chat.ChatCompletionChunk>
+              >(() => {});
+            },
+            return: returnSpy,
+          };
+        },
+      };
+
+      const firstGemini = new GenerateContentResponse();
+      firstGemini.candidates = [
+        { content: { parts: [{ text: 'Hello' }], role: 'model' } },
+      ];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        firstGemini,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'pid');
+      const drain = async () => {
+        const seen: GenerateContentResponse[] = [];
+        for await (const r of resultGenerator) seen.push(r);
+        return seen;
+      };
+
+      await expect(drain()).rejects.toBeInstanceOf(StreamIdleTimeoutError);
+      // The stalled iterator must be torn down so the socket is released.
+      expect(returnSpy).toHaveBeenCalled();
+    });
+
+    it('passes the stream through unchanged when the idle watchdog is disabled (<= 0)', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      mockContentGeneratorConfig.streamIdleTimeoutMs = 0; // disabled
+
+      const mockChunk = {
+        id: 'chunk-1',
+        choices: [{ delta: { content: 'Hi' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield mockChunk;
+        },
+      };
+      const gemini = new GenerateContentResponse();
+      gemini.candidates = [
+        { content: { parts: [{ text: 'Hi' }], role: 'model' } },
+      ];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(gemini);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const gen = await pipeline.executeStream(request, 'pid');
+      const results: GenerateContentResponse[] = [];
+      for await (const r of gen) results.push(r);
+      expect(results).toHaveLength(1);
+      expect(results[0]).toBe(gemini);
+    });
+
+    it('does not fire while the stream stays active (idle timer resets per chunk)', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      // Each inter-chunk gap (40ms) stays under the budget while the total
+      // stream duration (~120ms) exceeds it — proves the timer resets per chunk
+      // rather than bounding the whole stream.
+      mockContentGeneratorConfig.streamIdleTimeoutMs = 100;
+
+      const mk = (id: string, content: string, fin: string | null) =>
+        ({
+          id,
+          choices: [{ delta: { content }, finish_reason: fin }],
+        }) as OpenAI.Chat.ChatCompletionChunk;
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          for (const c of [
+            mk('c1', 'a', null),
+            mk('c2', 'b', null),
+            mk('c3', 'c', 'stop'),
+          ]) {
+            await new Promise((r) => setTimeout(r, 40));
+            yield c;
+          }
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (chunk: OpenAI.Chat.ChatCompletionChunk) => {
+          const r = new GenerateContentResponse();
+          const text = chunk.choices?.[0]?.delta?.content ?? '';
+          r.candidates = [{ content: { parts: [{ text }], role: 'model' } }];
+          return r;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const gen = await pipeline.executeStream(request, 'pid');
+      const results: GenerateContentResponse[] = [];
+      for await (const r of gen) results.push(r);
+      expect(results).toHaveLength(3);
     });
 
     it('should filter empty responses', async () => {

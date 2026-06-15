@@ -20,6 +20,7 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
+import { DEFAULT_STREAM_IDLE_TIMEOUT } from './constants.js';
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -31,6 +32,26 @@ export class StreamContentError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'StreamContentError';
+  }
+}
+
+/**
+ * Error thrown when a streaming response stalls mid-flight: the upstream
+ * provider opened the stream (headers received) but then stopped sending SSE
+ * chunks for longer than the configured inactivity budget. Surfaced as a
+ * dedicated type so the consuming retry loop (GeminiChat.sendMessageStream) can
+ * treat a stalled stream as transient and re-issue the request, rather than
+ * letting the `for await` hang forever (see {@link DEFAULT_STREAM_IDLE_TIMEOUT}).
+ */
+export class StreamIdleTimeoutError extends Error {
+  readonly idleTimeoutMs: number;
+  constructor(idleTimeoutMs: number) {
+    super(
+      `Streaming response stalled: no data received from the provider for ` +
+        `${Math.round(idleTimeoutMs / 1000)}s. The connection was aborted.`,
+    );
+    this.name = 'StreamIdleTimeoutError';
+    this.idleTimeoutMs = idleTimeoutMs;
   }
 }
 
@@ -111,19 +132,31 @@ export class ContentGenerationPipeline {
           throw e;
         }
 
+        // Stage 1.5: Guard the raw stream with an inactivity watchdog so a
+        // provider that stalls mid-stream (headers received, SSE body goes
+        // silent) surfaces as a retryable StreamIdleTimeoutError instead of
+        // hanging the consuming `for await` forever — the OpenAI SDK only
+        // bounds time-to-headers. Wrapping the *raw* stream means every chunk,
+        // including the ones processStreamWithLogging filters out, resets the
+        // idle timer.
+        const guardedStream = this.withStreamIdleTimeout(
+          stream,
+          this.resolveStreamIdleTimeoutMs(),
+        );
+
         // Stage 2: Process stream with conversion and logging.
         // When a per-request controller exists, wrap in an async generator
         // that aborts it once the stream is fully consumed or abandoned, so
         // the child signal's reverse-cleanup fires and the parent listener
         // is released.
         if (!perRequestAc) {
-          return this.processStreamWithLogging(stream, context, request);
+          return this.processStreamWithLogging(guardedStream, context, request);
         }
         // Capture the narrowed controller so the closure below sees a non-
         // nullable type (TS does not propagate narrowing into nested funcs).
         const ac = perRequestAc;
         const innerStream = this.processStreamWithLogging(
-          stream,
+          guardedStream,
           context,
           request,
         );
@@ -137,6 +170,87 @@ export class ContentGenerationPipeline {
         return drainThenCleanup();
       },
     );
+  }
+
+  /**
+   * Resolve the streaming inactivity timeout (ms). Precedence:
+   * `QWEN_CODE_STREAM_IDLE_TIMEOUT_MS` env var > `contentGenerator.streamIdleTimeoutMs`
+   * config > {@link DEFAULT_STREAM_IDLE_TIMEOUT}. A non-positive result disables
+   * the watchdog (passthrough).
+   */
+  private resolveStreamIdleTimeoutMs(): number {
+    const raw = process.env['QWEN_CODE_STREAM_IDLE_TIMEOUT_MS'];
+    if (raw !== undefined && raw.trim() !== '') {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    const configured = this.contentGeneratorConfig.streamIdleTimeoutMs;
+    if (typeof configured === 'number' && Number.isFinite(configured)) {
+      return configured;
+    }
+    return DEFAULT_STREAM_IDLE_TIMEOUT;
+  }
+
+  /**
+   * Wrap a raw provider stream with an inactivity watchdog. Each pull races the
+   * next chunk against a timer that is reset every iteration; if no chunk
+   * arrives within `idleTimeoutMs`, the underlying iterator is closed (which
+   * aborts the SDK request and releases the stalled socket) and a
+   * {@link StreamIdleTimeoutError} is thrown. The timer guards only the time
+   * spent awaiting the provider — it is cleared before the chunk is yielded, so
+   * slow downstream consumers never trip it. A non-positive `idleTimeoutMs`
+   * disables the watchdog.
+   */
+  private async *withStreamIdleTimeout(
+    stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+    idleTimeoutMs: number,
+  ): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
+    if (!(idleTimeoutMs > 0)) {
+      yield* stream;
+      return;
+    }
+
+    const iterator = stream[Symbol.asyncIterator]();
+    try {
+      while (true) {
+        const nextPromise = iterator.next();
+        // If the idle timer wins the race we abandon this pending read; it will
+        // reject later once the request aborts. Attach a no-op catch now so the
+        // late rejection never surfaces as an unhandledRejection.
+        nextPromise.catch(() => {});
+
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
+        try {
+          result = await Promise.race([
+            nextPromise,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new StreamIdleTimeoutError(idleTimeoutMs)),
+                idleTimeoutMs,
+              );
+              // Don't let the watchdog alone keep the event loop (and CLI) alive.
+              timer.unref?.();
+            }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+
+        if (result.done) return;
+        yield result.value;
+      }
+    } finally {
+      // Best-effort close of the underlying iterator on every exit path (idle
+      // timeout, consumer break/throw, normal completion). For the OpenAI SDK
+      // stream this calls controller.abort(), tearing down a stalled connection
+      // even when no per-request AbortController is present.
+      try {
+        await iterator.return?.();
+      } catch {
+        // ignore teardown errors — the original outcome already propagated
+      }
+    }
   }
 
   /**
@@ -247,6 +361,13 @@ export class ContentGenerationPipeline {
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
         throw redactProxyError(error);
+      }
+
+      // A mid-stream idle timeout is already a clean, typed signal for the
+      // caller's retry loop — bypass the provider error handler (which is
+      // shaped for SDK/HTTP errors) so the error identity survives upstream.
+      if (error instanceof StreamIdleTimeoutError) {
+        throw error;
       }
 
       // Use shared error handling logic

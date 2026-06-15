@@ -81,6 +81,7 @@ import {
   collectToolCallIdsFromHistory,
   normalizeModelToolCallIds,
 } from './toolCallIdUtils.js';
+import { StreamIdleTimeoutError } from './openaiContentGenerator/pipeline.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -2293,6 +2294,30 @@ export class GeminiChat {
                 continue;
               }
             }
+
+            // A mid-stream idle timeout (provider stalled after headers) is
+            // transient: re-issue the stream once before giving up, mirroring
+            // the invalid-content path above (same bounded budget + partial
+            // cleanup). Without this the stalled turn fails outright; with it a
+            // single provider hiccup self-heals — the common case behind
+            // parallel-subagent fan-out hangs.
+            if (error instanceof StreamIdleTimeoutError) {
+              if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
+                popPartialIfPushed();
+                debugLogger.warn('Stream idle timeout; retrying stream', {
+                  retryPath: 'stream',
+                  retryDecision: 'retry',
+                  attempt: attempt + 1,
+                  maxAttempts: INVALID_CONTENT_RETRY_OPTIONS.maxAttempts,
+                });
+                await delay(
+                  INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs * (attempt + 1),
+                  params.config?.abortSignal,
+                ).promise;
+                continue;
+              }
+            }
+
             break;
           }
         }
