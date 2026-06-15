@@ -1,0 +1,40 @@
+.message {
+  margin: 0 0 12px 14px;
+  padding: 2px 0;
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  margin-bottom: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.chevron {
+  flex-shrink: 0;
+  width: 12px;
+  color: var(--text-dimmed);
+  font-size: 10px;
+}
+
+.title {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.header:hover .title {
+  color: var(--accent-color);
+}
+
+.progress {
+  color: var(--text-dimmed);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}

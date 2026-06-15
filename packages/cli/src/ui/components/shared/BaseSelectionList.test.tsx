@@ -350,6 +350,15 @@ describe('BaseSelectionList', () => {
       });
     });
 
+    it('should show a high initial selection on the first frame', () => {
+      const { lastFrame } = renderScrollableList(9);
+      const output = lastFrame();
+
+      expect(output).toContain('Item 10');
+      expect(output).toContain('Item 8');
+      expect(output).not.toMatch(/(^|\n)\s*1\. Item 1($|\n)/);
+    });
+
     it('should handle dynamic scrolling through multiple activeIndex changes', async () => {
       const { updateActiveIndex, lastFrame } = renderScrollableList(0);
 

@@ -1,6 +1,10 @@
 # TUI Daemon Adapter Draft
 
-## Goal
+> **⚠️ 已过时**：本文档描述的是早期 `DaemonTuiAdapter` spike。该 legacy adapter 仍在 `packages/cli/src/ui/daemon/` 中，但新的可复用方向是 SDK 里的共享 UI Transcript 层。当前架构请参考 [`../daemon/14-cli-tui-adapter.md`](../daemon/14-cli-tui-adapter.md)。
+
+---
+
+## Goal (historical)
 
 Add a flag-gated TUI transport that talks to `qwen serve` through
 `DaemonSessionClient` instead of creating an in-process `Config` + agent

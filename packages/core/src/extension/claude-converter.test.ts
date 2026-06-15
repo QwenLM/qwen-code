@@ -72,6 +72,29 @@ describe('convertClaudeToQwenConfig', () => {
     expect(result.lspServers).toEqual(claudeConfig.lspServers);
   });
 
+  it('should preserve description field', () => {
+    const claudeConfig: ClaudePluginConfig = {
+      name: 'desc-plugin',
+      version: '1.0.0',
+      description: 'A plugin with a description',
+    };
+
+    const result = convertClaudeToQwenConfig(claudeConfig);
+
+    expect(result.description).toBe('A plugin with a description');
+  });
+
+  it('should leave description undefined when not provided', () => {
+    const claudeConfig: ClaudePluginConfig = {
+      name: 'no-desc-plugin',
+      version: '1.0.0',
+    };
+
+    const result = convertClaudeToQwenConfig(claudeConfig);
+
+    expect(result.description).toBeUndefined();
+  });
+
   it('should throw error for missing name', () => {
     const invalidConfig = {
       version: '1.0.0',

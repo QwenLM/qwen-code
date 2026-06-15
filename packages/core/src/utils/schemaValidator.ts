@@ -159,7 +159,10 @@ export class SchemaValidator {
     let valid = validate(data);
     if (!valid && validate.errors) {
       // Coerce string boolean values ("true"/"false") to actual booleans
-      fixBooleanValues(data as Record<string, unknown>);
+      fixBooleanValues(
+        data as Record<string, unknown>,
+        anySchema as Record<string, unknown>,
+      );
       // Coerce stringified JSON values (arrays/objects) back to their proper types.
       // Some LLMs serialize complex values as strings when the schema uses
       // anyOf/oneOf (e.g., '["url"]' instead of ["url"] for anyOf: [array, null]).
@@ -272,20 +275,45 @@ function fixStringifiedJsonValues(
   }
 }
 
-function fixBooleanValues(data: Record<string, unknown>) {
+function fixBooleanValues(
+  data: Record<string, unknown>,
+  schema?: Record<string, unknown>,
+) {
+  const properties = schema?.['properties'] as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  const items = schema?.['items'] as Record<string, unknown> | undefined;
+
   for (const key of Object.keys(data)) {
     if (!(key in data)) continue;
     const value = data[key];
+    // Array elements share the `items` schema; object fields use their
+    // per-property schema.
+    const childSchema = Array.isArray(data) ? items : properties?.[key];
 
     if (typeof value === 'object' && value !== null) {
-      fixBooleanValues(value as Record<string, unknown>);
-    } else if (typeof value === 'string') {
-      const lower = value.toLowerCase();
-      if (lower === 'true') {
-        data[key] = true;
-      } else if (lower === 'false') {
-        data[key] = false;
-      }
+      fixBooleanValues(value as Record<string, unknown>, childSchema);
+      continue;
+    }
+
+    if (typeof value !== 'string') continue;
+
+    // Only coerce when the field's schema explicitly types it as boolean (and
+    // does not also accept string). Without this guard a legitimate string
+    // value of "true"/"false" — e.g. an `old_string`/`content` argument that
+    // happens to be the text "true" — would be silently rewritten into a
+    // boolean, corrupting the tool call. Mirrors fixStringifiedJsonValues,
+    // which is already schema-aware for the same reason.
+    const accepted = childSchema ? getAcceptedTypes(childSchema) : null;
+    if (!accepted || accepted.has('string') || !accepted.has('boolean')) {
+      continue;
+    }
+
+    const lower = value.toLowerCase();
+    if (lower === 'true') {
+      data[key] = true;
+    } else if (lower === 'false') {
+      data[key] = false;
     }
   }
 }

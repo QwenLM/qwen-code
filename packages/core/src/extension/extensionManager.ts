@@ -143,6 +143,7 @@ export interface Extension {
 export interface ExtensionConfig {
   name: string;
   version: string;
+  description?: string;
   mcpServers?: Record<string, MCPServerConfig>;
   lspServers?: string | Record<string, unknown>;
   contextFileName?: string | string[];
@@ -257,19 +258,16 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
   };
 
   try {
-    const mdFiles = await glob('**/*.md', {
+    const allFiles = await glob('**/*.{md,toml}', {
       ...globOptions,
       cwd: dir,
     });
 
-    const commandNames = mdFiles.map((file) => {
-      const relativePathWithExt = path.relative(dir, path.join(dir, file));
-      const relativePath = relativePathWithExt.substring(
-        0,
-        relativePathWithExt.length - 3,
-      );
+    const commandNames = allFiles.map((file) => {
+      const ext = path.extname(file);
+      const relativePath = file.substring(0, file.length - ext.length);
       const commandName = relativePath
-        .split(path.sep)
+        .split(/[/\\]/)
         .map((segment) => segment.replaceAll(':', '_'))
         .join(':');
 

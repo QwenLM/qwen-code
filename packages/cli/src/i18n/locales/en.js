@@ -258,6 +258,8 @@ export default {
     'List available Qwen Code tools. Usage: /tools [desc]',
   'Open the skills panel (browse, search, toggle, pick).':
     'Open the skills panel (browse, search, toggle, pick).',
+  'Move this session to a new working directory':
+    'Move this session to a new working directory',
   // SkillsManagerDialog (the panel `/skills` opens)
   'Manage Skills': 'Manage Skills',
   'Skills configuration saved.': 'Skills configuration saved.',
@@ -367,12 +369,14 @@ export default {
     'Clear conversation history and free up context',
   'Compresses the context by replacing it with a summary.':
     'Compresses the context by replacing it with a summary.',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    'Fast context compression without AI. Strips old tool outputs and thinking parts.',
   'open full Qwen Code documentation in your browser':
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
   'Connect an LLM provider': 'Connect an LLM provider',
-  'Copy the last result or code snippet to clipboard':
-    'Copy the last result or code snippet to clipboard',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number',
   'Show working-tree change stats versus HEAD':
     'Show working-tree change stats versus HEAD',
   'Could not determine current working directory.':
@@ -655,8 +659,7 @@ export default {
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
-  'check session stats. Usage: /stats [model|tools]':
-    'check session stats. Usage: /stats [model|tools]',
+  'Show usage statistics dashboard.': 'Show usage statistics dashboard.',
   'Show model-specific usage statistics.':
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
@@ -788,6 +791,7 @@ export default {
     'The name of the extension to update.',
   'Either an extension name or --all must be provided':
     'Either an extension name or --all must be provided',
+  'List installed extensions': 'List installed extensions',
   'Lists installed extensions.': 'Lists installed extensions.',
   'Path:': 'Path:',
   'Source:': 'Source:',
@@ -1049,6 +1053,23 @@ export default {
   'Resume a previous session': 'Resume a previous session',
   'Fork the current conversation into a new session':
     'Fork the current conversation into a new session',
+  'Spawn a background agent that inherits the full conversation':
+    'Spawn a background agent that inherits the full conversation',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Please provide a directive. Usage: /fork <directive>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
+  'Cannot fork before the first conversation turn.':
+    'Cannot fork before the first conversation turn.',
+  'The agent tool is unavailable; cannot fork.':
+    'The agent tool is unavailable; cannot fork.',
+  'Failed to launch fork: {{error}}': 'Failed to launch fork: {{error}}',
+  'the background agent could not be started.':
+    'the background agent could not be started.',
+  'User launched a background fork via /fork: {{directive}}':
+    'User launched a background fork via /fork: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
   'No conversation to branch.': 'No conversation to branch.',
@@ -1122,6 +1143,8 @@ export default {
     'No managed auto-memory entries matched: {{query}}',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
+  'Import MCP servers from Claude configs':
+    'Import MCP servers from Claude configs',
   'Open MCP management dialog': 'Open MCP management dialog',
   'Could not retrieve tool registry.': 'Could not retrieve tool registry.',
   "Successfully authenticated and refreshed tools for '{{name}}'.":
@@ -1688,6 +1711,9 @@ export default {
   'Background tasks': 'Background tasks',
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
+  'needs approval': 'needs approval',
+  'Background agent needs approval': 'Background agent needs approval',
+  'Approve or deny the request above': 'Approve or deny the request above',
   Running: 'Running',
   Paused: 'Paused',
   Completed: 'Completed',
@@ -2175,4 +2201,87 @@ export default {
   'Loading suggestions...': 'Loading suggestions...',
   'Show per-item context usage breakdown.':
     'Show per-item context usage breakdown.',
+  'No compression needed.': 'No compression needed.',
+
+  // ============================================================================
+  // Stats
+  // ============================================================================
+
+  // statsCommand non-interactive output
+  'Session duration: {{duration}}': 'Session duration: {{duration}}',
+  'Prompts: {{count}}': 'Prompts: {{count}}',
+  'API requests: {{count}}': 'API requests: {{count}}',
+  'Tokens — prompt: {{prompt}}, output: {{output}}':
+    'Tokens — prompt: {{prompt}}, output: {{output}}',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)',
+  'Files: +{{added}} / -{{removed}} lines':
+    'Files: +{{added}} / -{{removed}} lines',
+  prompt: 'prompt',
+  output: 'output',
+  cached: 'cached',
+  'Estimated cost: ${{cost}}': 'Estimated cost: ${{cost}}',
+  'No model usage data yet.': 'No model usage data yet.',
+  'No tool usage data yet.': 'No tool usage data yet.',
+
+  // StatsDialog
+  Models: 'Models',
+  'All time': 'All time',
+  'Last 7 days': 'Last 7 days',
+  'Last 30 days': 'Last 30 days',
+  'N/A': 'N/A',
+  Sessions: 'Sessions',
+  days: 'days',
+  Input: 'Input',
+  'Tool calls': 'Tool calls',
+  'Code changes': 'Code changes',
+  Projects: 'Projects',
+  Name: 'Name',
+  Duration: 'Duration',
+  'Activity Heatmap': 'Activity Heatmap',
+  'Loading stats...': 'Loading stats...',
+  '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close':
+    '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close',
+  Cost: 'Cost',
+  Less: 'Less',
+  More: 'More',
+  '(no data)': '(no data)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — labels
+  Session: 'Session',
+  Activity: 'Activity',
+  Efficiency: 'Efficiency',
+  Success: 'Success',
+  Today: 'Today',
+  'Cache Hit Rate': 'Cache Hit Rate',
+  'Tool Success': 'Tool Success',
+  'Tool Leaderboard': 'Tool Leaderboard',
+  Time: 'Time',
+  Cache: 'Cache',
+  Latency: 'Latency',
+  'Code Impact': 'Code Impact',
+  'Failed to load stats. Press r to retry.':
+    'Failed to load stats. Press r to retry.',
+  net: 'net',
+  streak: 'streak',
+  best: 'best',
+  'Token Trend': 'Token Trend',
+  'In/Out': 'In/Out',
+  'API Requests': 'API Requests',
+  'Tool Calls': 'Tool Calls',
+  'Success rate': 'Success rate',
+  'Code Changes': 'Code Changes',
+  Tool: 'Tool',
+  reqs: 'reqs',
+  in: 'in',
+  out: 'out',
 };

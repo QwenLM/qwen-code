@@ -166,10 +166,17 @@ describe('AgentTool', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getTeamManager: vi.fn().mockReturnValue(undefined),
+      isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getModel: vi.fn().mockReturnValue('parent-model'),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getSandbox: vi.fn().mockReturnValue(undefined),
+      getScreenReader: vi.fn().mockReturnValue(false),
+      getMaxSessionTurns: vi.fn().mockReturnValue(-1),
+      getMaxToolCalls: vi.fn().mockReturnValue(-1),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
-      isForkSubagentEnabled: vi.fn().mockReturnValue(false),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(stubMonitorRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
@@ -217,7 +224,7 @@ describe('AgentTool', () => {
     it('should initialize with correct name and properties', () => {
       expect(agentTool.name).toBe('agent');
       expect(agentTool.displayName).toBe('Agent');
-      expect(agentTool.kind).toBe('other');
+      expect(agentTool.kind).toBe('agent');
     });
 
     it('should load available subagents during initialization', () => {
@@ -267,8 +274,6 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(true);
 
       const interactiveTool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -283,8 +288,6 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(false);
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(false);
 
       const nonInteractiveTool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -304,20 +307,18 @@ describe('AgentTool', () => {
       );
     });
 
-    it('omits fork discipline when interactive but fork flag is off', async () => {
+    it('includes fork discipline when interactive', async () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(false);
 
       const tool = new AgentTool(config);
       await vi.runAllTimersAsync();
 
-      expect(tool.description).not.toContain('When to fork');
-      expect(tool.description).toContain(
-        'If omitted, the general-purpose agent is used',
-      );
+      expect(tool.description).toContain('When to fork');
+      expect(tool.description).toContain("Don't peek");
+      expect(tool.description).toContain("Don't race");
+      expect(tool.description).toContain('Writing a fork prompt');
     });
   });
 
@@ -335,6 +336,35 @@ describe('AgentTool', () => {
         'file-search',
         'code-review',
       ]);
+    });
+
+    it('does not expose teammate name when teams are disabled', () => {
+      const schema = agentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          name?: unknown;
+        };
+      };
+
+      expect(parameters.properties.name).toBeUndefined();
+    });
+
+    it('exposes teammate name when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = teamAgentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          name?: {
+            description?: string;
+          };
+        };
+      };
+
+      expect(parameters.properties.name?.description).toContain('active team');
     });
 
     it('should generate schema without enum when no subagents available', async () => {
@@ -517,6 +547,26 @@ describe('AgentTool', () => {
     });
   });
 
+  describe('team routing', () => {
+    it('falls back to one-shot when `name` is supplied without a team', async () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+
+      const invocation = agentTool.build({
+        description: 'Spawn helper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).not.toContain('no active team');
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+    });
+  });
+
   describe('refreshSubagents', () => {
     it('should refresh when change listener fires', async () => {
       const newSubagents: SubagentConfig[] = [
@@ -628,9 +678,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
     });
 
     it('should execute subagent successfully', async () => {
@@ -1111,22 +1162,15 @@ describe('AgentTool', () => {
         }),
       } as unknown as ReturnType<Config['getGeminiClient']>);
 
+      vi.mocked(AgentHeadless.create).mockClear();
       vi.mocked(AgentHeadless.create).mockResolvedValue(mockAgent);
 
-      // Fork requires interactive mode + feature flag — gate from isForkSubagentEnabled().
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(true);
     });
 
-    it('falls back to general-purpose when fork flag is off', async () => {
-      // Fork flag off — even though interactive
-      vi.mocked(
-        config.isForkSubagentEnabled as ReturnType<typeof vi.fn>,
-      ).mockReturnValue(false);
-
+    it('forks in interactive mode', async () => {
       const mockLoadedSubagent: SubagentConfig = {
         name: 'general-purpose',
         description: 'General-purpose agent',
@@ -1148,19 +1192,17 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       await invocation.execute();
 
-      // Should load general-purpose, not fork
-      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalledWith(
         'general-purpose',
       );
-      expect(AgentHeadless.create).not.toHaveBeenCalled();
+      expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
     });
 
-    it('falls back to general-purpose when non-interactive (even with fork flag on)', async () => {
+    it('falls back to general-purpose when non-interactive', async () => {
       vi.mocked(
         config.isInteractive as ReturnType<typeof vi.fn>,
       ).mockReturnValue(false);
-      // Fork flag is on, but non-interactive → isForkSubagentEnabled() returns false
-      // because it requires both flag + interactive.
+      // Non-interactive sessions cannot service fork progress or prompts.
 
       const mockLoadedSubagent: SubagentConfig = {
         name: 'general-purpose',
@@ -1208,6 +1250,7 @@ describe('AgentTool', () => {
 
       const createArgs = vi.mocked(AgentHeadless.create).mock.calls[0];
       expect(createArgs[0]).toBe('fork'); // name
+      expect(createArgs[1].getApprovalMode()).toBe(ApprovalMode.DEFAULT);
       // First-turn fork (no cache params): systemPrompt path, no
       // renderedSystemPrompt. initialMessages is undefined (empty history).
       const promptConfig = createArgs[2];
@@ -1417,9 +1460,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
       mockHookSystem = {
         fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
@@ -1599,9 +1643,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
       mockHookSystem = {
         fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
@@ -1932,9 +1977,10 @@ describe('AgentTool', () => {
         emitDuringExecute(capturedInvocation.eventEmitter);
       });
 
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
       const params: AgentParams = {
         description: 'Edit files',
@@ -2245,9 +2291,10 @@ describe('AgentTool', () => {
       ] = vi.fn();
 
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
     });
 
     it('should run in background when agent definition has background: true', async () => {
@@ -2733,6 +2780,15 @@ describe('AgentTool', () => {
           status: 'running',
           agentType: 'file-search',
           description: 'Search files',
+          persistedCliFlags: expect.objectContaining({
+            approvalMode: 'auto-edit',
+            bare: false,
+            sandbox: null,
+            screenReader: false,
+            model: 'parent-model',
+            maxSessionTurns: -1,
+            maxToolCalls: -1,
+          }),
         }),
       );
       // Finally block patches the sidecar to the terminal status —
@@ -2851,6 +2907,31 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('keeps bubble-mode background agents on auto-deny in non-interactive mode', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        approvalMode: 'bubble',
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+
+      const createCalls = vi.mocked(mockSubagentManager.createAgentHeadless)
+        .mock.calls;
+      const createdConfig = createCalls[createCalls.length - 1][1] as Config;
+      expect(createdConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+    });
+
     it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
       const params: AgentParams = {
         description: 'Start monitor',
@@ -2940,9 +3021,6 @@ describe('AgentTool', () => {
     });
 
     it('persists fork capability snapshots in the bootstrap transcript', async () => {
-      // Fork requires opt-in + interactive
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(true);
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
@@ -3070,5 +3148,29 @@ describe('resolveSubagentApprovalMode', () => {
     expect(
       resolveSubagentApprovalMode(ApprovalMode.DEFAULT, undefined, false),
     ).toBe(PermissionMode.Default);
+  });
+
+  it('should resolve the subagent-only "bubble" mode to Default (confirmation required)', () => {
+    // `bubble` is not a privileged mode — it requires confirmation like
+    // `default`, so it resolves to Default in both trusted and untrusted
+    // folders (the background launch path is what flips deny → surface).
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'bubble', true),
+    ).toBe(PermissionMode.Default);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'bubble', false),
+    ).toBe(PermissionMode.Default);
+  });
+
+  it('should let a permissive parent win over a "bubble" subagent mode', () => {
+    // Consistent with every other mode: a yolo/auto-edit parent wins, so a
+    // bubble agent under such a parent runs permissively (and never bubbles,
+    // since no confirmation is ever requested).
+    expect(resolveSubagentApprovalMode(ApprovalMode.YOLO, 'bubble', true)).toBe(
+      PermissionMode.Yolo,
+    );
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.AUTO_EDIT, 'bubble', true),
+    ).toBe(PermissionMode.AutoEdit);
   });
 });

@@ -38,3 +38,27 @@ export const calculatePromptWidths = (terminalWidth: number) => {
     frameOverhead: FRAME_OVERHEAD,
   } as const;
 };
+
+export const MAIN_CONTENT_HEIGHT_RESERVATION = 2;
+
+export const clampDialogHeight = (
+  height: number | undefined,
+): number | undefined =>
+  height === undefined ? undefined : Math.max(1, Math.floor(height));
+
+/**
+ * Returns the max row budget for dialogs rendered in the input/control area.
+ *
+ * The row reservation matches AppContainer's main-content height
+ * reservation. Keeping the same buffer here prevents a newly opened dialog from
+ * painting into the terminal's bottom rows before control-height measurement
+ * settles.
+ */
+export const getDialogMaxHeight = (
+  terminalHeight: number,
+  staticExtraHeight: number,
+): number =>
+  Math.max(
+    1,
+    terminalHeight - staticExtraHeight - MAIN_CONTENT_HEIGHT_RESERVATION,
+  );

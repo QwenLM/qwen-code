@@ -41,6 +41,10 @@ import {
 const mockViewActions = vi.hoisted(() => ({
   setAgentTabBarFocused: vi.fn(),
   setBgPillFocused: vi.fn(),
+  setLivePanelFocused: vi.fn(),
+  setLivePanelSelectedIndex: vi.fn(),
+  setBgSelectedIndex: vi.fn(),
+  enterBgDetailFromPanel: vi.fn(),
 }));
 
 vi.mock('../hooks/useShellHistory.js');
@@ -81,6 +85,8 @@ vi.mock('../contexts/BackgroundTaskViewContext.js', () => ({
   })),
   useBackgroundTaskViewActions: vi.fn(() => ({
     setPillFocused: mockViewActions.setBgPillFocused,
+    setLivePanelFocused: mockViewActions.setLivePanelFocused,
+    setLivePanelSelectedIndex: mockViewActions.setLivePanelSelectedIndex,
   })),
 }));
 
@@ -180,6 +186,10 @@ describe('InputPrompt', () => {
     vi.resetAllMocks();
     mockViewActions.setAgentTabBarFocused.mockReset();
     mockViewActions.setBgPillFocused.mockReset();
+    mockViewActions.setLivePanelFocused.mockReset();
+    mockViewActions.setLivePanelSelectedIndex.mockReset();
+    mockViewActions.setBgSelectedIndex.mockReset();
+    mockViewActions.enterBgDetailFromPanel.mockReset();
 
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: false,
@@ -208,9 +218,15 @@ describe('InputPrompt', () => {
       dialogMode: 'closed',
       dialogOpen: false,
       pillFocused: false,
+      livePanelFocused: false,
+      livePanelSelectedIndex: 0,
     });
     mockedUseBackgroundTaskViewActions.mockReturnValue({
       setPillFocused: mockViewActions.setBgPillFocused,
+      setLivePanelFocused: mockViewActions.setLivePanelFocused,
+      setLivePanelSelectedIndex: mockViewActions.setLivePanelSelectedIndex,
+      setSelectedIndex: mockViewActions.setBgSelectedIndex,
+      enterDetailFromPanel: mockViewActions.enterBgDetailFromPanel,
     } as unknown as ReturnType<typeof useBackgroundTaskViewActions>);
 
     mockCommandContext = createMockCommandContext();
@@ -4278,6 +4294,266 @@ describe('InputPrompt', () => {
 
       expect(mockInputHistory.navigateDown).toHaveBeenCalled();
       expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('arrow Down jumps straight to the live agent panel when a bg sub-agent is running (#4907)', async () => {
+      // Core regression for #4907: with both an Arena session (tab bar) and a
+      // running background sub-agent (live panel), Down must reach the panel in
+      // ONE press — not stop at the tab bar first.
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'agent', agentId: 'bg-agent', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('draft');
+      mockBuffer.visualCursor = [0, 'draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down still falls through to the tab bar when the only bg entry is a non-agent (shell) task', async () => {
+      // The rendered live-agent roster (not bgEntries.length) gates the
+      // panel jump: a lone shell task does not render the live panel.
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'shell', shellId: 'bg-shell' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('draft');
+      mockBuffer.visualCursor = [0, 'draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down skips terminal bg agents after the live panel visibility window (#5067)', async () => {
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [
+          {
+            kind: 'agent',
+            agentId: 'done-bg-agent',
+            status: 'completed',
+            endTime: Date.now() - 9000,
+          },
+        ],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('draft');
+      mockBuffer.visualCursor = [0, 'draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down at the bottom of the live agent panel descends to the agent tab bar', async () => {
+      // Restores tab-bar reachability after the priority swap: from the panel's
+      // last row, Down hands focus to the tab bar (the surface below it).
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'agent', agentId: 'bg-agent', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 1, // bottom row: 0 = main, 1 = the only bg agent
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('Down at the bottom of the live agent panel returns to the composer when no tab bar exists', async () => {
+      // bg sub-agents without an Arena session: there is no tab bar below the
+      // panel, so Down at the last row releases focus back to the composer
+      // instead of silently consuming the key.
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'agent', agentId: 'bg-agent', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 1, // bottom row: 0 = main, 1 = the only bg agent
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an expired live panel falls through to the tab bar', async () => {
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [
+          {
+            kind: 'agent',
+            agentId: 'done-bg-agent',
+            status: 'completed',
+            endTime: Date.now() - 9000,
+          },
+        ],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 1,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('Enter on the live panel maps visible agents back to their bg entry index', async () => {
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [
+          { kind: 'shell', shellId: 'bg-shell' },
+          { kind: 'agent', agentId: 'first-live-agent', status: 'running' },
+          {
+            kind: 'agent',
+            agentId: 'expired-agent',
+            status: 'completed',
+            endTime: Date.now() - 9000,
+          },
+          { kind: 'agent', agentId: 'second-live-agent', status: 'running' },
+        ],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 2,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\r'); // Enter
+      await wait();
+
+      expect(mockViewActions.setBgSelectedIndex).toHaveBeenCalledWith(3);
+      expect(mockViewActions.enterBgDetailFromPanel).toHaveBeenCalled();
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
       unmount();
     });
 

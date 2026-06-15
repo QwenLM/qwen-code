@@ -7,7 +7,7 @@
 /**
  * Event-bus for the daemon's per-session NDJSON stream.
  *
- * Design notes (from issue #3803 §04 / threat-model):
+ * Design notes (from the threat-model):
  *   - Each event carries a monotonic `id` (per session) so the SSE
  *     `Last-Event-ID` reconnect protocol can pick up where the client left
  *     off. Backed by a bounded ring of recent events for replay.
@@ -18,6 +18,18 @@
  *   - The bus is push-based; consumers iterate the returned AsyncIterable.
  *     Aborting the supplied AbortSignal closes the iterator promptly.
  */
+
+export interface SessionReplaySnapshot {
+  compactedTurns: BridgeEvent[];
+  liveJournal: BridgeEvent[];
+  lastEventId: number;
+}
+
+export interface CompactionEngine {
+  ingest(event: BridgeEvent): void;
+  snapshot(): SessionReplaySnapshot;
+  close(): void;
+}
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -37,6 +49,10 @@ export interface BridgeEvent {
   type: string;
   /** Frame payload — opaque JSON. */
   data: unknown;
+  /**
+   * Envelope metadata shared by SSE and load/replay responses.
+   */
+  _meta?: Record<string, unknown>;
   /**
    * Identifier of the client that triggered the event, when known. Used by
    * fan-out consumers to suppress echoes of their own actions.
@@ -68,7 +84,7 @@ const DEFAULT_MAX_QUEUED = 256;
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
  * be exhausted by a moderate turn before the client reconnected;
- * 8000 matches the target set in #3803 §02 for chatty Stage 1
+ * 8000 matches the target set for chatty Stage 1
  * sessions, with ~30–60× headroom over a typical-but-busy turn at
  * the cost of a few hundred KB of RAM per session. Operators can
  * override per-daemon via `qwen serve --event-ring-size <n>`.
@@ -96,6 +112,13 @@ const WARN_RESET_RATIO = 0.375;
  */
 const DEFAULT_MAX_SUBSCRIBERS = 64;
 
+function getServerTimestamp(meta: Record<string, unknown> | undefined): number {
+  const existing = meta?.['serverTimestamp'];
+  return typeof existing === 'number' && Number.isFinite(existing)
+    ? existing
+    : Date.now();
+}
+
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
   evicted: boolean;
@@ -120,7 +143,7 @@ interface InternalSub {
    */
   warned: boolean;
   /**
-   * BmJT1: cleanup hook for the eviction path (overflow → close queue
+   * Note: cleanup hook for the eviction path (overflow → close queue
    * → remove from `subs`). Without this, the abort listener registered
    * in `subscribe()` would stay attached against the consumer's
    * AbortSignal — and the consumer is by definition stalled (that's
@@ -147,7 +170,7 @@ export class SubscriberLimitExceededError extends Error {
   }
 }
 
-// FIXME(stage-1.5, chiga0 finding 2):
+// FIXME(stage-1.5):
 // `EventBus` is currently private to the SSE route handler. Stage 1.5
 // should lift it to a top-level building block (likely
 // `packages/event-bus`) so other agent-exposing surfaces
@@ -166,7 +189,12 @@ export class EventBus {
   constructor(
     private readonly ringSize: number = DEFAULT_RING_SIZE,
     private readonly maxSubscribers: number = DEFAULT_MAX_SUBSCRIBERS,
+    private readonly compactionEngine?: CompactionEngine,
   ) {}
+
+  snapshotReplay(): SessionReplaySnapshot | undefined {
+    return this.compactionEngine?.snapshot();
+  }
 
   /** Most recent id ever assigned by `publish`. 0 if no events published. */
   get lastEventId(): number {
@@ -183,7 +211,7 @@ export class EventBus {
    * (with `id` + `v` assigned) on success, or `undefined` when the
    * bus is closed.
    *
-   * **Never throws** (BX9_p contract). Closing the bus mid-publish
+   * **Never throws** (never-throws contract). Closing the bus mid-publish
    * is the only abnormal path and is handled as a return-undefined
    * no-op; subscriber-enqueue failures are caught internally and
    * translated to per-subscriber eviction. Call sites can rely on
@@ -205,14 +233,25 @@ export class EventBus {
     // straightforward; nobody can observe a frame nobody can subscribe
     // to anyway.
     if (this.closed) return undefined;
+    const existingMeta = input._meta;
     const event: BridgeEvent = {
       id: this.nextId++,
       v: EVENT_SCHEMA_VERSION,
       ...input,
+      _meta: {
+        ...(existingMeta ?? {}),
+        serverTimestamp: getServerTimestamp(existingMeta),
+      },
     };
     this.ring.push(event);
+    try {
+      this.compactionEngine?.ingest(event);
+    } catch {
+      // CompactionEngine is best-effort; a throw must not break the
+      // publish() never-throws contract (never-throws).
+    }
     // Eviction-by-shift is O(n) once the ring is full. At the current
-    // default `ringSize=8000` (#3803 §02) the per-publish shift work
+    // default `ringSize=8000` (the target) the per-publish shift work
     // measures in low milliseconds on chatty sessions — still well
     // below per-frame latency budgets. A circular-buffer refactor
     // would push it to O(1) but adds index bookkeeping; deferred until
@@ -244,7 +283,7 @@ export class EventBus {
         // consumer iterator unwinds with a final synthetic event.
         sub.queue.forcePush(evictionFrame);
         sub.queue.close();
-        // BmJT1: dispose the subscription cleanly. `sub.dispose()`
+        // Note: dispose the subscription cleanly. `sub.dispose()`
         // both removes from `this.subs` AND detaches the
         // AbortSignal listener that `subscribe()` registered. Pre-
         // fix the eviction path only did `this.subs.delete(sub)`,
@@ -357,22 +396,140 @@ export class EventBus {
     this.subs.add(sub);
 
     if (opts.lastEventId !== undefined) {
+      // Detect ring eviction on resume
+      // (ring eviction detection): if the earliest event still in the ring has
+      // `id > lastEventId + 1`, then events between `lastEventId + 1`
+      // and `earliestInRing - 1` were evicted before the consumer
+      // reconnected — the consumer's reducer has a gap it doesn't
+      // know about. Pre-fix the resume silently succeeded ("you
+      // caught up!") even though the SDK reducer's state was now
+      // diverged from the daemon's truth.
+      //
+      // Emit `state_resync_required` as an id-less synthetic frame
+      // (no `id` — same no-burn pattern as `client_evicted`, so it
+      // doesn't occupy a slot in the per-session monotonic sequence
+      // other subscribers observe). **Unlike `client_evicted`, the
+      // stream stays OPEN after this frame** — the resync frame is
+      // emitted FIRST (before replay), and replay + live frames
+      // continue flowing afterward. The SDK reducer treats this as
+      // "your state is stale; call loadSession before applying any
+      // further deltas" — see `awaitingResync` flag in the SDK
+      // reducer. The prior wording was corrected to note
+      // that called this "TERMINAL" — that's misleading for oncall;
+      // `client_evicted` is genuinely terminal (closes stream),
+      // `state_resync_required` is recovery-oriented (keeps stream
+      // open).
+      //
+      // Replay continues after the resync frame (per design): the
+      // SDK reducer will auto-skip delta application until
+      // loadSession clears the flag, but the frames stay on the
+      // wire so SDK has the option to compute a "what you missed"
+      // diff later. This is network-friendly (no extra reconnect).
+      // Epoch-reset detection (epoch-reset detection).
+      // `this.nextId` is the next id this bus will assign, so the bus has
+      // only ever emitted ids `< nextId` THIS epoch. A consumer presenting
+      // `lastEventId >= nextId` therefore saw an id this epoch never
+      // produced — the only way that happens is a previous bus epoch
+      // (daemon restart / EventBus rebuild resets `nextId` to 1 and clears
+      // the ring). The `ring_evicted` check below is structurally blind to
+      // this: after a restart the ring is empty (`earliestInRing ===
+      // undefined`), so it is skipped and the consumer would otherwise get
+      // a bare `replay_complete{replayedCount:0}` — a false "you're caught
+      // up" while its accumulated reducer state is stale data from the dead
+      // epoch. Emit `state_resync_required` (reason `epoch_reset`) first.
+      const epochReset = opts.lastEventId >= this.nextId;
+      if (epochReset) {
+        queue.forcePush({
+          v: EVENT_SCHEMA_VERSION,
+          type: 'state_resync_required',
+          data: {
+            reason: 'epoch_reset',
+            lastDeliveredId: opts.lastEventId,
+            // Ring is typically empty right after a restart; fall back to
+            // `nextId` (the first id this epoch will assign) so the field
+            // stays meaningful ("fresh sequence starts here").
+            earliestAvailableId: this.ring[0]?.id ?? this.nextId,
+          },
+        });
+      } else {
+        const earliestInRing = this.ring[0]?.id;
+        if (
+          earliestInRing !== undefined &&
+          earliestInRing > opts.lastEventId + 1
+        ) {
+          queue.forcePush({
+            v: EVENT_SCHEMA_VERSION,
+            type: 'state_resync_required',
+            data: {
+              reason: 'ring_evicted',
+              lastDeliveredId: opts.lastEventId,
+              earliestAvailableId: earliestInRing,
+            },
+          });
+        }
+      }
+      // After an epoch reset the consumer's cursor belongs to a dead epoch,
+      // so every current-epoch event is "new" to it. Filtering replay by the
+      // stale `lastEventId` (e.g. 50) would drop the fresh low-id events
+      // (1,2,3…) entirely. Replay the whole current ring in that case.
+      const replayFrom = epochReset ? 0 : opts.lastEventId;
       // Force-push replay frames so they bypass the per-subscriber size
       // cap. The cap protects against a slow live consumer; replay is
       // already historical and silently dropping it would undermine the
       // `Last-Event-ID` resume contract (the consumer would think they
       // caught up). If the gap really is enormous, the queue will be
       // primed with a long backlog the consumer drains at its own pace.
+      let replayedCount = 0;
+      let lastReplayedId: number | undefined;
       for (const e of this.ring) {
         // The ring only ever contains live events (publish() always
         // assigns an id before pushing to ring), so `e.id` is never
         // undefined here — but the type system can't see that since
         // BridgeEvent.id is optional for synthetic terminal frames.
         // Guard explicitly to keep narrow typing without runtime cost.
-        if (e.id !== undefined && e.id > opts.lastEventId) {
+        if (e.id !== undefined && e.id > replayFrom) {
           queue.forcePush(e);
+          replayedCount += 1;
+          lastReplayedId = e.id;
         }
       }
+      // Emit a `replay_complete` sentinel so consumers can deterministically
+      // drop catch-up indicators. Fires both when replay actually
+      // delivered frames AND when there was nothing to replay (so the
+      // consumer always sees the transition from "catching up" to
+      // "live"). Synthetic frame — no `id` so it doesn't burn a slot in
+      // the per-session sequence (same pattern as `client_evicted` /
+      // `state_resync_required`).
+      //
+      // Without this sentinel, a consumer attaching via Last-Event-ID
+      // has no positive signal that replay drained — they have to
+      // heuristically time out the spinner. The state_resync_required
+      // path already has its own frame (above); the success path
+      // needed parity.
+      //
+      // `replayedCount` is the actual number of frames force-pushed,
+      // counted in the loop above — NOT `lastId - opts.lastEventId`,
+      // which would over-count when the ring has holes (state_resync
+      // path leaves a gap before the ring's earliest id).
+      queue.forcePush({
+        v: EVENT_SCHEMA_VERSION,
+        type: 'replay_complete',
+        data: {
+          // Note: `lastReplayedEventId`
+          // is the canonical wire name — the old `lastEventId` collided
+          // semantically with the SSE protocol's `Last-Event-ID` (envelope
+          // `id`) in raw daemon traces. Emit both: `lastReplayedEventId`
+          // for current SDKs and `lastEventId` as a deprecated alias so
+          // pre-rename consumers keep working (additive, non-breaking).
+          ...(lastReplayedId !== undefined
+            ? {
+                lastReplayedEventId: lastReplayedId,
+                lastEventId: lastReplayedId,
+              }
+            : {}),
+          replayedCount,
+        },
+      });
     }
 
     let disposed = false;
@@ -432,6 +589,7 @@ export class EventBus {
     this.closed = true;
     for (const sub of this.subs) sub.queue.close();
     this.subs.clear();
+    this.compactionEngine?.close();
   }
 }
 

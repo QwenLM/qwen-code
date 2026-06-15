@@ -31,6 +31,7 @@ import {
 } from '../../core/contentGenerator.js';
 import { GeminiChat } from '../../core/geminiChat.js';
 import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
+import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
 import { ContextState, AgentHeadless } from './agent-headless.js';
@@ -79,17 +80,17 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   };
 });
 vi.mock('../../utils/environmentContext.js', () => ({
+  SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    {
-      role: 'user',
-      parts: [{ text: 'Env Context' }],
-    },
-    {
-      role: 'model',
-      parts: [{ text: 'Got it. Thanks for the context!' }],
-    },
-    ...(extraHistory ?? []),
+    [
+      {
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nEnv Context\n</system-reminder>' }],
+      },
+      ...(extraHistory ?? []),
+    ],
+    [],
   ]),
 }));
 vi.mock('../../core/nonInteractiveToolExecutor.js');
@@ -464,11 +465,16 @@ describe('subagent.ts', () => {
 
         // Check History (should include environment context)
         const history = callArgs[2];
+        expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
+          includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: true,
+        });
         expect(history).toEqual([
-          { role: 'user', parts: [{ text: 'Env Context' }] },
           {
-            role: 'model',
-            parts: [{ text: 'Got it. Thanks for the context!' }],
+            role: 'user',
+            parts: [
+              { text: '<system-reminder>\nEnv Context\n</system-reminder>' },
+            ],
           },
         ]);
       });
@@ -1023,6 +1029,86 @@ describe('subagent.ts', () => {
         );
 
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
+      it('should execute only the first duplicate functionCall id in one model turn', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'dup_id_0001',
+                name: 'list_files',
+                args: { path: 'a' },
+              },
+              {
+                id: 'dup_id_0001',
+                name: 'list_files',
+                args: { path: 'b' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: 'a' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt',
+            returnDisplay: 'Listed 1 file',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledOnce();
+        const secondCallArgs = mockSendMessageStream.mock.calls[1][1];
+        const parts = secondCallArgs.message as Part[];
+        expect(
+          parts
+            .map((part) => part.functionResponse?.id)
+            .filter((id): id is string => Boolean(id)),
+        ).toEqual(['dup_id_0001']);
       });
     });
 
@@ -1664,6 +1750,96 @@ describe('subagent.ts', () => {
         expect(writeResult!.error).not.toContain(
           'rejected to prevent writing truncated content',
         );
+      });
+
+      it('keeps automatic max token escalation warm for the next agent round', async () => {
+        const writeFileToolDef: FunctionDeclaration = {
+          name: WriteFileTool.Name,
+          description: 'Writes a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([writeFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === WriteFileTool.Name) {
+              return new WriteFileTool(config);
+            }
+            return undefined;
+          }),
+        });
+
+        const toolConfig: ToolConfig = { tools: [WriteFileTool.Name] };
+        let callCount = 0;
+        mockSendMessageStream.mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return (async function* () {
+              yield {
+                type: 'retry',
+                maxOutputTokensEscalated: 65_536,
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call_write_complete',
+                      name: WriteFileTool.Name,
+                      args: {
+                        file_path: '/tmp/sticky-escalation.txt',
+                        content: 'hello',
+                      },
+                    },
+                  ],
+                },
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    { finishReason: 'STOP', content: { parts: [] } },
+                  ],
+                },
+              };
+            })();
+          }
+
+          return (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'STOP',
+                    content: { parts: [{ text: 'done' }] },
+                  },
+                ],
+              },
+            };
+          })();
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(
+          mockSendMessageStream.mock.calls[0][1].config.maxOutputTokens,
+        ).toBeUndefined();
+        expect(
+          mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
+        ).toBe(65_536);
       });
     });
   });

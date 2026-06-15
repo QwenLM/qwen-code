@@ -64,6 +64,36 @@ describe('OpenAIContentConverter', () => {
     };
   }
 
+  function hasOpenAIToolCalls(
+    message: OpenAI.Chat.ChatCompletionMessageParam,
+  ): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+    tool_calls: OpenAI.Chat.ChatCompletionMessageToolCall[];
+  } {
+    return (
+      message.role === 'assistant' &&
+      'tool_calls' in message &&
+      Array.isArray(message.tool_calls)
+    );
+  }
+
+  function isOpenAISplitMediaMessage(
+    message: OpenAI.Chat.ChatCompletionMessageParam,
+  ): boolean {
+    return (
+      message.role === 'user' &&
+      Array.isArray(message.content) &&
+      message.content.some((part) => {
+        const typedPart = part as { type?: string };
+        return (
+          typedPart.type === 'image_url' ||
+          typedPart.type === 'input_audio' ||
+          typedPart.type === 'video_url' ||
+          typedPart.type === 'file'
+        );
+      })
+    );
+  }
+
   describe('stream-local parser state', () => {
     it('creates fresh parser instances', () => {
       const ctx1 = new StreamingToolCallParser();
@@ -89,6 +119,39 @@ describe('OpenAIContentConverter', () => {
       expect(ctx2.getBuffer(0)).toBe('{"b":2}');
       expect(ctx1.getToolCallMeta(0).id).toBe('call_A');
       expect(ctx2.getToolCallMeta(0).id).toBe('call_B');
+    });
+
+    it('ignores replay chunks after an id already has complete JSON args', () => {
+      const parser = new StreamingToolCallParser();
+
+      parser.addChunk(0, '{"cmd":"echo hi"}', 'dup_id_0001', 'shell');
+      parser.addChunk(0, '{"cmd":"echo hi"}', 'dup_id_0001', 'shell');
+
+      expect(parser.getBuffer(0)).toBe('{"cmd":"echo hi"}');
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'dup_id_0001',
+          name: 'shell',
+          args: { cmd: 'echo hi' },
+          index: 0,
+        },
+      ]);
+    });
+
+    it('keeps accumulating normal fragmented JSON before it is complete', () => {
+      const parser = new StreamingToolCallParser();
+
+      parser.addChunk(0, '{"cmd"', 'call_fragmented', 'shell');
+      parser.addChunk(0, ':"echo hi"}', 'call_fragmented', 'shell');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_fragmented',
+          name: 'shell',
+          args: { cmd: 'echo hi' },
+          index: 0,
+        },
+      ]);
     });
 
     it('demuxes interleaved chunks from two concurrent streams correctly (#3516)', () => {
@@ -267,15 +330,45 @@ describe('OpenAIContentConverter', () => {
       };
     };
 
+    it('preserves ordered multi-part startup reminder user content', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: '<system-reminder>\ndeferred tools' },
+              { text: '<system-reminder>\nstartup context' },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>\ndeferred tools' },
+            { type: 'text', text: '<system-reminder>\nstartup context' },
+          ],
+        },
+      ]);
+    });
+
     it('should extract raw output from function response objects', () => {
       const request = createRequestWithFunctionResponse({
         output: 'Raw output text',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(
-        request,
-        requestContext,
-      );
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
       const toolMessage = messages.find((message) => message.role === 'tool');
 
       expect(toolMessage).toBeDefined();
@@ -757,10 +850,11 @@ describe('OpenAIContentConverter', () => {
       expect(img?.image_url?.url).toBe('data:image/png;base64,xxx');
     });
 
-    it('should preserve prior embedded-media behavior when splitToolMedia is false (default) on parallel tool calls (issue #3616)', () => {
+    it('should preserve embedded-media behavior when splitToolMedia is explicitly false (opt-out) on parallel tool calls (issue #3616, #4876)', () => {
       // Same input as the parallel-tool-calls split test, but with the flag
-      // off. Asserts that the opt-in is actually opt-in: media stays embedded
-      // in the tool message and no follow-up user message is synthesised.
+      // explicitly off. Since #4876 the default is true (spec-compliant), so
+      // this asserts the opt-out path: media stays embedded in the tool
+      // message and no follow-up user message is synthesised.
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -796,11 +890,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      // requestContext default has splitToolMedia undefined / false
-      const messages = converter.convertGeminiRequestToOpenAI(
-        request,
-        requestContext,
-      );
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: false,
+      });
 
       const toolMessages = messages.filter((m) => m.role === 'tool');
       const userMessages = messages.filter((m) => m.role === 'user');
@@ -1648,6 +1741,194 @@ describe('OpenAIContentConverter', () => {
         false,
       );
       expect(messages.some((message) => message.role === 'tool')).toBe(false);
+    });
+
+    it('should drop later assistant tool calls that reuse a previous surviving id', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'b.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'B' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const assistantToolCallIds = messages.flatMap((message) =>
+        hasOpenAIToolCalls(message)
+          ? message.tool_calls.map((toolCall) => toolCall.id)
+          : [],
+      );
+      const toolResultIds = messages
+        .filter(
+          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+            message.role === 'tool' && 'tool_call_id' in message,
+        )
+        .map((message) => message.tool_call_id);
+
+      expect(assistantToolCallIds).toEqual(['dup_id_0001']);
+      expect(toolResultIds).toEqual(['dup_id_0001']);
+    });
+
+    it('should drop duplicate tool call IDs within a single assistant message', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'b.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistant = messages.find(hasOpenAIToolCalls);
+
+      expect(assistant?.tool_calls).toHaveLength(1);
+      expect(assistant?.tool_calls?.[0].id).toBe('dup_id_0001');
+      expect(assistant?.tool_calls?.[0].function.arguments).toBe(
+        JSON.stringify({ file_path: 'a.ts' }),
+      );
+    });
+
+    it('should keep only the first adjacent tool response and its split media for a surviving id', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_image',
+                  name: 'screenshot',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_image',
+                  name: 'screenshot',
+                  response: { output: 'first' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'first' } },
+                  ],
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_image',
+                  name: 'screenshot',
+                  response: { output: 'second' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'second' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+      const toolMessages = messages.filter(
+        (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+          message.role === 'tool' && 'tool_call_id' in message,
+      );
+      const splitMediaMessages = messages.filter(isOpenAISplitMediaMessage);
+
+      expect(toolMessages).toHaveLength(1);
+      expect(toolMessages[0]?.content).toBe('first');
+      expect(splitMediaMessages).toHaveLength(1);
+      expect(JSON.stringify(splitMediaMessages[0])).toContain('first');
+      expect(JSON.stringify(splitMediaMessages[0])).not.toContain('second');
     });
 
     it('should keep a tool response after an empty-id tool message', () => {

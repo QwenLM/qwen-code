@@ -22,6 +22,7 @@ import type { Config } from '../../config/config.js';
 import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
   PromptConfig,
@@ -88,12 +89,14 @@ import {
   formatStopHookBlockingCapWarning,
 } from '../../hooks/stopHookCap.js';
 import { ApprovalMode } from '../../config/config.js';
+import { isTeammate } from '../../agents/team/identity.js';
 import {
   getAgentJsonlPath,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
   patchAgentMeta,
   writeAgentMeta,
+  type AgentPersistedCliFlags,
 } from '../../agents/agent-transcript.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
@@ -185,6 +188,8 @@ export interface AgentParams {
   prompt: string;
   subagent_type?: string;
   run_in_background?: boolean;
+  /** When set, spawn as a named teammate via TeamManager instead of a one-shot subagent. */
+  name?: string;
   /**
    * When set to `'worktree'`, spins up a temporary git worktree under
    * `<projectRoot>/.qwen/worktrees/agent-<7hex>` and instructs the agent to
@@ -197,6 +202,13 @@ export interface AgentParams {
 }
 
 const debugLogger = createDebugLogger('AGENT');
+
+const TEAM_AGENT_NAME_PROPERTY = {
+  type: 'string',
+  description:
+    'When provided, spawn as a named teammate via the active team ' +
+    'instead of a one-shot subagent. Requires an active team context.',
+};
 
 /**
  * Maps ApprovalMode to PermissionMode for hook events.
@@ -240,6 +252,16 @@ export function resolveSubagentApprovalMode(
     parentApprovalMode === ApprovalMode.AUTO
   ) {
     return approvalModeToPermissionMode(parentApprovalMode);
+  }
+
+  // The subagent-only `bubble` mode is not an ApprovalMode enum member; it
+  // resolves to Default run behavior (tool calls require confirmation). The
+  // background launch path is what turns deny into surface-to-parent. Handle
+  // it explicitly rather than relying on approvalModeToPermissionMode's
+  // `default:` fall-through, so adding a real ApprovalMode.BUBBLE later can't
+  // silently change this.
+  if (agentApprovalMode === BUBBLE_APPROVAL_MODE) {
+    return PermissionMode.Default;
   }
 
   // Agent definition's mode applies if set
@@ -365,6 +387,57 @@ export interface ApprovalModeOverrideHandle {
   cleanup: () => void;
 }
 
+export interface ApprovalModeOverrideOptions {
+  persistedCliFlags?: AgentPersistedCliFlags;
+}
+
+function hasOwn(value: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function applyPersistedCliFlagOverrides(
+  override: Config,
+  flags: AgentPersistedCliFlags | undefined,
+): void {
+  if (!flags) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ov = override as any;
+  if (flags.bare !== undefined) {
+    ov.getBareMode = () => flags.bare;
+  }
+  if (hasOwn(flags, 'sandbox')) {
+    const sandbox = flags.sandbox ?? undefined;
+    ov.getSandbox = () => sandbox;
+  }
+  if (flags.screenReader !== undefined) {
+    ov.getScreenReader = () => flags.screenReader;
+  }
+  if (flags.model !== undefined) {
+    ov.getModel = () => flags.model;
+  }
+  if (flags.maxSessionTurns !== undefined) {
+    ov.getMaxSessionTurns = () => flags.maxSessionTurns;
+  }
+  if (flags.maxToolCalls !== undefined) {
+    ov.getMaxToolCalls = () => flags.maxToolCalls;
+  }
+}
+
+function capturePersistedCliFlags(
+  config: Config,
+  resolvedApprovalMode: ApprovalMode,
+): AgentPersistedCliFlags {
+  return {
+    approvalMode: resolvedApprovalMode,
+    bare: config.getBareMode(),
+    sandbox: config.getSandbox() ?? null,
+    screenReader: config.getScreenReader(),
+    model: config.getModel(),
+    maxSessionTurns: config.getMaxSessionTurns(),
+    maxToolCalls: config.getMaxToolCalls(),
+  };
+}
+
 /**
  * Creates a Config override with a different approval mode.
  *
@@ -397,10 +470,12 @@ export interface ApprovalModeOverrideHandle {
 export async function createApprovalModeOverride(
   base: Config,
   mode: ApprovalMode,
+  options: ApprovalModeOverrideOptions = {},
 ): Promise<ApprovalModeOverrideHandle> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   override.getApprovalMode = (): ApprovalMode => mode;
+  applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
   await rebuildToolRegistryOnOverride(override as Config, base);
 
   let cleanup: () => void = () => {};
@@ -437,6 +512,14 @@ export async function createApprovalModeOverride(
 export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   static readonly Name: string = ToolNames.AGENT;
 
+  override get maxOutputChars(): number {
+    return 32_000;
+  }
+
+  override get truncateKeep(): 'tail' {
+    return 'tail';
+  }
+
   private subagentManager: SubagentManager;
   private availableSubagents: SubagentConfig[] =
     BuiltinAgentRegistry.getBuiltinAgents();
@@ -464,6 +547,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             'Set to true to run this agent in the background. You will be notified when it completes.',
         },
+        ...(config.isAgentTeamEnabled()
+          ? { name: TEAM_AGENT_NAME_PROPERTY }
+          : {}),
         isolation: {
           type: 'string',
           enum: ['worktree'],
@@ -480,7 +566,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       AgentTool.Name,
       ToolDisplayNames.AGENT,
       'Launch a new agent to handle complex, multi-step tasks autonomously.\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n',
-      Kind.Other,
+      Kind.Agent,
       initialSchema,
       true, // isOutputMarkdown
       true, // canUpdateOutput - Enable live output updates for real-time progress
@@ -534,6 +620,13 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         .join('\n');
     }
 
+    // Only advertise team coordination when the experimental
+    // feature is on; otherwise the model is steered toward a
+    // `team_create` tool that isn't registered.
+    const teamGuidance = this.config.isAgentTeamEnabled()
+      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
+      : '';
+
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -552,6 +645,7 @@ When NOT to use the Agent tool:
 - If you are searching for code within a specific file or set of 2-3 files, use the ${ToolNames.READ_FILE} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
 - Other tasks that are not related to the agent descriptions above
 
+${teamGuidance}
 
 Usage notes:
 - Always include a short description (3-5 words) summarizing what the agent will do
@@ -602,7 +696,6 @@ Example usage:
 
 <example_agent_descriptions>
 "test-runner": use this agent after you are done writing code to run tests
-"greeting-responder": use this agent to respond to user greetings with a friendly joke
 </example_agent_descriptions>
 
 <example>
@@ -622,14 +715,6 @@ Since a significant piece of code was written and the task was completed, now us
 </commentary>
 assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
 </example>
-
-<example>
-user: "Hello"
-<commentary>
-Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
-</commentary>
-assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-responder agent"
-</example>
 `;
 
     // Update description using object property assignment since it's readonly
@@ -644,6 +729,7 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
         subagent_type?: {
           enum?: string[];
         };
+        name?: typeof TEAM_AGENT_NAME_PROPERTY;
       };
     };
     if (schema.properties && schema.properties.subagent_type) {
@@ -651,6 +737,13 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
         schema.properties.subagent_type.enum = subagentNames;
       } else {
         delete schema.properties.subagent_type.enum;
+      }
+    }
+    if (schema.properties) {
+      if (this.config.isAgentTeamEnabled()) {
+        schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
+      } else {
+        delete schema.properties.name;
       }
     }
   }
@@ -1548,6 +1641,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // ─── Team routing ────────────────────────────────────
+    // A name only means "spawn a teammate" while a team is active. Older
+    // prompts may still pass it without a team; treat that as a normal
+    // one-shot agent instead of failing the whole task.
+    if (this.params.name && !isTeammate()) {
+      if (!this.config.getTeamManager()) {
+        debugLogger.debug(
+          `[AgentTool] Ignoring teammate name "${this.params.name}" because no team is active.`,
+        );
+      } else {
+        return this.executeTeammate(this.params.name, signal, updateOutput);
+      }
+    }
+
     // ── Isolation state hoisted to the outermost scope ────────────
     // The outer try/catch in this method is the last line of defence
     // against pre-execution failures (e.g. createApprovalModeOverride
@@ -1687,8 +1794,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let restoreParentPM: () => void = () => {};
 
     try {
-      // When subagent_type is omitted and fork is enabled (opt-in +
-      // interactive), use fork. Otherwise fall back to general-purpose.
+      // When subagent_type is omitted and fork is available in an interactive
+      // session, use fork. Otherwise fall back to general-purpose.
       const isFork =
         !this.params.subagent_type && isForkSubagentEnabled(this.config);
       const effectiveSubagentType =
@@ -1997,16 +2104,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagent: AgentHeadless;
       let taskPrompt: string;
 
+      // Per-spawn cleanup the subagent manager returns. The caller MUST
+      // invoke this in the same `finally` block that wraps `execute()` —
+      // see SubagentManager.createAgentHeadless's JSDoc for the leak
+      // scenarios it covers (ephemeral HookRegistry entries, force-rebuilt
+      // ToolRegistry owning per-agent MCP child processes / sockets).
+      // Fork subagents share the parent's lifecycle and need no per-spawn
+      // dispose, so this stays undefined on the fork path.
+      let subagentDispose: (() => Promise<void>) | undefined;
       if (isFork) {
         const fork = await this.createForkSubagent(agentConfig);
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
       } else {
-        subagent = await this.subagentManager.createAgentHeadless(
+        const result = await this.subagentManager.createAgentHeadless(
           subagentConfig,
           agentConfig,
           { eventEmitter: this.eventEmitter },
         );
+        subagent = result.subagent;
+        subagentDispose = result.dispose;
         taskPrompt = this.params.prompt;
       }
 
@@ -2062,13 +2179,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // survive ESC cancellation of the parent's current turn.
         const bgAbortController = new AbortController();
 
-        // Background agents have no UI, so interactive permission prompts must be
-        // auto-denied rather than auto-approved (YOLO). PermissionRequest hooks
-        // still run and can override. Use Object.create so the resolved approval
-        // mode override (e.g. subagent-level `approvalMode: auto-edit`) is preserved.
+        // Background agents have no inline UI, so a tool call that still needs
+        // confirmation is by default auto-denied rather than auto-approved
+        // (YOLO). PermissionRequest hooks still run and can override. When the
+        // agent's definition uses `approvalMode: bubble` AND the session is
+        // interactive, we instead let the normal approval path open (emitting
+        // TOOL_WAITING_APPROVAL) and surface the prompt in the parent session's
+        // Background tasks UI — see `registry.bridgeApprovalEvents` below.
+        // Non-interactive sessions can't answer, so they keep auto-deny.
+        // (`bubble` resolves to `default` run behavior, so the resolved mode
+        // already requires confirmation — this only flips deny → surface.)
+        const shouldBubble = Boolean(
+          subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
+            this.config.isInteractive(),
+        );
+        // Use Object.create so the resolved approval mode override (e.g.
+        // subagent-level `approvalMode: auto-edit`) is preserved.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const bgConfig = Object.create(agentConfig) as any;
-        bgConfig.getShouldAvoidPermissionPrompts = () => true;
+        bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 
         // Register in the background task registry only AFTER init succeeds — if
         // construction throws, a pre-registered phantom 'running' entry would hang
@@ -2083,6 +2212,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         let bgTaskPrompt: string;
         let bgPromptConfig: PromptConfig | undefined;
         let bgToolConfig: ToolConfig | undefined;
+        // Per-spawn cleanup from `createAgentHeadless` (background path).
+        // The bg `finally` below invokes this alongside the existing
+        // parent-registry stop; see the foreground call site for the leak
+        // scenarios it covers.
+        let bgSubagentDispose: (() => Promise<void>) | undefined;
         if (isFork) {
           const fork = await this.createForkSubagent(
             bgConfig as Config,
@@ -2094,11 +2228,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           bgPromptConfig = fork.promptConfig;
           bgToolConfig = fork.toolConfig;
         } else {
-          bgSubagent = await this.subagentManager.createAgentHeadless(
+          const bgResult = await this.subagentManager.createAgentHeadless(
             subagentConfig,
             bgConfig as Config,
             { eventEmitter: bgEventEmitter },
           );
+          bgSubagent = bgResult.subagent;
+          bgSubagentDispose = bgResult.dispose;
           bgTaskPrompt = this.params.prompt;
         }
 
@@ -2224,6 +2360,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          persistedCliFlags: capturePersistedCliFlags(
+            this.config,
+            resolvedApprovalMode,
+          ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
@@ -2266,6 +2406,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
         bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+
+        // Bridge permission prompts to the parent session's Background tasks
+        // UI when bubbling is enabled. No-op subscription otherwise (the
+        // scheduler auto-denies before any TOOL_WAITING_APPROVAL fires), but
+        // we only wire it when enabled to keep the emitter free of dead
+        // listeners.
+        const cleanupApprovalBridge = shouldBubble
+          ? registry.bridgeApprovalEvents(hookOpts.agentId, bgEmitter)
+          : undefined;
 
         const cleanupOwnedMonitorNotifications =
           this.registerOwnedMonitorNotifications(
@@ -2440,6 +2589,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           } finally {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
             bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+            cleanupApprovalBridge?.();
             cleanupOwnedMonitorNotifications();
             cleanupJsonl?.();
             // Release the per-subagent ToolRegistry now that the
@@ -2452,6 +2602,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               .getToolRegistry()
               .stop()
               .catch(() => {});
+            // Per-spawn cleanup from `SubagentManager.createAgentHeadless`
+            // (background path). Mirrors the foreground finally: releases
+            // agent-scope hook entries and stops the per-agent ToolRegistry
+            // owning MCP child processes; not redundant with the parent
+            // registry stop above.
+            void bgSubagentDispose?.().catch(() => {});
             // Restore parent PermissionManager's dangerous allow rules
             // if this AUTO override stripped them. Background path:
             // restore fires when the bg agent terminates (complete /
@@ -2756,6 +2912,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          persistedCliFlags: capturePersistedCliFlags(
+            this.config,
+            resolvedApprovalMode,
+          ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
@@ -2857,6 +3017,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           .getToolRegistry()
           .stop()
           .catch(() => {});
+        // Per-spawn cleanup from `SubagentManager.createAgentHeadless`:
+        // releases the agent-scope hook entries registered for this
+        // invocation and stops the per-agent ToolRegistry that the force
+        // rebuild created to land `mcpServers` discovery. The parent
+        // `getToolRegistry().stop()` above only reaches the parent's
+        // registry — the per-agent one is distinct.
+        void subagentDispose?.().catch(() => {});
         // Restore parent PermissionManager's dangerous allow rules if
         // this AUTO override stripped them on creation. No-op for non-
         // AUTO overrides and for AUTO overrides when parent was already
@@ -2907,6 +3074,83 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       return {
         llmContent: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
         returnDisplay: errorDisplay,
+      };
+    }
+  }
+
+  /**
+   * Spawn a named teammate via TeamManager.
+   * Returns immediately — the teammate runs concurrently.
+   * Messages from the teammate are delivered to the leader
+   * via TeamManager's inbox polling mechanism.
+   *
+   * `signal` aborts the spawn itself if the leader cancels
+   * before the teammate is registered. `updateOutput` lets the
+   * UI render a brief "spawning…" / "spawned" status while the
+   * teammate's runtime config is loaded.
+   */
+  private async executeTeammate(
+    name: string,
+    signal?: AbortSignal,
+    updateOutput?: (output: ToolResultDisplay) => void,
+  ): Promise<ToolResult> {
+    // Caller (`execute`) gates routing on `!isTeammate()`, so the
+    // recursive-spawn check is upstream. Re-check `getTeamManager`
+    // only — it can race with team_delete between the routing
+    // decision and this point.
+    const teamManager = this.config.getTeamManager();
+    if (!teamManager) {
+      return {
+        llmContent: 'No active team. Use TeamCreate to start a team first.',
+        returnDisplay: 'No active team. Use TeamCreate to start a team first.',
+        error: { message: 'No active team.' },
+      };
+    }
+
+    if (signal?.aborted) {
+      return {
+        llmContent: `Teammate spawn aborted before "${name}" was registered.`,
+        returnDisplay: `Teammate spawn aborted.`,
+        error: { message: 'Aborted.' },
+      };
+    }
+
+    updateOutput?.({
+      type: 'task_execution' as const,
+      subagentName: name,
+      taskDescription: this.params.description,
+      taskPrompt: this.params.prompt,
+      status: 'running' as const,
+    });
+
+    try {
+      await teamManager.spawnTeammate({
+        name,
+        prompt: this.params.prompt,
+        agentType: this.params.subagent_type,
+        cwd: this.config.getCwd(),
+      });
+
+      // Return immediately — teammate runs concurrently.
+      const msg =
+        `Teammate "${name}" is now running concurrently.` +
+        ` Task: ${this.params.description}` +
+        '\n\nYou will receive their messages as they' +
+        ' arrive. Do NOT call task_list to check on' +
+        ' them — teammates report results via' +
+        ' send_message. Spawn more teammates or' +
+        ' end your turn and wait.';
+      return { llmContent: msg, returnDisplay: msg };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      debugLogger.error(
+        `[AgentTool] Failed to spawn teammate: ${errorMessage}`,
+      );
+      return {
+        llmContent: `Failed to spawn teammate "${name}": ${errorMessage}`,
+        returnDisplay: `Failed to spawn teammate "${name}": ${errorMessage}`,
+        error: { message: errorMessage },
       };
     }
   }

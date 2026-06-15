@@ -113,6 +113,7 @@ describe('Session.pendingWorktreeNotice', () => {
         recordToolResult: vi.fn(),
         recordSlashCommand: vi.fn(),
         rewindRecording: vi.fn(),
+        setTitleRecordedCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
@@ -135,6 +136,17 @@ describe('Session.pendingWorktreeNotice', () => {
       // Added on main after the test was written; Session.prompt's stop-hook
       // loop reads this so the mock has to provide it.
       getStopHookBlockingCap: vi.fn().mockReturnValue(0),
+      // Session constructor registers background-notification callbacks on
+      // these registries; provide no-op stubs so construction succeeds.
+      getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+        setNotificationCallback: vi.fn(),
+      }),
+      getMonitorRegistry: vi.fn().mockReturnValue({
+        setNotificationCallback: vi.fn(),
+      }),
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+        setNotificationCallback: vi.fn(),
+      }),
     } as unknown as Config;
 
     mockClient = {

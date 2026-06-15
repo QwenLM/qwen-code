@@ -1219,6 +1219,10 @@ export type TextBufferAction =
       type: 'vim_change_movement';
       payload: { movement: 'h' | 'j' | 'k' | 'l'; count: number };
     }
+  | {
+      type: 'vim_delete_movement';
+      payload: { movement: 'h' | 'j' | 'k' | 'l'; count: number };
+    }
   // New vim actions for stateless command handling
   | { type: 'vim_move_left'; payload: { count: number } }
   | { type: 'vim_move_right'; payload: { count: number } }
@@ -1393,9 +1397,29 @@ function textBufferReducerLogic(
             } else if (newVisualRow > 0) {
               newVisualRow--;
               newVisualCol = cpLen(visualLines[newVisualRow] ?? '');
+              const previousMapping = visualToLogicalMap[newVisualRow];
+              if (previousMapping) {
+                const [previousLogRow, previousLogStartCol] = previousMapping;
+                const previousCursorCol = previousLogStartCol + newVisualCol;
+                if (
+                  previousLogRow === cursorRow &&
+                  previousCursorCol === cursorCol &&
+                  newVisualCol > 0
+                ) {
+                  newVisualCol--;
+                }
+              }
             }
             break;
           case 'right':
+            // No stall-fix needed here (unlike 'left' above): the cursor
+            // resolver (calculateVisualCursorFromLayout) selects segments with
+            // a strict `logicalCol < nextStartColInLogical`, so a cursor at a
+            // hard-wrap boundary always lands at the START of the next visual
+            // row, not the end of the current one — wrapping right never maps
+            // back to the same logical position. If that segment selection ever
+            // changes (e.g. `<` → `<=`), a symmetric decrement would be needed
+            // here to avoid a mirror-image right-movement stall.
             newPreferredCol = null;
             if (newVisualCol < currentVisLineLen) {
               newVisualCol++;
@@ -1767,6 +1791,21 @@ function textBufferReducerLogic(
           cursorCol: 0,
           preferredCol: null,
         };
+      } else if (cursorRow > 0) {
+        const nextState = pushUndoLocal(state);
+        const prevLineContent = currentLine(cursorRow - 1);
+        const currentLineContent = currentLine(cursorRow);
+        const newCol = cpLen(prevLineContent);
+        const newLines = [...nextState.lines];
+        newLines[cursorRow - 1] = prevLineContent + currentLineContent;
+        newLines.splice(cursorRow, 1);
+        return {
+          ...nextState,
+          lines: newLines,
+          cursorRow: cursorRow - 1,
+          cursorCol: newCol,
+          preferredCol: null,
+        };
       }
       return state;
     }
@@ -1848,6 +1887,7 @@ function textBufferReducerLogic(
     case 'vim_delete_to_end_of_line':
     case 'vim_change_to_end_of_line':
     case 'vim_change_movement':
+    case 'vim_delete_movement':
     case 'vim_move_left':
     case 'vim_move_right':
     case 'vim_move_up':
@@ -2331,6 +2371,13 @@ export function useTextBuffer({
     [dispatch],
   );
 
+  const vimDeleteMovement = useCallback(
+    (movement: 'h' | 'j' | 'k' | 'l', count: number): void => {
+      dispatch({ type: 'vim_delete_movement', payload: { movement, count } });
+    },
+    [dispatch],
+  );
+
   // New vim navigation and operation methods
   const vimMoveLeft = useCallback(
     (count: number): void => {
@@ -2756,6 +2803,7 @@ export function useTextBuffer({
       vimDeleteToEndOfLine,
       vimChangeToEndOfLine,
       vimChangeMovement,
+      vimDeleteMovement,
       vimMoveLeft,
       vimMoveRight,
       vimMoveUp,
@@ -2813,6 +2861,7 @@ export function useTextBuffer({
       vimDeleteToEndOfLine,
       vimChangeToEndOfLine,
       vimChangeMovement,
+      vimDeleteMovement,
       vimMoveLeft,
       vimMoveRight,
       vimMoveUp,
@@ -2998,6 +3047,10 @@ export interface TextBuffer {
    * Change movement operations (vim 'ch', 'cj', 'ck', 'cl' commands)
    */
   vimChangeMovement: (movement: 'h' | 'j' | 'k' | 'l', count: number) => void;
+  /**
+   * Delete movement operations (vim 'dh', 'dj', 'dk', 'dl' commands)
+   */
+  vimDeleteMovement: (movement: 'h' | 'j' | 'k' | 'l', count: number) => void;
   /**
    * Move cursor left N times (vim 'h' command)
    */

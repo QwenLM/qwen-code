@@ -34,7 +34,10 @@ import {
   ToolDisplayNames,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
-import { useBackgroundTaskViewState } from '../../contexts/BackgroundTaskViewContext.js';
+import {
+  useBackgroundTaskViewActions,
+  useBackgroundTaskViewState,
+} from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -43,6 +46,7 @@ import type {
   AgentDialogEntry,
   DialogEntry,
 } from '../../hooks/useBackgroundTaskView.js';
+import { isLiveAgentPanelVisibleEntry } from './liveAgentPanelVisibility.js';
 
 interface LiveAgentPanelProps {
   /**
@@ -60,13 +64,6 @@ interface LiveAgentPanelProps {
 }
 
 const DEFAULT_MAX_ROWS = 12;
-// Keep terminal entries on the panel briefly so the user gets visual
-// feedback ("✓ done · 12s") when a subagent finishes, then they fall off
-// and the user goes to BackgroundTasksDialog for a deeper look. Mirrors
-// Claude Code's `RECENT_COMPLETED_TTL_MS = 30_000` knob, scaled down
-// because the panel is denser and we have the dialog as the long-term
-// review surface.
-const TERMINAL_VISIBLE_MS = 8000;
 // Re-export under a panel-local alias so the source of truth stays
 // in `subagents/builtin-agents.ts` (a backend rename of the default
 // type would otherwise silently re-introduce the redundant
@@ -181,6 +178,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
 }) => {
   const { entries, dialogOpen, livePanelFocused, livePanelSelectedIndex } =
     useBackgroundTaskViewState();
+  const { setLivePanelFocused } = useBackgroundTaskViewActions();
   // Reach for Config via the raw context (NOT useConfig) so the panel
   // can degrade to snapshot-only when no provider is mounted — e.g.
   // unit tests that render the component in isolation. useConfig
@@ -206,12 +204,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   useEffect(() => {
     if (dialogOpen) return;
     const needsTick = (whenMs: number) =>
-      entries.some((e) => {
-        if (!isAgentEntry(e)) return false;
-        if (e.status === 'running' || e.status === 'paused') return true;
-        if (e.endTime === undefined) return false;
-        return whenMs - e.endTime <= TERMINAL_VISIBLE_MS;
-      });
+      entries.some((e) => isLiveAgentPanelVisibleEntry(e, whenMs));
     if (!needsTick(Date.now())) return;
     const id = setInterval(() => {
       const wallNow = Date.now();
@@ -351,6 +344,16 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
     return next;
   }, [entries, config, now]);
 
+  const hasVisibleAgent = liveAgentSnapshots.some((entry) =>
+    isLiveAgentPanelVisibleEntry(entry, now),
+  );
+
+  useEffect(() => {
+    if (livePanelFocused && !hasVisibleAgent) {
+      setLivePanelFocused(false);
+    }
+  }, [hasVisibleAgent, livePanelFocused, setLivePanelFocused]);
+
   // Defense in depth: don't compete with the dialog. Under
   // DefaultAppLayout this branch is unreachable because the layout
   // already gates the panel on `!uiState.dialogsVisible` (which folds
@@ -387,11 +390,7 @@ const LiveAgentPanelBody: React.FC<{
   const visibleAgents: LivePanelEntry[] = snapshots
     .map((entry) => ({
       ...entry,
-      expired:
-        entry.status !== 'running' &&
-        entry.status !== 'paused' &&
-        entry.endTime !== undefined &&
-        now - entry.endTime > TERMINAL_VISIBLE_MS,
+      expired: !isLiveAgentPanelVisibleEntry(entry, now),
     }))
     .filter((entry) => !entry.expired);
 

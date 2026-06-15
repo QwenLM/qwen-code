@@ -25,7 +25,11 @@ import {
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
-import { CHARS_PER_TOKEN, estimatePromptTokens } from './tokenEstimation.js';
+import {
+  CHARS_PER_TOKEN,
+  estimateContentTokens,
+  estimatePromptTokens,
+} from './tokenEstimation.js';
 import {
   buildStateReminderParts,
   composePostCompactHistory,
@@ -91,6 +95,30 @@ export const HARD_BUFFER = 3_000;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
+const CJK_CHAR_TOKEN_MULTIPLIER = 1.5;
+const CJK_CHAR_PATTERN =
+  /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/g;
+
+function estimateSummaryOutputTokens(
+  summary: string,
+  imageTokenEstimate: number,
+): number {
+  const genericEstimate = estimateContentTokens(
+    [{ role: 'model', parts: [{ text: summary }] }],
+    imageTokenEstimate,
+  );
+  const cjkCharCount = summary.match(CJK_CHAR_PATTERN)?.length ?? 0;
+  if (cjkCharCount === 0) {
+    return genericEstimate;
+  }
+
+  const nonCjkCharCount = Math.max(0, summary.length - cjkCharCount);
+  const cjkAwareEstimate =
+    Math.ceil(nonCjkCharCount / CHARS_PER_TOKEN) +
+    Math.ceil(cjkCharCount * CJK_CHAR_TOKEN_MULTIPLIER);
+  return Math.max(genericEstimate, cjkAwareEstimate);
+}
+
 /**
  * Hard cap on the PreCompact hook's `additionalContext` once it is merged
  * into the side-query system prompt. The user-supplied `/compress` text is
@@ -120,7 +148,7 @@ export interface CompactionThresholds {
  * Each tier is `max(proportional, absolute)`:
  *   auto = max(DEFAULT_PCT * window,                       effectiveWindow - AUTOCOMPACT_BUFFER)
  *   warn = max((DEFAULT_PCT - WARN_PCT_OFFSET) * window,   auto - WARN_BUFFER)
- *   hard = max(effectiveWindow - HARD_BUFFER,              auto)   // hard degrades to auto for tiny windows
+ *   hard = min(window, max(effectiveWindow - HARD_BUFFER,  auto + HARD_BUFFER))
  *
  * Small windows (where the absolute branch goes negative) automatically
  * fall back to the proportional branch. Large windows are dominated by
@@ -144,7 +172,10 @@ export function computeThresholds(window: number): CompactionThresholds {
   const warn = Math.max((DEFAULT_PCT - WARN_PCT_OFFSET) * window, absWarn);
 
   const rawHard = effectiveWindow - HARD_BUFFER;
-  const hard = Math.max(rawHard, auto);
+  // Guarantee hard > auto so compaction doesn't wait until the last moment.
+  // For tiny/zero windows where auto is already at the proportional floor,
+  // clamp hard to the window itself so it never exceeds the actual limit.
+  const hard = Math.min(window, Math.max(rawHard, auto + HARD_BUFFER));
 
   return { warn, auto, hard, effectiveWindow };
 }
@@ -325,6 +356,10 @@ export class ChatCompressionService {
                 chat.getHistoryShallow(true),
                 pendingUserMessage,
                 originalTokenCount,
+                // lastOutputTokenCount is unavailable here. The common
+                // sendMessageStream path passes precomputedEffectiveTokens,
+                // which already includes the chat's previous output tokens.
+                0,
                 slimmingConfig.imageTokenEstimate,
               )
             : originalTokenCount;
@@ -497,6 +532,19 @@ export class ChatCompressionService {
         compressionUsageMetadata.totalTokenCount - compressionInputTokenCount,
       );
     }
+    if (compressionOutputTokenCount === undefined && !isSummaryEmpty) {
+      compressionOutputTokenCount = estimateSummaryOutputTokens(
+        summary,
+        slimmingConfig.imageTokenEstimate,
+      );
+      config
+        .getDebugLogger()
+        .warn(
+          `[chat-compression] compression side-query omitted usage metadata; ` +
+            `using local estimate for summary output token count ` +
+            `(${compressionOutputTokenCount}).`,
+        );
+    }
 
     // Defensive guard: if the side-query hit COMPACT_MAX_OUTPUT_TOKENS, the
     // summary is likely truncated mid-content and unsafe to persist. Drop it
@@ -624,7 +672,12 @@ export class ChatCompressionService {
         ];
       }
 
-      // Best-effort token math using *only* model-reported token counts.
+      // Best-effort token math using model-reported token counts when
+      // available. Some OpenAI-compatible providers omit usage for the
+      // compression side-query; in that case, fall back to the same local
+      // content estimator used by the auto-compaction gate so a valid summary
+      // can still shrink the history instead of failing with a token-count
+      // error.
       //
       // Note: compressionInputTokenCount includes the entire compression
       // system prompt (the <state_snapshot> instructions, ~900 tokens) PLUS
@@ -654,12 +707,9 @@ export class ChatCompressionService {
         // The composer injects file-restoration blocks (up to
         // maxRecentFiles × 5K tokens) and an image-restoration block (up to
         // maxRecentImages images) that are NOT in
-        // compressionOutputTokenCount. Estimate their
-        // cost locally so the inflation guard below
-        // (newTokenCount > originalTokenCount) actually fires when
-        // attachments dominate the post-compact size, and so
-        // `lastPromptTokenCount` doesn't under-report the next auto-
-        // compaction cheap-gate input (Finding 1).
+        // compressionOutputTokenCount. Estimate their cost locally so the
+        // inflation guard below fires when attachments dominate the
+        // post-compact size.
         const restorationChars = extraHistory
           .slice(2) // skip [summary, model ack]
           .reduce(
@@ -668,6 +718,41 @@ export class ChatCompressionService {
             0,
           );
         newTokenCount += Math.ceil(restorationChars / CHARS_PER_TOKEN);
+      } else {
+        const estimatedOriginalVisibleTokenCount = estimateContentTokens(
+          curatedHistory,
+          slimmingConfig.imageTokenEstimate,
+        );
+        const estimatedNewVisibleTokenCount = estimateContentTokens(
+          extraHistory,
+          slimmingConfig.imageTokenEstimate,
+        );
+        if (
+          estimatedOriginalVisibleTokenCount > 0 &&
+          estimatedNewVisibleTokenCount > 0
+        ) {
+          const estimatedNonVisibleTokenCount = Math.max(
+            0,
+            originalTokenCount - estimatedOriginalVisibleTokenCount,
+          );
+          // Keep the API-reported system/tool/prompt remainder intact. The
+          // local estimator is only used for the visible conversation delta, so
+          // missing usage metadata cannot replace the authoritative total with
+          // a much smaller visible-history-only estimate.
+          newTokenCount =
+            estimatedNonVisibleTokenCount + estimatedNewVisibleTokenCount;
+          canCalculateNewTokenCount = true;
+          config
+            .getDebugLogger()
+            .debug(
+              `[chat-compression] usage metadata missing; estimated ` +
+                `post-compression token count by preserving the ` +
+                `API-reported non-visible remainder ` +
+                `(${estimatedNonVisibleTokenCount}) and replacing the ` +
+                `visible-history estimate (${estimatedOriginalVisibleTokenCount} -> ` +
+                `${estimatedNewVisibleTokenCount}).`,
+            );
+        }
       }
     }
 

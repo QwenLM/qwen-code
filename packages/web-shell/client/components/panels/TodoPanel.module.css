@@ -1,0 +1,186 @@
+.panel {
+  flex-shrink: 0;
+  padding: 6px 10px 8px;
+  margin: 0 16px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border-left: 3px solid var(--accent-color);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.toggle {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 2px 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: var(--text-primary);
+}
+
+.chevron {
+  flex-shrink: 0;
+  width: 12px;
+  font-size: 10px;
+  color: var(--text-dimmed);
+}
+
+.title {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.progress {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-dimmed);
+}
+
+.collapsedCurrent {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  margin-left: 6px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+
+.locate {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 2px 6px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-dimmed);
+}
+
+.locate:hover {
+  color: var(--accent-color);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+  padding-left: 4px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.item {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+}
+
+.num {
+  flex-shrink: 0;
+  color: var(--text-dimmed);
+  text-align: right;
+}
+
+.icon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.pending .icon {
+  color: var(--text-dimmed);
+}
+
+.pending .content {
+  color: var(--text-dimmed);
+}
+
+.inProgress .icon {
+  color: var(--accent-color);
+}
+
+.inProgress .content {
+  color: var(--accent-color);
+}
+
+.completed .icon {
+  color: var(--success-color);
+}
+
+.completed .content {
+  color: var(--text-dimmed);
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+}
+
+.moreLine {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  width: fit-content;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  /* Match .item so the num placeholder resolves to the same ch width. */
+  font-size: 13px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  color: var(--text-dimmed);
+}
+
+.moreText {
+  font-size: 12px;
+}
+
+.moreLine:hover {
+  color: var(--text-secondary);
+}
+
+.moreLine:hover .moreText {
+  text-decoration: underline;
+}
+
+.allDone {
+  font-size: 13px;
+  font-family: var(--font-mono);
+  color: var(--success-color);
+}
+
+.collapsedCurrent.allDone {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  display: inline-block;
+}

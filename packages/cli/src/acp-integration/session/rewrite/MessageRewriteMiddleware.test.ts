@@ -202,6 +202,52 @@ describe('MessageRewriteMiddleware', () => {
       expect(meta['rewritten']).toBe(true);
       expect(meta['turnIndex']).toBe(1);
     });
+
+    it('preserves background discrete metadata on rewritten messages', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware('message');
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'background response' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'monitor-1',
+            status: 'completed',
+            kind: 'monitor',
+            toolUseId: 'tool-1',
+          },
+          customTraceId: 'trace-1',
+        },
+      } as unknown as SessionUpdate);
+
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      const rewriteCall = mockSendUpdate.mock.calls.find(
+        (call: unknown[]) =>
+          (
+            (call[0] as Record<string, unknown>)['_meta'] as
+              | Record<string, unknown>
+              | undefined
+          )?.['rewritten'] === true,
+      );
+      expect(rewriteCall).toBeDefined();
+      expect((rewriteCall![0] as Record<string, unknown>)['_meta']).toEqual({
+        source: 'background_notification_response',
+        qwenDiscreteMessage: true,
+        backgroundTask: {
+          taskId: 'monitor-1',
+          status: 'completed',
+          kind: 'monitor',
+          toolUseId: 'tool-1',
+        },
+        customTraceId: 'trace-1',
+        rewritten: true,
+        turnIndex: 1,
+      });
+    });
   });
 
   describe('timeoutMs config', () => {

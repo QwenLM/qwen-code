@@ -29,6 +29,11 @@ import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
 } from '../services/chatCompressionService.js';
+import {
+  estimateContentTokens,
+  estimatePromptTokens,
+} from '../services/tokenEstimation.js';
+import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
 import { SessionStartSource } from '../hooks/types.js';
 
 // Mock fs module to prevent actual file system operations during tests
@@ -91,6 +96,17 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   },
 }));
 
+const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
+  () => ({
+    mockAcquireSleepInhibitor: vi.fn(),
+    mockSleepInhibitorRelease: vi.fn(),
+  }),
+);
+
+vi.mock('../services/sleepInhibitor.js', () => ({
+  acquireSleepInhibitor: mockAcquireSleepInhibitor,
+}));
+
 const { mockDebugLoggerWarn } = vi.hoisted(() => ({
   mockDebugLoggerWarn: vi.fn(),
 }));
@@ -117,6 +133,9 @@ describe('GeminiChat', async () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAcquireSleepInhibitor.mockReturnValue({
+      release: mockSleepInhibitorRelease,
+    });
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
     mockContentGenerator = {
       generateContent: vi.fn(),
@@ -320,6 +339,67 @@ describe('GeminiChat', async () => {
   });
 
   describe('sendMessageStream', () => {
+    it('releases the sleep inhibitor after the stream is consumed', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'done' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test message' },
+        'prompt-id-sleep-inhibitor',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      expect(mockAcquireSleepInhibitor).toHaveBeenCalledWith(
+        mockConfig,
+        'Qwen Code is streaming a model response',
+      );
+      expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases the sleep inhibitor when the stream errors', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'partial' }] },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw new Error('stream aborted');
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'fail' },
+        'prompt-id-stream-error',
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume stream */
+          }
+        })(),
+      ).rejects.toThrow('stream aborted');
+
+      expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
     it('should succeed if a tool call is followed by an empty part', async () => {
       // 1. Mock a stream that contains a tool call, then an invalid (empty) part.
       const streamWithToolCall = (async function* () {
@@ -1408,6 +1488,82 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('coalesces startup reminders with the first user prompt for provider requests', async () => {
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+          ],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'prompt-id-startup-coalesce',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+            { text: 'hello' },
+          ],
+        },
+      ]);
+      expect(chat.getHistory()).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      expect(chat.getHistory(true)).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+            { text: 'hello' },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+    });
+
     it('does not deep-clone the full curated history when building request contents', async () => {
       chat.setHistory([
         { role: 'user', parts: [{ text: 'prior question' }] },
@@ -1667,7 +1823,10 @@ describe('GeminiChat', async () => {
   });
 
   describe('auto-compression integration', () => {
-    function makeStreamResponse(text = 'ok') {
+    function makeStreamResponse(
+      text = 'ok',
+      usageMetadata?: GenerateContentResponse['usageMetadata'],
+    ) {
       return (async function* () {
         yield {
           candidates: [
@@ -1678,6 +1837,7 @@ describe('GeminiChat', async () => {
               safetyRatings: [],
             },
           ],
+          usageMetadata,
           text: () => text,
         } as unknown as GenerateContentResponse;
       })();
@@ -2498,7 +2658,10 @@ describe('GeminiChat', async () => {
   //   2) call tryCompress with force=true (so MAX_CONSECUTIVE_FAILURES does
   //      not gate the only attempt that can save the next round-trip).
   describe('sendMessageStream hard-tier rescue', () => {
-    function makeStreamResponse(text = 'ok') {
+    function makeStreamResponse(
+      text = 'ok',
+      usageMetadata?: GenerateContentResponse['usageMetadata'],
+    ) {
       return (async function* () {
         yield {
           candidates: [
@@ -2509,6 +2672,7 @@ describe('GeminiChat', async () => {
               safetyRatings: [],
             },
           ],
+          usageMetadata,
           text: () => text,
         } as unknown as GenerateContentResponse;
       })();
@@ -2745,6 +2909,710 @@ describe('GeminiChat', async () => {
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(175_500);
       expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
         originalHistory[0].parts?.[0].text,
+      );
+    });
+
+    it('does not treat the image token estimate as output tokens after hard-rescue compression', async () => {
+      const originalHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const recordChatCompression = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn: vi.fn(),
+          recordChatCompression,
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      chatWithRecording.setHistory(originalHistory);
+      chatWithRecording.setLastPromptTokenCount(176_500);
+
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ],
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 176_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('sent after compression'),
+      );
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'x'.repeat(3_000) },
+        'prompt-id-hard-rescue-image-estimate-slot',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      expect(compressSpy.mock.calls[0][1].force).toBe(true);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(recordChatCompression).toHaveBeenCalledTimes(1);
+      expect(chatWithRecording.getLastPromptTokenCount()).toBe(176_000);
+    });
+
+    it('includes previous response output tokens in the hard-tier estimate', async () => {
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 50_000,
+            newTokenCount: 50_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ],
+          info: {
+            originalTokenCount: 176_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          makeStreamResponse('first', {
+            promptTokenCount: 176_000,
+            candidatesTokenCount: 1_500,
+            totalTokenCount: 177_500,
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('after rescue'));
+
+      chat.setLastPromptTokenCount(50_000);
+      const firstStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'prime the token counters' },
+        'prompt-prime-candidates',
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      const rescueStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'small follow-up' },
+        'prompt-hard-rescue-candidates',
+      );
+      for await (const _ of rescueStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[0][1].force).toBe(false);
+      expect(compressSpy.mock.calls[1][1].force).toBe(true);
+      expect(
+        compressSpy.mock.calls[1][1].precomputedEffectiveTokens,
+      ).toBeGreaterThanOrEqual(177_000);
+    });
+
+    it('does not double-count output tokens when prompt count falls back to total token count', async () => {
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 176_000,
+          newTokenCount: 176_000,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          makeStreamResponse('first', {
+            candidatesTokenCount: 1_500,
+            totalTokenCount: 176_000,
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('second'));
+
+      chat.setLastPromptTokenCount(50_000);
+      const firstStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'prime fallback token counters' },
+        'prompt-prime-total-token-fallback',
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      const secondStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'small follow-up' },
+        'prompt-total-token-fallback-follow-up',
+      );
+      for await (const _ of secondStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].force).toBe(false);
+      expect(
+        compressSpy.mock.calls[1][1].precomputedEffectiveTokens,
+      ).toBeLessThan(177_000);
+    });
+
+    it('includes previous response thought tokens in the hard-tier estimate', async () => {
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 50_000,
+            newTokenCount: 50_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ],
+          info: {
+            originalTokenCount: 176_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          makeStreamResponse('first', {
+            promptTokenCount: 176_000,
+            candidatesTokenCount: 500,
+            thoughtsTokenCount: 1_000,
+            totalTokenCount: 177_500,
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('after rescue'));
+
+      chat.setLastPromptTokenCount(50_000);
+      const firstStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'prime thought token counters' },
+        'prompt-prime-thought-tokens',
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      const rescueStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'small follow-up' },
+        'prompt-hard-rescue-thought-tokens',
+      );
+      for await (const _ of rescueStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].force).toBe(true);
+      expect(
+        compressSpy.mock.calls[1][1].precomputedEffectiveTokens,
+      ).toBeGreaterThanOrEqual(177_000);
+    });
+
+    it('includes disjoint candidate and thought tokens when total token count is unavailable', async () => {
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 50_000,
+            newTokenCount: 50_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ],
+          info: {
+            originalTokenCount: 176_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          makeStreamResponse('first', {
+            promptTokenCount: 176_000,
+            candidatesTokenCount: 1_200,
+            thoughtsTokenCount: 300,
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('after rescue'));
+
+      chat.setLastPromptTokenCount(50_000);
+      const firstStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'prime disjoint output token counters' },
+        'prompt-prime-disjoint-output-tokens',
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      const rescueStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'small follow-up' },
+        'prompt-hard-rescue-disjoint-output-tokens',
+      );
+      for await (const _ of rescueStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].force).toBe(true);
+      expect(
+        compressSpy.mock.calls[1][1].precomputedEffectiveTokens,
+      ).toBeGreaterThanOrEqual(177_000);
+    });
+
+    it('does not double-count OpenAI-compatible reasoning tokens already included in candidates', async () => {
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 176_400,
+          newTokenCount: 176_400,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          makeStreamResponse('first', {
+            promptTokenCount: 175_400,
+            candidatesTokenCount: 1_000,
+            thoughtsTokenCount: 500,
+            totalTokenCount: 176_400,
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('second'));
+
+      chat.setLastPromptTokenCount(50_000);
+      const firstStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'prime OpenAI-compatible reasoning token counters' },
+        'prompt-prime-openai-reasoning-tokens',
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      const secondStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'small follow-up' },
+        'prompt-openai-reasoning-follow-up',
+      );
+      for await (const _ of secondStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].force).toBe(false);
+      expect(
+        compressSpy.mock.calls[1][1].precomputedEffectiveTokens,
+      ).toBeLessThan(177_000);
+    });
+
+    it('resets previous response output tokens when seeding last prompt tokens externally', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 176_000,
+            newTokenCount: 176_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          makeStreamResponse('first', {
+            promptTokenCount: 10_000,
+            candidatesTokenCount: 5_000,
+            totalTokenCount: 15_000,
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('second'));
+
+      const firstStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'collect candidates' },
+        'prompt-collect-candidates',
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      chat.setLastPromptTokenCount(176_000);
+      const secondStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'seeded follow-up' },
+        'prompt-seeded-after-candidates',
+      );
+      for await (const _ of secondStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].force).toBe(false);
+      expect(
+        compressSpy.mock.calls[1][1].precomputedEffectiveTokens,
+      ).toBeLessThan(177_000);
+    });
+
+    it('resets previous response output tokens after successful compression', async () => {
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 50_000,
+            newTokenCount: 50_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ],
+          info: {
+            originalTokenCount: 176_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 40_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          makeStreamResponse('first', {
+            promptTokenCount: 176_000,
+            candidatesTokenCount: 100_000,
+            totalTokenCount: 276_000,
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('after compression'))
+        .mockResolvedValueOnce(makeStreamResponse('after reset'));
+
+      chat.setLastPromptTokenCount(50_000);
+      const firstStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'prime output tokens' },
+        'prompt-prime-compression-reset',
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      const rescueStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'trigger compression' },
+        'prompt-compression-reset-rescue',
+      );
+      for await (const _ of rescueStream) {
+        /* consume */
+      }
+
+      const followUpStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'after compression reset' },
+        'prompt-after-compression-reset',
+      );
+      for await (const _ of followUpStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(3);
+      expect(compressSpy.mock.calls[1][1].force).toBe(true);
+      expect(
+        compressSpy.mock.calls[2][1].precomputedEffectiveTokens,
+      ).toBeLessThan(100_000);
+    });
+
+    it('stops pre-send hard-rescue after repeated failed hard-tier compactions', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse('after failed rescue'),
+      );
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `hard-rescue-${i}` },
+            `prompt-hard-rescue-bound-${i}`,
+          ),
+        ).rejects.toThrow(
+          /compression status: COMPRESSION_FAILED_EMPTY_SUMMARY/i,
+        );
+      }
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after bounded hard-rescue failures' },
+        'prompt-hard-rescue-after-failures',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES).fill(true),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('hard-tier rescue skipped'),
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('prompt_id=prompt-hard-rescue-after-failures'),
+      );
+    });
+
+    it('falls back to reactive overflow recovery after the hard-rescue bound is exhausted', async () => {
+      const failedRescueResult = {
+        newHistory: null,
+        info: {
+          originalTokenCount: 178_000,
+          newTokenCount: 178_000,
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+        },
+      };
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary after overflow' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce(failedRescueResult)
+        .mockResolvedValueOnce(failedRescueResult)
+        .mockResolvedValueOnce(failedRescueResult)
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(
+          new Error('prompt is too long: 180000 tokens > 128000 maximum'),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('after reactive fallback'));
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `failed-hard-rescue-${i}` },
+            `prompt-hard-rescue-before-reactive-${i}`,
+          ),
+        ).rejects.toThrow(
+          /compression status: COMPRESSION_FAILED_EMPTY_SUMMARY/i,
+        );
+      }
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after hard-rescue bound' },
+        'prompt-hard-rescue-reactive-fallback',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES + 1);
+      expect(
+        compressSpy.mock.calls
+          .slice(0, MAX_CONSECUTIVE_FAILURES)
+          .map(([, opts]) => opts.force),
+      ).toEqual(Array(MAX_CONSECUTIVE_FAILURES).fill(true));
+      expect(compressSpy.mock.calls[MAX_CONSECUTIVE_FAILURES][1].force).toBe(
+        true,
+      );
+      expect(
+        compressSpy.mock.calls[MAX_CONSECUTIVE_FAILURES][1].originalTokenCount,
+      ).toBe(180_000);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('does not count thrown hard-rescue attempts toward the retry bound', async () => {
+      const compressionError = new Error('compression side-query failed');
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockRejectedValue(compressionError);
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 1; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `throwing-hard-rescue-${i}` },
+            `prompt-hard-rescue-throw-${i}`,
+          ),
+        ).rejects.toThrow(compressionError);
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES + 1);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
+
+    it('stops hard-rescue after repeated NOOP results are still oversized', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `noop-hard-rescue-${i}` },
+            `prompt-hard-rescue-noop-${i}`,
+          ),
+        ).rejects.toThrow(/compression status: NOOP/i);
+      }
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('after bounded noop hard-rescue'),
+      );
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after bounded noop hard-rescue' },
+        'prompt-hard-rescue-after-noop-bound',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES).fill(true),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('hard-tier rescue skipped'),
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'prompt_id=prompt-hard-rescue-after-noop-bound',
+        ),
+      );
+    });
+
+    it('does not replace token counters when usage reports zero prompt tokens', async () => {
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 123_456,
+          newTokenCount: 123_456,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('zero prompt count', {
+          promptTokenCount: 0,
+          totalTokenCount: 5000,
+        }),
+      );
+
+      chat.setLastPromptTokenCount(123_456);
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'zero prompt count should not reseed' },
+        'prompt-zero-count-no-reseed',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(chat.getLastPromptTokenCount()).toBe(123_456);
+    });
+
+    it('ignores previous response output tokens when the prompt token count is zero', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'history question' }] },
+        { role: 'model', parts: [{ text: 'history answer' }] },
+      ];
+      const userMessage: Content = {
+        role: 'user',
+        parts: [{ text: 'follow-up question' }],
+      };
+
+      expect(estimatePromptTokens(history, userMessage, 0, 9999)).toBe(
+        estimateContentTokens([...history, userMessage]),
       );
     });
 
@@ -4813,6 +5681,79 @@ describe('GeminiChat', async () => {
           role: 'model',
           parts: [{ functionCall: { name: 'tool', args: {} } }],
         },
+      ]);
+    });
+
+    it('preserves the startup reminder when stripping a failed first prompt', () => {
+      const startupReminder: Content = {
+        role: 'user',
+        parts: [{ text: `${SYSTEM_REMINDER_OPEN}\nctx\n</system-reminder>` }],
+      };
+      chat.setHistory([
+        startupReminder,
+        { role: 'user', parts: [{ text: 'failed first prompt' }] },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([startupReminder]);
+    });
+
+    it('preserves a mid-history MCP added-tool reminder when a later prompt fails', () => {
+      // drainPendingAddedMcpToolsReminder injects a system-reminder user
+      // entry; if the following prompt fails, popping it must NOT also pop
+      // the reminder — the announcement can't be re-queued (the tool is
+      // already in announcedDeferredToolNames) so it would be lost forever.
+      const mcpReminder: Content = {
+        role: 'user',
+        parts: [
+          { text: `${SYSTEM_REMINDER_OPEN}\nadded: foo\n</system-reminder>` },
+        ],
+      };
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+        mcpReminder,
+        { role: 'user', parts: [{ text: 'failed prompt' }] },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+        mcpReminder,
+      ]);
+    });
+
+    it('pops a failed turn whose reminder shares a Content with the prompt', () => {
+      // In plan mode (and with subagent/memory reminders) the per-turn
+      // reminder is prepended as an extra part to the SAME user Content as the
+      // prompt — sendMessageStream records [<system-reminder>…, prompt] as one
+      // entry. A failed turn leaves that combined entry trailing. Matching
+      // parts[0] alone would treat it as structural and preserve the user's
+      // prompt text, which then leaks into the next turn via
+      // appendCuratedContent. It must be popped because not every part is a
+      // reminder.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nPlan mode is active.\n</system-reminder>`,
+            },
+            { text: 'the actual user prompt' },
+          ],
+        },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
       ]);
     });
 

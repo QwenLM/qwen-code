@@ -23,6 +23,13 @@ vi.mock('../ui/commands/approvalModeCommand.js', () => ({
     kind: 'built-in',
   },
 }));
+vi.mock('../ui/commands/cdCommand.js', () => ({
+  cdCommand: {
+    name: 'cd',
+    description: 'Change directory command',
+    kind: 'built-in',
+  },
+}));
 
 vi.mock('../ui/commands/ideCommand.js', async () => {
   const { CommandKind } = await import('../ui/commands/types.js');
@@ -178,8 +185,15 @@ describe('BuiltinCommandLoader', () => {
     expect(approvalModeCmd).toBeDefined();
     expect(approvalModeCmd?.kind).toBe(CommandKind.BUILT_IN);
 
+    const cdCmd = commands.find((c) => c.name === 'cd');
+    expect(cdCmd).toBeDefined();
+    expect(cdCmd?.kind).toBe(CommandKind.BUILT_IN);
+
     const ideCmd = commands.find((c) => c.name === 'ide');
     expect(ideCmd).toBeDefined();
+
+    const importConfigCmd = commands.find((c) => c.name === 'import-config');
+    expect(importConfigCmd).toBeDefined();
 
     const mcpCmd = commands.find((c) => c.name === 'mcp');
     expect(mcpCmd).toBeDefined();
@@ -209,6 +223,14 @@ describe('BuiltinCommandLoader', () => {
     const modelCmd = commands.find((c) => c.name === 'model');
     expect(modelCmd).toBeDefined();
     expect(modelCmd?.name).toBe('model');
+  });
+
+  it('should always register the /fork command', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const forkCmd = commands.find((c) => c.name === 'fork');
+    expect(forkCmd).toBeDefined();
+    expect(forkCmd?.kind).toBe(CommandKind.BUILT_IN);
   });
 
   it('should include lsp command only when LSP is enabled', async () => {

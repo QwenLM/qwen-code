@@ -1022,17 +1022,31 @@ export function buildLongRunningForegroundHint(elapsedMs: number): string {
 /**
  * Detect standalone or leading `sleep N` patterns that should use Monitor
  * instead. Catches `sleep 5`, `sleep 2.5`, `sleep 2s`,
- * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` — but not sleep
+ * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` -- but not sleep
  * inside pipelines, subshells, backgrounded commands, or scripts (those are
  * fine).
  */
 export function detectBlockedSleepPattern(command: string): string | null {
+  return detectBlockedSleepPatternDetails(command)?.description ?? null;
+}
+
+type BlockedSleepPatternDetails = {
+  description: string;
+  isStandalone: boolean;
+  intentionalSleepRejection?: string;
+};
+
+function detectBlockedSleepPatternDetails(
+  command: string,
+): BlockedSleepPatternDetails | null {
   // Strip trailing shell comments first; otherwise `sleep 5 # wait` would
   // present `# wait` as the suffix, which `getSleepSequentialSeparator`
   // rejects (only &&/||/;/\n are recognized), letting the foreground sleep
   // bypass the guard. Shell ignores top-level trailing comments, so for the
   // purposes of detection they are equivalent to end-of-command.
-  const trimmed = trimTrailingShellComment(command).trim();
+  const { command: uncommentedCommand, comment } =
+    splitTrailingShellComment(command);
+  const trimmed = uncommentedCommand.trim();
   if (!trimmed.startsWith('sleep')) return null;
   const afterSleep = trimmed.slice('sleep'.length);
   if (!afterSleep || !/\s/.test(afterSleep[0]!)) return null;
@@ -1059,9 +1073,51 @@ export function detectBlockedSleepPattern(command: string): string | null {
   if (separator === null) return null;
 
   const rest = separator.rest.trim();
-  return rest
+  const isStandalone = !rest;
+  const description = rest
     ? `sleep ${durationToken} followed by: ${rest}`
     : `standalone sleep ${durationToken}`;
+  const trimmedComment = comment?.trim();
+  if (
+    isStandalone &&
+    trimmedComment?.startsWith(INTENTIONAL_SLEEP_COMMENT_PREFIX)
+  ) {
+    const reason = getIntentionalSleepReason(trimmedComment);
+    if (reason === null) {
+      return {
+        description,
+        isStandalone,
+        intentionalSleepRejection:
+          'The intentional-sleep comment was recognized, but the reason is too short; explain why the delay is needed after `intentional-sleep:`.',
+      };
+    }
+    if (secs > MAX_INTENTIONAL_SLEEP_SECONDS) {
+      return {
+        description,
+        isStandalone,
+        intentionalSleepRejection:
+          'The intentional-sleep comment was recognized, but foreground sleeps over 10 minutes are not allowed; use is_background: true or Monitor for longer waits.',
+      };
+    }
+    debugLogger.debug('intentional sleep allowed', {
+      durationSeconds: secs,
+      reason,
+    });
+    return null;
+  }
+  return { description, isStandalone };
+}
+
+const INTENTIONAL_SLEEP_COMMENT_PREFIX = 'intentional-sleep:';
+const MAX_INTENTIONAL_SLEEP_SECONDS = 10 * 60;
+// Require a real reason, not a trivial opt-out like "wait".
+const MIN_INTENTIONAL_SLEEP_REASON_LENGTH = 8;
+
+function getIntentionalSleepReason(trimmedComment: string): string | null {
+  const reason = trimmedComment
+    .slice(INTENTIONAL_SLEEP_COMMENT_PREFIX.length)
+    .trim();
+  return reason.length >= MIN_INTENTIONAL_SLEEP_REASON_LENGTH ? reason : null;
 }
 
 function parseSleepDurationToSeconds(token: string): number | null {
@@ -1130,7 +1186,13 @@ function getSleepSequentialSeparator(suffix: string): { rest: string } | null {
   return null;
 }
 
-function trimTrailingShellComment(command: string): string {
+function splitTrailingShellComment(
+  command: string,
+  keepCommandsAfterCommentNewline = true,
+): {
+  command: string;
+  comment: string | null;
+} {
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let inBacktick = false;
@@ -1216,11 +1278,25 @@ function trimTrailingShellComment(command: string): string {
       commandSubstitutionDepth === 0 &&
       (i === 0 || /\s/.test(command[i - 1]!))
     ) {
-      return command.slice(0, i);
+      const newlineIndex = command.indexOf('\n', i + 1);
+      return {
+        command:
+          newlineIndex === -1 || !keepCommandsAfterCommentNewline
+            ? command.slice(0, i)
+            : command.slice(0, i) + command.slice(newlineIndex),
+        comment:
+          newlineIndex === -1
+            ? command.slice(i + 1)
+            : command.slice(i + 1, newlineIndex),
+      };
     }
   }
 
-  return command;
+  return { command, comment: null };
+}
+
+function trimTrailingShellComment(command: string): string {
+  return splitTrailingShellComment(command, false).command;
 }
 
 function hasTopLevelTrailingBackgroundOperator(command: string): boolean {
@@ -2090,6 +2166,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
         this.config,
         ShellTool.Name,
         llmContent,
+        // Per-tool char budget; mirrors ShellTool.maxOutputChars. keep='both'
+        // preserves the command's start AND its trailing exit/error summary
+        // (where shell failures report). Kept in-tool (not deferred to the
+        // scheduler) so the long-run hint below is appended OUTSIDE the
+        // truncation envelope; the scheduler's sentinel makes its later pass a
+        // no-op here. lines: Infinity keeps this char-only so the global line
+        // cap can't undercut the declared 30k char budget — many short lines
+        // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
+        { threshold: 30_000, keep: 'both', lines: Number.POSITIVE_INFINITY },
       );
 
       if (truncatedResult.outputFile) {
@@ -4182,6 +4267,10 @@ export class ShellTool extends BaseDeclarativeTool<
 > {
   static Name: string = ToolNames.SHELL;
 
+  override get maxOutputChars(): number {
+    return 30_000;
+  }
+
   constructor(private readonly config: Config) {
     super(
       ShellTool.Name,
@@ -4285,15 +4374,19 @@ export class ShellTool extends BaseDeclarativeTool<
     // `-c` script. This matches every other sensitive check in this file
     // (directory, read-only, command-root extraction, etc.).
     if (!params.is_background) {
-      const sleepPattern = detectBlockedSleepPattern(
-        stripShellWrapper(params.command),
-      );
+      const sleepPattern = detectBlockedSleepPatternDetails(strippedCommand);
       if (sleepPattern !== null) {
+        const intentionalSleepGuidance =
+          sleepPattern.intentionalSleepRejection ??
+          (sleepPattern.isStandalone
+            ? 'If you genuinely need a standalone delay (rate limiting, deliberate pacing), ' +
+              'add a trailing comment like `# intentional-sleep: wait for MCP rate limit reset` (up to 10 minutes).'
+            : 'Split into two calls: first `sleep N # intentional-sleep: <reason>` (standalone), then the follow-up command.');
         return (
-          `Blocked: ${sleepPattern}. ` +
+          `Blocked: ${sleepPattern.description}. ` +
           'Run blocking commands in the background with is_background: true. ' +
           'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
-          'If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds.'
+          intentionalSleepGuidance
         );
       }
     }

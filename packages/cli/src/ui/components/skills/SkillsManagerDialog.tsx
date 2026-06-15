@@ -187,7 +187,10 @@ export function SkillsManagerDialog({
     (async () => {
       try {
         const list = await skillManager.listSkills();
-        if (!cancelled) setSkills(sortSkills(list));
+        const userInvocableList = list.filter(
+          (skill) => skill.userInvocable !== false,
+        );
+        if (!cancelled) setSkills(sortSkills(userInvocableList));
       } catch (e) {
         if (!cancelled) {
           setLoadError(e instanceof Error ? e.message : String(e));

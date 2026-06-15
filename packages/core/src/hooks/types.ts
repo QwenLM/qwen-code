@@ -58,6 +58,8 @@ export enum HookEventName {
   TodoCreated = 'TodoCreated',
   // TodoCompleted - When a todo item's status changes to 'completed' (Qwen Code specific)
   TodoCompleted = 'TodoCompleted',
+  // InstructionsLoaded - When an instruction or context file is loaded
+  InstructionsLoaded = 'InstructionsLoaded',
 }
 
 /**
@@ -257,6 +259,21 @@ export interface HookInput {
   timestamp: string;
 }
 
+export type InstructionMemoryType = 'user' | 'project' | 'local' | 'extension';
+
+export type InstructionLoadReason = 'session_start' | 'include' | 'refresh';
+
+/**
+ * Input for InstructionsLoaded hook events
+ */
+export interface InstructionsLoadedInput extends HookInput {
+  file_path: string;
+  memory_type: InstructionMemoryType;
+  load_reason: InstructionLoadReason;
+  trigger_file_path?: string;
+  parent_file_path?: string;
+}
+
 /**
  * Base hook output - common fields for all events
  */
@@ -265,6 +282,7 @@ export interface HookOutput {
   stopReason?: string;
   suppressOutput?: boolean;
   systemMessage?: string;
+  terminalSequence?: string;
   decision?: HookDecision;
   reason?: string;
   hookSpecificOutput?: Record<string, unknown>;
@@ -320,6 +338,7 @@ export class DefaultHookOutput implements HookOutput {
   stopReason?: string;
   suppressOutput?: boolean;
   systemMessage?: string;
+  terminalSequence?: string;
   decision?: HookDecision;
   reason?: string;
   hookSpecificOutput?: Record<string, unknown>;
@@ -329,6 +348,7 @@ export class DefaultHookOutput implements HookOutput {
     this.stopReason = data.stopReason;
     this.suppressOutput = data.suppressOutput;
     this.systemMessage = data.systemMessage;
+    this.terminalSequence = data.terminalSequence;
     this.decision = data.decision;
     this.reason = data.reason;
     this.hookSpecificOutput = data.hookSpecificOutput;

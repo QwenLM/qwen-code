@@ -9,6 +9,7 @@ import {
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
+  applySkillAllowedTools,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
@@ -66,9 +67,12 @@ export class SkillCommandLoader implements ICommandLoader {
       const visibleSkills = allSkills.filter(
         (skill) => !disabled.has(skill.name.toLowerCase()),
       );
+      const nonUserInvocableCount = visibleSkills.filter(
+        (skill) => skill.userInvocable === false,
+      ).length;
 
       debugLogger.debug(
-        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled`,
+        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled; ${nonUserInvocableCount} marked non-user-invocable`,
       );
 
       return visibleSkills.map((skill) => {
@@ -103,10 +107,23 @@ export class SkillCommandLoader implements ICommandLoader {
             : skill.level === 'project'
               ? 'project'
               : 'user',
+          userInvocable: skill.userInvocable ?? true,
           modelInvocable,
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
+          skillDetail: {
+            name: skill.name,
+            description: skill.description,
+            body: skill.body,
+            level: skill.level,
+          },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
+            // Auto-approve the skill's declared allowedTools before its body is submitted.
+            applySkillAllowedTools(
+              this.config?.getPermissionManager(),
+              skill.allowedTools,
+            );
+
             const body = buildSkillLlmContent(
               dirname(skill.filePath),
               skill.body,
