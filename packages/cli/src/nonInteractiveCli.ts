@@ -624,6 +624,11 @@ export async function runNonInteractive(
         // originating turn has already completed.
         monitorRegistry.setNotificationCallback(
           (displayText, modelText, meta) => {
+            if (meta.status === 'running') {
+              const entry = monitorRegistry.get?.(meta.monitorId);
+              if (!entry || entry.status !== 'running') return;
+            }
+
             const queueItem = {
               displayText,
               modelText,
@@ -1159,9 +1164,33 @@ export async function runNonInteractive(
           // notifications could exceed the cap silently in headless runs.
           const drainOneItem = async () => {
             if (localQueue.length === 0) return;
-            const item = localQueue.shift()!;
 
-            emitNotificationToSdk(item);
+            // Batch-drain: take contiguous same-type items from the front
+            // of the queue. Cron prompts run individually — each needs its
+            // own slash/shell/@ preprocessing and approval cycle.
+            const targetType = localQueue[0]!.sendMessageType;
+            let splitIdx = targetType === SendMessageType.Cron ? 1 : 0;
+            if (splitIdx === 0) {
+              while (
+                splitIdx < localQueue.length &&
+                localQueue[splitIdx]!.sendMessageType === targetType
+              ) {
+                splitIdx++;
+              }
+            }
+            const batch = localQueue.splice(0, splitIdx);
+
+            if (batch.length === 0) return;
+
+            for (const queueItem of batch) {
+              emitNotificationToSdk(queueItem);
+            }
+
+            const item = {
+              displayText: batch.map((i) => i.displayText).join('; '),
+              modelText: batch.map((i) => i.modelText).join('\n\n'),
+              sendMessageType: targetType,
+            };
 
             turnCount++;
             if (
