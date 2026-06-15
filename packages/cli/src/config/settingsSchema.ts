@@ -1102,6 +1102,75 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  visionBridge: {
+    type: 'object',
+    label: 'Vision Bridge',
+    category: 'Model',
+    requiresRestart: false,
+    default: undefined as
+      | {
+          enabled?: boolean;
+          model?: string;
+          maxImages?: number;
+          timeoutMs?: number;
+          showTranscript?: boolean;
+        }
+      | undefined,
+    description:
+      'Opt-in compatibility layer for text-only primary models. When you send an image to a text-only model, a configured vision model transcribes/describes it to text that is then sent to the primary model. Disabled by default; the image and your prompt are sent to the configured vision model.',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable Vision Bridge',
+        category: 'Model',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Convert images to text via a vision model when the primary model is text-only.',
+        showInDialog: false,
+      },
+      model: {
+        type: 'string',
+        label: 'Vision Bridge Model',
+        category: 'Model',
+        requiresRestart: false,
+        default: '',
+        description:
+          'Model id used to transcribe/describe images. Must be an image-capable model resolvable in your configuration.',
+        showInDialog: false,
+      },
+      maxImages: {
+        type: 'number',
+        label: 'Max Images',
+        category: 'Model',
+        requiresRestart: false,
+        default: 4,
+        description: 'Maximum number of images converted per turn.',
+        showInDialog: false,
+      },
+      timeoutMs: {
+        type: 'number',
+        label: 'Vision Bridge Timeout (ms)',
+        category: 'Model',
+        requiresRestart: false,
+        default: 30000,
+        description: 'Timeout for the vision model call (milliseconds).',
+        showInDialog: false,
+      },
+      showTranscript: {
+        type: 'boolean',
+        label: 'Show Transcript',
+        category: 'Model',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show the generated image transcription so you can catch misreads.',
+        showInDialog: false,
+      },
+    },
+  },
+
   model: {
     type: 'object',
     label: 'Model',

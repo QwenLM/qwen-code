@@ -968,15 +968,24 @@ export async function processSingleFileContent(
     const modality = mediaModalityKey(fileType);
     if (modality && modality !== 'pdf') {
       if (!modalities[modality]) {
-        const message = unsupportedModalityMessage(modality, displayName);
-        debugLogger.warn(
-          `Model '${config.getModel()}' does not support ${modality} input. ` +
-            `Skipping file: ${relativePathForDisplay}`,
-        );
-        return {
-          llmContent: message,
-          returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
-        };
+        // When the vision bridge is enabled, keep image parts inline so the
+        // bridge can transcribe them downstream for a text-only model, instead
+        // of stripping the image to an "unsupported" note here. Other media
+        // (audio/video) are still skipped since the bridge only handles images.
+        const bridgeWillHandleImage =
+          modality === 'image' &&
+          config.getVisionBridgeConfig?.()?.enabled === true;
+        if (!bridgeWillHandleImage) {
+          const message = unsupportedModalityMessage(modality, displayName);
+          debugLogger.warn(
+            `Model '${config.getModel()}' does not support ${modality} input. ` +
+              `Skipping file: ${relativePathForDisplay}`,
+          );
+          return {
+            llmContent: message,
+            returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
+          };
+        }
       }
     }
 

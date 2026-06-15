@@ -181,6 +181,8 @@ export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitWorktreeService.js';
+export * from './services/visionBridge/visionBridgeService.js';
+export * from './services/visionBridge/imagePartUtils.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';

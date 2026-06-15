@@ -1089,6 +1089,51 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Skipped image file');
     });
 
+    it('should keep image inline (not stripped) when the vision bridge is enabled', async () => {
+      const fakePngData = Buffer.from('fake png data');
+      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      // Text-only model, but the bridge is enabled — the image must survive so
+      // the bridge can transcribe it downstream instead of being dropped here.
+      const mockConfigBridge = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+        getVisionBridgeConfig: () => ({ enabled: true }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfigBridge,
+      );
+      expect(typeof result.llmContent).toBe('object');
+      expect(
+        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
+          .mimeType,
+      ).toBe('image/png');
+      expect(result.returnDisplay).toContain('Read image file');
+    });
+
+    it('still strips audio when the vision bridge is enabled (bridge handles images only)', async () => {
+      const fakeAudio = Buffer.from('fake audio data');
+      const testAudioPath = path.join(tempRootDir, 'clip.mp3');
+      actualNodeFs.writeFileSync(testAudioPath, fakeAudio);
+      mockMimeGetType.mockReturnValue('audio/mpeg');
+
+      const mockConfigBridge = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+        getVisionBridgeConfig: () => ({ enabled: true }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testAudioPath,
+        mockConfigBridge,
+      );
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('does not support audio input');
+    });
+
     it('should fall back to pdftotext when model does not support PDF', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);

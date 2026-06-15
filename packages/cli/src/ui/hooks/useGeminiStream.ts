@@ -12,23 +12,22 @@ import {
   useMemo,
   useLayoutEffect,
 } from 'react';
-import type {
-  Config,
-  EditorType,
-  GeminiClient,
-  Logger,
-  RetryInfo,
-  ServerGeminiChatCompressedEvent,
-  ServerGeminiContentEvent as ContentEvent,
-  ServerGeminiFinishedEvent,
-  ServerGeminiStreamEvent as GeminiEvent,
-  ThoughtSummary,
-  ToolCallRequestInfo,
-  GeminiErrorEventValue,
-  StopFailureErrorType,
-  ActiveGoal,
-} from '@qwen-code/qwen-code-core';
 import {
+  type Config,
+  type EditorType,
+  type GeminiClient,
+  type Logger,
+  type RetryInfo,
+  type ServerGeminiChatCompressedEvent,
+  type ServerGeminiContentEvent as ContentEvent,
+  type ServerGeminiFinishedEvent,
+  type ServerGeminiStreamEvent as GeminiEvent,
+  type ThoughtSummary,
+  type ToolCallRequestInfo,
+  type GeminiErrorEventValue,
+  type StopFailureErrorType,
+  type ActiveGoal,
+  type VisionBridgeResult,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -51,6 +50,8 @@ import {
   ApiCancelEvent,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
+  runVisionBridge,
+  hasImageParts,
   generateToolUseSummary,
   getActiveGoal,
   activeGoalEquals,
@@ -95,6 +96,34 @@ import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+/**
+ * Build the user-facing notice shown when the vision bridge runs. On success it
+ * states which model was used, how many images were converted (and omitted),
+ * notes the data egress, and includes the generated transcription so the user
+ * can catch misreads. On failure it surfaces the reason.
+ *
+ * @param result The structured result returned by the vision bridge.
+ * @returns A multi-line notice string for the message history.
+ */
+function formatVisionBridgeNotice(
+  result: VisionBridgeResult,
+  showTranscript: boolean,
+): string {
+  if (result.status === 'failed') {
+    return `⚠ Vision bridge (${result.modelId ?? 'vision model'}) failed: ${
+      result.error ?? 'unknown error'
+    }. The image was not interpreted.`;
+  }
+  const omitted =
+    result.omittedCount > 0 ? ` (${result.omittedCount} omitted)` : '';
+  // The egress disclosure is always shown; the transcript body is optional so
+  // that hiding the transcript never silently hides that data left the machine.
+  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${result.modelId}. Your image and prompt were sent to that model.`;
+  return showTranscript && result.transcript
+    ? `${header}\n${result.transcript}`
+    : header;
+}
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -854,6 +883,48 @@ export const useGeminiStream = (
             return { queryToSend: null, shouldProceed: false };
           }
           localQueryToSendToGemini = atCommandResult.processedQuery;
+        }
+
+        // Vision bridge: opt-in conversion of images to text when the primary
+        // model is text-only. No-op unless explicitly enabled in settings and
+        // the resolved query actually carries image parts.
+        const visionBridge = config.getVisionBridgeConfig();
+        if (
+          visionBridge.enabled &&
+          localQueryToSendToGemini !== null &&
+          hasImageParts(localQueryToSendToGemini) &&
+          config.getEffectiveInputModalities().image !== true
+        ) {
+          const bridgeResult = await runVisionBridge({
+            config,
+            settings: visionBridge,
+            parts: localQueryToSendToGemini,
+            signal: abortSignal,
+          });
+          // Always surface one notice (egress disclosure on success, reason on
+          // failure); the transcript body is gated by showTranscript inside.
+          if (bridgeResult.status !== 'skipped') {
+            addItem(
+              {
+                type:
+                  bridgeResult.status === 'failed'
+                    ? MessageType.ERROR
+                    : MessageType.INFO,
+                text: formatVisionBridgeNotice(
+                  bridgeResult,
+                  visionBridge.showTranscript,
+                ),
+              },
+              userMessageTimestamp,
+            );
+          }
+          if (bridgeResult.applied && bridgeResult.parts != null) {
+            localQueryToSendToGemini = bridgeResult.parts;
+          } else if (bridgeResult.status === 'failed') {
+            // Image-only request we could not convert — stop the turn so the
+            // primary model never answers as if it had seen the image.
+            return { queryToSend: null, shouldProceed: false };
+          }
         }
       } else {
         // It's a function response (PartListUnion that isn't a string)

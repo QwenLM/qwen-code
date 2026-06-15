@@ -18,10 +18,17 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  InputModalities,
 } from '../core/contentGenerator.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import type { VisionBridgeSettings } from '../services/visionBridge/visionBridgeService.js';
+import {
+  resolveVisionBridgeSettings,
+  selectVisionBridgeModel,
+} from '../services/visionBridge/visionBridgeService.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
@@ -906,6 +913,13 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
+   * Opt-in vision bridge settings. When enabled, images sent to a text-only
+   * primary model are converted to text via a configured vision model.
+   * Corresponds to the `visionBridge` settings block. Partial — merged with
+   * {@link DEFAULT_VISION_BRIDGE_SETTINGS}.
+   */
+  visionBridge?: Partial<VisionBridgeSettings>;
+  /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
    * Users with old settings.json containing hooksConfig.enabled should migrate
@@ -1296,6 +1310,7 @@ export class Config {
   private readonly enableManagedAutoDream: boolean;
   private readonly enableAutoSkill: boolean;
   private fastModel?: string;
+  private readonly visionBridge: VisionBridgeSettings;
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
@@ -1534,6 +1549,9 @@ export class Config {
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.fastModel = params.fastModel || undefined;
+    // Normalize + clamp untrusted settings (empty model → undefined, numeric
+    // fields bounded) so a malformed value cannot hang or overrun the bridge.
+    this.visionBridge = resolveVisionBridgeSettings(params.visionBridge);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
@@ -2458,6 +2476,20 @@ export class Config {
   }
 
   /**
+   * Resolve the effective input modalities of the current primary model.
+   *
+   * Prefers explicitly configured modalities (e.g. from `modelProviders`) and
+   * falls back to name-based detection — the same precedence the request
+   * pipeline uses. Used to decide whether the vision bridge should run.
+   *
+   * @returns The resolved input modalities for the current model.
+   */
+  getEffectiveInputModalities(): InputModalities {
+    const cg = this.getContentGeneratorConfig();
+    return cg?.modalities ?? defaultModalities(cg?.model ?? this.getModel());
+  }
+
+  /**
    * Get the human-readable display name for the currently selected model.
    * Resolves the model id to its name from the model registry.
    * Falls back to the raw model id when the model is not found.
@@ -2521,6 +2553,30 @@ export class Config {
    */
   setFastModel(model: string | undefined): void {
     this.fastModel = model || undefined;
+  }
+
+  /**
+   * Return the resolved vision bridge settings (merged with defaults).
+   * `model` is `undefined` when the bridge is not configured.
+   */
+  getVisionBridgeConfig(): VisionBridgeSettings {
+    return this.visionBridge;
+  }
+
+  /**
+   * Pick an image-capable model from the registered models to use as the
+   * vision bridge model when the user has not configured one explicitly. This
+   * lets the bridge work out-of-the-box for users who already have a
+   * multimodal provider configured, instead of requiring a hand-set id.
+   *
+   * Selection prefers a model on the same provider as the primary model (same
+   * endpoint, then same auth type) before falling back to any image-capable
+   * model. See {@link selectVisionBridgeModel} for the full precedence.
+   *
+   * @returns A registered image-capable model id, or `undefined`.
+   */
+  getDefaultVisionBridgeModel(): string | undefined {
+    return selectVisionBridgeModel(this.getModel(), this.getAvailableModels());
   }
 
   /**
