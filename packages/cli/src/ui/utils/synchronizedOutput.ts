@@ -57,8 +57,17 @@ export function terminalSupportsSynchronizedOutput(
     return true;
   }
 
+  if (termProgram?.toLowerCase().includes('ghostty')) {
+    return true;
+  }
+
   const term = env['TERM'];
-  return Boolean(env['KITTY_WINDOW_ID'] || term?.includes('kitty'));
+  return Boolean(
+    env['KITTY_WINDOW_ID'] ||
+      term?.includes('kitty') ||
+      env['GHOSTTY_RESOURCES_DIR'] ||
+      term === 'xterm-ghostty',
+  );
 }
 
 export function installSynchronizedOutput(
