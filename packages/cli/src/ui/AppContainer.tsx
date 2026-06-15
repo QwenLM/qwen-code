@@ -282,6 +282,13 @@ export function dedupeNewestFirst(messages: readonly string[]): string[] {
   return result;
 }
 
+export function mergeStartupWarnings(
+  currentWarnings: readonly string[],
+  nextWarnings: readonly string[],
+): string[] {
+  return [...new Set([...currentWarnings, ...nextWarnings])];
+}
+
 interface AppContainerProps {
   config: Config;
   settings: LoadedSettings;
@@ -484,6 +491,9 @@ export const AppContainer = (props: AppContainerProps) => {
     computeWindowTitle(basename(config.getTargetDir())),
   );
   const lastTitleRef = useRef<string | null>(null);
+  const [startupWarnings, setStartupWarnings] = useState(
+    () => props.startupWarnings || [],
+  );
   const staticExtraHeight = 3;
 
   // Prefetch the lowlight chunk on mount so the dynamic import is already
@@ -520,6 +530,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
+      setStartupWarnings((currentWarnings) =>
+        mergeStartupWarnings(currentWarnings, config.getWarnings()),
+      );
       profileCheckpoint('config_initialize_end');
       setConfigInitialized(true);
       profileCheckpoint('input_enabled');
@@ -3715,7 +3728,7 @@ export const AppContainer = (props: AppContainerProps) => {
           <AppContext.Provider
             value={{
               version: props.version,
-              startupWarnings: props.startupWarnings || [],
+              startupWarnings,
             }}
           >
             <CompactModeProvider value={compactModeValue}>

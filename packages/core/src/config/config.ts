@@ -36,6 +36,7 @@ import {
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
@@ -149,6 +150,7 @@ import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaul
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
   clearRuntimeStatus,
   writeRuntimeStatus,
@@ -175,6 +177,8 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
+
+const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
 import {
   ModelsConfig,
@@ -2141,6 +2145,33 @@ export class Config {
     );
   }
 
+  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+    const contextWindowSize =
+      this.getContentGeneratorConfig()?.contextWindowSize ??
+      this.modelsConfig.getGenerationConfig().contextWindowSize ??
+      tokenLimit(this.getModel(), 'input');
+    if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
+      return undefined;
+    }
+
+    const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
+    const thresholdTokens = Math.floor(
+      contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
+    );
+    if (estimatedTokens <= thresholdTokens) {
+      return undefined;
+    }
+
+    return (
+      `Warning: Loaded QWEN.md/context instructions use about ` +
+      `${estimatedTokens.toLocaleString()} tokens, more than ` +
+      `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
+      `model's ${contextWindowSize.toLocaleString()} token context window. ` +
+      `Consider trimming long always-loaded context or moving details into ` +
+      `on-demand files.`
+    );
+  }
+
   private getMemoryDiscoveryDirectories(): string[] {
     if (!this.shouldLoadMemoryFromIncludeDirectories()) {
       return [];
@@ -2295,7 +2326,12 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    return this.warnings;
+    const memoryContextWarning = this.buildMemoryContextWarning(
+      this.getUserMemory(),
+    );
+    return memoryContextWarning
+      ? [...this.warnings, memoryContextWarning]
+      : this.warnings;
   }
 
   getDebugLogger(): DebugLogger {
