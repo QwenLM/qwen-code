@@ -308,10 +308,73 @@ describe('<ModelDialog />', () => {
       'model.name',
       'gpt-4',
     );
+    // The selected provider has no baseUrl, so the disambiguator must be cleared.
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      undefined,
+    );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'security.auth.selectedType',
       AuthType.USE_OPENAI,
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists model.baseUrl alongside model.name when the selected provider has a baseUrl', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'qwen3.7-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'qwen3.7-max',
+          label: '[Token Plan] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          envKey: 'TOKEN_PLAN_KEY',
+        },
+        {
+          id: 'qwen3.7-max',
+          label: '[IdeaLab] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://idealab.example.com/v1',
+          envKey: 'IDEALAB_KEY',
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        baseUrl: 'https://idealab.example.com/v1',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    // Select the IdeaLab entry (second provider with the same id).
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-max\0https://idealab.example.com/v1`,
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3.7-max',
+      {
+        baseUrl: 'https://idealab.example.com/v1',
+      },
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      'qwen3.7-max',
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      'https://idealab.example.com/v1',
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });

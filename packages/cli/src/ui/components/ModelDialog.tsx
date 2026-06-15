@@ -95,9 +95,15 @@ function maskApiKey(apiKey: string | undefined): string {
 function persistModelSelection(
   settings: ReturnType<typeof useSettings>,
   modelId: string,
+  baseUrl?: string,
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'model.name', modelId);
+  // Persist the paired baseUrl so the correct provider is restored on next
+  // launch when multiple providers share the same model id. Clear it when the
+  // selection has no baseUrl, otherwise a stale value would override the
+  // resolved provider.
+  settings.setValue(scope, 'model.baseUrl', baseUrl);
 }
 
 function persistAuthTypeSelection(
@@ -132,6 +138,7 @@ interface HandleModelSwitchSuccessParams {
   after: ContentGeneratorConfig | undefined;
   effectiveAuthType: AuthType | undefined;
   effectiveModelId: string;
+  effectiveBaseUrl: string | undefined;
   isRuntime: boolean;
 }
 
@@ -141,9 +148,10 @@ function handleModelSwitchSuccess({
   after,
   effectiveAuthType,
   effectiveModelId,
+  effectiveBaseUrl,
   isRuntime,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(settings, effectiveModelId);
+  persistModelSelection(settings, effectiveModelId, effectiveBaseUrl);
   if (effectiveAuthType) {
     persistAuthTypeSelection(settings, effectiveAuthType);
   }
@@ -553,6 +561,10 @@ export function ModelDialog({
         after,
         effectiveAuthType,
         effectiveModelId,
+        // Persist the selected provider's baseUrl so the right provider is
+        // restored next launch when several share the same id. Runtime models
+        // are keyed by snapshot id, so no baseUrl disambiguator is stored.
+        effectiveBaseUrl: isRuntime ? undefined : selectedEntry?.model.baseUrl,
         isRuntime,
       });
       onClose();

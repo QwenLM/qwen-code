@@ -157,11 +157,15 @@ export function resolveCliGenerationConfig(
   // Env vars are ONLY considered when neither argv.model nor settings.model.name is set.
   let resolvedModel: string | undefined;
   let sourceEnvVar: string | undefined;
+  // Whether the model came from settings.model.name (vs argv/env). The persisted
+  // settings.model.baseUrl disambiguator only applies to this case.
+  let resolvedFromSettings = false;
   if (argv.model) {
     resolvedModel = argv.model;
   } else if (settings.model?.name) {
     // Self-heal configs already corrupted by older builds.
     resolvedModel = stripRuntimeSnapshotPrefix(settings.model.name);
+    resolvedFromSettings = true;
   } else if (authType && AUTH_ENV_MODEL_VARS[authType]) {
     // Only check env vars for the current auth type
     for (const envVar of AUTH_ENV_MODEL_VARS[authType]) {
@@ -181,7 +185,21 @@ export function resolveCliGenerationConfig(
   if (resolvedModel && authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
-      modelProvider = providers.find((p) => p.id === resolvedModel);
+      // When multiple providers share the same id, disambiguate by the
+      // persisted settings.model.baseUrl (written by the model picker). This
+      // only applies when the model itself came from settings.model.name.
+      // Fall back to the first id match if the paired provider was edited or
+      // removed (and for the legacy id-only case where no baseUrl was saved),
+      // mirroring auth.ts:findModelConfig.
+      const persistedBaseUrl = settings.model?.baseUrl;
+      if (resolvedFromSettings && persistedBaseUrl) {
+        modelProvider =
+          providers.find(
+            (p) => p.id === resolvedModel && p.baseUrl === persistedBaseUrl,
+          ) ?? providers.find((p) => p.id === resolvedModel);
+      } else {
+        modelProvider = providers.find((p) => p.id === resolvedModel);
+      }
     }
   }
 
