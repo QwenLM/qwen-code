@@ -914,16 +914,42 @@
           "type": "number",
           "default": 1000
         },
+        "toolOutputBatchBudget": {
+          "description": "Per-message budget (characters) for the combined output of one batch of tool calls; the largest results are offloaded to disk when exceeded. Set to -1 to disable.",
+          "type": "number",
+          "default": 200000
+        },
         "computerUse": {
-          "description": "Cross-platform desktop automation via the upstream open-computer-use MCP server. Tools: list_apps, get_app_state, click, type_text, scroll, drag, press_key, perform_secondary_action, set_value. On first invocation, the upstream binary is fetched via npx and the user is walked through macOS Accessibility / Screen Recording permissions if needed.",
+          "description": "Cross-platform desktop automation via the cua-driver native driver (trycua/cua). On first invocation a pinned, signed + notarized binary (~20MB) is downloaded into ~/.qwen/computer-use/ and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Exposes cua-driver's full tool surface (click, type_text, scroll, drag, press_key, get_window_state, page, launch_app, and more).",
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "When enabled (default), the 9 computer_use__* tools are registered as deferred built-ins.",
+              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.",
               "type": "boolean",
               "default": true
             }
           }
+        }
+      }
+    },
+    "policy": {
+      "description": "Daemon multi-client coordination policies. Tool-level allow/deny rules live under `permissions`; this section is for runtime mediation behavior between concurrent HTTP clients sharing one `qwen serve` daemon.",
+      "type": "object",
+      "properties": {
+        "permissionStrategy": {
+          "description": "How permission requests resolve when multiple clients are attached. `first-responder` (default) = any client decides, first wins. `designated` = only the prompt originator decides; falls back to first-responder if originator is anonymous. NOTE: client identity comes from self-declared X-Qwen-Client-Id with no proof-of-possession (pair-token identity is not implemented yet), so any client observing originatorClientId on SSE frames can register with the same id and impersonate the originator. `consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, which means UNANIMITY for M=2 (quorum=2, both must agree) and supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). For M=2 specifically, split votes resolve only via permissionTimeoutMs. `local-only` = only loopback clients can RESOLVE; remote clients can still ABORT a pending permission via the cancel sentinel ({outcome:\"cancelled\"}) — cancel stays cross-policy for consistency. Strict-cancel-too deployments need a dedicated loopback-bound daemon. Requires daemon restart — read once at boot. Options: first-responder, designated, consensus, local-only",
+          "enum": [
+            "first-responder",
+            "designated",
+            "consensus",
+            "local-only"
+          ],
+          "default": "first-responder"
+        },
+        "consensusQuorum": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart — read once at boot."
         }
       }
     },

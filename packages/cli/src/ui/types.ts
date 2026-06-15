@@ -562,8 +562,9 @@ export type HistoryItemGoalStatus = HistoryItemBase & {
   type: 'goal_status';
   kind: GoalStatusKind;
   condition: string;
-  /** Set for progress and terminal goal states. */
+  /** Set for active, progress, and terminal goal states. */
   iterations?: number;
+  setAt?: number;
   durationMs?: number;
   lastReason?: string;
 };

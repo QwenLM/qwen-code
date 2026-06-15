@@ -11,7 +11,6 @@ import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('GIT');
 const GIT_STATUS_TIMEOUT_MS = 5000;
-const GIT_STATUS_SEPARATOR = '\n__QWEN_GIT_STATUS_SEPARATOR__\n';
 const DETACHED_HEAD_LABEL = '(detached HEAD)';
 
 /**
@@ -174,29 +173,29 @@ function formatGitPromptValue(value: string): string {
 export function getRecentGitStatus(cwd: string): string | null {
   if (!isGitRepository(cwd)) return null;
   try {
-    const gitSnapshot = execSync(
-      [
-        'git --no-optional-locks branch --show-current',
-        `printf ${JSON.stringify(GIT_STATUS_SEPARATOR)}`,
-        'git --no-optional-locks status --short',
-        `printf ${JSON.stringify(GIT_STATUS_SEPARATOR)}`,
-        'git --no-optional-locks log --oneline -n 5',
-      ].join(' && '),
-      {
+    // Run each git command separately to avoid shell compatibility issues
+    // (e.g., cmd.exe on Windows doesn't have 'printf')
+    const branch =
+      execSync('git --no-optional-locks branch --show-current', {
         cwd,
         encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'inherit'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         timeout: GIT_STATUS_TIMEOUT_MS,
-      },
-    );
+      }).trim() || DETACHED_HEAD_LABEL;
 
-    const [rawBranch = '', rawStatus = '', rawLog = ''] = gitSnapshot.split(
-      GIT_STATUS_SEPARATOR,
-      3,
-    );
-    const branch = rawBranch.trim() || DETACHED_HEAD_LABEL;
-    const status = rawStatus.trim();
-    const log = rawLog.trim();
+    const status = execSync('git --no-optional-locks status --short', {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: GIT_STATUS_TIMEOUT_MS,
+    }).trim();
+
+    const log = execSync('git --no-optional-locks log --oneline -n 5', {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: GIT_STATUS_TIMEOUT_MS,
+    }).trim();
 
     // Truncate status if too long (>2k chars)
     const MAX_STATUS_CHARS = 2000;

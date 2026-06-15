@@ -288,7 +288,6 @@ export type ServerGeminiStreamEvent =
 // A turn manages the agentic loop turn within the server context.
 export class Turn {
   readonly pendingToolCalls: ToolCallRequestInfo[] = [];
-  private debugResponses: GenerateContentResponse[] = [];
   private pendingCitations = new Set<string>();
   finishReason: FinishReason | undefined = undefined;
   private currentResponseId?: string;
@@ -328,7 +327,6 @@ export class Turn {
         if (streamEvent.type === 'retry') {
           this.pendingToolCalls.length = 0;
           this.pendingCitations.clear();
-          this.debugResponses = [];
           this.finishReason = undefined;
           yield {
             type: GeminiEventType.Retry,
@@ -354,8 +352,6 @@ export class Turn {
         // Assuming other events are chunks with a `value` property
         const resp = streamEvent.value as GenerateContentResponse;
         if (!resp) continue; // Skip if there's no response body
-
-        this.debugResponses.push(resp);
 
         // Track the current response ID for tool call correlation
         if (resp.responseId) {
@@ -477,10 +473,6 @@ export class Turn {
 
     // Yield a request for the tool call, not the pending/confirming status
     return { type: GeminiEventType.ToolCallRequest, value: toolCallRequest };
-  }
-
-  getDebugResponses(): GenerateContentResponse[] {
-    return this.debugResponses;
   }
 }
 

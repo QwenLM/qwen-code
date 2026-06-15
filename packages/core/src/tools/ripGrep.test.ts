@@ -24,6 +24,7 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { spawn } from 'node:child_process';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 
 // Mock ripgrepUtils
 vi.mock('../utils/ripgrepUtils.js', () => ({
@@ -41,6 +42,7 @@ describe('RipGrepTool', () => {
   let tempRootDir: string;
   let grepTool: RipGrepTool;
   let fileExclusionsMock: { getGlobExcludes: () => string[] };
+  let fileReadCache: FileReadCache;
   const abortSignal = new AbortController().signal;
   const sep = '\x1f';
 
@@ -65,9 +67,12 @@ describe('RipGrepTool', () => {
     fileExclusionsMock = {
       getGlobExcludes: vi.fn().mockReturnValue([]),
     };
+    fileReadCache = new FileReadCache();
     Object.assign(mockConfig, {
       getFileExclusions: () => fileExclusionsMock,
       getFileFilteringOptions: () => DEFAULT_FILE_FILTERING_OPTIONS,
+      getFileReadCache: () => fileReadCache,
+      getFileReadCacheDisabled: () => false,
     });
     grepTool = new RipGrepTool(mockConfig);
 
@@ -187,6 +192,21 @@ describe('RipGrepTool', () => {
         path.join(tempRootDir, 'fileA.txt'),
         path.join(tempRootDir, 'sub/fileC.txt'),
       ]);
+
+      const fileAStats = await fs.stat(path.join(tempRootDir, 'fileA.txt'));
+      const fileCStats = await fs.stat(path.join(tempRootDir, 'sub/fileC.txt'));
+      const fileARead = fileReadCache.check(fileAStats);
+      const fileCRead = fileReadCache.check(fileCStats);
+      expect(fileARead.state).toBe('fresh');
+      expect(fileCRead.state).toBe('fresh');
+      if (fileARead.state === 'fresh') {
+        expect(fileARead.entry.lastReadWasFull).toBe(false);
+        expect(fileARead.entry.lastReadCacheable).toBe(true);
+      }
+      if (fileCRead.state === 'fresh') {
+        expect(fileCRead.entry.lastReadWasFull).toBe(false);
+        expect(fileCRead.entry.lastReadCacheable).toBe(true);
+      }
     });
 
     it('should treat summary-only JSON output as no matches', async () => {

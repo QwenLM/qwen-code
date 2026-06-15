@@ -118,6 +118,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ExitPlanMode: 'exit_plan_mode',
   ExitPlanModeTool: 'exit_plan_mode',
 
+  // EnterPlanMode tool
+  enter_plan_mode: 'enter_plan_mode',
+  EnterPlanMode: 'enter_plan_mode',
+  EnterPlanModeTool: 'enter_plan_mode',
+
   // LSP tool
   lsp: 'lsp',
   Lsp: 'lsp',
@@ -339,6 +344,7 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   todo_write: 'TodoWrite',
   lsp: 'Lsp',
   exit_plan_mode: 'ExitPlanMode',
+  enter_plan_mode: 'EnterPlanMode',
 };
 
 /**
@@ -456,6 +462,7 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   TodoWrite: 'write todos',
   Lsp: 'use LSP',
   ExitPlanMode: 'exit plan mode',
+  EnterPlanMode: 'enter plan mode',
 };
 
 /**

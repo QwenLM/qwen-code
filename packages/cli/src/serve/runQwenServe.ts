@@ -10,23 +10,259 @@ import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import type { BridgeEvent } from './eventBus.js';
 import { getDeviceFlowRegistry } from './auth/deviceFlow.js';
-import { loadSettings, SettingScope } from '../config/settings.js';
+import {
+  loadSettings,
+  reloadEnvironment,
+  SettingScope,
+} from '../config/settings.js';
+import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import {
   canonicalizeWorkspace,
-  createHttpAcpBridge,
-  type HttpAcpBridge,
-} from './httpAcpBridge.js';
+  createAcpSessionBridge,
+  type AcpSessionBridge,
+} from './acpSessionBridge.js';
+import {
+  DEFAULT_OTLP_ENDPOINT,
+  DEFAULT_TELEMETRY_TARGET,
+  createDaemonBridgeTelemetry,
+  emitDaemonLog,
+  forceFlushMetrics,
+  hashDaemonWorkspace,
+  initializeDaemonMetrics,
+  initializeTelemetry,
+  recordDaemonCancel,
+  recordDaemonChannelLifecycle,
+  recordDaemonPromptDuration,
+  recordDaemonPromptQueueWait,
+  recordDaemonSessionLifecycle,
+  registerDaemonGaugeCallbacks,
+  findProviderById,
+  buildInstallPlan,
+  applyProviderInstallPlan,
+  resolveBaseUrl,
+  getDefaultModelIds,
+  resolveTelemetrySettings,
+  shutdownTelemetry,
+  type AuthType,
+  type ProviderSetupInputs,
+  type TelemetryRuntimeConfig,
+  type TelemetrySettings,
+} from '@qwen-code/qwen-code-core';
+import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
-import { createDefaultFsAuditEmit, createServeApp } from './server.js';
-import type { ServeOptions } from './types.js';
+import { parseAllowOriginPatterns } from './auth.js';
 import {
-  createWorkspaceFileSystemFactory,
-  type WorkspaceFileSystemFactory,
-} from './fs/index.js';
+  createPermissionAuditPublisher,
+  PermissionAuditRing,
+} from './permissionAudit.js';
+import {
+  createServeApp,
+  getActiveSseCount,
+  resolveBridgeFsFactory,
+} from './server.js';
+import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
+import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
+import { createDaemonWorkspaceService } from './workspace-service/index.js';
+import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
+import type {
+  ServeOptions,
+  ServeAuthProviderInstallRequest,
+  ServeAuthProviderInstallResult,
+} from './types.js';
+import type { WorkspaceFileSystemFactory } from './fs/index.js';
+import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import { getCliVersion } from '../utils/version.js';
+import { getRateLimiter } from './rateLimit.js';
+import type { AcpHttpHandle } from './acpHttp/index.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
+const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
+const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
+  'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+
+function isPositiveIntegerMs(value: number): boolean {
+  return Number.isFinite(value) && Number.isInteger(value) && value > 0;
+}
+
+function isNonNegativeIntegerOrInfinity(value: number): boolean {
+  return (
+    value === Number.POSITIVE_INFINITY ||
+    (Number.isFinite(value) && Number.isInteger(value) && value >= 0)
+  );
+}
+
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+function assertTimerDelayInRange(name: string, value: number): void {
+  if (value > MAX_TIMEOUT_MS) {
+    throw new TypeError(
+      `Invalid ${name}: ${value}. Exceeds maximum JS timer delay of ` +
+        `${MAX_TIMEOUT_MS} ms (~24.8 days); Node would silently ` +
+        `compress longer delays to 1ms.`,
+    );
+  }
+}
+
+/**
+ * Resolve a positive-integer millisecond value from an env var.
+ * Returns `undefined` when the var is absent (caller falls back to the
+ * CLI option / `ServeOptions` field), throws when the var is present
+ * but malformed so a typo fails the boot loudly instead of silently
+ * disabling the deadline.
+ */
+function parseDeadlineEnv(
+  envName: string,
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  // Don't early-return on empty/whitespace: `Number('')` and
+  // `Number(' ')` both yield `0`, which the positive-integer check
+  // below rejects with the standard error message. Silently treating
+  // `QWEN_SERVE_PROMPT_DEADLINE_MS=" "` as "not set" would let a
+  // shell-substitution typo slip past.
+  const trimmed = raw.trim();
+  const parsed = Number(trimmed);
+  if (!isPositiveIntegerMs(parsed)) {
+    throw new Error(
+      `Invalid ${envName}="${raw}": must be a positive integer (milliseconds).`,
+    );
+  }
+  return parsed;
+}
+
+function createDaemonTelemetryRuntimeConfig(
+  telemetry: TelemetrySettings,
+  cliVersion: string,
+  daemonSessionId: string,
+): TelemetryRuntimeConfig {
+  return {
+    getTelemetryEnabled: () => telemetry.enabled ?? false,
+    getTelemetryOtlpEndpoint: () =>
+      telemetry.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
+    getTelemetryOtlpProtocol: () => telemetry.otlpProtocol ?? 'grpc',
+    getTelemetryOtlpTracesEndpoint: () => telemetry.otlpTracesEndpoint,
+    getTelemetryOtlpLogsEndpoint: () => telemetry.otlpLogsEndpoint,
+    getTelemetryOtlpMetricsEndpoint: () => telemetry.otlpMetricsEndpoint,
+    getTelemetryTarget: () => telemetry.target ?? DEFAULT_TELEMETRY_TARGET,
+    getTelemetryOutfile: () => telemetry.outfile,
+    getTelemetryIncludeSensitiveSpanAttributes: () =>
+      telemetry.includeSensitiveSpanAttributes ?? false,
+    getTelemetryResourceAttributes: () => ({
+      'service.instance.id': daemonSessionId,
+      ...(telemetry.resourceAttributes ?? {}),
+    }),
+    getTelemetryMetricsIncludeSessionId: () =>
+      telemetry.metrics?.includeSessionId ?? false,
+    getTelemetryResourceAttributeWarnings: () =>
+      telemetry.resourceAttributeWarnings ?? [],
+    getCliVersion: () => cliVersion,
+    getSessionId: () => daemonSessionId,
+    isInteractive: () => false,
+    getOutboundCorrelationPropagateTraceContext: () => false,
+  };
+}
+
+/**
+ * Boot-time policy validation error. The catch block in `runQwenServe`
+ * matches with `instanceof InvalidPolicyConfigError` to distinguish
+ * operator-misconfiguration (rethrow → fail boot loudly) from
+ * settings-read failures (fall back to defaults).
+ */
+export class InvalidPolicyConfigError extends Error {
+  override readonly name = 'InvalidPolicyConfigError';
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
+ * Parse + validate the `policy.*` section of merged daemon settings.
+ * Returns the resolved `permissionPolicy` /
+ * `permissionConsensusQuorum` for `BridgeOptions`, or throws
+ * `InvalidPolicyConfigError` for operator misconfiguration.
+ *
+ * - `permissionStrategy` must be one of the four `PermissionPolicy`
+ *   literals if present.
+ * - `consensusQuorum` must be a positive integer if present.
+ * - When `consensusQuorum` is set but `permissionStrategy` is not
+ *   `'consensus'`, the override is silently ignored — emit a
+ *   stderr warning so the operator notices.
+ *
+ * The mismatch warning runs through `onWarning` so tests can
+ * capture it; production passes `writeStderrLine`.
+ *
+ * The runtime valid-policy set is derived from
+ * `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes` (single
+ * source of truth) instead of repeating the four literals.
+ */
+export function validatePolicyConfig(
+  policyConfig: { permissionStrategy?: string; consensusQuorum?: number } = {},
+  onWarning: (message: string) => void = writeStderrLine,
+): {
+  permissionPolicy: PermissionPolicy | undefined;
+  permissionConsensusQuorum: number | undefined;
+} {
+  // Derive from the capability registry so the runtime set, the
+  // settings schema enum, the `PermissionPolicy` union, and the
+  // capability advertisement all stay aligned through a single
+  // edit point. The cast asserts every `modes` entry is a
+  // `PermissionPolicy` — TypeScript's `satisfies Record<string,
+  // ServeCapabilityDescriptor>` on the registry doesn't narrow
+  // `modes` to the union, so the assertion is necessary here. The
+  // `permissionMediation.test.ts` capability-suite asserts the
+  // modes list is exhaustive over `PermissionPolicy`, providing
+  // the runtime guarantee.
+  const validSet: ReadonlySet<string> = new Set<string>(
+    SERVE_CAPABILITY_REGISTRY.permission_mediation.modes,
+  );
+  if (
+    policyConfig.permissionStrategy !== undefined &&
+    !validSet.has(policyConfig.permissionStrategy)
+  ) {
+    throw new InvalidPolicyConfigError(
+      `qwen serve: invalid policy.permissionStrategy ` +
+        `"${String(policyConfig.permissionStrategy)}"; must be one of ` +
+        `${Array.from(validSet).join(', ')}`,
+    );
+  }
+  if (
+    policyConfig.consensusQuorum !== undefined &&
+    (!Number.isInteger(policyConfig.consensusQuorum) ||
+      policyConfig.consensusQuorum < 1)
+  ) {
+    throw new InvalidPolicyConfigError(
+      `qwen serve: invalid policy.consensusQuorum ` +
+        `${String(policyConfig.consensusQuorum)}; must be a positive integer`,
+    );
+  }
+  // When consensusQuorum is set but the active strategy doesn't
+  // use it, drop the value so the public contract matches the
+  // warning. Operators reading the warning at boot now see
+  // consistent behavior all the way down.
+  const consensusQuorumActive =
+    policyConfig.consensusQuorum !== undefined &&
+    policyConfig.permissionStrategy === 'consensus';
+  if (
+    policyConfig.consensusQuorum !== undefined &&
+    policyConfig.permissionStrategy !== 'consensus'
+  ) {
+    onWarning(
+      'qwen serve: policy.consensusQuorum is set but ' +
+        'policy.permissionStrategy is not "consensus"; the override will ' +
+        'be ignored.',
+    );
+  }
+  return {
+    permissionPolicy: policyConfig.permissionStrategy as
+      | PermissionPolicy
+      | undefined,
+    permissionConsensusQuorum: consensusQuorumActive
+      ? policyConfig.consensusQuorum
+      : undefined,
+  };
+}
 
 /**
  * Wrap raw IPv6 literals in brackets so the printed URL is a valid RFC 3986
@@ -50,27 +286,50 @@ function formatHostForUrl(host: string): string {
 }
 
 /**
- * #4282 fold-in 4 (qwen-latest C2). Per-workspace promise chain that
- * serializes settings read-modify-write cycles inside this process.
+ * Pull the `context.fileName` snapshot out of merged settings into a
+ * typed string, falling back to `undefined` when the value is missing
+ * or malformed.
+ *
+ * Validation contract:
+ *   - non-empty string after trim → returned trimmed
+ *   - array → first non-empty string element after trim, or undefined
+ *   - anything else (object, number, boolean, undefined) → undefined
+ *
+ * Returning `undefined` is the bridge's signal to use its own
+ * `getCurrentGeminiMdFilename()` default — so a malformed value
+ * keeps the daemon alive rather than producing a garbage filename.
+ */
+export function extractContextFilename(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed === '' ? undefined : trimmed;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry === 'string') {
+        const trimmed = entry.trim();
+        if (trimmed !== '') return trimmed;
+      }
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Per-workspace promise chain that serializes settings read-modify-write
+ * cycles inside this process.
  *
  * Both `persistApprovalMode` and `persistDisabledTools` re-read
  * `tools.disabled` (or `tools.approvalMode`) from disk before writing
  * the merged result back, which is a textbook lost-update window if
  * two concurrent HTTP requests land at the same workspace. Threading
- * each call through this lock collapses the window: the first request
- * holds the chain until its `setValue` flush completes, and the second
- * sees the post-write state when it runs its own load.
+ * each call through this lock collapses the window.
  *
- * Scope is INTRA-process: a separate `qwen serve` invocation against
- * the same workspace would not share the Map, but per-workspace
- * single-daemon is the supported deployment shape (see #3803 §02).
- * The lock decays naturally — when no callers are queued, the chain
- * resolves and stays mounted in the Map; the per-workspace memory
- * cost is one settled Promise and one Map entry.
- *
- * Errors propagate to the caller; the chain advances to the next
- * waiter regardless via the `.then(fn, fn)` pattern, so a single
- * failed write doesn't permanently stall persistence.
+ * Scope is INTRA-process: per-workspace single-daemon is the supported
+ * deployment shape. Errors propagate to the caller; the chain advances
+ * to the next waiter regardless via the `.then(fn, fn)` pattern, so a
+ * single failed write doesn't permanently stall persistence.
  */
 const settingsWriteLocks = new Map<string, Promise<unknown>>();
 function withSettingsLock<T>(
@@ -86,22 +345,54 @@ function withSettingsLock<T>(
 export interface RunHandle {
   server: Server;
   url: string;
-  bridge: HttpAcpBridge;
+  bridge: AcpSessionBridge;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
 
+function normalizeInstallModelIds(
+  req: ServeAuthProviderInstallRequest,
+  provider: NonNullable<ReturnType<typeof findProviderById>>,
+): string[] {
+  const fromRequest = req.modelIds
+    ?.map((id) => id.trim())
+    .filter((id) => id.length > 0);
+  const modelIds =
+    fromRequest && fromRequest.length > 0
+      ? fromRequest
+      : getDefaultModelIds(provider);
+  return [...new Set(modelIds)];
+}
+
+function buildProviderSetupInputs(
+  req: ServeAuthProviderInstallRequest,
+  provider: NonNullable<ReturnType<typeof findProviderById>>,
+): ProviderSetupInputs {
+  const protocol = (req.protocol ?? provider.protocol) as AuthType;
+  const baseUrl = resolveBaseUrl(provider, req.baseUrl);
+  return {
+    ...(provider.protocolOptions ? { protocol } : {}),
+    baseUrl,
+    apiKey: req.apiKey.trim(),
+    modelIds: normalizeInstallModelIds(req, provider),
+    ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
+  };
+}
+
 export interface RunQwenServeDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
-  bridge?: HttpAcpBridge;
+  bridge?: AcpSessionBridge;
   /**
-   * Workspace filesystem factory (#4175 PR 19). When omitted,
-   * `runQwenServe` constructs one using `boundWorkspace`,
-   * `trustedWorkspace`, and a default warning-emit hook. Tests
-   * inject a real factory + custom emit to capture audit events,
-   * or override `trustedWorkspace` to flip the trust snapshot
-   * without re-routing through the OS-level trustedFolders config
-   * file.
+   * Whether to start the real ACP child eagerly after listen. Production
+   * keeps this on; tests can disable it so boot-path assertions do not wait
+   * on a real child bridge.
+   */
+  preheatBridge?: boolean;
+  /**
+   * Workspace filesystem factory. When omitted, `runQwenServe`
+   * constructs one using `boundWorkspace`, `trustedWorkspace`, and a
+   * default warning-emit hook. Tests inject a real factory + custom
+   * emit to capture audit events.
    */
   fsFactory?: WorkspaceFileSystemFactory;
   /**
@@ -120,12 +411,14 @@ export interface RunQwenServeDeps {
   /**
    * Audit-emit hook for `fs.access` / `fs.denied`. Defaults to a
    * stderr warning every 100 events so a regression that drops
-   * audit emission stays visible in the operator log. PR 21's SSE
-   * fan-out will replace the default with a workspace-scoped event
-   * channel; for now tests inject a recording array to assert the
-   * audit pipeline.
+   * audit emission stays visible in the operator log.
    */
   fsAuditEmit?: (event: BridgeEvent) => void;
+}
+
+function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
+  if (deps.preheatBridge !== undefined) return deps.preheatBridge;
+  return process.env['VITEST_WORKER_ID'] === undefined;
 }
 
 /**
@@ -154,9 +447,39 @@ export async function runQwenServe(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
-  const opts: ServeOptions = { ...optsIn, token };
+  const sessionShellCommandEnabled =
+    optsIn.enableSessionShell === true && token !== undefined;
+  if (optsIn.enableSessionShell === true && token === undefined) {
+    writeStderrLine(
+      `qwen serve: --enable-session-shell ignored because no bearer token ` +
+        `is configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token to ` +
+        `enable direct session shell.`,
+    );
+  }
+  // Env-var fallback for the deadline options. Explicit option
+  // beats the env beats unset (= unlimited). `parseDeadlineEnv` throws
+  // on malformed values so an `export QWEN_SERVE_PROMPT_DEADLINE_MS=abc`
+  // typo fails boot loudly instead of silently disabling the cap.
+  const promptDeadlineMs =
+    optsIn.promptDeadlineMs ??
+    parseDeadlineEnv(
+      QWEN_SERVE_PROMPT_DEADLINE_MS_ENV,
+      process.env[QWEN_SERVE_PROMPT_DEADLINE_MS_ENV],
+    );
+  const writerIdleTimeoutMs =
+    optsIn.writerIdleTimeoutMs ??
+    parseDeadlineEnv(
+      QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV,
+      process.env[QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV],
+    );
+  const opts: ServeOptions = {
+    ...optsIn,
+    token,
+    promptDeadlineMs,
+    writerIdleTimeoutMs,
+  };
 
-  // BU-sh: catch the `--hostname localhost:4170` / `127.0.0.1:4170`
+  // Catch the `--hostname localhost:4170` / `127.0.0.1:4170`
   // typo BEFORE the loopback / token check so the operator sees a
   // useful "did you mean --port?" message instead of "Refusing to
   // bind localhost:4170:0 without a bearer token". Unbracketed input
@@ -179,8 +502,8 @@ export async function runQwenServe(
         `(127.0.0.1, localhost, ::1, or [::1]).`,
     );
   }
-  // Issue #4175 PR 15. `--require-auth` extends the "must have a token"
-  // rule to loopback as well. Boot-loud, like the non-loopback check
+  // `--require-auth` extends the "must have a token" rule to loopback
+  // as well. Boot-loud, like the non-loopback check
   // above: silently dropping the flag when no token is configured
   // would leave the operator believing the deployment is hardened
   // when it isn't. Mention both the env var and the flag so log
@@ -193,18 +516,60 @@ export async function runQwenServe(
     );
   }
 
-  // Resolve the bound workspace per #3803 §02 (1 daemon = 1 workspace).
+  // Validate `--allow-origin` patterns at boot so
+  // operators discover typos before the daemon advertises
+  // `allow_origin` to clients. Each entry must be either `*` or a value
+  // that round-trips through `new URL(...).origin` — see
+  // `parseAllowOriginPatterns` JSDoc for the strict-by-intent rationale.
+  // The parsed `ParsedAllowOriginPatterns` is then re-derived in
+  // `createServeApp` to avoid threading an extra option shape through;
+  // re-parsing is O(n) over operator-listed patterns and only happens
+  // once at boot.
+  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
+    // `InvalidAllowOriginPatternError` already names the bad pattern
+    // and the canonical form; surface it verbatim.
+    const parsed = parseAllowOriginPatterns(opts.allowOrigins);
+    // `*` admits cross-origin requests from any browser tab on the
+    // host. On a token-less loopback default that's a wide-open API
+    // surface — any page (https://evil.example.com, attacker-controlled
+    // ad-frame) can read every route. Refuse to start so operators
+    // don't ship this combination by accident. Mirrors the
+    // `--require-auth + no token` boot-refusal above. A token (any
+    // source: --token, env, --require-auth) makes the bearer the
+    // security boundary, so `*` is acceptable under that posture.
+    if (parsed.allowAny && !token) {
+      throw new Error(
+        `Refusing to start with --allow-origin '*' but no bearer token ` +
+          `configured. '*' admits any cross-origin browser to the API; ` +
+          `without a token, any local page can drive the daemon. Set ` +
+          `${QWEN_SERVER_TOKEN_ENV} or pass --token, or list specific ` +
+          `origins instead of '*'.`,
+      );
+    }
+    writeStderrLine(
+      `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
+        (parsed.allowAny
+          ? ' (WARNING: `*` admits any cross-origin browser — bearer ' +
+            'token gates API routes; /health and /demo remain pre-auth ' +
+            'on loopback unless --require-auth is set)'
+          : ''),
+    );
+  }
+  if (opts.allowPrivateAuthBaseUrl) {
+    writeStderrLine(
+      'qwen serve: --allow-private-auth-base-url enabled; ' +
+        '/workspace/auth/provider may install localhost/private-network ' +
+        'model endpoints. Use only for local development with trusted clients.',
+    );
+  }
+
+  // Resolve the bound workspace (1 daemon = 1 workspace).
   // Explicit `--workspace` wins; otherwise default to process.cwd().
   // `POST /session` with a mismatched `cwd` is rejected by the bridge
   // with `WorkspaceMismatchError`. Multi-workspace deployments use
   // multiple daemon processes, not intra-daemon routing.
   //
   // Boot-loud validation: absolute path, exists, is a directory.
-  // Without the stat() check, `canonicalizeWorkspace`'s ENOENT fallback
-  // to `path.resolve` would let the daemon boot pointed at a
-  // non-existent directory; every `POST /session` would then spawn a
-  // `qwen --acp` child with that cwd and the agent would fail with an
-  // opaque ENOENT — operator pain we can avoid by failing at boot.
   const rawWorkspace = opts.workspace ?? process.cwd();
   if (!path.isAbsolute(rawWorkspace)) {
     throw new Error(
@@ -251,29 +616,20 @@ export async function runQwenServe(
   // server.ts's raw `opts.workspace` and clients see one path on
   // `/capabilities` but another on `POST /session` responses.
   const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
-  // Issue #4175 PR 14. The MCP client guardrails enforce in the ACP
-  // child process (where `McpClientManager` lives), not the daemon.
-  // Forward the budget config via env vars so the child's
-  // `readBudgetFromEnv()` picks them up.
-  //
-  // PR 14 fix (review #4247 wenshao R5 line 216): use per-handle env
-  // overrides via `BridgeOptions.childEnvOverrides` instead of
-  // mutating global `process.env`. Pre-fix concurrent embedded
-  // daemons (`runQwenServe()` × 2 in the same process) would race
-  // on `process.env` — `defaultSpawnChannelFactory` snapshots
-  // `process.env` AT SPAWN TIME, so the later daemon's env value
-  // would silently win for the earlier daemon's subsequent ACP
-  // child spawns. With per-handle overrides closed over inside
-  // each bridge, each daemon's children inherit ONLY that
-  // daemon's intended budget config, regardless of what other
-  // daemons in the same process are doing.
-  //
-  // Also: `runQwenServe` is exported and other validations
-  // (`requireAuth` no-token, `maxConnections` NaN, `--workspace`
-  // checks) live here, so embedded callers expect boot-time
-  // rejection of invalid inputs. The yargs CLI handler duplicates
-  // these for fast-fail UX, but `runQwenServe` is the source of
-  // truth.
+
+  // Init daemon logger early so all subsequent lifecycle events
+  // (bridge spawn diagnostics, shutdown errors) are captured to file.
+  const daemonLog: DaemonLogger = initDaemonLogger({ boundWorkspace });
+  writeStderrLine(
+    `qwen serve: daemon log → ${daemonLog.getLogPath() || '(disabled)'}`,
+  );
+
+  // The MCP client guardrails enforce in the ACP child process (where
+  // `McpClientManager` lives), not the daemon. Forward the budget
+  // config via env vars so the child's `readBudgetFromEnv()` picks
+  // them up. Use per-handle env overrides via
+  // `BridgeOptions.childEnvOverrides` instead of mutating global
+  // `process.env`, so concurrent embedded daemons don't race.
   if (opts.mcpClientBudget !== undefined) {
     if (
       !Number.isFinite(opts.mcpClientBudget) ||
@@ -291,12 +647,59 @@ export async function runQwenServe(
         'Pass mcpClientBudget=N, or set mcpBudgetMode to "warn" or "off".',
     );
   }
+  // Validate the deadline options on the explicit option path.
+  // The env path is already validated inside `parseDeadlineEnv`. Boot-
+  // loud so an embedded caller passing `{ promptDeadlineMs: -5 }`
+  // doesn't end up with a daemon that silently fails to enforce the
+  // cap, leaving the operator believing the timeout is active.
+  if (opts.promptDeadlineMs !== undefined) {
+    if (!isPositiveIntegerMs(opts.promptDeadlineMs)) {
+      throw new TypeError(
+        `Invalid promptDeadlineMs: ${opts.promptDeadlineMs}. Must be a positive integer (milliseconds).`,
+      );
+    }
+    assertTimerDelayInRange('promptDeadlineMs', opts.promptDeadlineMs);
+  }
+  if (opts.maxPendingPromptsPerSession !== undefined) {
+    if (!isNonNegativeIntegerOrInfinity(opts.maxPendingPromptsPerSession)) {
+      throw new TypeError(
+        `Invalid maxPendingPromptsPerSession: ${opts.maxPendingPromptsPerSession}. Must be a non-negative integer (0 / Infinity = unlimited).`,
+      );
+    }
+  }
+  if (opts.writerIdleTimeoutMs !== undefined) {
+    if (!isPositiveIntegerMs(opts.writerIdleTimeoutMs)) {
+      throw new TypeError(
+        `Invalid writerIdleTimeoutMs: ${opts.writerIdleTimeoutMs}. Must be a positive integer (milliseconds).`,
+      );
+    }
+  }
+  if (opts.channelIdleTimeoutMs !== undefined) {
+    if (
+      !Number.isFinite(opts.channelIdleTimeoutMs) ||
+      !Number.isInteger(opts.channelIdleTimeoutMs) ||
+      opts.channelIdleTimeoutMs < 0
+    ) {
+      throw new TypeError(
+        `Invalid channelIdleTimeoutMs: ${opts.channelIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = immediate kill).`,
+      );
+    }
+  }
   // Per-handle env overrides: `undefined` value means "scrub this
   // var from the child env" — important when a different daemon
   // in the same process set the var globally previously. Always
   // set both keys explicitly (to value or `undefined`) so each
   // child's MCP budget env is fully determined by this handle's
   // options, with no inheritance from process.env's current state.
+  //
+  // If the daemon parent process has the pool kill switch
+  // (`QWEN_SERVE_NO_MCP_POOL=1`) in its own env, infer
+  // `mcpPoolActive: false` so the capabilities envelope drops the
+  // `mcp_workspace_pool` + `mcp_pool_restart` tags.
+  const inheritedNoPool = process.env['QWEN_SERVE_NO_MCP_POOL'] === '1';
+  if (opts.mcpPoolActive === undefined && inheritedNoPool) {
+    opts.mcpPoolActive = false;
+  }
   const childEnvOverrides: Record<string, string | undefined> = {
     QWEN_SERVE_MCP_CLIENT_BUDGET:
       opts.mcpClientBudget !== undefined
@@ -305,21 +708,203 @@ export async function runQwenServe(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
   };
 
+  // Read settings once at boot for the workspace context filename and
+  // policy fields (permissionStrategy / consensusQuorum). Wrap in
+  // try/catch so a corrupted settings.json doesn't block daemon boot
+  // — context filename falls back to the bridge's default; policy
+  // validation rethrows because invalid policy is an explicit operator
+  // misconfiguration.
+  let contextFilenameForInit: string | undefined;
+  let permissionPolicy: PermissionPolicy | undefined;
+  let permissionConsensusQuorum: number | undefined;
+  let bootSettings: ReturnType<typeof loadSettings> | undefined;
+  try {
+    bootSettings = loadSettings(boundWorkspace);
+    contextFilenameForInit = extractContextFilename(
+      bootSettings.merged.context?.fileName,
+    );
+    const policyConfig =
+      (
+        bootSettings.merged as {
+          policy?: {
+            permissionStrategy?: string;
+            consensusQuorum?: number;
+          };
+        }
+      ).policy ?? {};
+    const resolved = validatePolicyConfig(policyConfig);
+    permissionPolicy = resolved.permissionPolicy;
+    permissionConsensusQuorum = resolved.permissionConsensusQuorum;
+  } catch (err) {
+    // Invalid policy values must fail startup loudly. Discriminate by
+    // error class rather than substring-matching the message.
+    if (err instanceof InvalidPolicyConfigError) {
+      throw err;
+    }
+    // All other settings-read failures (corrupted JSON, transient
+    // disk IO) fall back to defaults so the daemon stays bootable.
+    writeStderrLine(
+      `qwen serve: could not read settings for context.fileName / ` +
+        `policy.* (${err instanceof Error ? err.message : String(err)}); ` +
+        `falling back to defaults. Restart with a valid settings.json ` +
+        `to apply context.fileName / policy.* overrides.`,
+    );
+  }
+
+  const daemonWorkspaceHash = hashDaemonWorkspace(boundWorkspace);
+  const daemonTelemetrySettings = await resolveTelemetrySettings({
+    env: process.env,
+    settings: bootSettings?.merged.telemetry,
+  });
+  const cliVersion = await getCliVersion();
+  initializeTelemetry(
+    createDaemonTelemetryRuntimeConfig(
+      daemonTelemetrySettings,
+      cliVersion,
+      `daemon:${daemonWorkspaceHash}:${process.pid}`,
+    ),
+  );
+  initializeDaemonMetrics();
+  const daemonTelemetry = createDaemonBridgeTelemetry();
+  daemonTelemetry.metrics = {
+    sessionLifecycle(action) {
+      recordDaemonSessionLifecycle(action);
+      emitDaemonLog(
+        `Session ${action}.`,
+        {
+          'qwen-code.workspace.hash': daemonWorkspaceHash,
+        },
+        {
+          eventName: `qwen-code.daemon.session.${action}`,
+        },
+      );
+    },
+    channelLifecycle(action, expected) {
+      recordDaemonChannelLifecycle(action, expected);
+      emitDaemonLog(
+        action === 'spawn'
+          ? 'ACP channel spawned.'
+          : `ACP channel exited (expected=${expected ?? true}).`,
+        {
+          ...(action === 'exit'
+            ? { 'qwen-code.daemon.channel.expected': expected ?? true }
+            : {}),
+        },
+        {
+          eventName: `qwen-code.daemon.channel.${action}`,
+          ...(expected === false && action === 'exit'
+            ? { severityNumber: 13 }
+            : {}),
+        },
+      );
+    },
+    promptQueueWait: recordDaemonPromptQueueWait,
+    promptDuration: recordDaemonPromptDuration,
+    cancelled: recordDaemonCancel,
+  };
+
+  // Allocate the audit ring + publisher in the daemon host (here)
+  // rather than inside the bridge factory, because the ring is the
+  // seam for exposing `GET /workspace/permission/audit` in the
+  // future.
+  const permissionAuditRing = new PermissionAuditRing();
+  const permissionAuditPublisher = createPermissionAuditPublisher({
+    ring: permissionAuditRing,
+  });
+
+  // Construct `fsFactory` BEFORE the bridge so the bridge can wire it
+  // through `BridgeFileSystem` for ACP-side writeTextFile / readTextFile
+  // calls. See `bridgeFileSystemAdapter.ts` for the translation layer.
+  const trustedWorkspace = deps.trustedWorkspace ?? true;
+  const customIgnoreFiles =
+    bootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
+  const fsFactory = resolveBridgeFsFactory({
+    boundWorkspace,
+    injected: deps.fsFactory,
+    trusted: trustedWorkspace,
+    emit: deps.fsAuditEmit,
+    ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+  });
+
+  // Create a spawn channel factory that tees child-stderr diagnostics
+  // into the daemon log file (file-only, no duplicate stderr write).
+  const diagnosticSink = (line: string, level?: 'info' | 'warn' | 'error') =>
+    daemonLog.raw(line, level);
+  const channelFactory = createSpawnChannelFactory({
+    onDiagnosticLine: diagnosticSink,
+  });
+
+  const persistDisabledToolsFn = (
+    workspace: string,
+    toolName: string,
+    enabled: boolean,
+  ): Promise<void> =>
+    withSettingsLock(workspace, async () => {
+      const fresh = loadSettings(workspace);
+      const wsScope = fresh.forScope(SettingScope.Workspace).settings;
+      const wsDisabled = wsScope.tools?.disabled;
+      const current = Array.isArray(wsDisabled)
+        ? wsDisabled.filter((v): v is string => typeof v === 'string')
+        : [];
+      const next = new Set(current);
+      if (enabled) next.delete(toolName);
+      else next.add(toolName);
+      fresh.setValue(
+        SettingScope.Workspace,
+        'tools.disabled',
+        [...next].sort(),
+      );
+    });
+
+  // Create the status provider once — shared between bridge and workspace
+  // service so both answer env/preflight cells from the same daemon-local
+  // implementation.
+  const statusProvider = createDaemonStatusProvider();
+
   const bridge =
     deps.bridge ??
-    createHttpAcpBridge({
+    createAcpSessionBridge({
       maxSessions: opts.maxSessions,
+      ...(opts.maxPendingPromptsPerSession !== undefined
+        ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
+        : {}),
       ...(opts.eventRingSize !== undefined
         ? { eventRingSize: opts.eventRingSize }
         : {}),
+      ...(opts.channelIdleTimeoutMs !== undefined
+        ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+        : {}),
+      ...(opts.sessionReapIntervalMs !== undefined
+        ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
+        : {}),
+      ...(opts.sessionIdleTimeoutMs !== undefined
+        ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+        : {}),
       boundWorkspace,
+      sessionShellCommandEnabled,
       childEnvOverrides,
+      channelFactory,
+      onDiagnosticLine: diagnosticSink,
+      telemetry: daemonTelemetry,
+      // Wire the validated policy/quorum from settings into the
+      // bridge.
+      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+      ...(permissionConsensusQuorum !== undefined
+        ? { permissionConsensusQuorum }
+        : {}),
+      permissionAudit: permissionAuditPublisher,
       // #4175 PR 22b/2: inject the daemon-host status provider so the
       // bridge can pull env / preflight cells through a typed seam
       // instead of importing daemon-host helpers directly. Production
       // implementation wraps `buildEnvStatusFromProcess` and the
       // (lifted) `buildDaemonPreflightCells` body.
-      statusProvider: createDaemonStatusProvider(),
+      statusProvider,
+      // F1 follow-up (#4319): inject the WorkspaceFileSystem adapter so
+      // agent ACP `writeTextFile` / `readTextFile` calls go through
+      // PR 18's defensive fs layer (trust gate + atomic write + symlink
+      // resolution + audit emit) instead of `BridgeClient`'s inline
+      // raw-fs proxy. Closes the `ws.ts:613` follow-up thread.
+      fileSystem: createBridgeFileSystemAdapter(fsFactory),
       // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
       // an opt-in `persist: true` flag. We re-load settings on each
       // persist call rather than caching a `LoadedSettings` handle —
@@ -342,38 +927,41 @@ export async function runQwenServe(
           const fresh = loadSettings(workspace);
           fresh.setValue(SettingScope.Workspace, 'tools.approvalMode', mode);
         }),
-      // #4175 Wave 4 PR 17: `POST /workspace/tools/:name/enable` writes
-      // through this callback. Re-reads settings on each call (same
-      // freshness rationale as `persistApprovalMode`) and merges into
-      // the existing `tools.disabled` array — concurrent toggles from
-      // other writers stay safe across the read/modify/write window.
-      //
-      // #4282 wenshao H2 fold-in: read from the WORKSPACE scope only.
-      // Reading `fresh.merged.tools?.disabled` (the UNION across
-      // System / SystemDefaults / User / Workspace) and writing the
-      // result back into `SettingScope.Workspace` would copy entries
-      // from higher scopes into the workspace file on the first
-      // toggle. Subsequent removals at the originating scope (e.g.
-      // User) would no longer take effect because the names have been
-      // baked into the workspace file with no obvious source.
-      persistDisabledTools: (workspace, toolName, enabled) =>
-        withSettingsLock(workspace, async () => {
-          const fresh = loadSettings(workspace);
-          const wsScope = fresh.forScope(SettingScope.Workspace).settings;
-          const wsDisabled = wsScope.tools?.disabled;
-          const current = Array.isArray(wsDisabled)
-            ? wsDisabled.filter((v): v is string => typeof v === 'string')
-            : [];
-          const next = new Set(current);
-          if (enabled) next.delete(toolName);
-          else next.add(toolName);
-          fresh.setValue(
-            SettingScope.Workspace,
-            'tools.disabled',
-            [...next].sort(),
-          );
-        }),
     });
+
+  // Construct the DaemonWorkspaceService AFTER the bridge so it can
+  // close over the bridge's generic delegation methods. This service
+  // owns workspace-scoped status queries, tool toggle, init, and MCP
+  // restart — routes in server.ts delegate here instead of reaching
+  // into the bridge for workspace concerns.
+  const workspaceService = createDaemonWorkspaceService({
+    boundWorkspace,
+    contextFilename: contextFilenameForInit ?? 'QWEN.md',
+    // Daemon-host status provider for env + preflight cells.
+    statusProvider,
+    // Channel liveness check — proxied through the bridge's live-channel
+    // probe (not session count: a channel can be live with zero attached
+    // sessions during the cold-spawn window).
+    isChannelLive: () => bridge.isChannelLive(),
+    persistDisabledTools: persistDisabledToolsFn,
+    reloadDaemonEnv: (workspace) =>
+      withSettingsLock(workspace, async () => {
+        const fresh = loadSettings(workspace, { skipLoadEnvironment: true });
+        return reloadEnvironment(fresh.merged, workspace);
+      }),
+    queryWorkspaceStatus: (method, idle) =>
+      bridge.queryWorkspaceStatus(method, idle),
+    invokeWorkspaceCommand: (method, params, invokeOpts) =>
+      bridge.invokeWorkspaceCommand(method, params, invokeOpts),
+    publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+  });
+
+  registerDaemonGaugeCallbacks({
+    sessionCount: () => bridge.sessionCount,
+    sseCount: () => getActiveSseCount(),
+    heapUsed: () => process.memoryUsage().heapUsed,
+  });
+
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
   // via `deps.boundWorkspace`. That field is the pre-canonicalized
@@ -383,53 +971,59 @@ export async function runQwenServe(
   // callers of createServeApp (tests / embeds) omit it and the
   // server canonicalizes itself.
   //
-  // PR 19 — wire up `fsFactory` so the new read routes
-  // (`GET /file|/list|/glob|/stat`) consume a per-request boundary
-  // built against THIS daemon's bound workspace. Trust snapshot
-  // defaults to true; tests / future hardening flows pass an
-  // explicit `trustedWorkspace` to flip the gate. The audit-emit
-  // hook plugs into PR 21's SSE fan-out once that lands; until then
-  // the warning-emit fallback in `createServeApp` makes any silent
-  // drop visible in operator logs.
-  const trustedWorkspace = deps.trustedWorkspace ?? true;
-  // Reuse `createDefaultFsAuditEmit` so the throttle behavior here
-  // matches what `createServeApp`'s built-in fallback would emit.
-  // The earlier per-event `writeStderrLine` would print one line for
-  // every `/file` / `/list` / `/glob` / `/stat` audit event under
-  // normal traffic — a workspace scan can flood operator logs in
-  // seconds. The shared helper warns once + every 100th drop and
-  // includes payload context (errorKind / intent / pathHash), so a
-  // genuine wiring regression still surfaces but routine audit
-  // traffic stays quiet. Future PR 21 SSE fan-out replaces this
-  // default with the workspace-scoped event channel; until then the
-  // throttled stderr warning is the canonical "emit channel orphaned"
-  // breadcrumb.
-  let fsFactory = deps.fsFactory;
-  if (!fsFactory) {
-    const customIgnoreFiles =
-      loadSettings(boundWorkspace).merged.context?.fileFiltering
-        ?.customIgnoreFiles;
-    fsFactory = createWorkspaceFileSystemFactory({
-      boundWorkspace,
-      trusted: trustedWorkspace,
-      emit: deps.fsAuditEmit ?? createDefaultFsAuditEmit(),
-      ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
-    });
-  }
+  // `fsFactory` is constructed above (before the bridge) so the
+  // bridge can wire it through `BridgeFileSystem`. The HTTP read
+  // routes and ACP fs calls share the same factory instance.
   const app = createServeApp(opts, () => actualPort, {
     bridge,
     boundWorkspace,
+    qwenCodeVersion: cliVersion,
     fsFactory,
+    daemonLog,
+    workspace: workspaceService,
+    persistDisabledTools: persistDisabledToolsFn,
+    persistSetting: (workspace, scope, key, value) =>
+      withSettingsLock(workspace, async () => {
+        const fresh = loadSettings(workspace);
+        fresh.setValue(scope, key, value);
+      }),
+    installAuthProvider: (req) =>
+      withSettingsLock(
+        boundWorkspace,
+        async (): Promise<ServeAuthProviderInstallResult> => {
+          const provider = findProviderById(req.providerId);
+          if (!provider) {
+            throw new Error(`Unsupported auth provider: ${req.providerId}`);
+          }
+          const inputs = buildProviderSetupInputs(req, provider);
+          const plan = buildInstallPlan(provider, inputs);
+          const fresh = loadSettings(boundWorkspace);
+          await applyProviderInstallPlan(plan, {
+            settings: createLoadedSettingsAdapter(fresh),
+            doRefreshAuth: false,
+          });
+          emitDaemonLog('Auth provider installed.', {
+            'qwen-code.daemon.auth.provider_id': provider.id,
+            'qwen-code.daemon.auth.auth_type': plan.authType,
+          });
+          return {
+            v: 1,
+            providerId: provider.id,
+            providerLabel: provider.label,
+            authType: plan.authType,
+            ...(plan.modelSelection?.modelId
+              ? { modelId: plan.modelSelection.modelId }
+              : {}),
+            ...(inputs.baseUrl ? { baseUrl: inputs.baseUrl } : {}),
+            message: `Successfully configured ${provider.label}. Use /model to switch models.`,
+          };
+        },
+      ),
   });
-  // Issue #4175 PR 21 — `createServeApp` parks the device-flow registry
-  // on `app.locals` when it constructs (or accepts) one. Pull it back
-  // out so the close hook can dispose it before `bridge.shutdown()`,
-  // ensuring polling timers + cancel controllers are torn down BEFORE
-  // we tell agent children to exit (otherwise a stuck IdP fetch could
-  // pin the drain). `unref()`'d timers mean the process WILL exit
-  // either way; explicit dispose is for cleanliness + audit
-  // visibility. Typed accessor (fold-in 4 review thread D) prevents
-  // a key-name typo from silently nulling out the dispose path.
+  // Pull the device-flow registry back out so the close hook can
+  // dispose it before `bridge.shutdown()`, ensuring polling timers +
+  // cancel controllers are torn down BEFORE we tell agent children
+  // to exit.
   const deviceFlowRegistry = getDeviceFlowRegistry(app);
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -464,25 +1058,20 @@ export async function runQwenServe(
     listenHostname = inner;
   }
 
-  // BUF9-: validate maxConnections BEFORE binding so a typo fails the
+  // Validate maxConnections BEFORE binding so a typo fails the
   // promise instead of escaping as an uncaught exception inside the
   // listen callback (which fires from the `listening` event after the
   // outer promise has already resolved). Silent fail-OPEN on NaN /
   // negative would weaken the DoS/FD-exhaustion guard the cap exists
   // for.
-  if (opts.maxConnections !== undefined) {
-    if (Number.isNaN(opts.maxConnections)) {
-      throw new TypeError(
-        'Invalid maxConnections: NaN. Must be >= 0 ' +
-          '(0 / Infinity = unlimited).',
-      );
-    }
-    if (opts.maxConnections < 0) {
-      throw new TypeError(
-        `Invalid maxConnections: ${opts.maxConnections}. Must be >= 0 ` +
-          `(0 / Infinity = unlimited).`,
-      );
-    }
+  if (
+    opts.maxConnections !== undefined &&
+    (Number.isNaN(opts.maxConnections) || opts.maxConnections < 0)
+  ) {
+    throw new TypeError(
+      `Invalid maxConnections: ${opts.maxConnections}. Must be >= 0 ` +
+        `(0 / Infinity = unlimited).`,
+    );
   }
 
   return await new Promise<RunHandle>((resolve, reject) => {
@@ -496,16 +1085,16 @@ export async function runQwenServe(
       // socket descriptors. The default of 256 leaves room for many
       // sessions × many legitimate clients while keeping the FD count
       // bounded; operators with high-concurrency deployments raise it
-      // via `--max-connections` (BRQQb).
+      // via `--max-connections`.
       //
-      // tanzhenxin issue 1: `0` and `Infinity` are operator-visible
+      // `0` and `Infinity` are operator-visible
       // "disable the cap" sentinels — but on Node 22 setting
       // `server.maxConnections = 0` causes the listener to refuse
       // EVERY connection (verified on v22.15.0: every fetch fails
       // with `SocketError: other side closed`). Treat 0 / Infinity
       // as "leave the property unset" so the documented disable
       // path actually disables instead of silently bricking the
-      // daemon. NaN / negative are rejected upstream (BUF9-) so
+      // daemon. NaN / negative are rejected upstream so
       // they never reach here.
       const cap = opts.maxConnections ?? 256;
       if (cap > 0 && Number.isFinite(cap)) {
@@ -522,7 +1111,7 @@ export async function runQwenServe(
       // Operator log on stderr too (systemd/docker/k8s default
       // captures only stderr for service diagnostics, and the
       // workspace= breadcrumb is the single piece of information
-      // operators need most when triaging §02 migration issues —
+      // operators need most when triaging migration issues —
       // "did the daemon bind to the right workspace?"). The stdout
       // line above stays put so integration tests + scripts that
       // parse stdout for the listening URL keep working;
@@ -558,36 +1147,38 @@ export async function runQwenServe(
       // drain completes. The handler is registered just before `resolve()`.
       const onSignal = async (signal: NodeJS.Signals) => {
         if (shuttingDown) {
-          // BSA0K: second signal forces exit. During drain (up to
+          // Second signal forces exit. During drain (up to
           // ~15s for a stuck child + the 5s force-close timer) an
           // operator's reflexive `^C^C` would otherwise be dropped.
           // Match standard daemon behavior (nginx, redis, etc.):
           // first signal = graceful drain; second = hard exit.
           //
-          // Bd1y6: synchronously SIGKILL every live `qwen --acp`
+          // Synchronously SIGKILL every live `qwen --acp`
           // child BEFORE `process.exit(1)`. Otherwise the daemon
           // vanishes but its child processes keep running with
           // dangling stdin/stdout pipes — visible as orphan
           // `qwen` processes in the operator's `ps` output.
-          writeStderrLine(
-            `qwen serve: received ${signal} during drain — forcing exit`,
-          );
+          daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
             bridge.killAllSync();
           } catch (err) {
-            writeStderrLine(
-              `qwen serve: force-kill error: ${err instanceof Error ? err.message : String(err)}`,
+            daemonLog.error(
+              'force-kill error',
+              err instanceof Error ? err : null,
             );
           }
+          await daemonLog.flush().catch(() => {});
           process.exit(1);
           return;
         }
-        writeStderrLine(`qwen serve: received ${signal}, draining...`);
+        daemonLog.warn(`received ${signal}, draining`);
         try {
           await handle.close();
+          await daemonLog.flush();
           process.exit(0);
         } catch (err) {
-          writeStderrLine(`qwen serve: shutdown error: ${String(err)}`);
+          daemonLog.error('shutdown error', err instanceof Error ? err : null);
+          await daemonLog.flush().catch(() => {});
           process.exit(1);
         }
       };
@@ -632,7 +1223,7 @@ export async function runQwenServe(
             // the bridge was still tearing children down — orphaning
             // any that hadn't yet hit `KILL_HARD_DEADLINE_MS`.
             let settled = false;
-            // BV-qW: track bridge.shutdown failures so close()
+            // Track bridge.shutdown failures so close()
             // doesn't silently report success when the bridge
             // teardown itself failed. The contract says "resolves
             // when the listener has fully closed and the bridge is
@@ -642,18 +1233,29 @@ export async function runQwenServe(
             const finish = (err?: Error | null) => {
               if (settled) return;
               settled = true;
-              // Drain finished (or timed out) — safe to detach now.
               process.removeListener('SIGINT', onSignal);
               process.removeListener('SIGTERM', onSignal);
-              // Server.close error takes precedence (operator-visible
-              // listener problem); fall back to the bridge error
-              // captured during shutdown if any.
-              const finalErr = err ?? bridgeShutdownError;
-              if (finalErr) rej(finalErr);
-              else res();
+              void shutdownTelemetry()
+                .catch((telemetryErr) => {
+                  writeStderrLine(
+                    `qwen serve: telemetry shutdown error: ${
+                      telemetryErr instanceof Error
+                        ? telemetryErr.message
+                        : String(telemetryErr)
+                    }`,
+                  );
+                })
+                .finally(() => {
+                  // Server.close error takes precedence (operator-visible
+                  // listener problem); fall back to the bridge error
+                  // captured during shutdown if any.
+                  const finalErr = err ?? bridgeShutdownError;
+                  if (finalErr) rej(finalErr);
+                  else res();
+                });
             };
 
-            // PR 21: dispose the device-flow registry FIRST so any
+            // Dispose the device-flow registry FIRST so any
             // in-flight IdP poll is cancelled and timers are cleared
             // before the bridge tear-down (which would otherwise race
             // with the still-polling registry on shared HTTP agents).
@@ -661,65 +1263,99 @@ export async function runQwenServe(
               try {
                 deviceFlowRegistry.dispose();
               } catch (err) {
-                writeStderrLine(
-                  `qwen serve: device-flow registry dispose error: ${
+                daemonLog.warn(
+                  `device-flow registry dispose error: ${
                     err instanceof Error ? err.message : String(err)
                   }`,
                 );
               }
             }
-            bridge
-              .shutdown()
-              .catch((err) => {
-                writeStderrLine(
-                  `qwen serve: bridge shutdown error: ${String(err)}`,
+            // Dispose ACP handle (close WebSocketServer + send close frames).
+            const acpHandle = app.locals?.['acpHandle'] as
+              | AcpHttpHandle
+              | undefined;
+            if (acpHandle?.dispose) {
+              try {
+                acpHandle.dispose();
+              } catch (err) {
+                daemonLog.warn(
+                  `ACP handle dispose error: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
                 );
-                bridgeShutdownError =
-                  err instanceof Error ? err : new Error(String(err));
+              }
+            }
+            // Dispose rate limiter (clear GC timer + buckets).
+            const rl = getRateLimiter(app);
+            if (rl) {
+              rl.setDraining(true);
+              rl.dispose();
+            }
+            forceFlushMetrics()
+              .catch((flushErr) => {
+                daemonLog.warn(
+                  `pre-shutdown metrics flush failed: ${
+                    flushErr instanceof Error
+                      ? flushErr.message
+                      : String(flushErr)
+                  }`,
+                );
               })
-              .finally(() => {
-                // Phase 2: arm the force timer NOW so it only races
-                // server.close, not the bridge tear-down above.
-                // BUb7h: `RunHandle.close()` contract says "fully
-                // closed and bridge drained" — the previous code
-                // resolved on a 100ms shortcut AFTER
-                // `closeAllConnections()` without waiting for
-                // `server.close`'s callback, so embedders/tests
-                // could observe a "closed" handle while the server
-                // was still finalizing. Now: force-close just
-                // accelerates `server.close` by killing the
-                // sockets, but we still wait for `server.close`'s
-                // callback to fire. A secondary deadline catches
-                // the pathological case where `server.close` never
-                // resolves at all (kernel-stuck socket etc.) so
-                // shutdown is still bounded.
-                const SECONDARY_DEADLINE_MS = 2_000;
-                let secondaryTimer: NodeJS.Timeout | undefined;
-                const forceTimer = setTimeout(() => {
-                  writeStderrLine(
-                    `qwen serve: ${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
-                  );
-                  server.closeAllConnections();
-                  // After force-close, server.close's callback
-                  // SHOULD fire promptly. Give it `SECONDARY_DEADLINE_MS`
-                  // before we resolve anyway with a warning — much
-                  // longer than the previous 100ms shortcut, and
-                  // logged so the operator knows the contract was
-                  // bent.
-                  secondaryTimer = setTimeout(() => {
-                    writeStderrLine(
-                      `qwen serve: server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
+              .then(() => {
+                bridge
+                  .shutdown()
+                  .catch((err) => {
+                    daemonLog.error(
+                      'bridge shutdown error',
+                      err instanceof Error ? err : null,
                     );
-                    finish();
-                  }, SECONDARY_DEADLINE_MS);
-                  secondaryTimer.unref();
-                }, SHUTDOWN_FORCE_CLOSE_MS);
-                forceTimer.unref();
-                server.close((err) => {
-                  clearTimeout(forceTimer);
-                  if (secondaryTimer) clearTimeout(secondaryTimer);
-                  finish(err);
-                });
+                    bridgeShutdownError =
+                      err instanceof Error ? err : new Error(String(err));
+                  })
+                  .finally(() => {
+                    // Phase 2: arm the force timer NOW so it only races
+                    // server.close, not the bridge tear-down above.
+                    // `RunHandle.close()` contract says "fully
+                    // closed and bridge drained" — the previous code
+                    // resolved on a 100ms shortcut AFTER
+                    // `closeAllConnections()` without waiting for
+                    // `server.close`'s callback, so embedders/tests
+                    // could observe a "closed" handle while the server
+                    // was still finalizing. Now: force-close just
+                    // accelerates `server.close` by killing the
+                    // sockets, but we still wait for `server.close`'s
+                    // callback to fire. A secondary deadline catches
+                    // the pathological case where `server.close` never
+                    // resolves at all (kernel-stuck socket etc.) so
+                    // shutdown is still bounded.
+                    const SECONDARY_DEADLINE_MS = 2_000;
+                    let secondaryTimer: NodeJS.Timeout | undefined;
+                    const forceTimer = setTimeout(() => {
+                      daemonLog.warn(
+                        `${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
+                      );
+                      server.closeAllConnections();
+                      // After force-close, server.close's callback
+                      // SHOULD fire promptly. Give it `SECONDARY_DEADLINE_MS`
+                      // before we resolve anyway with a warning — much
+                      // longer than the previous 100ms shortcut, and
+                      // logged so the operator knows the contract was
+                      // bent.
+                      secondaryTimer = setTimeout(() => {
+                        daemonLog.warn(
+                          `server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
+                        );
+                        finish();
+                      }, SECONDARY_DEADLINE_MS);
+                      secondaryTimer.unref();
+                    }, SHUTDOWN_FORCE_CLOSE_MS);
+                    forceTimer.unref();
+                    server.close((err) => {
+                      clearTimeout(forceTimer);
+                      if (secondaryTimer) clearTimeout(secondaryTimer);
+                      finish(err);
+                    });
+                  });
               });
           });
           return closePromise;
@@ -729,7 +1365,7 @@ export async function runQwenServe(
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
 
-      // BX9_i: swap the boot-error listener for a runtime-error one
+      // Swap the boot-error listener for a runtime-error one
       // before resolving. `server.once('error', reject)` at the
       // bottom only catches errors BEFORE listening; post-listen
       // errors (EMFILE after FD exhaustion, runtime errors on the
@@ -737,10 +1373,22 @@ export async function runQwenServe(
       // persistent listener that logs to stderr instead.
       server.removeAllListeners('error');
       server.on('error', (err) => {
-        writeStderrLine(
-          `qwen serve: server error: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        daemonLog.error('server error', err instanceof Error ? err : null);
       });
+      if (!deps.bridge && shouldPreheatBridge(deps)) {
+        bridge.preheat().catch((err) => {
+          writeStderrLine(
+            `qwen serve: ACP preheat failed, will retry on first session: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+      }
+
+      // Enable WebSocket transport now that http.Server is available.
+      const acpHandle = app.locals?.['acpHandle'] as AcpHttpHandle | undefined;
+      acpHandle?.attachServer?.(server);
+
       resolve(handle);
     });
     server.once('error', reject);

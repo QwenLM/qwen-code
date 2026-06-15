@@ -120,6 +120,13 @@ function isRegexContext(source: string, i: number): boolean {
 }
 
 import * as vm from 'node:vm';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+// Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
+// instance with the same 'WORKFLOW' namespace). Re-exported so orchestrator
+// imports the same instance — orchestrator already imports from this module,
+// so this is the natural direction (the reverse would be a circular dep).
+export const debugLogger = createDebugLogger('WORKFLOW');
 
 // Cap log + phase lines to prevent unbounded memory growth from runaway
 // model-authored loops.
@@ -151,10 +158,15 @@ export interface WorkflowAgentOpts {
 }
 
 /**
- * Forward-compatibility alias for the agent dispatch return type. P1: always
- * `string`. P3 will widen this to support StructuredOutput.
+ * Agent dispatch return type. P1/P2 was `string` (the subagent's final text
+ * verbatim). P3 widens to also allow a JSON-serializable object — the
+ * validated arguments of the subagent's `structured_output` call when
+ * `agent({schema})` is used. Strings remain the no-schema return shape;
+ * the sandbox's `agent` wrapper revives object returns into the vm realm
+ * per-call so a host-realm prototype escape (T1/T8/T14) cannot ride the
+ * structured payload back into a script.
  */
-export type WorkflowAgentResult = string;
+export type WorkflowAgentResult = string | object;
 
 /**
  * P5: budget global API surface. P1 default is throwing stubs (total = null,
@@ -220,11 +232,16 @@ export interface SandboxOptions {
 }
 
 /**
- * T23 (PR #4732 R2): default async wall-clock cap. 30 minutes is generous
- * for any realistic P1 sequential workflow (single agent capped at
- * 10 min × ~10 agents max practical → ~100 min upper bound, but typical
- * workflows finish in seconds). 30 min stops 0-token hang patterns
- * before they waste operator hours.
+ * T23 (PR #4732 R2): default async wall-clock cap. The wall clock is a
+ * 0-token-hang backstop, NOT a precise cost cap: it bounds patterns like an
+ * in-script `await new Promise(() => {})` that the vm timeout cannot reach.
+ * For genuine cost control, use the env-overridable per-run cap
+ * (`QWEN_CODE_MAX_WORKFLOW_AGENTS`) and concurrency window
+ * (`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`). 30 minutes is set generously
+ * enough that typical workflows never see it but a hang doesn't waste
+ * operator hours; raise via `QWEN_CODE_MAX_WORKFLOW_SECONDS` for long
+ * legitimate fan-outs (1000 agents × 10-min subagent cap ÷ default
+ * concurrency would already exceed 30 min).
  */
 const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 
@@ -341,6 +358,18 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     pushLog: safeLog,
     lastPhase: () => phases[phases.length - 1],
     hostAgent: opts.dispatch,
+    // PR #4947 R2 T7 (qwen-code-ci-bot): host-side log hook for reviveInRealm's
+    // catch path. Mirrors the rejection-logging in settleToNullArray so an
+    // operator running with debug logging can distinguish "thunk rejected"
+    // (settleToNullArray.warn) from "thunk resolved to a non-JSON-serializable
+    // value" (this warn). Receives only primitive strings/numbers — the bridge
+    // contract forbids host objects crossing back to the script.
+    logRevivalFailure: (idx: number, reason: string): void => {
+      debugLogger.warn(
+        `Workflow result revival failed at index ${idx}: ${reason}; ` +
+          `slot set to null (non-JSON-serializable thunk return).`,
+      );
+    },
     // The truthy flags distinguish "injected" from "default stub" inside the
     // init script without leaking the host function itself when not used.
     hasParallel: !!opts.parallel,
@@ -481,61 +510,162 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             );
           }
         }
-        if (agentOpts.schema !== undefined) {
+        // P3: schema + model + agentType + isolation are all wired through
+        // createProductionDispatch → SubagentManager.createAgentHeadless.
+        // The dispatch surfaces descriptive errors for "agent type not found",
+        // "isolation:'remote' is not available in this build", parent-dirty
+        // refuse, worktree creation failures, and StructuredOutput contract
+        // violations ("completed without calling StructuredOutput after 2
+        // in-conversation nudges").
+        if (
+          agentOpts.isolation !== undefined &&
+          agentOpts.isolation !== 'worktree' &&
+          agentOpts.isolation !== 'remote'
+        ) {
           throw new Error(
-            'agent({schema}) is not supported in P1. ' +
-            'Schema enforcement / StructuredOutput contract is scheduled for P3.'
+            "agent({isolation: '" + agentOpts.isolation + "'}): unknown isolation mode. " +
+            "Known modes are: 'worktree', 'remote'."
           );
-        }
-        if (agentOpts.isolation !== undefined) {
-          throw new Error(
-            "agent({isolation: '" + agentOpts.isolation + "'}) is not supported in P1. " +
-            'Worktree / remote isolation is scheduled for a later phase.'
-          );
-        }
-        if (agentOpts.model !== undefined) {
-          throw new Error(
-            'agent({model}) is not supported in P1. Model override is scheduled for a later phase.'
-          );
-        }
-        if (agentOpts.agentType !== undefined) {
-          throw new Error('agent({agentType}) is not supported in P1.');
         }
         if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
           if (__b.lastPhase() !== agentOpts.phase) {
             __b.pushPhase(agentOpts.phase);
           }
         }
-        return __b.hostAgent(prompt, agentOpts);
+        // SECURITY (P3 R2 self-review): user-script-controlled agentOpts
+        // cross the vm/host boundary verbatim via vmAsync's hostFn.apply.
+        // A Proxy / inherited-getter / non-plain object in agentOpts.schema
+        // would let host-side code (SyntheticOutputTool constructor + AJV
+        // compile) trigger user-controlled trap handlers that execute with
+        // the host realm's full surface. Revive agentOpts through JSON
+        // round-trip BEFORE crossing so the host only ever sees vm-realm
+        // plain objects with vm-realm prototypes. Same mechanism that
+        // makes args + parallel/pipeline results safe.
+        var safeOpts;
+        try {
+          safeOpts = JSON.parse(JSON.stringify(agentOpts));
+        } catch (e) {
+          throw new Error(
+            "agent() opts contain a non-JSON-serializable value: " +
+            String(e && e.message != null ? e.message : e)
+          );
+        }
+        // SECURITY (PR #4947 R1 wenshao, extended for P3): vmAsync's resolve
+        // path is verbatim (no re-wrap of resolved values). Host-realm
+        // strings cross the boundary harmlessly because primitives have no
+        // prototype identity. But P3's schema-mode dispatch returns the
+        // validated structured_output args as a host-realm OBJECT --
+        // handing that to the script reopens the T1/T8/T14 escape:
+        // result.constructor.constructor("return process")() would walk
+        // the host Object.prototype chain to the host Function
+        // constructor. Per-call JSON revival inside this vm runInContext
+        // block makes the returned object carry vm-realm prototypes (same
+        // mechanism as parallel/pipeline reviveInRealm and the args
+        // global revival). The fallback to null on a non-serializable
+        // resolve mirrors the errors-as-data convention parallel/pipeline
+        // already use for individual slot failures.
+        // R3 review (wenshao T3 [Suggestion]): the null fallback below is
+        // a SECURITY backstop, not a contract path. In schema mode the
+        // host return is the validated args of a structured_output tool
+        // call -- LLM tool_call payloads are always JSON-serializable
+        // (the model sends them through the OpenAI tool-call protocol
+        // which serializes through JSON itself) and SyntheticOutputTool's
+        // AJV validation runs over the parsed JSON, so a non-serializable
+        // host return is unreachable in production schema mode. The
+        // sentinel preserves the errors-as-data convention parallel /
+        // pipeline already use for individual slot failures, and stays as
+        // residual defense for any future dispatch path whose return
+        // value isn't a tool_call payload. logRevivalFailure surfaces
+        // the actionable detail (slot 0 + the error string) to operators
+        // so a real trigger in production isn't silent.
+        return __b.hostAgent(prompt, safeOpts).then(function (value) {
+          if (value === null || typeof value !== 'object') {
+            return value;
+          }
+          try {
+            return JSON.parse(JSON.stringify(value));
+          } catch (e) {
+            __b.logRevivalFailure(0, String(e && e.message != null ? e.message : e));
+            return null;
+          }
+        });
       });
 
       // --- parallel / pipeline ---
+      // SECURITY (PR #4732 P2): the host impl resolves with a HOST-realm array.
+      // vmAsync's resolve path is verbatim (it does NOT re-wrap resolved
+      // values), so handing that host array to the script would reopen the
+      // T1/T8/T14 escape: result.constructor.constructor('return process')()
+      // walks the host Array.prototype chain to the host Function constructor.
+      // We revive the array INSIDE the vm realm with JSON.parse(JSON.stringify)
+      // -- the same mechanism that makes the args global safe (see the args
+      // revival above) -- so the value the script sees has vm-realm prototypes
+      // whose constructors can't reach host process. Agent results are JSON
+      // strings (and null slots), so the round-trip is lossless for P2.
+      //
+      // EAD-1 (P2 self-review): revive PER-ELEMENT, not the whole array in one
+      // JSON.stringify. A single slot whose VALUE is non-serializable (a thunk
+      // that returns a BigInt or a circular object) must become null at its
+      // index -- it must NOT throw on the whole array and destroy every sibling
+      // result, which would defeat errors-as-data for return values. The outer
+      // [] is built in-realm here, so the result keeps vm-realm prototypes.
+      //
+      // SECURITY (PR #4947 R1 wenshao): reviveInRealm MUST remain inside this
+      // vm init runInContext block. JSON, Array, Object here are vm-realm
+      // globals; extracting this function to a host-side utility (e.g. a
+      // shared utils/jsonRevive.ts) would resolve those references against
+      // the HOST realm, silently reopening the T1/T8/T14 escape that the
+      // revival is designed to prevent. The textual identity to a host-side
+      // util is exactly the trap.
+      function reviveInRealm(hostArr) {
+        const out = [];
+        for (let i = 0; i < hostArr.length; i++) {
+          try {
+            out[i] = JSON.parse(JSON.stringify(hostArr[i]));
+          } catch (e) {
+            // Cross to host realm for debug logging. The bridge function
+            // accepts only primitive strings/numbers; the error message is
+            // coerced to a String here so no vm-realm Error object crosses.
+            __b.logRevivalFailure(i, String(e?.message ?? e));
+            out[i] = null;
+          }
+        }
+        return out;
+      }
       if (__b.hasParallel) {
-        globalThis.parallel = vmAsync(function (thunks) {
+        const callParallel = vmAsync(function (thunks) {
           return __b.hostParallel(thunks);
         });
+        globalThis.parallel = function parallel(thunks) {
+          return callParallel(thunks).then(reviveInRealm);
+        };
       } else {
         globalThis.parallel = function parallel() {
           return new Promise(function (_, reject) {
             reject(new Error(
-              'parallel() is not supported in P1. Sequential agent() is the only ' +
-              'execution mode in P1. Concurrent fan-out is scheduled for P2.'
+              'parallel() is unavailable: this sandbox was created without a ' +
+              'parallel implementation. The orchestrator injects one; a bare ' +
+              'sandbox has no concurrent-dispatch capability.'
             ));
           });
         };
       }
       if (__b.hasPipeline) {
-        globalThis.pipeline = vmAsync(function (items) {
+        const callPipeline = vmAsync(function (items) {
           const stages = [];
           for (let i = 1; i < arguments.length; i++) stages.push(arguments[i]);
           return __b.hostPipeline.apply(null, [items].concat(stages));
         });
+        globalThis.pipeline = function pipeline() {
+          return callPipeline.apply(null, arguments).then(reviveInRealm);
+        };
       } else {
         globalThis.pipeline = function pipeline() {
           return new Promise(function (_, reject) {
             reject(new Error(
-              'pipeline() is not supported in P1. Staggered multi-stage execution ' +
-              'is scheduled for P2.'
+              'pipeline() is unavailable: this sandbox was created without a ' +
+              'pipeline implementation. The orchestrator injects one; a bare ' +
+              'sandbox has no staggered multi-stage capability.'
             ));
           });
         };

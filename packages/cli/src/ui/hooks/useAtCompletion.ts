@@ -121,6 +121,10 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
 
   useEffect(() => {
     dispatch({ type: 'RESET' });
+    return () => {
+      void fileSearch.current?.dispose?.();
+      fileSearch.current = null;
+    };
   }, [cwd, config]);
 
   // Reacts to user input (`pattern`) ONLY.
@@ -153,8 +157,15 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
 
   // The "Worker" that performs async operations based on status.
   useEffect(() => {
+    let cancelled = false;
+
     const initialize = async () => {
       try {
+        // Dispose previous instance to prevent worker thread leaks on
+        // re-initialization (cwd/config change triggers RESET → re-init).
+        await fileSearch.current?.dispose?.();
+        fileSearch.current = null;
+
         const searcher = FileSearchFactory.create({
           projectRoot: cwd,
           ignoreDirs: [],
@@ -173,13 +184,21 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
             config?.getFileFilteringEnableFuzzySearch() !== false,
         });
         await searcher.initialize();
+        // Guard against the effect being cleaned up (unmount / cwd change)
+        // or superseded by a newer initialize() while we were awaiting.
+        if (cancelled) {
+          await searcher.dispose?.();
+          return;
+        }
         fileSearch.current = searcher;
         dispatch({ type: 'INITIALIZE_SUCCESS' });
         if (state.pattern !== null) {
           dispatch({ type: 'SEARCH', payload: state.pattern });
         }
       } catch (_) {
-        dispatch({ type: 'ERROR' });
+        if (!cancelled) {
+          dispatch({ type: 'ERROR' });
+        }
       }
     };
 
@@ -236,6 +255,7 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
     }
 
     return () => {
+      cancelled = true;
       searchAbortController.current?.abort();
       if (slowSearchTimer.current) {
         clearTimeout(slowSearchTimer.current);

@@ -1,0 +1,59 @@
+.list,
+.summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.num {
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--text-dimmed);
+  font-variant-numeric: tabular-nums;
+}
+
+.icon {
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--text-dimmed);
+}
+
+.text {
+  color: var(--text-secondary);
+}
+
+/* The collapsed summary keeps each row to one line so a long task title never
+   wraps; the expanded list stays free to wrap and show the full text. */
+.summary .text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inProgress .icon,
+.inProgress .text {
+  color: var(--accent-color);
+}
+
+.completed .icon {
+  color: var(--success-color);
+}
+
+/* Strike-through belongs to the persistent expanded list, where a completed
+   item lingers as crossed-off. A summary row is an event ("just completed")
+   that reads as an accomplishment, so it stays in normal text. */
+.list .completed .text {
+  color: var(--text-dimmed);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-dimmed);
+}

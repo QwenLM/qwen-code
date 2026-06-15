@@ -155,6 +155,46 @@ describe('<Footer />', () => {
       expect(frame).toContain('████░░░░ 34% context');
     });
 
+    it('wraps long status line output without growing past two lines', () => {
+      const longLine = [
+        'visible-start',
+        ...Array.from({ length: 40 }, (_, index) => `chunk-${index}`),
+        'hidden-tail',
+      ].join(' ');
+      useStatusLineMock.mockReturnValue({
+        lines: [longLine],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(16, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('visible-start');
+      expect(frame).toContain('chunk-10');
+      expect(frame).not.toContain('hidden-tail');
+      expect(frame).not.toContain('? for shortcuts');
+    });
+
+    it('clips later status line entries after wrapped output reaches two lines', () => {
+      const longLine = [
+        'first-line-start',
+        ...Array.from({ length: 40 }, (_, index) => `part-${index}`),
+        'first-line-tail',
+      ].join(' ');
+      useStatusLineMock.mockReturnValue({
+        lines: [longLine, 'second-status-line'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(16, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('first-line-start');
+      expect(frame).not.toContain('first-line-tail');
+      expect(frame).not.toContain('second-status-line');
+      expect(frame).not.toContain('? for shortcuts');
+    });
+
     it('suppresses hint when status line is active', () => {
       useStatusLineMock.mockReturnValue({
         lines: ['status info'],

@@ -115,6 +115,8 @@ export default {
     'List available Qwen Code tools. Usage: /tools [desc]',
   'Open the skills panel (browse, search, toggle, pick).':
     'Open the skills panel (browse, search, toggle, pick).',
+  'Move this session to a new working directory':
+    'Move this session to a new working directory',
   // SkillsManagerDialog (the panel `/skills` opens)
   'Manage Skills': 'Manage Skills',
   'Skills configuration saved.': 'Skills configuration saved.',
@@ -224,12 +226,14 @@ export default {
     'Clear conversation history and free up context',
   'Compresses the context by replacing it with a summary.':
     'Compresses the context by replacing it with a summary.',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    'Fast context compression without AI. Strips old tool outputs and thinking parts.',
   'open full Qwen Code documentation in your browser':
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
   'Connect an LLM provider': 'Connect an LLM provider',
-  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
-    'Copy the last AI response to clipboard (/copy N for Nth-latest)',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number',
   'Show working-tree change stats versus HEAD':
     'Show working-tree change stats versus HEAD',
   'Could not determine current working directory.':
@@ -620,6 +624,7 @@ export default {
     'The name of the extension to update.',
   'Either an extension name or --all must be provided':
     'Either an extension name or --all must be provided',
+  'List installed extensions': 'List installed extensions',
   'Lists installed extensions.': 'Lists installed extensions.',
   'Path:': 'Path:',
   'Source:': 'Source:',
@@ -889,8 +894,6 @@ export default {
     'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
   'Cannot fork before the first conversation turn.':
     'Cannot fork before the first conversation turn.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
   'The agent tool is unavailable; cannot fork.':
     'The agent tool is unavailable; cannot fork.',
   'Failed to launch fork: {{error}}': 'Failed to launch fork: {{error}}',
@@ -973,6 +976,8 @@ export default {
     'No managed auto-memory entries matched: {{query}}',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
+  'Import MCP servers from Claude configs':
+    'Import MCP servers from Claude configs',
   'Open MCP management dialog': 'Open MCP management dialog',
   'Could not retrieve tool registry.': 'Could not retrieve tool registry.',
   "Successfully authenticated and refreshed tools for '{{name}}'.":
@@ -1538,6 +1543,9 @@ export default {
   'Background tasks': 'Background tasks',
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
+  'needs approval': 'needs approval',
+  'Background agent needs approval': 'Background agent needs approval',
+  'Approve or deny the request above': 'Approve or deny the request above',
   Running: 'Running',
   Paused: 'Paused',
   Completed: 'Completed',
@@ -2025,6 +2033,7 @@ export default {
   'Loading suggestions...': 'Loading suggestions...',
   'Show per-item context usage breakdown.':
     'Show per-item context usage breakdown.',
+  'No compression needed.': 'No compression needed.',
 
   // ============================================================================
   // Stats

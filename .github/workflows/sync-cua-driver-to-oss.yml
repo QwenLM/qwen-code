@@ -1,0 +1,199 @@
+name: 'Sync cua-driver to Aliyun OSS'
+
+# Mirrors the pinned cua-driver-rs binaries from the upstream trycua/cua GitHub
+# release onto the qwen-code-assets OSS bucket, so Computer Use's in-bootstrap
+# downloader can pull them fast from the CN mirror (with the trycua/cua GitHub
+# release as automatic fallback).
+#
+# Triggers:
+#   - push to main touching constants.ts (where CUA_DRIVER_VERSION lives), so a
+#     version bump auto-mirrors the new release without anyone remembering to.
+#     The "already mirrored" guard makes unrelated constants.ts edits a no-op.
+#   - manual workflow_dispatch (first-time / re-mirror; `force` re-uploads even
+#     when the version is already on OSS).
+on:
+  push:
+    branches:
+      - 'main'
+    paths:
+      - 'packages/core/src/tools/computer-use/constants.ts'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cua-driver-rs version to mirror (blank = read CUA_DRIVER_VERSION from constants.ts)'
+        required: false
+        type: 'string'
+      force:
+        description: 'Re-upload even if this version is already mirrored on OSS'
+        required: false
+        type: 'boolean'
+        default: false
+
+concurrency:
+  group: 'sync-cua-driver-to-oss'
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 'Mirror cua-driver binaries to Aliyun OSS'
+    runs-on: 'ubuntu-latest'
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    environment:
+      name: 'production-release'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+
+      - name: 'Resolve cua-driver version'
+        id: 'meta'
+        env:
+          INPUT_VERSION: '${{ inputs.version }}'
+        run: |-
+          set -euo pipefail
+          version="${INPUT_VERSION:-}"
+          if [[ -z "${version}" ]]; then
+            version="$(grep -E "CUA_DRIVER_VERSION = '" packages/core/src/tools/computer-use/constants.ts \
+              | sed -E "s/.*'([0-9]+\.[0-9]+\.[0-9]+)'.*/\1/")"
+          fi
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not resolve a valid cua-driver version (got '${version}')."
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved cua-driver-rs v${version}"
+
+      - name: 'Skip if this version is already mirrored'
+        id: 'guard'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          VERSION: '${{ steps.meta.outputs.version }}'
+          FORCE: '${{ inputs.force }}'
+        run: |-
+          set -euo pipefail
+          url="${ALIYUN_OSS_PUBLIC_BASE_URL}/computer-use/cua-driver-rs/v${VERSION}/checksums.txt"
+          if [[ "${FORCE}" != "true" ]] && curl -fsI --connect-timeout 15 --max-time 60 "${url}" >/dev/null 2>&1; then
+            echo "v${VERSION} already mirrored (${url}); nothing to do. Re-run with force=true to overwrite."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "v${VERSION} not yet on OSS (or force=true); will mirror."
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 'Download the assets qwen-code consumes from trycua/cua'
+        if: |-
+          ${{ steps.guard.outputs.skip != 'true' }}
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          VERSION: '${{ steps.meta.outputs.version }}'
+        run: |-
+          set -euo pipefail
+          mkdir -p dist/cua-driver
+          # Only the per-platform assets resolveAssetTarget() can request, plus
+          # checksums.txt. Keep aligned with constants.ts resolveAssetTarget().
+          gh release download "cua-driver-rs-v${VERSION}" \
+            --repo trycua/cua \
+            --dir dist/cua-driver \
+            --pattern "cua-driver-rs-${VERSION}-darwin-arm64.tar.gz" \
+            --pattern "cua-driver-rs-${VERSION}-darwin-x86_64.tar.gz" \
+            --pattern "cua-driver-rs-${VERSION}-linux-x86_64-binary.tar.gz" \
+            --pattern "cua-driver-rs-${VERSION}-windows-x86_64.zip" \
+            --pattern "cua-driver-rs-${VERSION}-windows-arm64.zip" \
+            --pattern "checksums.txt"
+          ls -la dist/cua-driver
+
+      - name: 'Verify checksums before upload'
+        if: |-
+          ${{ steps.guard.outputs.skip != 'true' }}
+        run: |-
+          set -euo pipefail
+          cd dist/cua-driver
+          # checksums.txt lists every release asset; --ignore-missing checks
+          # only the ones we pulled. A mismatch fails the sync before upload.
+          sha256sum -c --ignore-missing checksums.txt
+
+      - name: 'Install ossutil'
+        if: |-
+          ${{ steps.guard.outputs.skip != 'true' }}
+        env:
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        run: |-
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}" -o "${tmp_dir}/ossutil.zip"
+          echo "${OSSUTIL_SHA256}  ${tmp_dir}/ossutil.zip" | sha256sum -c -
+          unzip -q "${tmp_dir}/ossutil.zip" -d "${tmp_dir}"
+          ossutil_path="$(find "${tmp_dir}" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          if [[ -z "${ossutil_path}" ]]; then
+            echo "::error::ossutil binary not found in downloaded archive"
+            exit 1
+          fi
+          chmod +x "${ossutil_path}"
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${ossutil_path}" "${HOME}/.local/bin/ossutil"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          rm -rf "${tmp_dir}"
+          "${HOME}/.local/bin/ossutil" >/dev/null
+
+      - name: 'Configure Aliyun OSS Credentials'
+        if: |-
+          ${{ steps.guard.outputs.skip != 'true' }}
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |-
+          set -euo pipefail
+          if [[ -z "${ALIYUN_OSS_ACCESS_KEY_ID}" || -z "${ALIYUN_OSS_ACCESS_KEY_SECRET}" ]]; then
+            echo "::error::Missing Aliyun OSS credentials. Set ALIYUN_OSS_ACCESS_KEY_ID and ALIYUN_OSS_ACCESS_KEY_SECRET in the production-release environment secrets."
+            exit 1
+          fi
+          ossutil config \
+            -e "${ALIYUN_OSS_ENDPOINT}" \
+            -i "${ALIYUN_OSS_ACCESS_KEY_ID}" \
+            -k "${ALIYUN_OSS_ACCESS_KEY_SECRET}" \
+            -L EN \
+            -c "${RUNNER_TEMP}/.ossutilconfig"
+
+      - name: 'Upload to Aliyun OSS'
+        if: |-
+          ${{ steps.guard.outputs.skip != 'true' }}
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          VERSION: '${{ steps.meta.outputs.version }}'
+        run: |-
+          set -euo pipefail
+          # Prefix mirrors resolveAssetUrls(): <base>/cua-driver-rs/v<ver>/<asset>,
+          # where OSS_MIRROR_BASE already carries the `computer-use` segment.
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "${ALIYUN_OSS_BUCKET}" \
+            --config "${RUNNER_TEMP}/.ossutilconfig" \
+            --prefix "computer-use/cua-driver-rs/v${VERSION}" \
+            dist/cua-driver/*
+
+      - name: 'Verify assets are reachable + intact on OSS'
+        if: |-
+          ${{ steps.guard.outputs.skip != 'true' }}
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          VERSION: '${{ steps.meta.outputs.version }}'
+        run: |-
+          set -euo pipefail
+          base="${ALIYUN_OSS_PUBLIC_BASE_URL}/computer-use/cua-driver-rs/v${VERSION}"
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "${tmp_dir}"' EXIT
+          for path in dist/cua-driver/*; do
+            f="$(basename "${path}")"
+            curl -fsSL --connect-timeout 15 --max-time 300 "${base}/${f}" -o "${tmp_dir}/${f}"
+          done
+          cd "${tmp_dir}"
+          sha256sum -c --ignore-missing checksums.txt
+          echo "All mirrored cua-driver assets verified on OSS at ${base}/"
+
+      - name: 'Cleanup Aliyun OSS Credentials'
+        if: '${{ always() }}'
+        run: |-
+          rm -f "${RUNNER_TEMP}/.ossutilconfig"

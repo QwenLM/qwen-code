@@ -27,7 +27,14 @@ import { DaemonClient, type DaemonEvent } from '@qwen-code/sdk';
 
 const client = new DaemonClient({
   baseUrl: 'http://127.0.0.1:4170',
-  // token: process.env.QWEN_SERVER_TOKEN, // required for non-loopback binds
+  // PR 27 (v0.16-alpha): when `token` is omitted, DaemonClient falls
+  // back to `process.env.QWEN_SERVER_TOKEN` automatically — same env
+  // var the daemon's `--token` CLI flag falls back to. So either:
+  //   export QWEN_SERVER_TOKEN="$(openssl rand -hex 32)"   # one-shot
+  //   export QWEN_SERVER_TOKEN="$(cat ./my-token-file)"    # user-managed file
+  //   const client = new DaemonClient({ baseUrl: '...' });
+  // OR pass it explicitly when you have a different env-var name:
+  //   token: process.env.MY_TOKEN,
 });
 
 // 1. Confirm we can reach the daemon, gate UI on its features, and
@@ -232,6 +239,15 @@ const client = new DaemonClient({
   token: process.env.QWEN_SERVER_TOKEN,
 });
 ```
+
+**SDK env fallback (PR 27, v0.16-alpha)** — `DaemonClient` reads `QWEN_SERVER_TOKEN` from the environment automatically when `token` is omitted, mirroring the daemon's own `--token` CLI fallback. So if your shell has `export QWEN_SERVER_TOKEN=...`, this is equivalent to the above:
+
+```ts
+// Same effect as token: process.env.QWEN_SERVER_TOKEN, but without the boilerplate.
+const client = new DaemonClient({ baseUrl: 'https://your-host:4170' });
+```
+
+The fallback strips leading/trailing whitespace (handy for `export QWEN_SERVER_TOKEN="$(cat token.txt)"` where `cat` adds a newline) and treats empty / whitespace-only values as unset (a stale `export QWEN_SERVER_TOKEN=""` won't accidentally send `Authorization: Bearer ` with no token). The fallback runs once at construction; later `process.env` mutations don't affect already-built clients. Browser bundles (e.g. via `@qwen-code/webui`) get `undefined` cleanly because `globalThis.process` doesn't exist there.
 
 Wrong / missing tokens return `401` with a uniform body — the SDK throws `DaemonHttpError` on any 4xx/5xx from a route handler.
 

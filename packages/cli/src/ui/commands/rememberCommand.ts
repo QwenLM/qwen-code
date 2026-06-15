@@ -22,6 +22,8 @@ export const rememberCommand: SlashCommand = {
     return t('Save a durable memory to the memory system.');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'acp'] as const,
+  argumentHint: '<text to remember>',
   action: (context: CommandContext, args): SlashCommandActionReturn | void => {
     const fact = args.trim();
     if (!fact) {
@@ -33,6 +35,14 @@ export const rememberCommand: SlashCommand = {
     }
 
     const config = context.services.config;
+    if (!config) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Config not loaded.'),
+      };
+    }
+
     const useManagedMemory = config?.getManagedAutoMemoryEnabled() ?? false;
 
     if (useManagedMemory) {

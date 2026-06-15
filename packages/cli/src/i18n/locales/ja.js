@@ -591,8 +591,6 @@ export default {
     '応答またはツール呼び出しの処理中はフォークできません。完了するか、保留中のツール呼び出しを解決してください。',
   'Cannot fork before the first conversation turn.':
     '最初の会話ターンの前にはフォークできません。',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    '/fork コマンドには fork フィーチャーゲートが必要です。有効にするには QWEN_CODE_ENABLE_FORK_SUBAGENT=1 を設定してください。',
   'The agent tool is unavailable; cannot fork.':
     'エージェントツールを利用できないため、フォークできません。',
   'Failed to launch fork: {{error}}': 'フォークの起動に失敗しました: {{error}}',
@@ -878,6 +876,28 @@ export default {
   ', {{inProgress}} in progress': '、{{inProgress}} 進行中',
   'Pending Tasks:': '保留中のタスク:',
   'Current tasks': '現在のタスク',
+  'Background tasks': 'バックグラウンドタスク',
+  'No tasks currently running': '現在実行中のタスクはありません',
+  'No entry to show.': '表示するエントリはありません。',
+  'needs approval': '承認待ち',
+  'Background agent needs approval':
+    'バックグラウンドエージェントが承認待ちです',
+  'Approve or deny the request above':
+    '上のリクエストを承認または拒否してください',
+  Running: '実行中',
+  Paused: '一時停止中',
+  Completed: '完了',
+  Failed: '失敗',
+  Stopped: '停止済み',
+  Shell: 'シェル',
+  Monitor: 'モニター',
+  Command: 'コマンド',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] メモリ統合',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
   '... and {{count}} more': '... 他 {{count}} 件',
   'What would you like to do?': '何をしますか?',
   'Choose how to proceed with your session:':
