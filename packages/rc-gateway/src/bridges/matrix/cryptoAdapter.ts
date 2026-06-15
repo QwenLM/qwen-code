@@ -101,16 +101,21 @@ export async function createMatrixCryptoAdapter(
     const {
       MatrixClient,
       RustSdkCryptoStorageProvider,
-      RustSdkCryptoStoreType,
       SimpleFsStorageProvider,
     } = sdk;
+    // matrix-bot-sdk re-exports the store-type enum as a TYPE only
+    // (`RustSdkCryptoStoreType` is a `const enum`, erased at runtime → `undefined`
+    // under esbuild). Source the real runtime value from the native package, which
+    // exports `StoreType` as an actual object — both type-correct and present at
+    // runtime, no cast.
+    const { StoreType } = await import('@matrix-org/matrix-sdk-crypto-nodejs');
 
     // SQLite-backed olm/megolm store at <stateDir>/olm/ (survives restart, so
     // encrypted-room messages remain decryptable without re-keying — the spec's
     // "Persistent olm crypto store" requirement).
     const cryptoStore = new RustSdkCryptoStorageProvider(
       olmStoreDir(deps.stateDir),
-      RustSdkCryptoStoreType.Sqlite,
+      StoreType.Sqlite,
     );
     const storage = new SimpleFsStorageProvider(
       join(deps.stateDir, 'matrix-sync.json'),

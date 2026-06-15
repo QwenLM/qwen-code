@@ -20,16 +20,16 @@ cd packages/rc-gateway/integration/matrix
 # One-time: generate the homeserver config.
 docker compose run --rm synapse generate
 
-# Enable shared-secret registration (used to provision throwaway test users).
-# The /_synapse/admin/v1/register endpoint needs ONLY this key set — public
-# registration can stay off.
-#
-# IMPORTANT: `synapse generate` often ALREADY writes a `registration_shared_secret`
-# line. SET/REPLACE it (a duplicate YAML key makes Synapse error or silently pick
-# one) — open ./data/homeserver.yaml and ensure exactly one line reads:
-#     registration_shared_secret: "itsecret-change-me"
+# Shared-secret registration provisions the throwaway test users. The current
+# matrixdotorg/synapse image ALREADY writes a random `registration_shared_secret`
+# into ./data/homeserver.yaml during `generate` — just read it:
+#     grep registration_shared_secret ./data/homeserver.yaml
+# (Only if it is absent: add exactly one such line — never a duplicate key, which
+# makes Synapse error. /_synapse/admin/v1/register needs only this key; public
+# registration can stay off.)
 
 docker compose up -d
+# Readiness: curl http://<host>:8008/_matrix/client/versions  → expect 200.
 # Wait until http://<host>:8008/_matrix/client/versions returns 200.
 ```
 
@@ -39,7 +39,7 @@ From `packages/rc-gateway`:
 
 ```bash
 export QWEN_MATRIX_IT_HS_URL="http://<pkix-host>:8008"
-export QWEN_MATRIX_IT_REG_SECRET="itsecret-change-me"   # must match homeserver.yaml
+export QWEN_MATRIX_IT_REG_SECRET="<value from ./data/homeserver.yaml>"  # registration_shared_secret
 npx vitest run src/bridges/matrix/crypto.integration.test.ts
 ```
 

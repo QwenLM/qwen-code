@@ -50,9 +50,11 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
     const {
       MatrixClient,
       RustSdkCryptoStorageProvider,
-      RustSdkCryptoStoreType,
       SimpleFsStorageProvider,
     } = sdk;
+    // Runtime store-type value from the native package (matrix-bot-sdk's
+    // RustSdkCryptoStoreType is a runtime-erased const enum — see cryptoAdapter.ts).
+    const { StoreType } = await import('@matrix-org/matrix-sdk-crypto-nodejs');
 
     const stamp = `${Date.now()}`;
     const botName = `qwenbot_${stamp}`;
@@ -76,7 +78,7 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
       new SimpleFsStorageProvider(join(dir, 'sender-sync.json')),
       new RustSdkCryptoStorageProvider(
         join(dir, 'sender-olm'),
-        RustSdkCryptoStoreType.Sqlite,
+        StoreType.Sqlite,
       ),
     );
 

@@ -24,6 +24,7 @@
     "yaml": "^2.8.1"
   },
   "optionalDependencies": {
+    "@matrix-org/matrix-sdk-crypto-nodejs": "^0.4.0",
     "better-sqlite3": "^11.10.0",
     "bonjour-service": "^1.4.1",
     "matrix-bot-sdk": "^0.8.0"

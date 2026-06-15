@@ -16,10 +16,11 @@ sidecar later by changing only its configuration.
 > **⚠️ Encrypted rooms are still refused at runtime in this build.** The default
 > bridge talks the plain client-server API over `fetch`; in an encrypted room it
 > posts a notice and **refuses to bind** rather than silently fail. Use an
-> **unencrypted** room. The `matrix-bot-sdk` + olm crypto adapter IS now built and
-> compile-checked (see "End-to-end encryption" below), but its live decrypt and
-> dispatch routing are an unverified residual integration — so encrypted rooms are
-> not yet functionally delivered.
+> **unencrypted** room. The `matrix-bot-sdk` + olm crypto adapter is built and its
+> decrypt has been **verified end-to-end against a real Synapse** (see "End-to-end
+> encryption" below); what remains is the live wiring — starting the adapter and
+> reconciling its `/sync` with the runner's — so encrypted rooms are not yet
+> functionally delivered by the running bridge.
 
 ## What it does
 
@@ -175,14 +176,24 @@ a deliberate-wrong-argument test that makes the build go red), **not** hand-roll
 `*Like` shapes. The sidecar constructs the adapter (initializing the persistent olm
 store) when `MATRIX_ENABLE_E2EE` is set, and logs honestly.
 
-**Live decrypt — now has an env-gated integration test.** The olm/megolm round-trip
-is verified by `crypto.integration.test.ts`: it provisions two throwaway crypto
-users on a real Synapse, has the SENDER create an encrypted room, and asserts the
-bot's `cryptoAdapter` decrypts a message into `onMessage`. It **skips** in the
+**Live decrypt — verified against a real Synapse (env-gated).** The olm/megolm
+round-trip is exercised by `crypto.integration.test.ts`: it provisions two throwaway
+crypto users on a real Synapse, has the SENDER create an encrypted room, and asserts
+the bot's `cryptoAdapter` decrypts a message into `onMessage`. It **skips** in the
 default suite and runs only when `QWEN_MATRIX_IT_HS_URL` + `QWEN_MATRIX_IT_REG_SECRET`
 point at a homeserver — stand one up with `integration/matrix/docker-compose.yml`
 (see that README; mind the key-share **ordering** and **unverified-device** gotchas).
-The provisioning HMAC (`synapseRegisterMac`) has its own known-answer unit test.
+This test has been **run green** against a self-hosted Synapse container (the bot
+decrypted a real encrypted-room message end-to-end). The provisioning HMAC
+(`synapseRegisterMac`) also has its own known-answer unit test.
+
+Running it surfaced a real bug the compile-checked path could not: matrix-bot-sdk's
+`RustSdkCryptoStoreType` is a **`const enum`** (erased at runtime under esbuild →
+`undefined`), so `RustSdkCryptoStoreType.Sqlite` threw at construction and the
+adapter silently degraded to `null` (E2EE off) on every real run. Fixed by sourcing
+the store-type value from the native `@matrix-org/matrix-sdk-crypto-nodejs`
+`StoreType` (a real runtime object), which is both type-correct and present at
+runtime — a reminder that "compile-checked" can hide runtime-erased const enums.
 
 What's still un-CI-able: only a _public/federated_ homeserver interop and a fully
 _verified_-device path. The sidecar still **constructs but does not start** the
