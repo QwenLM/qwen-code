@@ -10,16 +10,14 @@
  * ./e2ee.js} scaffolding reserved. Opt-in via `MATRIX_ENABLE_E2EE`, OFF by
  * default; the tested `fetch`-based plain path is untouched and stays the default.
  *
- * VERIFICATION CEILING (chosen "compile-checked ceiling"): the matrix-bot-sdk
- * `MatrixClient` + `RustSdkCryptoStorageProvider` construction below is typed
- * against the REAL SDK (the `import('matrix-bot-sdk')` types flow through tsc and
- * the ctor calls are signature-checked — a wrong argument fails the build), but it
- * is NOT exercised at runtime: live olm/megolm decrypt needs a homeserver, an
- * encrypted room, and a verified device, none of which exist in CI. The genuinely
- * verifiable seams — olm-store presence, the store-missing warn decision, and the
- * `e2eeEnabled` gating — are pure and unit-tested. Routing the adapter's decrypted
- * events into the runner's existing dispatch (reconciling its `/sync` loop with the
- * SDK's own) is the residual integration, documented in docs/matrix-bridge.md.
+ * The construction is typed against the REAL SDK (the `import('matrix-bot-sdk')`
+ * types flow through tsc and the ctor calls are signature-checked). The live
+ * olm/megolm decrypt is exercised by the env-gated `crypto.integration.test.ts`
+ * and has been RUN GREEN against a real Synapse (the bot decrypts a real
+ * encrypted-room message); the pure seams — olm-store presence, the store-missing
+ * warn, `e2eeEnabled` gating — are unit-tested. The remaining residual is the LIVE
+ * WIRING: starting the adapter and reconciling its `/sync` loop with the runner's
+ * fetch `/sync`, then feeding `onMessage` into dispatch — see docs/matrix-bridge.md.
  */
 
 import { existsSync, readdirSync } from 'node:fs';
@@ -148,9 +146,7 @@ export async function createMatrixCryptoAdapter(
         const joined = await client.getJoinedRooms();
         await client.crypto.prepare(joined);
         await client.start();
-        deps.log?.(
-          'matrix crypto: prepared + syncing (live decrypt unverified)',
-        );
+        deps.log?.('matrix crypto: prepared + syncing');
       },
       stop: async () => {
         client.stop();
