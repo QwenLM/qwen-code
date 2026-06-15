@@ -18,7 +18,7 @@ The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST 
 - Resolve user-supplied paths into branded `ResolvedPath` values that the rest of the boundary can safely use.
 - Refuse paths outside the bound workspace (`path_outside_workspace`) and paths whose target is a symlink (`symlink_escape`).
 - Refuse reads above `MAX_READ_BYTES`, writes above `MAX_WRITE_BYTES`, and binary files (`binary_file`).
-- Refuse writes/edits when the workspace is untrusted (`untrusted_workspace`) — gated by `assertTrustedForIntent(intent)`.
+- Refuse writes/edits when the workspace is untrusted (`untrusted_workspace`) — gated by `assertTrustedForIntent(trusted, intent)`.
 - Honor `.gitignore` / `.qwenignore` patterns via `shouldIgnore`.
 - Perform atomic write-then-rename with target mode preservation; default new file mode is `0o600`.
 - Emit `fs.access` / `fs.denied` audit events on every operation.
@@ -111,7 +111,16 @@ Two design notes:
 
 ### Trust gate
 
-`assertTrustedForIntent(intent)` consults `Config.isTrustedFolder()`. Read / list / stat / glob are always allowed (trust is only for writes). Write intents in untrusted workspaces throw `FsError('untrusted_workspace', ..., status: 403)`. The trust signal flows in via `WorkspaceFileSystemFactoryDeps.trusted: boolean` — `runQwenServe` passes `true` because the operator booted the daemon against a workspace they implicitly trust; `createServeApp` (direct embed without `runQwenServe`) defaults to `false` and warns once per process (see [`02-serve-runtime.md`](./02-serve-runtime.md)).
+`assertTrustedForIntent(trusted, intent)` consumes the trust boolean injected by
+the caller; the policy layer does not read `Config.isTrustedFolder()` directly.
+Read / list / stat / glob are always allowed (trust is only for writes). Write
+intents in untrusted workspaces throw
+`FsError('untrusted_workspace', ..., status: 403)`. The trust signal flows in
+via `WorkspaceFileSystemFactoryDeps.trusted: boolean` — `runQwenServe` passes
+`true` because the operator booted the daemon against a workspace they
+implicitly trust; `createServeApp` (direct embed without `runQwenServe`)
+defaults to `false` and warns once per process (see
+[`02-serve-runtime.md`](./02-serve-runtime.md)).
 
 ## Workflow
 
@@ -127,7 +136,6 @@ sequenceDiagram
 
     R->>FS: readText(ctx, path, opts)
     FS->>FS: resolveWithinWorkspace(path) → ResolvedPath OR throw
-    FS->>FS: shouldIgnore? → throw / skip
     FS->>FSP: stat(path)
     FSP-->>FS: stats
     FS->>FS: reject if not regular file (describeStatKind)
@@ -137,9 +145,15 @@ sequenceDiagram
     FS->>POL: detectBinary(buffer)
     POL-->>FS: isBinary?
     FS->>FS: reject if binary; sha256 hash; truncate to line window
+    FS->>FS: shouldIgnore? → annotate meta.matchedIgnore
     FS->>FS: audit fs.access
     FS-->>R: { content, sha256, truncated?, meta }
 ```
+
+`readText` does not skip or reject reads because of ignore rules. It reads the
+file normally and records the matching ignore classification in
+`meta.matchedIgnore`. `list` and `glob` filter ignored results only when
+`includeIgnored` is not enabled.
 
 ### Write
 

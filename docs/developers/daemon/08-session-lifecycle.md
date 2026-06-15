@@ -159,12 +159,96 @@ When the spawn-owning client's HTTP response cannot be written (TCP reset mid-ha
 - [`04-permission-mediation.md`](./04-permission-mediation.md) for how originator + identity drive policy decisions.
 - [`10-event-bus.md`](./10-event-bus.md) for terminal-frame delivery.
 
+## Additional session endpoints
+
+These endpoints extend the base lifecycle surface:
+
+### Non-blocking Prompt (`non_blocking_prompt` capability tag)
+
+`POST /session/:id/prompt` now returns HTTP **202** with
+`{ promptId, lastEventId }` instead of blocking until the prompt completes. The
+actual result arrives on SSE as `turn_complete` / `turn_error`, and the
+`promptId` field correlates those events with the 202 response.
+`DaemonSessionClient.prompt()` automatically uses the non-blocking path when it
+has an active event subscription and transparently matches the result from the
+SSE stream.
+
+### Session Recap (`session_recap` capability tag)
+
+`POST /session/:id/recap` asks the fast model for a one-line "where did I leave
+off" summary. It returns `{ sessionId, recap: string | null }`; `null` means the
+history was too short or the model failed temporarily. This endpoint is
+best-effort.
+
+### Session BTW / Side Question (`session_btw` capability tag)
+
+`POST /session/:id/btw` asks a one-off question against the session context
+without interrupting the main conversation flow. It uses `runForkedAgent` on the
+cache path for a single-turn, no-tool LLM call and returns
+`{ sessionId, answer: string | null }`. The implementation enforces
+`BTW_MAX_INPUT_LENGTH`, cross-session leakage guards, and timeout handling.
+
+### Shell Command Execution
+
+`POST /session/:id/shell` executes a shell command directly on the daemon host,
+without routing through the LLM. It streams output on the session SSE bus via
+`user_shell_command` / `user_shell_result` events and injects the command plus
+result into the LLM conversation history. The response is
+`{ exitCode, output, aborted }`.
+
+### Session Detach
+
+`POST /session/:id/detach` explicitly detaches a client from a session by
+decrementing `attachCount`; it does not close the session by itself. If no other
+attach or subscriber remains, the session is reaped. The endpoint returns 204.
+
+### Batch Session Delete
+
+`POST /sessions/delete` accepts `{ sessionIds: string[] }` (up to 100 ids),
+closes bridge sessions, and deletes transcript files. It uses
+`Promise.allSettled` for resilience and returns `{ removed, notFound, errors }`.
+
+### Context Usage (`session_context_usage` capability tag)
+
+`GET /session/:id/context-usage` returns structured context-window usage.
+`?detail=true` includes finer-grained usage grouped by tool, memory, and skill.
+
+### Session Stats (`session_stats` capability tag)
+
+`GET /session/:id/stats` returns usage statistics: model metrics
+(input/output tokens, cache reads/writes, total cost), per-tool call counts and
+latencies, and file edit counts.
+
+### Session Tasks (`session_tasks` capability tag)
+
+`GET /session/:id/tasks` returns a background-task snapshot for agent tasks,
+shell tasks, monitor tasks, and their lifecycle states.
+
+### Compacted Replay
+
+`POST /session/:id/load` now returns a `BridgeRestoredSession` that can include
+`compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`, and
+`lastEventId?: number`. `compactedReplay` is produced by
+`TurnBoundaryCompactionEngine`: at turn boundaries it folds consecutive text /
+thought blocks, collapses tool-call sequences to their final state, discards
+transient signals, and produces O(turns) replay logs instead of O(tokens) logs
+(typically a 25-30x reduction).
+
+### ACP Child Preheat
+
+`bridge.preheat()` warms the ACP child process before the first session so that
+the first real session avoids cold-start latency. It pairs with
+`channelIdleTimeoutMs`, which keeps the ACP child alive after the last session
+closes, and skip-relaunch, which reuses an already idle child when a new session
+arrives.
+
 ## Configuration
 
 - `BridgeOptions.maxSessions` (default 20) — cap.
-- `BridgeOptions.sessionScope` (default `'single'`).
+- `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
 - `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
-- Capability tags: `session_create`, `session_scope_override`, `session_load`, `unstable_session_resume`, `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`.
+- `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
+- Capability tags: `session_create`, `session_scope_override`, `session_load`, `unstable_session_resume`, `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `non_blocking_prompt`.
 
 ## Caveats & Known Limits
 

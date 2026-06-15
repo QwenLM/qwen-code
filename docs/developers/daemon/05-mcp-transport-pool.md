@@ -261,6 +261,206 @@ The W77 race (`cb206da36`): `createUnpooledConnection` stores the entry in `this
 
 This race was latent today (the W61/W71 per-session `releaseSession` hooks land in F4) but would become live the moment that hook arrived — fix landed early on the F2 line.
 
+## `GET /workspace/mcp` pool-aware snapshot fields
+
+When the pool is active, each `ServeWorkspaceMcpStatus` server cell
+(`packages/acp-bridge/src/status.ts`) includes three additional fields:
+
+| Field            | Type                                        | Purpose                                                                                                                                                                                                                                                                                                                                       |
+| ---------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `disabledReason` | `'config' \| 'budget'`                      | Distinguishes operator-disabled servers (`disabled: true` from `disabledMcpServers`) from budget refusal (`status: 'error', errorKind: 'budget_exhausted'`). Dashboards can render one server row without cross-reading `errors[]` or `budgets[]`.                                                                                            |
+| `entryCount`     | `number` (`>=1`)                            | In pool mode a workspace can have multiple `PoolEntry` instances with the same name when sessions inject different fingerprints such as per-session OAuth headers. This field is absent when `QWEN_SERVE_NO_MCP_POOL=1` disables the pool. New clients render an "N entries" badge when `entryCount > 1`.                                     |
+| `entrySummary`   | `ReadonlyArray<{entryIndex, refs, status}>` | Per-entry breakdown. `entryIndex` is the stable opaque integer assigned when the entry was created; it is not the raw fingerprint, so snapshot diffs do not leak OAuth or env rotation timing. `refs` is the current attached-session count. `status` lets dashboards show per-entry health while aggregate `mcpStatus` is already connected. |
+
+`(entryCount, entrySummary)` are always broadcast as a pair. The
+`mcp_workspace_pool` capability tag implies both fields. Older SDK clients
+ignore them under the additive protocol contract.
+
+Pool snapshots also expose `subprocessCount`. It counts only the `'stdio'`
+family: websocket, HTTP, and SSE dial remote servers and do not create local
+child processes. Early versions counted websocket as local subprocesses, which
+inflated resource dashboards.
+
+## Drain runs from both shutdown paths
+
+Pool drain is not limited to the SIGTERM handler. The normal IDE shutdown path
+(`await connection.closed`) also calls `drainAll` via
+`packages/cli/src/acp-integration/acpAgent.ts`'s `drainPoolBeforeExit`. Whether
+the daemon receives a process signal or the IDE closes its connection cleanly,
+the pool enters `draining`, refuses new acquires, and waits for entries to
+close.
+
+## `/mcp refresh` shares the boot discovery path
+
+`discoverAllMcpTools` (boot discovery) and
+`discoverAllMcpToolsIncremental` (`/mcp refresh` / hot reload) both consult the
+pool first in pool mode (`packages/core/src/tools/mcp-client-manager.ts`). The
+shared gate prevents hot reload from accidentally creating a per-session
+client, double-counting budget, or leaving an orphan transport behind.
+
+## In-flight tool calls during reconnect (`MCPCallInterruptedError`)
+
+When the underlying MCP transport silently disconnects (the connection jumps
+from `'active'` / `'draining'` to `localStatus === DISCONNECTED` without an
+explicit close), the pool marks the entry `'failed'`, evicts it from
+`pool.entries`, and emits the `failed` event before detaching subscriber views.
+That emit-before-detach order matters: subscribers receive the `failed` event
+soon enough to route pending `callTool` promises to
+`MCPCallInterruptedError`, so a stuck `await client.callTool(...)` rejects
+cleanly instead of hanging. `forceShutdown` uses the same emit-then-detach
+ordering.
+
+## Fingerprint and `canonicalOAuth` normalization
+
+The pool key comes from `fingerprint(cfg)` in `mcp-pool-key.ts`. The hash covers
+all transport-defining fields:
+
+> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, oauth`
+
+Per-session filtering and metadata fields (`includeTools`, `excludeTools`,
+`trust`, `description`, `extensionName`, `discoveryTimeoutMs`) are excluded, so
+sessions with different filters can share one entry.
+
+For the OAuth cell, `canonicalOAuth(o)` hashes every `MCPOAuthConfig` field:
+`clientId`, `clientSecret`, sorted `scopes`, sorted `audiences`,
+`authorizationUrl`, `tokenUrl`, `redirectUri`, `tokenParamName`, and
+`registrationUrl`. This is the credential-isolation contract: two session
+configs that differ only by `clientSecret`, `audiences`, or `redirectUri` get
+different fingerprints and cannot share one entry. Confidential clients and
+multi-audience token deployments depend on this.
+
+Sorting `scopes` and `audiences` makes callsite order irrelevant. Explicit
+`null` is normalized so undefined fields hash the same as explicit null. The
+key does not include `discoveryTimeoutMs`; concurrent acquire calls with the
+same key but different timeouts are "first wins", matching the pre-F2
+per-session manager behavior.
+
+`PoolEntry` keeps `cfg: MCPServerConfig` private. External code must use the
+`entry.transportKind` getter when it needs the transport family. That prevents
+env, header auth, and OAuth fields from leaking to consumers by accident.
+
+## Extension unloads rely on `MAX_IDLE_MS`
+
+There is intentionally no active cleanup path for unloading an MCP extension at
+runtime. Orphan entries whose `MCPServerConfig` no longer appears in the merged
+workspace settings are reclaimed naturally by the `MAX_IDLE_MS` hard cap after
+the last subscriber detaches. A synchronous unload-cleanup path would add
+complexity for a rare operator edge case; the hard cap limits orphan process
+lifetime past the unload point to 5 minutes by default.
+
+Operators who need faster cleanup can restart the daemon or call
+`POST /workspace/mcp/:server/restart` for the now-unconfigured name, which goes
+through the disabled-server path and tears the entry down.
+
+## Self-heal observability
+
+The pool emits two structured diagnostics on the self-heal path:
+
+**`McpClient.lastTransportError: Error | undefined`** (`packages/core/src/tools/mcp-client.ts`) — `McpClient.onerror` stores the most recent transport exception in a private field and clears it at `connect()` entry. The `PoolEntry` silent-drop path reads `client.getLastTransportError()` and includes it in `emit({kind:'failed', lastError})`, so subscribers and dashboards do not have to grep stderr for root cause.
+
+**`SweepResult`** (internal interface, not exported; `packages/core/src/tools/mcp-pool-entry.ts`) — `sweepAndDisconnect(reason)` returns `Promise<SweepResult>`:
+
+```ts
+interface SweepResult {
+  pidSweepError?: Error; // listDescendantPids itself threw
+  descendantsFound?: number; // descendant pid count found
+  descendantsSignaled?: number; // successfully SIGTERM'd count
+}
+```
+
+The only consumer is the silent-drop block in `statusChangeListener`. It uses
+`descendantsFound` / `descendantsSignaled` to detect partial-signal cases
+(fewer processes signaled than found, usually because a process exited or EPERM
+occurred between `listDescendantPids` and `sigtermPids`) and sweep errors, then
+logs a structured warning. `forceShutdown` and `doRestart` ignore this return
+value because their catch paths already carry richer failure signals.
+
+## Subprocess cleanup: the `pid-descendants` snapshot path
+
+When `McpTransportPool` shuts down stdio subprocesses, it has to enumerate their
+descendant processes; `npx` wrappers and shell wrappers can create multiple fork
+levels. `packages/core/src/tools/pid-descendants.ts` exposes
+`listDescendantPids(rootPid) → Promise<number[]>` and `sigtermPids(pids)` for
+`sweepAndDisconnect`.
+
+### Linux / macOS primary path
+
+A single `ps -A -o pid=,ppid=` snapshot reads the process table, parses it into
+`Map<ppid, pid[]>`, then `walkDescendants(tree, root)` performs BFS to extract
+the subtree. Any depth requires only one `ps` fork.
+
+`walkDescendants` maintains `visited: Set<number>` and includes `root` in the
+set to defend against PID-reuse cycles. Under fast process churn, the snapshot
+can theoretically contain A→B / B→A loops. Without `visited`, the walker could
+fill the `MAX_DESCENDANTS` quota with bogus data and crowd out real descendants.
+
+### Windows primary path
+
+A single `Get-CimInstance Win32_Process | ConvertTo-Csv -Delimiter ","`
+snapshot emits all `(ProcessId, ParentProcessId)` rows, then the same `Map` and
+`walkDescendants` path runs.
+
+The explicit `-Delimiter ","` is required. PowerShell 5.1, which ships with
+Windows, defaults `ConvertTo-Csv` to the system locale list separator; DE, FR,
+NL, IT, and similar locales use `;`, so the pre-fix parser
+`^"(\d+)","(\d+)"$` never matched and every daemon shutdown fell back to the
+per-pid CIM filter path, adding roughly 0.5-1s of PowerShell startup cost per
+child.
+
+### Fallback path
+
+BusyBox `<v1.28` lacks `ps -o`, distroless containers might not include `ps`,
+and some Windows environments truncate CIM output via ACLs. When the primary
+path parses zero rows or throws, the code falls back to per-pid BFS: Linux /
+macOS use `pgrep -P <pid>`, and Windows uses
+`Get-CimInstance -Filter "ParentProcessId=$p"` where `$p` is a PowerShell
+variable binding rather than string concatenation. The current
+`Number.isInteger` guard is sufficient for the entry point; the binding is
+defense-in-depth.
+
+### Shared constraints
+
+Both paths are bounded by `MAX_DESCENDANTS = 256` and `MAX_DEPTH = 8` to keep a
+malicious or degenerate process tree from dragging down sweep.
+
+The snapshot path uses `maxBuffer: 8MB`, enough for pathological hosts with
+about 250k processes. Node's default 1MB buffer can truncate child-process
+output around 30k processes.
+
+The performance gain is intentionally modest (typical 200-500 process dev
+machines parse in under 10ms, around 2x faster than per-pid `pgrep`). The main
+benefit is fork hygiene and snapshot consistency: BFS sees the full subtree at
+once, while the previous per-pid query path could miss a grandchild forked
+between two queries.
+
+## Embedder note: `McpClientManager` constructor
+
+`McpClientManager` is constructed as
+`(config, toolRegistry, options?: McpClientManagerOptions)`. Embedders that
+import the class directly should pass:
+
+```ts
+new McpClientManager(config, toolRegistry, {
+  eventEmitter,
+  sendSdkMcpMessage,
+  healthConfig,
+  budgetConfig,
+  pool,
+});
+```
+
+Tests should prefer an `mkManager(overrides?)` factory so cases that care about
+one or two fields stay one line.
+
+## Implementation notes
+
+These helpers are internal, but source readers may see them:
+
+- `McpTransportPool.acquire()` uses `attachPooledSession` and `rollbackReservationOnSpawnFailure` to share fast-path attach, post-spawn attach, and pooled spawn-in-flight catch behavior. Runtime behavior is unchanged; race-window invariants still live at the call sites.
+- `SessionMcpView.applyTools` / `applyPrompts` compile `includeTools` / `excludeTools` once via `compileNameFilter(cfg)` and check each tool with `compiledFilterAccepts(compiled, name)`. Exported `passesSessionFilter` / `passesSessionPromptFilter` use the same compiled path. `excludeTools` is exact-match; `includeTools` strips the first `(...)` suffix so `toolName(args)` matches `toolName`.
+
+The F2 design doc, [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md), covers the transport-pool state machine, reconnect, drain, and descendant sweep in section 6.
+
 ## Caveats & Known Limits
 
 - **HTTP / SSE transports are unpooled** — each acquire mints a fresh entry that lives only as long as its session. Reason: their headers may carry session-specific OAuth state, so pooling would leak credentials across sessions.

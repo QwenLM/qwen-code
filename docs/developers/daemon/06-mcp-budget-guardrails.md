@@ -142,10 +142,12 @@ Out-of-pass refusals (e.g. lazy `readResource` spawn that bypasses the bulk pass
 - **`warn` mode never refuses.** It still tracks reservations and fires `mcp_budget_warning`, but `tryReserve` always returns `'reserved'`. Refusal semantics are `enforce`-only.
 - **Workspace-scoped budget events carry `scope: 'workspace'`** so they fan out to every attached session simultaneously. SDK reducers' `mcpBudgetWarningCount` / `mcpChildRefusedBatchCount` increment in lockstep across sessions on the same connection. Per-session legacy events from `McpClientManager` carry no `scope` (defaults to `'session'` semantically).
 - **The kill switch `QWEN_SERVE_NO_MCP_POOL=1`** disables the pool entirely; the workspace budget is also disabled, and the per-session `McpClientManager` budget takes over. The capabilities envelope drops `mcp_workspace_pool` and `mcp_pool_restart` to signal this honestly.
+- **`ServeMcpBudgetStatusCell.scope` is a forward-compatible list shape.** Snapshot cells expose `budgets[]`, not a single `budget?` field. PR 14 v1 emits one `scope: 'session'` cell for each ACP session because `acpAgent.newSessionConfig()` constructs that session's `Config` / `McpClientManager`. The `'pool'` scope is reserved for the Wave 5 PR 23 pool-scoped cell that will sit alongside session-scoped cells. Consumers must tolerate additional unknown `scope` values by dropping them rather than failing.
 
 ## References
 
 - `packages/core/src/tools/mcp-workspace-budget.ts:1-200+` (entire class)
 - `packages/core/src/tools/mcp-client-manager.ts` (`BudgetExhaustedError`, `McpBudgetEvent`, hysteresis constants)
 - `packages/core/src/tools/mcp-transport-pool.ts:208+` (pool's `acquire` site that calls `tryReserve`)
+- F2 design doc: [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md) section 11 (workspace-level budget) and the v2.2 changelog fold-ins for W21 / W77 / W88 / W121 / W122 / R3.
 - F2 design notes: issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) commit 6.

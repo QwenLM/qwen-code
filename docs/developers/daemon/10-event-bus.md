@@ -100,13 +100,19 @@ sequenceDiagram
     EB->>EB: refuse if subs.size >= maxSubscribers<br/>(throws SubscriberLimitExceededError)
     EB->>Q: new BoundedAsyncQueue(256)
     EB->>EB: subs.add(sub)
-    EB->>EB: earliestInRing = ring[0]?.id
-    alt earliestInRing > lastEventId + 1 (gap evicted)
-        EB->>Q: forcePush state_resync_required<br/>{ reason: 'ring_evicted', lastDeliveredId: 42, earliestAvailableId: earliestInRing }
-        Note over EB,Q: id-less synthetic, frame goes BEFORE replay.<br/>Stream stays open; SDK reducer flips awaitingResync.
+    EB->>EB: epochReset = lastEventId >= nextId
+    alt epochReset (old bus epoch)
+        EB->>Q: forcePush state_resync_required<br/>{ reason: 'epoch_reset', lastDeliveredId: 42, earliestAvailableId: ring[0]?.id ?? nextId }
+        Note over EB,Q: id-less synthetic, frame goes BEFORE replay.<br/>Replay scans the whole current ring.
+    else same bus epoch
+        EB->>EB: earliestInRing = ring[0]?.id
+        opt earliestInRing > lastEventId + 1 (gap evicted)
+            EB->>Q: forcePush state_resync_required<br/>{ reason: 'ring_evicted', lastDeliveredId: 42, earliestAvailableId: earliestInRing }
+            Note over EB,Q: id-less synthetic, frame goes BEFORE replay.<br/>Stream stays open; SDK reducer flips awaitingResync.
+        end
     end
     loop ring scan
-        EB->>EB: for e in ring where e.id > 42
+        EB->>EB: for e in ring where e.id > (epochReset ? 0 : 42)
         EB->>Q: forcePush(e)
     end
     EB->>EB: attach AbortSignal listener<br/>(onAbort → queue.close({drain:false}); dispose)
@@ -120,10 +126,13 @@ If `subs.size >= maxSubscribers` at subscribe time, `SubscriberLimitExceededErro
 
 When a consumer reconnects with `Last-Event-ID: N` and the ring's earliest surviving event has `id > N + 1`, the events in `[N+1, earliestInRing-1]` were evicted before the consumer reconnected. The naïve replay would silently succeed with a non-contiguous suffix, the SDK reducer would keep applying deltas as if the stream were contiguous, and its state would diverge from the daemon's truth — with no terminal signal.
 
-Implemented at `packages/acp-bridge/src/eventBus.ts:359-402`:
+Implemented in `EventBus.subscribe()`:
 
-1. Compute `earliestInRing = this.ring[0]?.id`.
-2. If `earliestInRing > opts.lastEventId + 1`, force-push a synthetic frame **before** the replay frames:
+1. First check `opts.lastEventId >= this.nextId`. If true, the client cursor is
+   from an older bus epoch (daemon restart / EventBus reconstruction), so the
+   bus emits `reason: 'epoch_reset'` and replays the whole current ring.
+2. Otherwise compute `earliestInRing = this.ring[0]?.id`.
+3. If `earliestInRing > opts.lastEventId + 1`, force-push a synthetic frame **before** the replay frames:
    ```jsonc
    {
      "v": 1,
@@ -135,7 +144,7 @@ Implemented at `packages/acp-bridge/src/eventBus.ts:359-402`:
      }
    }
    ```
-3. Continue the normal replay loop afterwards.
+4. Continue the normal replay loop afterwards.
 
 Critical contracts (and what the wenshao #4360 review corrected):
 
@@ -175,7 +184,7 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 - Consumed by `packages/acp-bridge/src/bridge.ts` (`BridgeClient.sessionUpdate` / `BridgeClient.extNotification` → `events.publish(...)`).
 - Consumed by `packages/cli/src/serve/server.ts` (SSE route handler → `events.subscribe(...)` then formats `BridgeEvent` to SSE wire frames).
 - Re-export shim: `packages/cli/src/serve/eventBus.ts` → `@qwen-code/acp-bridge/eventBus`.
-- SDK consumer: `packages/sdk-typescript/src/daemon/sse.ts` (`parseSseStream`), then `narrowDaemonEvent` (see [`09-event-schema.md`](./09-event-schema.md), [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)).
+- SDK consumer: `packages/sdk-typescript/src/daemon/sse.ts` (`parseSseStream`), then `asKnownDaemonEvent` (see [`09-event-schema.md`](./09-event-schema.md), [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)).
 
 ## Configuration
 
@@ -186,7 +195,7 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 
 ## Caveats & Known Limits
 
-- **Synthetic frames have no `id`.** SDK consumers using `Last-Event-ID` resume must not assume contiguity — gaps in the live stream that look like "events 3, 5, 6" with the 4 missing are normal when `slow_client_warning` or `client_evicted` was force-pushed in between (those frames are private to the subscriber that received them).
+- **Synthetic frames have no `id`.** SDK consumers using `Last-Event-ID` resume only record frames with ids; `slow_client_warning`, `client_evicted`, `state_resync_required`, and `replay_complete` do not advance the cursor and do not consume per-session sequence numbers. If two id-bearing live frames have a real gap, handle it through the ring-eviction / epoch-reset resync path rather than treating it as a private synthetic frame.
 - `client_evicted` is **per-subscriber**, not per-session. The same client can reconnect.
 - `BoundedAsyncQueue` iterator is **not safe for concurrent drivers** — two simultaneous `.next()` calls would race for the same event. Daemon usage is sequential (`for await ... of` in the SSE route handler), so this is safe in production.
 - The bus is currently package-private; channels and webui that want to subscribe must do so through the daemon's HTTP SSE route, not by reaching into the bus directly. Stage 1.5 lifts this.

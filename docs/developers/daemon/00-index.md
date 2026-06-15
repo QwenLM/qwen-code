@@ -23,7 +23,7 @@ Pick the path that matches your goal:
 - **Adding a new client adapter**: `01 -> 09 -> 10 -> 13 -> (14 / 15 / 16)`.
 - **Working on the MCP pool or budget**: `01 -> 03 -> 05 -> 06`.
 - **Working on permissions**: `01 -> 03 -> 04 -> 12`.
-- **Debugging a production daemon**: `17 -> 19 -> 18`.
+- **Debugging a production daemon**: `19 -> 18 -> 17 -> 20`.
 
 ## Document set
 
@@ -79,6 +79,26 @@ Pick the path that matches your goal:
 - **SSE** - Server-Sent Events. The daemon outbound event channel (`GET /session/:id/events`).
 - **Workspace** - the directory the daemon was bound to at boot (`--workspace` or `cwd`). One daemon process equals one workspace.
 
+## Implementation source anchors
+
+Use these anchors when moving from the docs into the latest `main` code:
+
+| Surface                             | Implementation anchors                                                                                                                                                                                                                                    | Primary docs                                                                                                           |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Bootstrap and HTTP assembly         | `packages/cli/src/serve/runQwenServe.ts`, `server.ts`, `/demo`                                                                                                                                                                                            | [`02`](./02-serve-runtime.md), [`20`](./20-quickstart-operations.md)                                                   |
+| ACP bridge and session multiplexing | `packages/acp-bridge/src/bridge.ts`, `packages/acp-bridge/src/bridgeTypes.ts`, `@qwen-code/acp-bridge`                                                                                                                                                    | [`03`](./03-acp-bridge.md), [`08`](./08-session-lifecycle.md)                                                          |
+| Permission mediation                | `packages/acp-bridge/src/permissionMediator.ts`, `fromLoopback: boolean`, `policy.*`                                                                                                                                                                      | [`04`](./04-permission-mediation.md), [`12`](./12-auth-security.md)                                                    |
+| MCP transport pool                  | `packages/core/src/tools/mcp-transport-pool.ts`, `mcp-pool-key.ts`, `pid-descendants.ts`, `session-mcp-view.ts`, `/mcp refresh`, `MCPCallInterruptedError`                                                                                                | [`05`](./05-mcp-transport-pool.md), [`06`](./06-mcp-budget-guardrails.md)                                              |
+| MCP budget guardrails               | `packages/core/src/tools/mcp-workspace-budget.ts`, `ServeMcpBudgetStatusCell.scope`, `budgets[]`                                                                                                                                                          | [`06`](./06-mcp-budget-guardrails.md)                                                                                  |
+| Workspace filesystem                | `packages/cli/src/serve/fs/`, `assertTrustedForIntent(trusted, intent)`, `meta.matchedIgnore`, `includeIgnored`                                                                                                                                           | [`07`](./07-workspace-filesystem.md)                                                                                   |
+| Event schema and SSE writer         | `packages/sdk-typescript/src/daemon/events.ts`, `packages/cli/src/serve/server.ts`, `formatSseFrame`, `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`, `ToolCallEmitter.resolveToolProvenance`, `tool_call.provenance`, `serverId` | [`09`](./09-event-schema.md), [`10`](./10-event-bus.md)                                                                |
+| Event resync                        | `state_resync_required`, `awaitingResync`, `RESYNC_PASSTHROUGH_TYPES`, `asKnownDaemonEvent`, `unrecognizedKnownEventCount`                                                                                                                                | [`09`](./09-event-schema.md), [`10`](./10-event-bus.md)                                                                |
+| Capabilities                        | `packages/cli/src/serve/capabilities.ts`, `mcp_server_restart_refused.reason`, `MCP_RESTART_REFUSED_REASONS.has`                                                                                                                                          | [`11`](./11-capabilities-versioning.md)                                                                                |
+| Auth and device flow                | `packages/cli/src/serve/auth.ts`, `packages/cli/src/serve/auth/deviceFlow.ts`                                                                                                                                                                             | [`12`](./12-auth-security.md)                                                                                          |
+| TypeScript SDK daemon client        | `packages/sdk-typescript/src/daemon/{DaemonClient,DaemonSessionClient,DaemonAuthFlow,sse,events,types}.ts`, `MCP_RESTART_DEFAULT_TIMEOUT_MS`                                                                                                              | [`13`](./13-sdk-daemon-client.md)                                                                                      |
+| Shared UI transcript layer          | `DaemonUiEventType`, `DaemonSessionProvider`, `packages/webui/src/daemon/`                                                                                                                                                                                | [`13`](./13-sdk-daemon-client.md), [`14`](./14-cli-tui-adapter.md), [`../daemon-ui/README.md`](../daemon-ui/README.md) |
+| Channels and IDE adapters           | `packages/channels/`, `packages/vscode-ide-companion/src/services/daemonIdeConnection.ts`                                                                                                                                                                 | [`15`](./15-channel-adapters.md), [`16`](./16-vscode-ide-adapter.md)                                                   |
+
 ## What is intentionally out of scope
 
 - **Java / Python SDK daemon clients** - only the TypeScript SDK ships a daemon client today. Doc 13 is TypeScript-only.
@@ -88,7 +108,7 @@ Pick the path that matches your goal:
 
 ## Current daemon mode coverage
 
-### Server core
+### Server core coverage
 
 | Area                      | Current state                                                                                                                                                                    | Primary docs                                                              |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
@@ -144,4 +164,4 @@ Pick the path that matches your goal:
 
 ## Version provenance
 
-This doc set reflects the daemon mode surface after `daemon_mode_b_main` was merged into `main` through [#4412](https://github.com/QwenLM/qwen-code/pull/4412). It intentionally describes the current `main` behavior instead of the earlier F-series planning snapshots.
+This doc set reflects the daemon mode surface currently merged into `main`, including the follow-up work from [#4412](https://github.com/QwenLM/qwen-code/pull/4412). It intentionally describes current behavior instead of earlier F-series planning snapshots.

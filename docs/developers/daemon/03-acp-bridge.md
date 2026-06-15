@@ -85,7 +85,20 @@ sequenceDiagram
     end
 ```
 
-`SessionLimitExceededError` is thrown when `byId.size >= maxSessions`. `InvalidClientIdError` is thrown if `X-Qwen-Client-Id` is outside `[A-Za-z0-9._:-]{1,128}`. The disconnect-reaper in `server.ts` tracks the spawn owner via `attachCount`/`spawnOwnerWantedKill` to avoid tearing down a session whose spawn owner disconnected but other clients already attached (review #3889 BQ9tV).
+Key points:
+
+- `sessionScope='single'` with an existing `defaultEntry` only bumps
+  `attachCount`, registers `clientId`, and returns `attached: true`.
+- The cold path runs the ChannelFactory, performs ACP `initialize`
+  (`DEFAULT_INIT_TIMEOUT_MS=10s`), calls `connection.newSession({cwd})`, then
+  registers the new `SessionEntry`.
+- `SessionLimitExceededError` is thrown when `byId.size >= maxSessions`.
+- `InvalidClientIdError` is thrown if `X-Qwen-Client-Id` is outside
+  `[A-Za-z0-9._:-]{1,128}`.
+- The disconnect-reaper in `server.ts` tracks the spawn owner via
+  `attachCount`/`spawnOwnerWantedKill` to avoid tearing down a session whose
+  spawn owner disconnected but other clients already attached (review #3889
+  BQ9tV).
 
 ### Prompt serialization
 
@@ -199,11 +212,44 @@ sequenceDiagram
 | `permissionPolicy`                            | from `settings.json`'s `policy.permissionStrategy` | One of `first-responder` / `designated` / `consensus` / `local-only`.                                                 |
 | `permissionConsensusQuorum`                   | from `settings.json`                               | N for consensus policy.                                                                                               |
 | `permissionAudit`                             | `createNoOpPermissionAuditPublisher()`             | Wire to `PermissionAuditRing` for the audit trail.                                                                    |
+| `channelIdleTimeoutMs`                        | `0`                                                | Keep the ACP child alive for this many milliseconds after the last session closes.                                    |
+
+## Additional bridge methods
+
+In addition to the core `spawnOrAttach`, `sendPrompt`, `cancelSession`,
+`respondToPermission`, `loadSession`, and `resumeSession` calls, the
+`HttpAcpBridge` interface now includes these daemon-facing helpers:
+
+| Method                                                       | Purpose                                       |
+| ------------------------------------------------------------ | --------------------------------------------- |
+| `generateSessionRecap(sessionId, context?)`                  | Generate a one-line session recap.            |
+| `generateSessionBtw(sessionId, question, signal?, context?)` | Answer a side question / btw prompt.          |
+| `executeShellCommand(sessionId, command, signal?, context?)` | Run a shell command on the daemon host.       |
+| `getSessionContextUsageStatus(sessionId, opts?)`             | Return context-window usage.                  |
+| `getSessionSupportedCommandsStatus(sessionId)`               | Return available slash commands.              |
+| `getSessionTasksStatus(sessionId)`                           | Return a background-task snapshot.            |
+| `getSessionStatsStatus(sessionId)`                           | Return session usage statistics.              |
+| `setSessionApprovalMode(sessionId, mode, opts, context?)`    | Update approval mode for a session.           |
+| `detachClient(sessionId, clientId?)`                         | Explicitly detach a client.                   |
+| `addRuntimeMcpServer(name, config, originatorClientId)`      | Add an MCP server at runtime.                 |
+| `removeRuntimeMcpServer(name, originatorClientId)`           | Remove an MCP server at runtime.              |
+| `manageMcpServer(serverName, action, originatorClientId)`    | Enable / disable / authenticate / clear auth. |
+| `generateWorkspaceAgent(description, originatorClientId)`    | Generate a subagent definition with AI.       |
+| `preheat()`                                                  | Warm the ACP child before the first session.  |
+| `getSessionLastEventId(sessionId)`                           | Read the session's monotonic event id.        |
+| `getWorkspaceToolsStatus()`                                  | Return the built-in tool registry snapshot.   |
+| `getWorkspaceMcpToolsStatus(serverName)`                     | Return tools for a specific MCP server.       |
+
+`BridgeSpawnRequest.sessionScope` was renamed from `'per-client'` to
+`'thread'`. `BridgeRestoredSession` now carries `compactedReplay`,
+`liveJournal`, and `lastEventId`. `BridgeClientRequestContext` is the request
+context threaded through bridge calls; it carries `clientId`,
+`fromLoopback: boolean`, and `promptId`.
 
 ## Caveats & Known Limits
 
 - `MCP_RESTART_TIMEOUT_MS = 300_000` (5 min) — the bridge race deadline for `/workspace/mcp/:server/restart` is intentionally large because `McpClientManager.MAX_DISCOVERY_TIMEOUT_MS` can be up to 5 min for stdio servers. A shorter deadline would produce false timeouts while the ACP child kept reconnecting in the background.
-- `BridgeOptions.eventRingSize > MAX_EVENT_RING_SIZE (1_000_000)` throws at construction.
+- `BridgeOptions.eventRingSize > 1_000_000` throws at construction.
 - `connection.unstable_resumeSession` is exposed via the `unstable_session_resume` capability tag with the `unstable_` prefix; the ACP method may still change its shape. Clients must feature-detect.
 - The bridge package is `@qwen-code/acp-bridge` and is consumed via re-export shims in `serve/eventBus.ts`, `serve/status.ts`, `serve/httpAcpBridge.ts` for back-compat with pre-F1 import paths. New code should import directly.
 

@@ -6,12 +6,20 @@ When the ACP child's agent calls `requestPermission`, the daemon doesn't just fo
 
 `MultiClientPermissionMediator` (`packages/acp-bridge/src/permissionMediator.ts:1-1292`) implements the `PermissionMediator` contract (`packages/acp-bridge/src/permission.ts`) and owns ALL pending + resolved permission state for the bridge. It dispatches votes through one of four policies declared in `PermissionPolicy`:
 
-| Policy            | Resolution rule                                                                                                               | Use case                                                                 |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `first-responder` | First valid vote wins; later voters get `permission_already_resolved`.                                                        | Live cross-client collaboration UX (default).                            |
-| `designated`      | Only the prompt's `originatorClientId` may resolve; others see `permission_forbidden{designated_mismatch}`.                   | Per-tenant SaaS where the UI surface must own its own approvals.         |
-| `consensus`       | N-of-M quorum across pair-token-authenticated clients; intermediate `permission_partial_vote` events let UIs render progress. | Enterprise change review where two operators must agree.                 |
-| `local-only`      | Refuses any non-loopback voter; blocks until a loopback client resolves.                                                      | Workstations where remote control must never grant privilege escalation. |
+| Policy            | Resolution rule                                                                                                        | Use case                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `first-responder` | First valid vote wins; later voters get `permission_already_resolved`.                                                 | Live cross-client collaboration UX (default).                            |
+| `designated`      | Only the prompt's `originatorClientId` may resolve; others see `permission_forbidden{designated_mismatch}`.            | Per-tenant SaaS where the UI surface must own its own approvals.         |
+| `consensus`       | N-of-M quorum across the v1 client-id snapshot; intermediate `permission_partial_vote` events let UIs render progress. | Enterprise change review where two operators must agree.                 |
+| `local-only`      | Refuses any non-loopback voter; blocks until a loopback client resolves.                                               | Workstations where remote control must never grant privilege escalation. |
+
+> **v1 security limit**: `X-Qwen-Client-Id` is self-reported. `designated` and
+> `consensus` do not yet have proof-of-possession. A client that observes
+> `originatorClientId` can reuse that id. `{outcome:'cancelled'}` also routes
+> through the cancel sentinel before policy dispatch, so even `local-only`
+> cannot treat cancel as a policy-protected resolve. For strong isolation, bind
+> the daemon to loopback or put it behind an authenticated reverse proxy. See
+> [Security note: v1 client identity is self-reported](#security-note-v1-client-identity-is-self-reported).
 
 ## Responsibilities
 
@@ -170,6 +178,83 @@ The bridge's session-teardown path always calls `forgetSession` **before** the c
 | `BridgeOptions`     | `permissionPolicy`, `permissionConsensusQuorum`, `permissionAudit`                                     | Programmatic override.                |
 | Capability tag      | `permission_mediation` (always; `modes: ['first-responder', 'designated', 'consensus', 'local-only']`) | Build-supported set.                  |
 | Capability envelope | `policy.permission`                                                                                    | Active policy this daemon is running. |
+
+If `policy.permissionStrategy` is not explicitly configured, the daemon uses
+`first-responder`. `designated`, `consensus`, and `local-only` only take effect
+when set in `settings.json`.
+
+## Consensus quorum: default formula and the M=2 edge
+
+When the `consensus` policy is active and `policy.consensusQuorum` is not set,
+the mediator computes **N = floor(M/2) + 1** via `consensusQuorumFor` in
+`permissionMediator.ts`:
+
+```ts
+Math.max(1, Math.floor(m / 2) + 1);
+```
+
+| M (`votersAtIssue.size`) | Default N | Behavior                        |
+| ------------------------ | --------- | ------------------------------- |
+| 1                        | 1         | One voter resolves immediately. |
+| 2                        | 2         | Requires unanimous agreement.   |
+| 3                        | 2         | Majority.                       |
+| 4                        | 3         | More than half.                 |
+| 5                        | 3         | Majority.                       |
+| 6                        | 4         | More than half.                 |
+
+For **M = 2**, split votes (A selects X, B selects Y) can only be resolved by
+the per-permission timeout: no option reaches unanimity, so the request waits
+until `permissionResponseTimeoutMs` (default 5 min) and resolves as
+`{cancelled, timeout}`. The vote-advance path logs this "unanimity means split
+votes time out" semantic to stderr for operators.
+
+Operators who want first-vote-wins behavior for M = 2 can explicitly set
+`policy.consensusQuorum: 1`. Stricter configurations, such as requiring
+unanimity for M = 4, use the same field.
+
+## Boot-time policy validation
+
+`runQwenServe.validatePolicyConfig(policyConfig)`
+(`packages/cli/src/serve/runQwenServe.ts`) validates merged `settings.json`
+`policy.*` at boot and throws `InvalidPolicyConfigError` for operator mistakes:
+
+- `policy.permissionStrategy` is set but not in the four supported modes. The
+  valid set is derived at runtime from
+  `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes`, the single source of
+  truth for capability advertisement.
+- `policy.consensusQuorum` is set but is not a positive integer.
+
+There is also a soft stderr warning when `consensusQuorum` is set while
+`permissionStrategy !== 'consensus'`; the override would otherwise be silently
+ignored under non-consensus policies.
+
+`InvalidPolicyConfigError` is exported for `instanceof` tests. `runQwenServe`
+uses it to distinguish operator misconfiguration, which is rethrown as an
+explicit boot failure, from settings read I/O failures, which fall back to
+defaults.
+
+## Security note: v1 client identity is self-reported
+
+`X-Qwen-Client-Id` is supplied by the HTTP client. In v1, the daemon validates
+the format (`[A-Za-z0-9._:-]{1,128}`) and tracks attached client ids in
+`clientIds`, but it does not perform proof-of-possession. Any client that can
+observe `originatorClientId` in SSE can register with the same id and
+impersonate that originator in later requests.
+
+Policy impact:
+
+- **`first-responder`** is unaffected because it does not depend on identity.
+- **`designated`** can be spoofed by a remote client reusing
+  `originatorClientId`.
+- **`consensus`** gates on the issue-time `votersAtIssue` snapshot; if a spoofed
+  id is already attached when the request is issued, it can vote.
+- **`local-only`** is immune to id spoofing because `fromLoopback: boolean` is
+  stamped by the daemon from the connection remote address, not supplied by the
+  client.
+
+A future pair-token mechanism will issue a per-session secret from
+`POST /session` and require it on `designated` / `consensus` votes. That
+mechanism does not exist in v1.
 
 ## Caveats & Known Limits
 

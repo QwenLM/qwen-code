@@ -13,7 +13,7 @@ The package layout is intentionally small:
 | `DaemonSessionClient.ts` | Session-scoped wrapper with SSE replay tracking.                                                                               |
 | `DaemonAuthFlow.ts`      | High-level OAuth device-flow helper.                                                                                           |
 | `sse.ts`                 | `parseSseStream` (NDJSON / SSE framing parser).                                                                                |
-| `events.ts`              | `narrowDaemonEvent`, `reduceDaemonSessionEvent`, `reduceDaemonAuthEvent` (see [`09-event-schema.md`](./09-event-schema.md)).   |
+| `events.ts`              | `asKnownDaemonEvent`, `reduceDaemonSessionEvent`, `reduceDaemonAuthEvent` (see [`09-event-schema.md`](./09-event-schema.md)).  |
 | `types.ts`               | `DaemonCapabilities`, `DaemonSession`, `DaemonEvent`, `PermissionResponse`, `PromptResult`, MCP / agent / memory / auth types. |
 
 The walk-through example is at [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md); this doc is the architecture/contract reference.
@@ -61,7 +61,7 @@ Method groups (every method takes an optional `clientId` to stamp `X-Qwen-Client
 Every request goes through `fetchWithTimeout`. Critical details:
 
 - **Body read is inside the timer scope.** Previous implementations cleared the timer when headers arrived; if a proxy stalled mid-body, `await res.json()` could hang past `fetchTimeoutMs`. The current shape passes the body-reading code as a callback so the timer covers both header arrival AND body consumption.
-- **`perCallTimeoutMs`** lets a single call override the client-wide default (e.g. `restartMcpServer` accepts up to 300s because the daemon waits for MCP rediscovery; passing `0` disables the timeout entirely).
+- **`perCallTimeoutMs`** lets a single call override the client-wide default. The most visible caller is `restartMcpServer`: the SDK uses `MCP_RESTART_DEFAULT_TIMEOUT_MS = 330_000` (5 min 30s). The daemon's own `MCP_RESTART_TIMEOUT_MS` is exactly 300s; if the client matched that value, a restart that completes near 300s could lose the race while the daemon serializes and sends its structured response, causing a false-positive `TimeoutError`. The extra 30s covers serialization, network transfer, and decode on both sides. Callers that need a tighter budget can pass `timeoutMs`; passing `0` disables the timeout.
 - **`AbortSignal.any`** composes caller-supplied signal with the per-call timer signal, so caller cancellation and per-call timeout both abort cleanly.
 - **`AbortController` + cancellable `setTimeout`** instead of `AbortSignal.timeout()` so fast-resolving requests don't leak pending timers on the event loop. Timer is cleared in `finally`.
 - **Streaming endpoints (`subscribeEvents`) bypass the timeout** — long-lived SSE must not be killed by it.
@@ -120,7 +120,7 @@ Turns a `Response.body` (`ReadableStream<Uint8Array>`) into `AsyncIterable<Daemo
 - LF and CRLF framing.
 - Buffer overflow cap (16 MiB) — defensive bound against a daemon emitting a single absurdly large frame.
 - AbortSignal wire-up — abort closes the stream + the iterator.
-- Comment-only frames and unknown event types (passed through as `DaemonEvent`; SDK consumers narrow downstream via `narrowDaemonEvent`).
+- Comment-only frames and unknown event types (passed through as `DaemonEvent`; SDK consumers narrow downstream via `asKnownDaemonEvent`).
 
 ### Types (`types.ts`)
 
@@ -172,7 +172,7 @@ sequenceDiagram
         P-->>SC: DaemonEvent
         SC->>SC: bump lastSeenEventId
         SC-->>App: DaemonEvent
-        App->>App: narrowDaemonEvent + reduce
+        App->>App: asKnownDaemonEvent + reduce
     end
 ```
 
@@ -214,6 +214,27 @@ sequenceDiagram
 - Native `AbortController` / `AbortSignal.any` / `setTimeout`.
 - No transitive dependencies on `@qwen-code/qwen-code-core` or `@qwen-code/acp-bridge` — the SDK package is fully decoupled so external consumers don't pull in the daemon's internals.
 
+## `ui/*` subpackage ([#4328](https://github.com/QwenLM/qwen-code/pull/4328) + [#4353](https://github.com/QwenLM/qwen-code/pull/4353))
+
+The SDK also exports `packages/sdk-typescript/src/daemon/ui/`, a host-neutral
+set of primitives that turn daemon events into transcript blocks:
+
+- `normalizeDaemonEvent(evt)` maps the 43 known daemon wire events into 36 UI-friendly `DaemonUiEventType` values; unmodeled or malformed events normalize to `debug`.
+- `createDaemonTranscriptState()` plus `reduceDaemonTranscriptEvents(state, events)` projects UI events into `DaemonTranscriptBlock[]`.
+- `createDaemonTranscriptStore()` wraps subscribe / dispatch.
+- `render.ts` / `terminal.ts` provide HTML and terminal baseline renderers, while `toolPreview.ts` produces tool-call summaries.
+- Selectors include `selectTranscriptBlocksOrderedByEventId`, `selectPendingPermissionBlocks`, `selectCurrentTool`, `selectApprovalMode`, `selectToolProgress`, `selectSubagentChildBlocks`, `formatMissedRange`, and `formatBlockTimestamp`.
+- Public constants include `DAEMON_PLAN_TOOL_CALL_ID`.
+- `conformance.ts` contains the cross-host consistency test suite.
+
+The first real consumer is `packages/webui/src/daemon/` through React's
+`DaemonSessionProvider`. See [`14-cli-tui-adapter.md`](./14-cli-tui-adapter.md)
+for the detailed architecture, glossary, selector table, and relationship to
+the legacy `DaemonTuiAdapter`.
+
+The subpackage is exported from the `@qwen-code/sdk/daemon` subpath. Existing
+code that does `import { DaemonClient }` is unaffected.
+
 ## Configuration
 
 | Knob               | Where                                | Effect                                                                                  |
@@ -232,7 +253,7 @@ sequenceDiagram
 - **`fetchTimeoutMs` is per-call, not connection-level.** Long body reads share the timer. A daemon that streams responses must override per-call or set the timeout to `0`.
 - **SSE is bypass-only for the timeout** — long-lived SSE connections aren't killed by `fetchTimeoutMs`. Use `AbortSignal` for caller-controlled cancellation.
 - **`parseSseStream` buffer cap is 16 MiB** as a defensive bound. A single frame larger than this aborts the iterator (the daemon never legitimately emits such frames).
-- **`narrowDaemonEvent` returns `kind: 'unknown'` for future event types.** SDK consumers must handle this branch rather than assuming the union is exhaustive — that's the forward-compat contract.
+- **`asKnownDaemonEvent` returns `undefined` for unrecognized event types.** SDK consumers must handle this branch rather than assuming the union is exhaustive — that's the forward-compat contract. Unrecognized events increment `DaemonSessionViewState.unrecognizedKnownEventCount`.
 - **`client_evicted`, `slow_client_warning`, `stream_error` are not in the replay ring.** Reconnecting after eviction picks up from the daemon's ring; you won't re-see the eviction frame.
 - **`DaemonClient` does not auto-retry.** Network failures surface as rejections; reconnect / replay strategy is the caller's responsibility (`DaemonSessionClient.events()` makes replay easy but reconnect is still per-call).
 

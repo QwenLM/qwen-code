@@ -8,9 +8,9 @@ The IDE's chat webview consumes daemon events through this adapter; permission p
 
 ## Responsibilities
 
-- Construct a `DaemonClient` + `DaemonSessionClient` from a loopback-validated `baseUrl`.
+- Construct a `DaemonClient` + `DaemonSessionClient` from a loopback-validated `baseUrl` passed to `connect(options)`.
 - Pump SSE events from the session client into per-callback dispatch (`onSessionUpdate`, `onPermissionRequest`, `onAskUserQuestion`, `onEndTurn`, `onDisconnected`).
-- Enforce a **loopback-only** invariant at construction (the IDE should only ever talk to a daemon on the same host).
+- Enforce a **loopback-only** invariant in `connect(options)` (the IDE should only ever talk to a daemon on the same host).
 - Bridge daemon events into webview `postMessage`s so the chat panel stays in sync.
 - Surface permission requests through VSCode's native quick-pick UI.
 - Serialize calls into a queue so a fast double-`connect()` from the host doesn't race.
@@ -21,59 +21,67 @@ The IDE's chat webview consumes daemon events through this adapter; permission p
 
 ```ts
 class DaemonIdeConnection {
-  constructor(opts: DaemonIdeConnectionOptions);
-  connect(): Promise<void>;
+  connect(options: DaemonIdeConnectionOptions): Promise<void>;
   disconnect(): Promise<void>;
-  prompt(req): Promise<PromptResult>;
-  cancel(): Promise<void>;
-  respondToPermission(req): Promise<void>;
-  setModel(modelServiceId): Promise<void>;
+  sendPrompt(prompt: string | ContentBlock[]): Promise<DaemonIdePromptResult>;
+  cancelSession(): Promise<void>;
+  setModel(modelId: string): Promise<DaemonIdeSetModelResult>;
 
-  onSessionUpdate(cb: (update) => void): Disposable;
-  onPermissionRequest(cb: (req) => void): Disposable;
-  onAskUserQuestion(cb: (q) => void): Disposable;
-  onEndTurn(cb: () => void): Disposable;
-  onDisconnected(cb: (reason) => void): Disposable;
+  onSessionUpdate: (data: SessionNotification) => void;
+  onPermissionRequest: (
+    data: RequestPermissionRequest,
+  ) => Promise<{ optionId?: string }>;
+  onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
+    optionId: string;
+    answers?: Record<string, string>;
+  }>;
+  onEndTurn: (reason?: string) => void;
+  onDisconnected: (code: number | null, signal: string | null) => void;
 }
 
 interface DaemonIdeConnectionOptions {
   baseUrl: string; // MUST be loopback (127.0.0.1 / localhost / [::1])
   token?: string;
-  workspaceCwd: string;
+  workspaceCwd?: string;
   modelServiceId?: string;
   lastEventId?: number;
+  sessionFactory?: DaemonIdeSessionFactory;
 }
 ```
 
 ### Loopback validation
 
-At construction (`daemonIdeConnection.ts:161-628`):
+In `connectInternal()`:
 
 ```ts
-const parsed = new URL(opts.baseUrl);
-if (!isLoopbackHost(parsed.hostname)) {
-  throw new Error('DaemonIdeConnection: baseUrl must be loopback (...)');
-}
+const baseUrl = validateDaemonBaseUrl(options.baseUrl);
 ```
 
 This is a **client-side hard constraint** distinct from the daemon's own `hostAllowlist` (see [`12-auth-security.md`](./12-auth-security.md)). The IDE companion will never connect to a remote daemon — even if the operator configured one. Rationale: VSCode's threat model assumes the workspace and the daemon share the same host (filesystem trust, etc.).
 
 ### `createSdkDaemonSessionFactory()`
 
-A factory function at `daemonIdeConnection.ts:144-159` that constructs `DaemonClient` + calls `DaemonSessionClient.createOrAttach()` from `@qwen-code/sdk`. The connection class holds the factory rather than instantiating directly so tests can inject a fake.
+`createSdkDaemonSessionFactory()` constructs `DaemonClient` and calls
+`DaemonSessionClient.createOrAttach()` from `@qwen-code/sdk`. The connection
+class holds the factory rather than instantiating directly so tests can inject a
+fake.
 
 ### Event dispatch
 
 The connection runs one SSE consumer (`for await` over `session.events()`) and routes each event by type:
 
-| Daemon event                                                       | IDE callback                                          |
-| ------------------------------------------------------------------ | ----------------------------------------------------- |
-| `session_update` (most subtypes)                                   | `onSessionUpdate`                                     |
-| `session_update` (ask-user-question variant)                       | `onAskUserQuestion`                                   |
-| `session_update` (end-turn marker)                                 | `onEndTurn`                                           |
-| `permission_request`                                               | `onPermissionRequest`                                 |
-| `session_died`, `session_closed`, `client_evicted`, `stream_error` | `onDisconnected` (terminal)                           |
-| Others (model, MCP, mutation, auth)                                | (currently no-op or logged; future webview surfacing) |
+| Daemon event / source                                                                                   | IDE callback / action                                                    |
+| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `session_update`                                                                                        | `onSessionUpdate`                                                        |
+| Normal `permission_request`                                                                             | `onPermissionRequest`, then `respondToPermission()`                      |
+| `permission_request` where `toolCall.kind === 'ask_user_question'` and `rawInput.questions` is an array | `onAskUserQuestion`, then forward `answers` to the daemon                |
+| `session_died` with a payload `sessionId` matching the current session                                  | `onDisconnected(null, reason)`                                           |
+| SSE natural end / stream failure / manual `disconnect()`                                                | `onDisconnected(null, 'stream_ended' / 'daemon_error' / 'disconnected')` |
+| Other daemon events                                                                                     | Debug-level log; no IDE callback today.                                  |
+
+`onEndTurn` is not produced by SSE dispatch. `sendPrompt()` waits for the daemon
+HTTP prompt response and calls it with `response.stopReason`; non-abort
+exception paths call `onEndTurn('error')`.
 
 ### Webview bridging
 
@@ -96,9 +104,9 @@ sequenceDiagram
     participant SDK as DaemonSessionClient
     participant D as Daemon
 
-    H->>C: new DaemonIdeConnection({baseUrl, token, workspaceCwd})
+    H->>C: new DaemonIdeConnection()
+    H->>C: connect({baseUrl, token, workspaceCwd, lastEventId})
     C->>C: validate loopback host
-    H->>C: connect()
     C->>F: factory({baseUrl, token, workspaceCwd, lastEventId})
     F->>SDK: DaemonClient + DaemonSessionClient.createOrAttach
     SDK->>D: POST /session
@@ -152,12 +160,12 @@ sequenceDiagram
     SDK-->>C: DaemonEvent
     C->>C: shut down pump
     C-->>H: onDisconnected(reason)
-    H->>C: connect() (user-driven retry; resume lastEventId)
+    H->>C: connect({baseUrl, token, workspaceCwd, lastEventId})
 ```
 
 ## State & Lifecycle
 
-- Construction is synchronous; **no network I/O** until `connect()`.
+- Construction is synchronous; **no network I/O** until `connect(options)`.
 - `connect()` is idempotent through the internal queue; calling twice serializes.
 - `disconnect()` aborts the SSE iterator (`AbortController` on the pump) and clears callback registrations.
 - `lastEventId` is captured from the SDK's `DaemonSessionClient` on disconnect and can be re-supplied on the next `connect()` for resume.
@@ -170,18 +178,18 @@ sequenceDiagram
 
 ## Configuration
 
-| Knob                                                | Where                      | Effect                                                            |
-| --------------------------------------------------- | -------------------------- | ----------------------------------------------------------------- |
-| `baseUrl`                                           | Constructor                | Daemon URL; must be loopback.                                     |
-| `token`                                             | Constructor                | Bearer token (stamped via SDK).                                   |
-| `workspaceCwd`                                      | Constructor                | Used on `POST /session`; must match the daemon's bound workspace. |
-| `modelServiceId`                                    | Constructor / `setModel()` | Initial model.                                                    |
-| `lastEventId`                                       | Constructor                | Resume cursor (typically restored from host state).               |
-| VSCode setting `qwen.ide.daemonUrl` (or equivalent) | Workspace settings         | Operator-configured daemon URL.                                   |
+| Knob                                                | Where                             | Effect                                                            |
+| --------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------- |
+| `baseUrl`                                           | `connect(options)`                | Daemon URL; must be loopback.                                     |
+| `token`                                             | `connect(options)`                | Bearer token (stamped via SDK).                                   |
+| `workspaceCwd`                                      | `connect(options)`                | Used on `POST /session`; must match the daemon's bound workspace. |
+| `modelServiceId`                                    | `connect(options)` / `setModel()` | Initial model.                                                    |
+| `lastEventId`                                       | `connect(options)`                | Resume cursor (typically restored from host state).               |
+| VSCode setting `qwen.ide.daemonUrl` (or equivalent) | Workspace settings                | Operator-configured daemon URL.                                   |
 
 ## Caveats & Known Limits
 
-- **Loopback-only — hard refusal at construction.** Operators who want to point the IDE at a remote daemon need to use SSH port-forward / local proxy; the adapter will not connect to a non-loopback URL.
+- **Loopback-only — hard refusal in `connect(options)`.** Operators who want to point the IDE at a remote daemon need to use SSH port-forward / local proxy; the adapter will not connect to a non-loopback URL.
 - **The legacy `AcpConnectionState` path is still primary** in the IDE companion (stdio child). This adapter is the sibling-transport for Mode-B migration; see [`../daemon-client-adapters/ide.md`](../daemon-client-adapters/ide.md) for the migration blockers and the planned `BridgeFileSystem` parity work.
 - **No reverse-RPC / editor-affordance surface yet over HTTP.** Features that require the agent to call back into the IDE (e.g. read-only buffer access, diff preview integration) currently live only on the stdio path.
 - **Webview ↔ connection coupling is host-owned**, not in this adapter. Don't push webview-specific logic into `DaemonIdeConnection`.

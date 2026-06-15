@@ -7,7 +7,7 @@
 1. **Bind** — non-loopback bind without a bearer token **refuses to start**.
 2. **Bearer auth** — `bearerAuth` middleware with constant-time SHA-256 compare protects every route except `/health` on loopback (`require_auth` extends this to loopback and `/health` too).
 3. **Host header allowlist** — on loopback, only `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal` (plus port) are accepted; defense against DNS rebinding.
-4. **Origin deny** — any request carrying an `Origin` header is `403`'d. CLI / SDK never send `Origin`; only browsers do.
+4. **Origin control** — by default, any request carrying an `Origin` header is `403`'d. When `--allow-origin <pattern>` is configured, the daemon switches to CORS allowlist mode (`allowOriginCors`) and only permits matching origins.
 5. **Per-route mutation gate** — Wave 4 mutating routes can opt-in to "401 even on loopback no-token defaults" with a distinct `code: 'token_required'` error.
 6. **Device-flow auth** — separate OAuth surface for providers (`POST /workspace/auth/device-flow` + GET/DELETE on `/:id`).
 
@@ -37,22 +37,46 @@ if (opts.requireAuth && !token) {
 }
 ```
 
-Both refusals are boot-loud (visible in stderr / thrown to the embedder), never silent. The threat model from #3803 explicitly forbids silently letting a daemon bind beyond loopback in the open.
+The allow-origin wildcard has its own refuse rule:
+
+```ts
+const parsed = parseAllowOriginPatterns(opts.allowOrigins);
+if (parsed.allowAny && !token) {
+  throw new Error(
+    "Refusing to start with --allow-origin '*' but no bearer token configured. ...",
+  );
+}
+```
+
+All three refusals are boot-loud (visible in stderr / thrown to the embedder),
+never silent. The threat model from #3803 explicitly forbids silently letting a
+daemon bind beyond loopback in the open.
 
 ### Middleware chain (HTTP request order)
 
 ```mermaid
 flowchart LR
     REQ[Request] --> SO["strip same-origin Origin<br/>(demo page support)"]
-    SO --> CORS["denyBrowserOriginCors"]
-    CORS --> HA["hostAllowlist"]
-    HA --> BA["bearerAuth"]
-    BA --> ROUTE["route handler"]
-    ROUTE --> MG["mutationGate (per-route opt-in)"]
-    MG --> BODY["body parsing + handler"]
+    SO --> CORS{"--allow-origin?"}
+    CORS -->|yes| AO["allowOriginCors<br/>(allowlist match)"]
+    CORS -->|no| DC["denyBrowserOriginCors<br/>(reject all Origin)"]
+    AO --> HA["hostAllowlist"]
+    DC --> HA
+    HA --> LOG["access-log middleware<br/>(DaemonLogger)"]
+    LOG --> BA["bearerAuth"]
+    BA --> RL["rate-limit middleware<br/>(when enabled)"]
+    RL --> JSON["express.json<br/>(body parser)"]
+    JSON --> TEL["daemonTelemetryMiddleware<br/>(OTel span)"]
+    TEL --> MG["per-route: mutationGate<br/>(opt-in strict)"]
+    MG --> HANDLER["route handler"]
 ```
 
-(`mutationGate` is applied as per-route middleware so it can be `strict: true` selectively. See `packages/cli/src/serve/auth.ts:1-294`.)
+`mutationGate` is a per-route middleware factory (`createMutationGate` returns
+`mutate()`); routes call `mutate()` or `mutate({strict: true})` at registration
+time. It is not a global `app.use()` middleware. Access logging is registered
+before `bearerAuth` so 401 rejects are still logged. Rate limiting runs after
+`bearerAuth` and before `express.json()`, so only authenticated requests count
+and large bodies are rejected before parsing when a limit is exceeded.
 
 ### `bearerAuth`
 
@@ -78,6 +102,21 @@ Reject any request with an `Origin` header. CLI/SDK never set Origin; only brows
 
 Exception: the demo page's same-origin XHRs are handled by a separate middleware (in `server.ts`) that strips `Origin` when it matches the daemon's own address.
 
+### `allowOriginCors` (`--allow-origin` mode)
+
+When `--allow-origin <pattern>` is configured, `denyBrowserOriginCors` is
+replaced with `allowOriginCors(parsedPatterns)`:
+
+- Matching `Origin` values receive `Access-Control-Allow-Origin`,
+  `Access-Control-Allow-Headers`, and `Access-Control-Allow-Methods`; `OPTIONS`
+  preflight returns `204`.
+- Non-matching `Origin` values receive the same deterministic
+  `403 { error: 'Request denied by CORS policy' }` as deny mode.
+- `--allow-origin '*'` requires `--token`; otherwise boot refuses.
+- `parseAllowOriginPatterns()` validates pattern syntax at boot.
+- The `allow_origin` capability tag is advertised only when this mode is
+  configured.
+
 ### `createMutationGate`
 
 Per-route opt-in gate. Behavior matrix:
@@ -94,11 +133,41 @@ Per-route opt-in gate. Behavior matrix:
 
 The `code: 'token_required'` shape is distinct from `bearerAuth`'s plain `Unauthorized` so SDK clients can render a "configure --token / --require-auth" hint instead of a generic 401.
 
-**Wave 4 strict routes**: `/workspace/memory`, `/workspace/agents/*`, `/file/write`, `/file/edit`, `/workspace/tools/:name/enable`, `/workspace/mcp/:server/restart`, `/workspace/auth/device-flow`, `/workspace/init`, `/session/:id/approval-mode`.
+**Wave 4+ strict routes**: `/workspace/memory`, `/workspace/agents/*`,
+`/workspace/agents/generate`, `/file/write`, `/file/edit`,
+`/workspace/tools/:name/enable`, `/workspace/mcp/:server/restart`,
+`/workspace/mcp/:server/{enable,disable,authenticate,clear-auth}`,
+`/workspace/mcp/servers` (POST/DELETE), `/workspace/auth/device-flow`,
+`/workspace/init`, `/session/:id/approval-mode`.
 
 ### `/health` exemption
 
 On loopback binds, `/health` is registered **before** the bearer middleware so liveness probes inside the pod don't need to carry the token. Non-loopback binds gate `/health` behind bearer like every other route. `--require-auth` drops the exemption: `/health` requires `Authorization: Bearer <token>` on loopback too.
+
+### v1 client identity (`X-Qwen-Client-Id`) is self-reported
+
+The daemon validates only the format of `X-Qwen-Client-Id`
+(`[A-Za-z0-9._:-]{1,128}`) and tracks attached client ids per session. It does
+not currently perform proof-of-possession. A client that observes
+`originatorClientId` on SSE can re-register the same id and impersonate that
+originator in later requests.
+
+Impact:
+
+- `designated` — a remote caller can impersonate the originator and vote on a
+  request intended only for the prompt originator.
+- `consensus` — if the spoofed id was already in the `votersAtIssue` snapshot,
+  it can vote.
+- `local-only` is not affected because it gates on `fromLoopback`, which the
+  daemon stamps from the connection remote address.
+- `first-responder` is not affected because it is identity-agnostic.
+
+A future pair-token mechanism will issue a per-session secret from
+`POST /session`; `designated` / `consensus` votes will have to present it. Until
+then, deployments that need a hardened designated policy should bind loopback
+or run behind an authenticated reverse proxy. See
+[`04-permission-mediation.md`](./04-permission-mediation.md) for policy-level
+details.
 
 ### Device-flow auth
 
@@ -112,6 +181,26 @@ Separate OAuth surface for provider authentication (Qwen OAuth, etc.):
 SSE events `auth_device_flow_{started, throttled, authorized, failed, cancelled}` fan-out flow state to all subscribers so multi-client UIs stay in sync. See [`09-event-schema.md`](./09-event-schema.md).
 
 Implementation: `packages/cli/src/serve/auth/deviceFlow.ts` + `qwenDeviceFlowProvider.ts`.
+
+**Log injection / Trojan Source defense**: `sanitizeForStderr(value)`
+(`deviceFlow.ts`) replaces ASCII control characters and Unicode control
+characters with `?`. A malicious IdP could otherwise forge log lines or hide
+payloads:
+
+| Range                            | Why it is stripped                                                                                                                                                                                                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `\x00–\x1f`, `\x7f`, `\x80–\x9f` | ASCII C0 / DEL / C1 controls, terminal escapes, and log-line forging.                                                                                                                                                                                               |
+| U+200B-U+200F                    | Zero-width characters plus LRM / RLM; invisible but can change terminal rendering.                                                                                                                                                                                  |
+| U+2028-U+2029                    | LINE / PARAGRAPH SEPARATOR; many Unicode-aware terminals treat them as line breaks.                                                                                                                                                                                 |
+| U+202A-U+202E                    | Bidirectional EMBEDDING / OVERRIDE controls.                                                                                                                                                                                                                        |
+| U+2066-U+2069                    | Bidirectional ISOLATE controls (LRI / RLI / FSI / PDI), the main [CVE-2021-42574 "Trojan Source"](https://trojansource.codes/) vector. An IdP using U+2066 (LRI) instead of U+202D (LRO) can bypass EMBEDDING/OVERRIDE-only filters with similar visual reordering. |
+| U+FEFF                           | BOM / zero-width no-break space.                                                                                                                                                                                                                                    |
+
+Length is preserved by replacing each stripped code point with `?` rather than
+deleting it, so operators can still see that something was present at that
+index. Both layers use the sanitizer: `qwenDeviceFlowProvider` sanitizes IdP
+`oauthError`, and the registry's late-poll observer sanitizes provider-controlled
+values interpolated into audit hints (`latePollResult.kind` / `lateErr.name`).
 
 The `auth_device_flow` capability tag is advertised **unconditionally**; the routes themselves return `400 unsupported_provider` if the daemon can't satisfy a specific provider. The supported-providers list is on `/workspace/auth/status` rather than `/capabilities` to keep the descriptor shape uniform.
 
@@ -186,13 +275,14 @@ sequenceDiagram
 
 ## Configuration
 
-| Source          | Knob                                                      | Effect                                                                  |
-| --------------- | --------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Env             | `QWEN_SERVER_TOKEN`                                       | Bearer token (trimmed).                                                 |
-| Flag            | `--token`                                                 | Bearer token (overrides env).                                           |
-| Flag            | `--require-auth`                                          | Extends bearer to loopback + `/health`. Boots only with a token.        |
-| Flag            | `--hostname`                                              | Non-loopback bind requires `--token` (or env).                          |
-| Capability tags | `require_auth` (conditional), `auth_device_flow` (always) | See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md). |
+| Source          | Knob                                                                                    | Effect                                                                  |
+| --------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Env             | `QWEN_SERVER_TOKEN`                                                                     | Bearer token (trimmed).                                                 |
+| Flag            | `--token`                                                                               | Bearer token (overrides env).                                           |
+| Flag            | `--require-auth`                                                                        | Extends bearer to loopback + `/health`. Boots only with a token.        |
+| Flag            | `--hostname`                                                                            | Non-loopback bind requires `--token` (or env).                          |
+| Flag            | `--allow-origin <pattern>`                                                              | Switch to CORS allowlist mode. `'*'` requires a token.                  |
+| Capability tags | `require_auth` (conditional), `auth_device_flow` (always), `allow_origin` (conditional) | See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md). |
 
 ## Caveats & Known Limits
 
@@ -200,7 +290,7 @@ sequenceDiagram
 - **Mutation gate body-parser ordering**: `mutationGate({strict: true})` 401s fire **after** `express.json()` parses the body. Worst case on a saturated loopback listener: `--max-connections × express.json({limit: '10mb'})` ≈ 2.5 GB transient. Loopback-only attack surface, intentionally accepted.
 - **Same-origin Origin stripping** in `server.ts` happens _before_ `denyBrowserOriginCors`. If a future change moves the strip elsewhere, the demo page breaks.
 - **Token comparison is over the SHA-256 digest**, not the raw token. Reduces timing leakage by collapsing variable-length token compares to a fixed-size digest compare.
-- The daemon does **not** carry mTLS, request signing, or per-client rate limiting today. Those are F-series Wave 5+ items.
+- The daemon does **not** carry mTLS, request signing, or pair-token proof-of-possession today. `--rate-limit` provides HTTP rate limiting by client-id / IP key; it is not client identity authentication.
 
 ## References
 

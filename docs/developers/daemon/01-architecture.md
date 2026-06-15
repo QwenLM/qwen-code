@@ -2,7 +2,7 @@
 
 ## Overview
 
-A `qwen serve` process is **one daemon = one workspace**. It hosts a single Express HTTP server, owns an `acp-bridge` instance, and spawns one ACP child process (`qwen --acp`) that runs the actual agent runtime. Multiple clients (CLI TUI, IDE companion, IM channel bots, web BFFs, custom scripts) connect over HTTP + SSE and either share one ACP session (`sessionScope: 'single'`, default) or split sessions by conversation thread (`sessionScope: 'thread'`).
+A `qwen serve` process is **one daemon = one workspace**. It hosts a single Express HTTP server, owns an `@qwen-code/acp-bridge` instance, and spawns one ACP child process (`qwen --acp`) that runs the actual agent runtime. Multiple clients (CLI TUI, IDE companion, IM channel bots, web BFFs, custom scripts) connect over HTTP + SSE and either share one ACP session (`sessionScope: 'single'`, default) or split sessions by conversation thread (`sessionScope: 'thread'`).
 
 Inside the ACP child, MCP servers are shared workspace-wide through `McpTransportPool` (F2): a single (server-name + config-fingerprint) tuple maps to one MCP transport, regardless of how many sessions discover it. The bridge's `MultiClientPermissionMediator` (F3) coordinates permission votes across all connected clients under one of four policies.
 
@@ -275,10 +275,14 @@ sequenceDiagram
     P->>E: drain + close
     P->>E: spawn replacement
     E->>SRV: reconnect
-    P->>EB: publish mcp_server_restarted
+    P->>EB: publish mcp_server_restarted<br/>with stable entryIndex
+    P-->>S: single result or {entries: RestartResult[]}
 ```
 
 `releaseSession(sessionId)` uses the reverse `sessionToEntries` index to release every entry the session holds in O(refs). On daemon shutdown, `drainAll()` sets the `draining` flag (refusing new acquires) and waits for every entry to close under a configurable timeout.
+
+The deep design reference for this state machine is
+[`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md).
 
 ## Workflow 5: Lifecycle — startup and graceful shutdown
 
