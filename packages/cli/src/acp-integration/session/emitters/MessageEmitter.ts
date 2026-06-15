@@ -160,6 +160,19 @@ export class MessageEmitter extends BaseEmitter {
       cachedReadTokens: usageMetadata.cachedContentTokenCount,
     };
 
+    // Advance the running cumulative usage so PlanEmitter can snapshot it onto
+    // the next todo update. apiTimeMs only moves when a per-turn duration is
+    // present (live), keeping API time live-only on replay by design.
+    const cumulative = this.ctx.cumulativeUsage;
+    if (cumulative) {
+      cumulative.promptTokens += usage.inputTokens;
+      cumulative.candidateTokens += usage.outputTokens;
+      cumulative.cachedTokens += usage.cachedReadTokens ?? 0;
+      if (typeof durationMs === 'number') {
+        cumulative.apiTimeMs += durationMs;
+      }
+    }
+
     const meta =
       typeof durationMs === 'number'
         ? { usage, durationMs, ...subagentMeta }

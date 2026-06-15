@@ -278,5 +278,73 @@ describe('MessageEmitter', () => {
         },
       });
     });
+
+    it('accumulates token counts and API time into the context cumulative usage', async () => {
+      const cumulativeUsage = {
+        promptTokens: 0,
+        cachedTokens: 0,
+        candidateTokens: 0,
+        apiTimeMs: 0,
+      };
+      const ctx: SessionContext = {
+        sessionId: 'test-session-id',
+        config: {} as Config,
+        sendUpdate: sendUpdateSpy,
+        cumulativeUsage,
+      };
+      const e = new MessageEmitter(ctx);
+      await e.emitUsageMetadata(
+        {
+          promptTokenCount: 100,
+          candidatesTokenCount: 50,
+          cachedContentTokenCount: 10,
+        },
+        '',
+        800,
+      );
+      await e.emitUsageMetadata(
+        {
+          promptTokenCount: 30,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 5,
+        },
+        '',
+        200,
+      );
+
+      expect(cumulativeUsage).toEqual({
+        promptTokens: 130,
+        cachedTokens: 15,
+        candidateTokens: 70,
+        apiTimeMs: 1000,
+      });
+    });
+
+    it('accumulates tokens but not API time when no duration is provided (replay)', async () => {
+      const cumulativeUsage = {
+        promptTokens: 0,
+        cachedTokens: 0,
+        candidateTokens: 0,
+        apiTimeMs: 0,
+      };
+      const ctx: SessionContext = {
+        sessionId: 'test-session-id',
+        config: {} as Config,
+        sendUpdate: sendUpdateSpy,
+        cumulativeUsage,
+      };
+      await new MessageEmitter(ctx).emitUsageMetadata({
+        promptTokenCount: 100,
+        candidatesTokenCount: 50,
+        cachedContentTokenCount: 10,
+      });
+
+      expect(cumulativeUsage).toEqual({
+        promptTokens: 100,
+        cachedTokens: 10,
+        candidateTokens: 50,
+        apiTimeMs: 0,
+      });
+    });
   });
 });

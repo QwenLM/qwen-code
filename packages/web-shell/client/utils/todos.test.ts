@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
 import {
+  computeTodoDetails,
   computeTodoTimeline,
+  extractTodoStats,
   extractTodosFromToolCall,
   getFloatingTodos,
   getTodoStatusIcon,
   getTodoWindow,
   isTodoWriteToolName,
+  todoDetailSignature,
+  todoStateKey,
   todoTimelineSignature,
+  type TodoStatsSnapshot,
 } from './todos';
 
 function todo(id: string, status: TodoItem['status']): TodoItem {
@@ -26,17 +31,40 @@ function planMessage(id: string, todos: TodoItem[]): Message {
   return { id, role: 'plan', todos };
 }
 
-function todoWriteMessage(id: string, todos: TodoItem[]): Message {
+function todoWriteMessage(
+  id: string,
+  todos: TodoItem[],
+  stats?: TodoStatsSnapshot,
+): Message {
+  const tool: ACPToolCall = {
+    callId: `call-${id}`,
+    toolName: 'todo_write',
+    status: 'completed',
+    kind: 'think',
+    args: { todos },
+    ...(stats ? { rawOutput: { stats } } : {}),
+  };
+  return { id, role: 'tool_group', tools: [tool] };
+}
+
+/** A non-todo tool call carrying a wall-clock span, used for tool-time tests. */
+function toolMessage(
+  id: string,
+  startTime: number,
+  endTime: number,
+  toolName = 'read',
+): Message {
   return {
     id,
     role: 'tool_group',
     tools: [
       {
-        callId: `call-${id}`,
-        toolName: 'todo_write',
+        callId: `tc-${id}`,
+        toolName,
         status: 'completed',
-        kind: 'think',
-        args: { todos },
+        kind: 'read',
+        startTime,
+        endTime,
       },
     ],
   };
@@ -469,5 +497,305 @@ describe('getTodoWindow', () => {
       'completed',
     ]);
     expect(getTodoWindow(todos, 5)).toEqual({ start: 0, end: 5 });
+  });
+});
+
+function stats(
+  promptTokens: number,
+  cachedTokens: number,
+  candidateTokens: number,
+  apiTimeMs: number,
+): TodoStatsSnapshot {
+  return { promptTokens, cachedTokens, candidateTokens, apiTimeMs };
+}
+
+const at = (message: Message, timestamp: number): Message => ({
+  ...message,
+  timestamp,
+});
+
+describe('extractTodoStats', () => {
+  function toolCall(rawOutput: unknown): ACPToolCall {
+    return {
+      callId: 'c1',
+      toolName: 'todo_write',
+      status: 'completed',
+      kind: 'think',
+      rawOutput,
+    };
+  }
+
+  it('reads a complete stats snapshot from rawOutput', () => {
+    expect(
+      extractTodoStats(
+        toolCall({
+          stats: {
+            promptTokens: 1,
+            cachedTokens: 2,
+            candidateTokens: 3,
+            apiTimeMs: 4,
+          },
+        }),
+      ),
+    ).toEqual({
+      promptTokens: 1,
+      cachedTokens: 2,
+      candidateTokens: 3,
+      apiTimeMs: 4,
+    });
+  });
+
+  it('returns undefined when stats is absent', () => {
+    expect(extractTodoStats(toolCall({ entries: [] }))).toBeUndefined();
+  });
+
+  it('returns undefined when a field is missing or non-numeric', () => {
+    expect(
+      extractTodoStats(
+        toolCall({
+          stats: { promptTokens: 1, cachedTokens: 2, candidateTokens: 3 },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      extractTodoStats(
+        toolCall({
+          stats: {
+            promptTokens: '1',
+            cachedTokens: 2,
+            candidateTokens: 3,
+            apiTimeMs: 4,
+          },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+});
+
+describe('computeTodoDetails', () => {
+  it('records start and end timestamps from the transcript with no stats', () => {
+    const details = computeTodoDetails([
+      at(planMessage('p1', [todo('1', 'in_progress')]), 1000),
+      at(planMessage('p2', [todo('1', 'completed')]), 5000),
+    ]);
+    expect(details.get(todoStateKey(todo('1', 'pending')))).toEqual({
+      startTs: 1000,
+      endTs: 5000,
+    });
+  });
+
+  it('derives token and API resources from the diff of the boundary snapshots', () => {
+    const details = computeTodoDetails([
+      at(
+        todoWriteMessage(
+          'm1',
+          [todo('1', 'in_progress')],
+          stats(100, 10, 20, 500),
+        ),
+        1000,
+      ),
+      at(
+        todoWriteMessage(
+          'm2',
+          [todo('1', 'completed')],
+          stats(300, 40, 80, 1500),
+        ),
+        5000,
+      ),
+    ]);
+    expect(details.get(todoStateKey(todo('1', 'pending')))).toEqual({
+      startTs: 1000,
+      endTs: 5000,
+      resources: {
+        inputTokens: 200,
+        cachedTokens: 30,
+        outputTokens: 60,
+        apiTimeMs: 1000,
+      },
+    });
+  });
+
+  it('omits token resources when the start boundary has no stamped snapshot', () => {
+    const details = computeTodoDetails([
+      at(todoWriteMessage('m1', [todo('1', 'in_progress')]), 1000),
+      at(
+        todoWriteMessage(
+          'm2',
+          [todo('1', 'completed')],
+          stats(300, 40, 80, 1500),
+        ),
+        5000,
+      ),
+    ]);
+    expect(details.get(todoStateKey(todo('1', 'pending')))).toEqual({
+      startTs: 1000,
+      endTs: 5000,
+    });
+  });
+
+  it('clamps an individually shrinking token field to zero', () => {
+    // Tokens shrink (clamp to 0) while API time grows, so the diff is not
+    // all-zero and stays surfaced — exercising the per-field clamp.
+    const details = computeTodoDetails([
+      at(
+        todoWriteMessage(
+          'm1',
+          [todo('1', 'in_progress')],
+          stats(300, 40, 80, 1500),
+        ),
+        1000,
+      ),
+      at(
+        todoWriteMessage(
+          'm2',
+          [todo('1', 'completed')],
+          stats(100, 10, 20, 1600),
+        ),
+        5000,
+      ),
+    ]);
+    expect(details.get(todoStateKey(todo('1', 'pending')))?.resources).toEqual({
+      inputTokens: 0,
+      cachedTokens: 0,
+      outputTokens: 0,
+      apiTimeMs: 100,
+    });
+  });
+
+  it('treats an all-zero token diff as not captured, keeping the timestamps', () => {
+    // Equal (or fully shrinking) snapshots measure nothing; the task still
+    // shows start/end but no misleading row of zeros.
+    const details = computeTodoDetails([
+      at(
+        todoWriteMessage(
+          'm1',
+          [todo('1', 'in_progress')],
+          stats(300, 40, 80, 1500),
+        ),
+        1000,
+      ),
+      at(
+        todoWriteMessage(
+          'm2',
+          [todo('1', 'completed')],
+          stats(100, 10, 20, 500),
+        ),
+        5000,
+      ),
+    ]);
+    const detail = details.get(todoStateKey(todo('1', 'pending')));
+    expect(detail?.startTs).toBe(1000);
+    expect(detail?.endTs).toBe(5000);
+    expect(detail?.resources).toBeUndefined();
+  });
+
+  it('omits API time when the diff did not advance it (resume path)', () => {
+    // Replayed sessions carry token counts but not per-turn durations, so the
+    // API time component stays flat and is dropped while tokens still show.
+    const details = computeTodoDetails([
+      at(
+        todoWriteMessage(
+          'm1',
+          [todo('1', 'in_progress')],
+          stats(100, 0, 0, 500),
+        ),
+        1000,
+      ),
+      at(
+        todoWriteMessage('m2', [todo('1', 'completed')], stats(300, 0, 0, 500)),
+        5000,
+      ),
+    ]);
+    const resources = details.get(
+      todoStateKey(todo('1', 'pending')),
+    )?.resources;
+    expect(resources?.inputTokens).toBe(200);
+    expect(resources?.apiTimeMs).toBeUndefined();
+  });
+
+  it('spans intermediate snapshots while a task stays in progress', () => {
+    // First start (m1) and completion (m3) bound the window; the middle
+    // boundary (m2) does not affect the cumulative diff.
+    const details = computeTodoDetails([
+      at(
+        todoWriteMessage(
+          'm1',
+          [todo('1', 'in_progress')],
+          stats(100, 0, 0, 100),
+        ),
+        1000,
+      ),
+      at(
+        todoWriteMessage(
+          'm2',
+          [todo('1', 'in_progress')],
+          stats(300, 0, 0, 500),
+        ),
+        3000,
+      ),
+      at(
+        todoWriteMessage('m3', [todo('1', 'completed')], stats(500, 0, 0, 900)),
+        5000,
+      ),
+    ]);
+    const detail = details.get(todoStateKey(todo('1', 'pending')));
+    expect(detail?.startTs).toBe(1000);
+    expect(detail?.endTs).toBe(5000);
+    expect(detail?.resources?.inputTokens).toBe(400);
+    expect(detail?.resources?.apiTimeMs).toBe(800);
+  });
+
+  it('sums tool time from transcript tool spans started within the window', () => {
+    const details = computeTodoDetails([
+      toolMessage('t0', 100, 500), // before the window
+      at(todoWriteMessage('m1', [todo('1', 'in_progress')]), 1000),
+      toolMessage('t1', 2000, 2500), // within: 500ms
+      at(todoWriteMessage('m2', [todo('1', 'completed')]), 5000),
+      toolMessage('t2', 6000, 9000), // after the window
+    ]);
+    expect(details.get(todoStateKey(todo('1', 'pending')))?.resources).toEqual({
+      toolTimeMs: 500,
+    });
+  });
+
+  it('yields no detail for an item first seen already completed', () => {
+    const details = computeTodoDetails([
+      at(planMessage('p1', [todo('1', 'completed')]), 1000),
+    ]);
+    expect(details.has(todoStateKey(todo('1', 'pending')))).toBe(false);
+  });
+
+  it('records an end with no start when an item skips in_progress', () => {
+    const details = computeTodoDetails([
+      at(planMessage('p1', [todo('1', 'pending')]), 1000),
+      at(planMessage('p2', [todo('1', 'completed')]), 5000),
+    ]);
+    expect(details.get(todoStateKey(todo('1', 'pending')))).toEqual({
+      endTs: 5000,
+    });
+  });
+});
+
+describe('todoDetailSignature', () => {
+  it('changes when a snapshot timestamp changes', () => {
+    const a = todoDetailSignature([
+      at(planMessage('p1', [todo('1', 'in_progress')]), 1000),
+    ]);
+    const b = todoDetailSignature([
+      at(planMessage('p1', [todo('1', 'in_progress')]), 2000),
+    ]);
+    expect(b).not.toBe(a);
+  });
+
+  it('is unchanged by edits to non-todo messages', () => {
+    const a = todoDetailSignature([
+      at(planMessage('p1', [todo('1', 'in_progress')]), 1000),
+      assistantMessage('a1'),
+    ]);
+    const b = todoDetailSignature([
+      at(planMessage('p1', [todo('1', 'in_progress')]), 1000),
+      { id: 'a1', role: 'assistant', content: 'different text' },
+    ]);
+    expect(b).toBe(a);
   });
 });

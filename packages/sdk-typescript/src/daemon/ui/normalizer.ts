@@ -654,6 +654,11 @@ function normalizePlanUpdate(
     base.eventId !== undefined
       ? `${DAEMON_PLAN_TOOL_CALL_ID}-${base.eventId}`
       : DAEMON_PLAN_TOOL_CALL_ID;
+  // Carry the cumulative-usage snapshot the agent stamps on each plan update
+  // (PlanEmitter) through to rawOutput, so the web-shell can diff consecutive
+  // todo snapshots into per-task token/time detail.
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const stats = meta && isRecord(meta['stats']) ? meta['stats'] : undefined;
   return {
     ...base,
     type: 'tool.update',
@@ -668,7 +673,7 @@ function normalizePlanUpdate(
         content: { type: 'text', text: contentText },
       },
     ],
-    rawOutput: { entries },
+    rawOutput: stats ? { entries, stats } : { entries },
   };
 }
 

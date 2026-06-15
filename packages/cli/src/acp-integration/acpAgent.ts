@@ -6153,6 +6153,16 @@ class QwenAgent implements Agent {
           sendUpdate: async (update) => {
             updates.push(update);
           },
+          // Fresh accumulator for this replay: MessageEmitter advances it from
+          // replayed usage metadata (tokens only — no per-turn durations) and
+          // PlanEmitter snapshots it onto each todo update, so resumed sessions
+          // recover per-task token spend (API time stays live-only).
+          cumulativeUsage: {
+            promptTokens: 0,
+            cachedTokens: 0,
+            candidateTokens: 0,
+            apiTimeMs: 0,
+          },
         };
         let replayError: string | undefined;
         try {

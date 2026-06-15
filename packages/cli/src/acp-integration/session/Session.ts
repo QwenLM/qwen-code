@@ -135,6 +135,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 // Import modular session components
 import type {
   ApprovalModeValue,
+  CumulativeUsage,
   SessionContext,
   ToolCallStartParams,
 } from './types.js';
@@ -417,6 +418,16 @@ export class Session implements SessionContext {
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
   private readonly createdAt: number = Date.now();
+  /**
+   * Running cumulative usage for this session, snapshotted onto each todo/plan
+   * update by PlanEmitter so the web-shell can show per-task token/API spend.
+   */
+  readonly cumulativeUsage: CumulativeUsage = {
+    promptTokens: 0,
+    cachedTokens: 0,
+    candidateTokens: 0,
+    apiTimeMs: 0,
+  };
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state

@@ -144,6 +144,8 @@ interface TodoSnapshot {
   /** Key the diff is stored under: tool callId, or plan message id. */
   key: string;
   todos: TodoItem[];
+  /** Cumulative-usage baseline the agent stamped on this snapshot, if any. */
+  stats?: TodoStatsSnapshot;
 }
 
 /**
@@ -165,7 +167,7 @@ interface TodoSnapshot {
  * - Two unrelated plans that reuse both the id AND the exact content (a generic
  *   recurring todo like `"Run tests"`) still collide.
  */
-function todoStateKey(todo: TodoItem): string {
+export function todoStateKey(todo: TodoItem): string {
   return JSON.stringify([todo.id, todo.content]);
 }
 
@@ -182,7 +184,13 @@ function todoSnapshotsOf(message: Message): TodoSnapshot[] {
     const snapshots: TodoSnapshot[] = [];
     for (const tool of message.tools) {
       const todos = extractTodosFromToolCall(tool);
-      if (todos) snapshots.push({ key: tool.callId, todos });
+      if (todos) {
+        snapshots.push({
+          key: tool.callId,
+          todos,
+          stats: extractTodoStats(tool),
+        });
+      }
     }
     return snapshots;
   }
@@ -255,6 +263,42 @@ export function todoTimelineSignature(messages: readonly Message[]): string {
   return parts.join('\n');
 }
 
+/**
+ * Like {@link todoTimelineSignature} but folds in everything
+ * {@link computeTodoDetails} reads beyond item status: each snapshot's message
+ * timestamp and stamped stats, plus every non-todo tool span (whose durations
+ * feed tool time). App memoizes the detail map on this so the TodoDetailContext
+ * value stays referentially stable across streaming ticks that touch none of it.
+ */
+export function todoDetailSignature(messages: readonly Message[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (message.role === 'tool_group') {
+      for (const tool of message.tools) {
+        if (
+          !isTodoWriteToolName(tool.toolName) &&
+          (tool.startTime !== undefined || tool.endTime !== undefined)
+        ) {
+          parts.push(
+            JSON.stringify(['span', tool.callId, tool.startTime, tool.endTime]),
+          );
+        }
+      }
+    }
+    for (const { key, todos, stats } of todoSnapshotsOf(message)) {
+      parts.push(
+        JSON.stringify([
+          key,
+          message.timestamp,
+          todos.map((t) => [t.id, t.status, t.content]),
+          stats,
+        ]),
+      );
+    }
+  }
+  return parts.join('\n');
+}
+
 export interface TodoWindow {
   start: number;
   end: number;
@@ -279,6 +323,244 @@ export function getTodoWindow(
   const end = Math.min(todos.length, start + maxVisible);
   start = Math.max(0, end - maxVisible);
   return { start, end };
+}
+
+/**
+ * Cumulative-usage baseline the agent stamps onto each todo update
+ * (`_meta.stats`, surfaced via the tool call's rawOutput). The web-shell diffs
+ * consecutive snapshots to attribute a task's spend. `apiTimeMs` only advances
+ * live — replayed sessions carry tokens but not per-turn durations.
+ */
+export interface TodoStatsSnapshot {
+  promptTokens: number;
+  cachedTokens: number;
+  candidateTokens: number;
+  apiTimeMs: number;
+}
+
+/**
+ * Read the cumulative-usage snapshot the agent stamped onto a todo_write tool
+ * call's rawOutput. Absent for snapshots emitted by an agent that predates the
+ * stamping, or non-tool todo sources (plain plan messages).
+ */
+export function extractTodoStats(
+  tool: ACPToolCall,
+): TodoStatsSnapshot | undefined {
+  const stats = getRecord(getRecord(tool.rawOutput)?.['stats']);
+  if (!stats) return undefined;
+  const num = (key: string): number | undefined => {
+    const value = stats[key];
+    return typeof value === 'number' && Number.isFinite(value)
+      ? value
+      : undefined;
+  };
+  const promptTokens = num('promptTokens');
+  const cachedTokens = num('cachedTokens');
+  const candidateTokens = num('candidateTokens');
+  const apiTimeMs = num('apiTimeMs');
+  if (
+    promptTokens === undefined ||
+    cachedTokens === undefined ||
+    candidateTokens === undefined ||
+    apiTimeMs === undefined
+  ) {
+    return undefined;
+  }
+  return { promptTokens, cachedTokens, candidateTokens, apiTimeMs };
+}
+
+/**
+ * Resource usage consumed during a single todo's [start, end] window. Every
+ * field is optional: tokens/API time come from the snapshot diff (absent on
+ * sessions whose agent didn't stamp snapshots; API time is also absent on
+ * replay), while tool time comes from transcript tool durations and is shown
+ * whenever any tool ran in the window.
+ */
+export interface TodoResources {
+  inputTokens?: number;
+  cachedTokens?: number;
+  outputTokens?: number;
+  apiTimeMs?: number;
+  toolTimeMs?: number;
+}
+
+/** Per-todo timing and resource breakdown. */
+export interface TodoDetail {
+  /** Wall-clock ms when the item first became in_progress. */
+  startTs?: number;
+  /** Wall-clock ms when the item became completed. */
+  endTs?: number;
+  /**
+   * Tokens and time spent while this item was the active task. Tokens and API
+   * time come from diffing the cumulative-usage snapshots stamped on its start
+   * and end todo boundaries; tool time is summed from the transcript's tool
+   * durations in the window. Undefined when nothing could be measured.
+   */
+  resources?: TodoResources;
+}
+
+interface ToolSpan {
+  start: number;
+  end: number;
+}
+
+/**
+ * Wall-clock spans of every non-todo tool call that has both a start and end
+ * time. Used to attribute tool time to the task window a tool ran in.
+ */
+function collectToolSpans(messages: readonly Message[]): ToolSpan[] {
+  const spans: ToolSpan[] = [];
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      if (isTodoWriteToolName(tool.toolName)) continue;
+      const { startTime, endTime } = tool;
+      if (
+        typeof startTime === 'number' &&
+        typeof endTime === 'number' &&
+        endTime >= startTime
+      ) {
+        spans.push({ start: startTime, end: endTime });
+      }
+    }
+  }
+  return spans;
+}
+
+/** Total duration of tool spans that started within [startTs, endTs]. */
+function sumToolTimeInWindow(
+  spans: readonly ToolSpan[],
+  startTs: number,
+  endTs: number,
+): number {
+  let total = 0;
+  for (const span of spans) {
+    if (span.start >= startTs && span.start <= endTs) {
+      total += span.end - span.start;
+    }
+  }
+  return total;
+}
+
+interface TokenDiff {
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  apiTimeMs: number;
+}
+
+function diffStats(
+  start: TodoStatsSnapshot,
+  end: TodoStatsSnapshot,
+): TokenDiff {
+  // Clamp to zero: snapshots are cumulative, so a smaller end (a reset, or two
+  // snapshots that coincided) must never surface a negative count.
+  const nonNeg = (a: number, b: number) => Math.max(0, b - a);
+  return {
+    inputTokens: nonNeg(start.promptTokens, end.promptTokens),
+    cachedTokens: nonNeg(start.cachedTokens, end.cachedTokens),
+    outputTokens: nonNeg(start.candidateTokens, end.candidateTokens),
+    apiTimeMs: nonNeg(start.apiTimeMs, end.apiTimeMs),
+  };
+}
+
+/**
+ * Combine the token snapshot diff and the windowed tool time into the resource
+ * fields to show. Token fields are included only when the diff measured
+ * something (a coincident diff of all zeros reads as not-captured, not a row of
+ * zeros); API time only when it advanced (live); tool time only when nonzero.
+ * Returns undefined when nothing was measured.
+ */
+function buildResources(
+  tokenDiff: TokenDiff | undefined,
+  toolTimeMs: number | undefined,
+): TodoResources | undefined {
+  const resources: TodoResources = {};
+  if (
+    tokenDiff &&
+    (tokenDiff.inputTokens > 0 ||
+      tokenDiff.outputTokens > 0 ||
+      tokenDiff.cachedTokens > 0 ||
+      tokenDiff.apiTimeMs > 0)
+  ) {
+    resources.inputTokens = tokenDiff.inputTokens;
+    resources.cachedTokens = tokenDiff.cachedTokens;
+    resources.outputTokens = tokenDiff.outputTokens;
+    if (tokenDiff.apiTimeMs > 0) resources.apiTimeMs = tokenDiff.apiTimeMs;
+  }
+  if (toolTimeMs !== undefined && toolTimeMs > 0) {
+    resources.toolTimeMs = toolTimeMs;
+  }
+  return Object.keys(resources).length > 0 ? resources : undefined;
+}
+
+/**
+ * Per-todo detail keyed by {@link todoStateKey}: when each item started and
+ * completed, plus the resources spent in that window.
+ *
+ * Mirrors {@link computeTodoTimeline}'s state machine — a todo's start is its
+ * first in_progress transition and its end the completed transition — but
+ * records timestamps, the snapshot diff (tokens + API time) between the start
+ * and end boundaries, and the transcript tool time in the window. An item first
+ * seen already completed (a restored opening snapshot) yields no detail, exactly
+ * as it produces no timeline event.
+ */
+export function computeTodoDetails(
+  messages: readonly Message[],
+): Map<string, TodoDetail> {
+  const result = new Map<string, TodoDetail>();
+  const lastStatus = new Map<string, TodoItem['status']>();
+  const startStatsByKey = new Map<string, TodoStatsSnapshot | undefined>();
+  const toolSpans = collectToolSpans(messages);
+
+  const ensure = (stateKey: string): TodoDetail => {
+    let detail = result.get(stateKey);
+    if (!detail) {
+      detail = {};
+      result.set(stateKey, detail);
+    }
+    return detail;
+  };
+
+  for (const message of messages) {
+    const ts = message.timestamp;
+    for (const { todos, stats } of todoSnapshotsOf(message)) {
+      for (const todo of todos) {
+        const stateKey = todoStateKey(todo);
+        const prev = lastStatus.get(stateKey);
+        if (todo.status === 'in_progress' && prev !== 'in_progress') {
+          // First start wins: record the start snapshot for the resource diff
+          // even when this message carries no timestamp.
+          if (!startStatsByKey.has(stateKey)) {
+            startStatsByKey.set(stateKey, stats);
+            if (ts !== undefined) ensure(stateKey).startTs = ts;
+          }
+        } else if (
+          todo.status === 'completed' &&
+          prev !== 'completed' &&
+          prev !== undefined
+        ) {
+          const startStats = startStatsByKey.get(stateKey);
+          const tokenDiff =
+            startStats && stats ? diffStats(startStats, stats) : undefined;
+          const startTs = result.get(stateKey)?.startTs;
+          const toolTimeMs =
+            startTs !== undefined && ts !== undefined
+              ? sumToolTimeInWindow(toolSpans, startTs, ts)
+              : undefined;
+          const resources = buildResources(tokenDiff, toolTimeMs);
+          if (ts !== undefined || resources) {
+            const detail = ensure(stateKey);
+            if (ts !== undefined) detail.endTs = ts;
+            if (resources) detail.resources = resources;
+          }
+        }
+        lastStatus.set(stateKey, todo.status);
+      }
+    }
+  }
+
+  return result;
 }
 
 function getTodoArray(
