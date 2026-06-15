@@ -205,7 +205,7 @@ jobs:
       - name: 'Publish Test Report (for non-forks)'
         if: |-
           ${{ always() && (github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: 'dorny/test-reporter@dc3a92680fcc15842eef52e8c4606ea7ce6bd3f3' # ratchet:dorny/test-reporter@v2
+        uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2'  # v3.0.0
         with:
           name: 'Test Results (${{ matrix.os }}, Node ${{ matrix.node-version }})'
           path: 'packages/*/junit.xml'
@@ -287,9 +287,9 @@ jobs:
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
 
       - name: 'Initialize CodeQL'
-        uses: 'github/codeql-action/init@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/init@v3
+        uses: 'github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e'  # v4.36.2
         with:
           languages: 'javascript'
 
       - name: 'Perform CodeQL Analysis'
-        uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
+        uses: 'github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e'  # v4.36.2
