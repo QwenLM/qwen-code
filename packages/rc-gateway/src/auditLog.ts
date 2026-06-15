@@ -68,7 +68,8 @@ export type AuditAction =
   | 'rate_table_parse_failed'
   | 'rate_table_miss'
   | 'apns_registered'
-  | 'apns_subscription_removed';
+  | 'apns_subscription_removed'
+  | 'push_routed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -126,6 +127,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'rate_table_miss',
   'apns_registered',
   'apns_subscription_removed',
+  'push_routed',
 ];
 
 export interface AuditEntry {

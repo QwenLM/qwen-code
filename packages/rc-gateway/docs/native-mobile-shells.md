@@ -13,7 +13,8 @@ assigns it:
 | Token-revoke → APNs cascade                   | Cycle A ✅        |
 | `remoteControl.nativeShells` capability block | Cycle B ✅        |
 | `GET /.well-known/assetlinks.json`            | Cycle B ✅        |
-| APNs sender (JWT ES256 + HTTP/2 to Apple)     | Cycle C (ceiling) |
+| APNs sender (JWT ES256 + payload + retry)     | Cycle C ✅        |
+| Live HTTP/2 send to Apple + notifier wiring   | Cycle C (ceiling) |
 
 Everything else — the `window.qwen` bridge contract, keystore token storage,
 biometric, QR/`scanQR`, `qwen-rc://` URL scheme, TLS pinning, daemon-URL pinning,
@@ -94,24 +95,37 @@ configured (the shell then falls back to a Custom Tab).
 - **Cycle B** — `remoteControl.nativeShells` capability (`apnsEnabled` reflects an
   actually-loadable P-8 key AND a wired store) and `GET /.well-known/assetlinks.json`
   (404 when unconfigured → the Android shell falls back to a Custom Tab).
-- **Cycle C** — the **APNs sender**: sign a JWT (ES256, `kid`/`iss`/`iat`), HTTP/2
-  POST to `api[.sandbox].push.apple.com`, audit `push_routed { transport: apns }`,
-  `410`/`400` → remove subscription, `429`/`5xx` → backoff. This is a **runtime
-  ceiling** (needs real Apple credentials + a device + HTTP/2 to Apple): it will be
-  built **injectable** and unit-tested against a fake transport, with the live send
-  documented as unverified — same posture as the matrix-E2EE adapter.
+- **Cycle C** — the **APNs sender**, built injectable so the routing logic is
+  fully unit-tested while the live Apple call stays behind a ceiling:
+  - `apnsJwt.ts` — ES256 provider JWT (`kid`/`iss`/`iat`), with a caching
+    `ApnsJwtSigner` (~50 min refresh). **Verifiable** and verified: the test signs
+    and checks the signature against the public key, and a malformed key throws
+    (so `apnsEnabled` can later reflect parse-validity, not just file presence).
+  - `apnsPayload.ts` — maps `PushPayload` → `aps` (`alert.title`=summary,
+    `alert.body`=session name, `category`=kind, `thread-id`=sessionId,
+    `mutable-content:1` for `permission.required`). Pure, tested.
+  - `apnsSender.ts` — `ApnsSender` over an **injected** `ApnsTransport`: `200` →
+    `push_routed { transport: apns }`; `410`/`400` → remove subscription +
+    `apns_subscription_removed`, no retry; `429`/`5xx` → exponential backoff up to
+    5 attempts; other `4xx` → reject (no retry, no removal); and the orphan guard
+    (`isTokenLive` false → remove + no send), closing the Cycle-A flag. All tested
+    against a fake transport.
+  - **Ceiling (not exercised in CI):** `createHttp2ApnsTransport` (the live HTTP/2
+    POST to `api[.sandbox].push.apple.com` — needs real Apple credentials, a
+    device, and reachability to Apple) and wiring `ApnsSender` into the live
+    notification routing/coalescing loop. The delivery primitive is complete and
+    tested; the live send + notifier integration are the documented unverified
+    edge, same posture as the matrix-E2EE adapter's olm transport.
 
-### Note for Cycle C: `apnsEnabled` existence-vs-loadable
+### Resolved in Cycle C
 
-Cycle B's `apnsEnabled` uses `existsSync(keyPath)` — presence, not parse-validity
-(the spec scenario only tests a _missing_ key, so this satisfies it). When the
-Cycle C sender parses the P-8 as an ES256 key, `apnsEnabled` should reflect actual
-parse success so a present-but-malformed key reads `false` — the same
-existence-vs-validity fix applied to bind-security's TLS cert (`createSecureContext`).
-
-### Note for Cycle C: orphaned-device safety
-
-A token revoke cascade-deletes subscriptions, but if `persist()` throws mid-cascade
-a subscription could be orphaned (and the revoke route would 500). When the sender
-lands, it MUST validate each target against a live token, not blindly iterate the
-store, so a revoked token's device can never still receive pushes.
+- **`apnsEnabled` existence-vs-loadable** — now parses the P-8 as an EC private
+  key (`createPrivateKey`) on each capability read, so a present-but-malformed key
+  reads `false` (mirrors bind-security's `createSecureContext`), not just presence.
+- **Orphaned-device safety** — `ApnsSender` provides an `isTokenLive` guard
+  (removes the subscription and sends nothing when its token is no longer live).
+  ⚠ This is a _mechanism, not yet an enforcement_: `isTokenLive` defaults to
+  absent, so an unwired/mis-wired sender has NO orphan protection. **REQUIRED when
+  wiring the sender into the notifier:** the caller MUST pass `isTokenLive` (e.g.
+  `(tid) => tokenStore.isLive(tid)`) — otherwise a revoked token's device keeps
+  receiving pushes until the next 410. Do not skip it.

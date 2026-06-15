@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { watch, readFileSync, existsSync, type FSWatcher } from 'node:fs';
+import { watch, readFileSync, type FSWatcher } from 'node:fs';
+import { createPrivateKey } from 'node:crypto';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
@@ -306,9 +307,20 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       apnsStore,
       nativeShellsCapability: () => {
         const keyPath = nativePushConfig.apns?.keyPath;
-        const keyReadable = !!keyPath && existsSync(expandTilde(keyPath));
+        // apnsEnabled reflects a LOADABLE P-8 key, not mere file presence: parse
+        // it as an EC private key so a present-but-malformed key reads false
+        // (mirrors bind-security's createSecureContext check). Re-checked live.
+        let keyLoadable = false;
+        if (keyPath) {
+          try {
+            createPrivateKey(readFileSync(expandTilde(keyPath)));
+            keyLoadable = true;
+          } catch {
+            keyLoadable = false;
+          }
+        }
         return buildNativeShellsCapability(
-          resolveApnsEnabled(nativePushConfig, keyReadable),
+          resolveApnsEnabled(nativePushConfig, keyLoadable),
         );
       },
       assetLinks: () => buildAssetLinks(nativePushConfig),
