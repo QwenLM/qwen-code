@@ -409,6 +409,32 @@ export interface WorkflowBudget {
   remaining(): number;
 }
 
+/**
+ * P4b: host-side live-event channel for the orchestrator and sandbox to
+ * notify external consumers (typically the `WorkflowRunRegistry`) when
+ * a phase boundary or agent dispatch happens, or when the script logs
+ * something. Every method is host-realm (called from sandbox closures
+ * and `countedDispatch`) — no vm-realm bridge concerns.
+ *
+ * All methods are no-ops by default — implementations are free to
+ * implement only the events they care about.
+ *
+ * Truncation: `phaseStarted` / `logAppended` are NOT called once the
+ * sandbox's internal `MAX_PHASE_ENTRIES` / `MAX_LOG_LINES` cap has
+ * been reached, mirroring `getPhases()` / `getLogs()` so a chatty
+ * workflow does not flood the registry with thousands of events.
+ */
+export interface WorkflowOrchestratorEmitter {
+  /** Sandbox `phase(title)` was called. */
+  phaseStarted?(title: string): void;
+  /** Sandbox `log(...)` produced one line of output (or `console.log`). */
+  logAppended?(line: string): void;
+  /** Orchestrator's `countedDispatch` is about to invoke `dispatch(...)`. */
+  agentDispatched?(label?: string): void;
+  /** `dispatch(...)` settled (success or thrown). `error` set on rejection. */
+  agentCompleted?(label?: string, error?: string): void;
+}
+
 export interface SandboxOptions {
   /** Value bound to the `args` global inside the script. */
   args: unknown;
@@ -460,6 +486,15 @@ export interface SandboxOptions {
    * `abort()` in a `finally` block to cancel any straggler dispatch).
    */
   abortOnTimeout?: AbortController;
+  /**
+   * P4b: optional host-side event channel. When provided, the sandbox's
+   * `safePhase` / `safeLog` closures fire `phaseStarted` / `logAppended`
+   * on every accepted entry (after the per-cap truncation guard). The
+   * caller (typically `WorkflowTool` via `WorkflowOrchestrator`) wires
+   * these into the `WorkflowRunRegistry` so the UI surfaces (pill /
+   * dialog / detail body) can re-render without polling `getPhases()`.
+   */
+  emitter?: WorkflowOrchestratorEmitter;
 }
 
 /**
@@ -560,7 +595,16 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
 
   const safeLog = (msg: unknown): void => {
     if (logs.length < MAX_LOG_LINES) {
-      logs.push(String(msg));
+      const line = String(msg);
+      logs.push(line);
+      // P4b: emit to host-side subscriber (registry). Defensive try/catch
+      // because a subscriber error must not interrupt script execution
+      // — the script body has no business knowing about UI plumbing.
+      try {
+        opts.emitter?.logAppended?.(line);
+      } catch (e) {
+        debugLogger.warn('emitter.logAppended threw:', e);
+      }
     } else if (logs.length === MAX_LOG_LINES) {
       logs.push(`[workflow log truncated at ${MAX_LOG_LINES} lines]`);
     }
@@ -568,7 +612,15 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
 
   const safePhase = (title: string): void => {
     if (phases.length < MAX_PHASE_ENTRIES) {
-      phases.push(String(title));
+      const t = String(title);
+      phases.push(t);
+      // P4b: emit to host-side subscriber. Same defensive try/catch as
+      // safeLog — subscriber errors must not bubble into the script.
+      try {
+        opts.emitter?.phaseStarted?.(t);
+      } catch (e) {
+        debugLogger.warn('emitter.phaseStarted threw:', e);
+      }
     } else if (phases.length === MAX_PHASE_ENTRIES) {
       phases.push(
         `[workflow phases truncated at ${MAX_PHASE_ENTRIES} entries]`,

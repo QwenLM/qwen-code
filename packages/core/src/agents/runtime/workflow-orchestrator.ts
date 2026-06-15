@@ -12,6 +12,7 @@ import type {
   WorkflowAgentOpts,
   WorkflowAgentResult,
   WorkflowMeta,
+  WorkflowOrchestratorEmitter,
 } from './workflow-sandbox.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
@@ -180,7 +181,7 @@ export class WorkflowExecutionError extends Error {
 // FIX-E (Round 4 ARCH-I1): single source of truth for the dispatch return
 // type is `workflow-sandbox.ts`. Re-exported here so external consumers
 // (WorkflowTool) can import the alias from the orchestrator module.
-export type { WorkflowAgentResult, WorkflowMeta };
+export type { WorkflowAgentResult, WorkflowMeta, WorkflowOrchestratorEmitter };
 
 export interface WorkflowRunRequest {
   script: string;
@@ -200,6 +201,24 @@ export interface WorkflowRunRequest {
    * until their internal `max_time_minutes` limit.
    */
   abortOnTimeout?: AbortController;
+  /**
+   * P4b: optional host-side event channel. When provided, the orchestrator
+   * fires `agentDispatched` / `agentCompleted` inside `countedDispatch`
+   * and the sandbox fires `phaseStarted` / `logAppended` from `safePhase`
+   * / `safeLog`. Wired into `SandboxOptions.emitter` and used by
+   * `WorkflowTool` to keep the `WorkflowRunRegistry` record in sync
+   * with the run state for the pill + dialog + detail body.
+   */
+  emitter?: WorkflowOrchestratorEmitter;
+  /**
+   * P4b: pre-generated run identifier (shape `wf_<hex>`). Callers that
+   * need the id at register-time (e.g. `WorkflowTool` registering the
+   * run with `WorkflowRunRegistry` before `run()` resolves) must
+   * pre-generate one and pass it here. Omitted by tests and by the
+   * historical contract; orchestrator falls back to its own generator
+   * so existing call sites work unchanged.
+   */
+  runId?: string;
 }
 
 export interface WorkflowRunOutcome {
@@ -1057,7 +1076,14 @@ export class WorkflowOrchestrator {
     // queued dispatches promptly. Sync-loop protection is the 30s vm
     // timeout in workflow-sandbox.ts; async-loop cancellation flows through
     // dispatch's subagent.execute path.
-    const runId = generateRunId();
+    //
+    // P4b: callers (`WorkflowTool`) may pre-generate `runId` and pass it
+    // in so they can register the run with `WorkflowRunRegistry` BEFORE
+    // `run()` resolves — necessary because the registry needs the id at
+    // emit time, not at resolve time. The orchestrator validates the
+    // shape (`wf_<hex>`) but otherwise trusts the caller. When omitted,
+    // the orchestrator generates one as before.
+    const runId = req.runId ?? generateRunId();
 
     const maxAgents = resolveMaxAgentsPerRun();
     const signal = req.abortOnTimeout?.signal;
@@ -1078,6 +1104,7 @@ export class WorkflowOrchestrator {
     // cap regardless of launch path (increment-then-check: calls 1..max pass,
     // the (max+1)th throws), and limiter.run enforces the concurrency window.
     let agentCount = 0;
+    const emitter = req.emitter;
     const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
       agentCount += 1;
       if (agentCount > maxAgents) {
@@ -1087,7 +1114,38 @@ export class WorkflowOrchestrator {
           ),
         );
       }
-      return limiter.run(() => this.dispatch(prompt, opts));
+      // P4b: emit dispatch-start outside the limiter so the registry
+      // sees "queued" the moment the script issued the call, not after
+      // a slot frees. Symmetric agentCompleted fires after the dispatch
+      // settles (success or thrown) — defensive try/catch on both so a
+      // subscriber error never propagates into the script.
+      const label = typeof opts.label === 'string' ? opts.label : undefined;
+      try {
+        emitter?.agentDispatched?.(label);
+      } catch (e) {
+        debugLogger.warn('emitter.agentDispatched threw:', e);
+      }
+      return limiter
+        .run(() => this.dispatch(prompt, opts))
+        .then(
+          (result) => {
+            try {
+              emitter?.agentCompleted?.(label);
+            } catch (e) {
+              debugLogger.warn('emitter.agentCompleted threw:', e);
+            }
+            return result;
+          },
+          (err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            try {
+              emitter?.agentCompleted?.(label, msg);
+            } catch (e) {
+              debugLogger.warn('emitter.agentCompleted threw:', e);
+            }
+            throw err;
+          },
+        );
     };
 
     const parallelImpl = makeParallelImpl(signal);
@@ -1099,6 +1157,7 @@ export class WorkflowOrchestrator {
       parallel: parallelImpl,
       pipeline: pipelineImpl,
       abortOnTimeout: req.abortOnTimeout,
+      emitter,
     });
     try {
       const result = await sandbox.run(req.script);

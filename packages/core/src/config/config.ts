@@ -89,6 +89,7 @@ import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
@@ -1108,6 +1109,7 @@ export class Config {
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  private readonly workflowRunRegistry = new WorkflowRunRegistry();
   // Field initializer runs once on the parent Config; child Configs
   // built via Object.create(parent) intentionally do NOT pick this up
   // — see getFileReadCache() for the per-instance lazy initialization
@@ -4423,6 +4425,10 @@ export class Config {
 
   getBackgroundShellRegistry(): BackgroundShellRegistry {
     return this.backgroundShellRegistry;
+  }
+
+  getWorkflowRunRegistry(): WorkflowRunRegistry {
+    return this.workflowRunRegistry;
   }
 
   /**

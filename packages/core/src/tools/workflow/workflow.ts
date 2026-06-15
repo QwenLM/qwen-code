@@ -30,8 +30,11 @@ import {
   WorkflowExecutionError,
   createProductionDispatch,
   type WorkflowAgentDispatch,
+  type WorkflowOrchestratorEmitter,
 } from '../../agents/runtime/workflow-orchestrator.js';
 import { createChildAbortController } from '../../utils/abortController.js';
+import { randomBytes } from 'node:crypto';
+import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
 
 export interface WorkflowParams {
   /** Inline JavaScript source for the workflow. Required in P1. */
@@ -133,7 +136,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
 
   override async execute(
     signal: AbortSignal,
-    _updateOutput?: (output: ToolResultDisplay) => void,
+    updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
     // T40 (PR #4732 R4): child controller so dispatch sees caller aborts
@@ -143,12 +146,64 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       this.toolOptions.dispatch ??
       createProductionDispatch(this.config, dispatchController.signal);
     const orchestrator = new WorkflowOrchestrator(dispatch);
+
+    // P4b: pre-generate the runId so the registry record exists before
+    // the first sandbox event fires. Without this, `agentDispatched` /
+    // `phaseStarted` callbacks would have no entry to update.
+    const runId = `wf_${randomBytes(8).toString('hex')}`;
+    const registry = this.config.getWorkflowRunRegistry?.();
+    const registryEntry = registry?.register({
+      runId,
+      meta: null, // populated after meta parses; safe default until then
+      status: 'running',
+      startTime: Date.now(),
+      outputFile: '', // P4b reserves the field but doesn't materialize
+      abortController: dispatchController,
+    });
+    // The emitter forwards sandbox + dispatch events into the registry
+    // AND fires `updateOutput` so the tool's renderDisplay block (a
+    // phase-tree-shaped JSON) refreshes live in the TUI. Each method
+    // is fail-safe: registry mutation errors are swallowed by the
+    // registry itself; updateOutput errors are caught here.
+    const emitter: WorkflowOrchestratorEmitter = {
+      phaseStarted: (title) => {
+        registry?.onPhaseStarted(runId, title);
+        safeEmitUpdate(updateOutput, registryEntry);
+      },
+      agentDispatched: () => {
+        registry?.onAgentDispatched(runId);
+        safeEmitUpdate(updateOutput, registryEntry);
+      },
+      agentCompleted: () => {
+        registry?.onAgentCompleted(runId);
+        safeEmitUpdate(updateOutput, registryEntry);
+      },
+      logAppended: () => {
+        // P4b: skip per-line emit; the tool snapshots logs at terminal
+        // via `registry.setRecentLogs` so the registry record reflects
+        // the final tail without per-line churn driving rerenders.
+      },
+    };
+
     try {
       const outcome = await orchestrator.run({
         script: this.params.script,
         args: this.params.args,
         abortOnTimeout: dispatchController,
+        runId,
+        emitter,
       });
+
+      // P4b: snapshot meta + logs onto the registry record so the dialog
+      // detail body reflects the final state once the run terminates.
+      if (registryEntry) {
+        registryEntry.meta = outcome.meta;
+        if (outcome.meta?.name && registryEntry.description === runId) {
+          registryEntry.description = outcome.meta.name;
+        }
+      }
+      registry?.setRecentLogs(runId, outcome.logs);
+      registry?.complete(runId, outcome.result, Date.now());
 
       // FIX-7 (UP-C2): unwrap the script result so the LLM receives the
       // script's return value verbatim. The full metadata (runId, phases,
@@ -199,8 +254,19 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // body may have thrown long after the meta declaration parsed
       // cleanly; keeping name/description/phases visible on failure helps
       // the user identify which workflow ran.
-      const meta =
-        err instanceof WorkflowExecutionError ? err.meta : undefined;
+      const meta = err instanceof WorkflowExecutionError ? err.meta : undefined;
+      // P4b: surface the failure / abort to the registry. A caller-aborted
+      // run (`signal.aborted === true`) becomes `cancelled` rather than
+      // `failed` so the dialog distinguishes user intent from script bugs.
+      if (registryEntry) {
+        if (meta && !registryEntry.meta) registryEntry.meta = meta;
+      }
+      if (logs) registry?.setRecentLogs(runId, logs);
+      if (signal.aborted) {
+        registry?.cancel(runId, Date.now());
+      } else {
+        registry?.fail(runId, message, Date.now());
+      }
       const display =
         phases || logs || meta
           ? `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload({
@@ -221,6 +287,49 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // T40: cancel any straggler subagent on natural completion.
       dispatchController.abort();
     }
+  }
+}
+
+/**
+ * P4b: render an in-flight workflow as a compact JSON block for
+ * `_updateOutput`. Same shape as the terminal `returnDisplay` so the
+ * TUI does not need a separate live renderer. Logs are omitted from
+ * the live snapshot — they would churn at >10Hz and the per-line
+ * channel adds little value while a workflow is still running.
+ */
+function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
+  const payload: Record<string, unknown> = {
+    runId: entry.runId,
+    ...(entry.meta ? { meta: entry.meta } : {}),
+    status: entry.status,
+    currentPhase: entry.currentPhase,
+    phases: entry.phases,
+    agentsDispatched: entry.agentsDispatched,
+    agentsCompleted: entry.agentsCompleted,
+  };
+  try {
+    return '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
+  } catch {
+    return `Workflow ${entry.runId} — ${entry.status} — ${entry.phases.length} phase(s)`;
+  }
+}
+
+/**
+ * Defensive bridge from the emitter's host-realm callbacks to
+ * `updateOutput`. The TUI's renderer wraps the callback in its own
+ * try/catch but we add another layer here because an outer throw
+ * inside `phaseStarted` would propagate up through the vm-realm
+ * `bridge.pushPhase` call and corrupt the script's `phase()` global.
+ */
+function safeEmitUpdate(
+  updateOutput: ((output: ToolResultDisplay) => void) | undefined,
+  entry: WorkflowTask | undefined,
+): void {
+  if (!updateOutput || !entry) return;
+  try {
+    updateOutput(buildLivePhaseTreeDisplay(entry));
+  } catch {
+    // Renderer errors must not interrupt orchestration.
   }
 }
 
@@ -312,7 +421,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
       Kind.Other,
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,
-      /* canUpdateOutput */ false,
+      /* canUpdateOutput */ true,
     );
   }
 
