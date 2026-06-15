@@ -44,6 +44,7 @@ function keyOf(id: string, content: string): string {
 function render(
   todos: TodoItem[],
   details: Map<string, TodoDetail>,
+  onParentClick?: () => void,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -52,7 +53,11 @@ function render(
     root.render(
       <I18nProvider language="en">
         <TodoDetailContext.Provider value={details}>
-          <TodoFullList todos={todos} />
+          {/* Parent click handler stands in for the surrounding todo_write
+              tool-row header, to assert the expander click doesn't bubble. */}
+          <div onClick={onParentClick}>
+            <TodoFullList todos={todos} />
+          </div>
         </TodoDetailContext.Provider>
       </I18nProvider>,
     );
@@ -134,5 +139,18 @@ describe('TodoFullList detail', () => {
     expect(text).toContain("wasn't captured");
     expect(text).toContain('Time'); // the Time section still renders
     expect(text).not.toContain('Time spent'); // but not the token/spent groups
+  });
+
+  it('does not bubble the expander click to a surrounding click handler', () => {
+    // The detail expander lives inside the todo_write tool row, whose header
+    // toggles the whole list on click. The button must stopPropagation so
+    // expanding a task never collapses its list.
+    const details = new Map<string, TodoDetail>([
+      [keyOf('1', 'Done with stats'), { startTs: 1000, endTs: 4000 }],
+    ]);
+    const parentClick = vi.fn();
+    const container = render([TODOS[0]], details, parentClick);
+    click(container.querySelector('button')!);
+    expect(parentClick).not.toHaveBeenCalled();
   });
 });

@@ -158,14 +158,18 @@ interface TodoSnapshot {
  * unlike a user-turn reset — it still tracks a list correctly when it spans
  * turns (a "continue" turn that completes an item carried over from before).
  *
- * Two rare cases this trades for, both only affecting the collapsed diff while
- * the expanded list stays correct:
+ * Two rare cases this trades for, affecting the collapsed diff and the per-task
+ * detail ({@link computeTodoDetails}) but not the expanded list itself:
  * - A todo reworded on a stable id reads as a new task. Reworded while still
  *   `in_progress` it emits a spurious `started`; reworded straight to
  *   `completed` (`1 "Write report"` → `1 "Write the final report" completed`)
  *   the completion is treated as first-seen and dropped.
  * - Two unrelated plans that reuse both the id AND the exact content (a generic
- *   recurring todo like `"Run tests"`) still collide.
+ *   recurring todo like `"Run tests"`) still collide. computeTodoDetails resets
+ *   a task's window when a completed key restarts as `in_progress`, so the
+ *   common reuse keeps correct numbers; a reused id+content that goes *straight*
+ *   to `completed` (never observed `in_progress`) still shares the earlier
+ *   task's detail slot.
  */
 export function todoStateKey(todo: TodoItem): string {
   return JSON.stringify([todo.id, todo.content]);
@@ -406,7 +410,9 @@ interface ToolSpan {
 
 /**
  * Wall-clock spans of every non-todo tool call that has both a start and end
- * time. Used to attribute tool time to the task window a tool ran in.
+ * time, sorted by start. Used to attribute tool time to the task window a tool
+ * ran in; sorting once lets {@link sumToolTimeInWindow} binary-search each
+ * window rather than scan every span per task.
  */
 function collectToolSpans(messages: readonly Message[]): ToolSpan[] {
   const spans: ToolSpan[] = [];
@@ -424,20 +430,35 @@ function collectToolSpans(messages: readonly Message[]): ToolSpan[] {
       }
     }
   }
+  spans.sort((a, b) => a.start - b.start);
   return spans;
 }
 
-/** Total duration of tool spans that started within [startTs, endTs]. */
+/**
+ * Total duration of tool spans whose start falls within [startTs, endTs].
+ * `sortedSpans` must be sorted by start (see {@link collectToolSpans}); binary
+ * search finds the window's first span, then we walk until past its end —
+ * O(log S + matched) instead of a full scan per task.
+ */
 function sumToolTimeInWindow(
-  spans: readonly ToolSpan[],
+  sortedSpans: readonly ToolSpan[],
   startTs: number,
   endTs: number,
 ): number {
+  let lo = 0;
+  let hi = sortedSpans.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sortedSpans[mid].start < startTs) lo = mid + 1;
+    else hi = mid;
+  }
   let total = 0;
-  for (const span of spans) {
-    if (span.start >= startTs && span.start <= endTs) {
-      total += span.end - span.start;
-    }
+  for (
+    let i = lo;
+    i < sortedSpans.length && sortedSpans[i].start <= endTs;
+    i++
+  ) {
+    total += sortedSpans[i].end - sortedSpans[i].start;
   }
   return total;
 }
@@ -529,8 +550,18 @@ export function computeTodoDetails(
         const stateKey = todoStateKey(todo);
         const prev = lastStatus.get(stateKey);
         if (todo.status === 'in_progress' && prev !== 'in_progress') {
-          // First start wins: record the start snapshot for the resource diff
-          // even when this message carries no timestamp.
+          // A key seen active again after it already completed is a *new* task
+          // reusing a positional id (`plan-N` numbering repeats across plans).
+          // Reset so its window diffs against its own start, not the prior
+          // task's far-earlier boundary — otherwise the detail row would show a
+          // window spanning both tasks with wildly inflated token/time numbers.
+          if (prev === 'completed') {
+            startStatsByKey.delete(stateKey);
+            result.delete(stateKey);
+          }
+          // First start within a task's lifecycle wins: record the start
+          // snapshot for the resource diff even when this message has no
+          // timestamp.
           if (!startStatsByKey.has(stateKey)) {
             startStatsByKey.set(stateKey, stats);
             if (ts !== undefined) ensure(stateKey).startTs = ts;

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { normalizeDaemonEvent } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
 import {
   computeTodoDetails,
@@ -772,6 +773,115 @@ describe('computeTodoDetails', () => {
     ]);
     expect(details.get(todoStateKey(todo('1', 'pending')))).toEqual({
       endTs: 5000,
+    });
+  });
+
+  it('starts a fresh window when a completed id+content is reused by a new task', () => {
+    // The ACP bridge reuses positional ids across plans, so two unrelated tasks
+    // can share id+content. The second occurrence must diff against its own
+    // start (plan B: 900→1000, 5000→5200) — not plan A's far-earlier boundary,
+    // which would render a cross-plan window with inflated numbers.
+    const details = computeTodoDetails([
+      at(
+        todoWriteMessage(
+          'a1',
+          [item('1', 'Run tests', 'in_progress')],
+          stats(100, 0, 0, 100),
+        ),
+        1000,
+      ),
+      at(
+        todoWriteMessage(
+          'a2',
+          [item('1', 'Run tests', 'completed')],
+          stats(200, 0, 0, 300),
+        ),
+        2000,
+      ),
+      userMessage('u1'),
+      at(
+        todoWriteMessage(
+          'b1',
+          [item('1', 'Run tests', 'in_progress')],
+          stats(900, 0, 0, 5000),
+        ),
+        8000,
+      ),
+      at(
+        todoWriteMessage(
+          'b2',
+          [item('1', 'Run tests', 'completed')],
+          stats(1000, 0, 0, 5200),
+        ),
+        9000,
+      ),
+    ]);
+    const detail = details.get(
+      todoStateKey(item('1', 'Run tests', 'completed')),
+    );
+    expect(detail?.startTs).toBe(8000);
+    expect(detail?.endTs).toBe(9000);
+    expect(detail?.resources?.inputTokens).toBe(100);
+    expect(detail?.resources?.apiTimeMs).toBe(200);
+  });
+
+  it('sums only tool spans whose start falls within the task window', () => {
+    const details = computeTodoDetails([
+      toolMessage('t-before', 100, 500),
+      at(todoWriteMessage('m1', [todo('1', 'in_progress')]), 1000),
+      toolMessage('t-a', 1500, 2000), // 500ms, in window
+      toolMessage('t-b', 3000, 3700), // 700ms, in window
+      at(todoWriteMessage('m2', [todo('1', 'completed')]), 5000),
+      toolMessage('t-after', 6000, 9000),
+    ]);
+    expect(details.get(todoStateKey(todo('1', 'pending')))?.resources).toEqual({
+      toolTimeMs: 1200,
+    });
+  });
+});
+
+describe('plan stats contract (SDK normalizer → extractTodoStats)', () => {
+  it('round-trips an agent-stamped _meta.stats into a defined snapshot', () => {
+    // Field names mirror what the cli PlanEmitter stamps. Exercising the real
+    // SDK normalizer locks the sdk → web-shell hop: if normalizePlanUpdate stops
+    // forwarding stats, or extractTodoStats's field names drift from the
+    // forwarded shape, this returns undefined and fails here rather than
+    // silently rendering "not captured". (The cli field names are pinned
+    // separately by PlanEmitter.test.)
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'plan',
+          entries: [
+            { content: 'Task', status: 'completed', priority: 'medium' },
+          ],
+          _meta: {
+            stats: {
+              promptTokens: 100,
+              cachedTokens: 10,
+              candidateTokens: 20,
+              apiTimeMs: 500,
+            },
+          },
+        },
+      },
+    });
+    const rawOutput = (events[0] as { rawOutput?: unknown }).rawOutput;
+    const tool: ACPToolCall = {
+      callId: 'c',
+      toolName: 'TodoWrite',
+      status: 'completed',
+      kind: 'think',
+      rawOutput,
+    };
+    expect(extractTodoStats(tool)).toEqual({
+      promptTokens: 100,
+      cachedTokens: 10,
+      candidateTokens: 20,
+      apiTimeMs: 500,
     });
   });
 });
