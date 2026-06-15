@@ -112,6 +112,43 @@ describe('auto-memory extraction', () => {
     expect(cursor.processedOffset).toBe(2);
   });
 
+  it('builds transcripts only from history after the extraction cursor', async () => {
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      systemMessage: undefined,
+    });
+    await fs.writeFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      JSON.stringify({
+        sessionId: 'session-1',
+        processedOffset: 1,
+        updatedAt: new Date().toISOString(),
+      }),
+      'utf-8',
+    );
+
+    const processedMessage = {
+      role: 'user' as const,
+      get parts(): never {
+        throw new Error('processed history should not be read');
+      },
+    };
+    const result = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [
+        processedMessage,
+        { role: 'user', parts: [{ text: 'new preference' }] },
+      ],
+    });
+
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledTimes(1);
+    expect(result.cursor.processedOffset).toBe(2);
+  });
+
   it('throws when config is missing because heuristic fallback was removed', async () => {
     await expect(
       runAutoMemoryExtract({

@@ -46,10 +46,11 @@ export interface AutoMemoryExtractResult {
 
 export function buildTranscriptMessages(
   history: Content[],
+  startOffset = 0,
 ): AutoMemoryTranscriptMessage[] {
   return history
     .map((message, index) => ({
-      offset: index,
+      offset: startOffset + index,
       role: message.role,
       text: partToString(message.parts ?? [])
         .replace(/\s+/g, ' ')
@@ -153,13 +154,18 @@ export async function runAutoMemoryExtract(params: {
     );
   }
 
-  const transcript = buildTranscriptMessages(params.history);
   const currentCursor = await readExtractCursor(params.projectRoot);
-  const slice = loadUnprocessedTranscriptSlice(
-    params.sessionId,
-    transcript,
-    currentCursor,
-  );
+  const startOffset =
+    currentCursor.sessionId === params.sessionId
+      ? (currentCursor.processedOffset ?? 0)
+      : 0;
+  const slice = {
+    messages: buildTranscriptMessages(
+      params.history.slice(startOffset),
+      startOffset,
+    ),
+    nextProcessedOffset: params.history.length,
+  };
 
   if (!params.config) {
     throw new Error(
