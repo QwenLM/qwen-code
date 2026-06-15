@@ -745,6 +745,16 @@ export default {
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.',
   'The git ref to install from.': 'The git ref to install from.',
+  '--registry is only applicable for npm extensions.':
+    '--registry is only applicable for npm extensions.',
+  'Custom npm registry URL (only for npm extensions).':
+    'Custom npm registry URL (only for npm extensions).',
+  '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).':
+    '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).',
+  'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).':
+    'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
+  Description: 'Description',
+  'Delete Session': 'Delete Session',
   'Enable auto-update for this extension.':
     'Enable auto-update for this extension.',
   'Enable pre-release versions for this extension.':

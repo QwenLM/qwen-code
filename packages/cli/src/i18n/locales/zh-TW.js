@@ -668,6 +668,16 @@ export default {
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     '要安裝的擴展的 GitHub URL、本地路徑或市場源（marketplace-url:plugin-name）。',
   'The git ref to install from.': '要安裝的 Git 引用。',
+  '--registry is only applicable for npm extensions.':
+    '--registry 僅適用於 npm 擴展。',
+  'Custom npm registry URL (only for npm extensions).':
+    '自訂 npm registry URL（僅適用於 npm 擴展）。',
+  '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).':
+    '--ref 不適用於 npm 擴展。請改用 @version 後綴（例如 @scope/package@1.2.0）。',
+  'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).':
+    '從 Git 倉庫 URL、本地路徑、帶作用域的 npm 套件（@scope/name）或 Claude 市場源（marketplace-url:plugin-name）安裝擴展。',
+  Description: '描述',
+  'Delete Session': '刪除會話',
   'Enable auto-update for this extension.': '為此擴展啟用自動更新。',
   'Enable pre-release versions for this extension.': '為此擴展啟用預發佈版本。',
   'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
