@@ -100,6 +100,13 @@ export interface WebShellModelInfo {
   contextWindow?: number;
 }
 
+// ---- Skill info (public type for footer renderer) ----
+
+export interface WebShellSkillInfo {
+  name: string;
+  description: string;
+}
+
 // ---- Footer renderer ----
 
 export interface WebShellFooterRenderInfo {
@@ -112,6 +119,7 @@ export interface WebShellFooterRenderInfo {
   tasks: readonly WebShellTaskInfo[];
   availableModes: readonly string[];
   availableModels: readonly WebShellModelInfo[];
+  skills: readonly WebShellSkillInfo[];
 
   onSelectMode: (mode: string) => void;
   onSelectModel: (model: string) => void;

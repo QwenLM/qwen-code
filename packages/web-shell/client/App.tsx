@@ -2943,6 +2943,7 @@ export function App({
                     label: m.label,
                     contextWindow: m.contextWindow,
                   }))}
+                  skills={loadedSkills}
                   onSelectMode={(mode) => handleSetMode(mode)}
                   onSelectModel={(model) => {
                     sessionActions.setModel(model).then(() => {
