@@ -322,10 +322,12 @@ function fixNumericValues(
     const trimmed = value.trim();
     if (!/^-?\d+(\.\d+)?$/.test(trimmed)) continue;
 
-    const hasDecimal = trimmed.includes('.');
-    if (wantsInteger && !wantsNumber && hasDecimal) continue;
+    const num = parseFloat(trimmed);
+    // Reject non-integer values (e.g. "5.5") for integer-only schemas so the
+    // LLM self-corrects. Whole-number decimals (e.g. "3.0") still coerce.
+    if (wantsInteger && !wantsNumber && num % 1 !== 0) continue;
 
-    const parsed = wantsNumber ? parseFloat(trimmed) : parseInt(trimmed, 10);
+    const parsed = wantsNumber ? num : parseInt(trimmed, 10);
     if (Number.isFinite(parsed)) {
       data[key] = parsed;
     }

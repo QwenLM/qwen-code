@@ -545,6 +545,20 @@ describe('SchemaValidator', () => {
       expect(params.value).toBe(5.5);
     });
 
+    it('should coerce whole-number decimal string to integer (e.g. "3.0")', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          depth: { type: 'integer' },
+        },
+        required: ['depth'],
+      };
+      const params = { depth: '3.0' };
+      // "3.0" represents an integer — coerce it rather than rejecting.
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.depth).toBe(3);
+    });
+
     it('should coerce numeric strings inside arrays of integers', () => {
       const schema = {
         type: 'object',
