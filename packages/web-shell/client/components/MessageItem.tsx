@@ -162,7 +162,12 @@ function turnCollapseEqual(
   return (
     a.turnId === b.turnId &&
     a.collapsed === b.collapsed &&
-    a.hiddenCount === b.hiddenCount
+    a.hiddenCount === b.hiddenCount &&
+    a.elapsedMs === b.elapsedMs &&
+    a.inputTokens === b.inputTokens &&
+    a.outputTokens === b.outputTokens &&
+    a.cachedTokens === b.cachedTokens &&
+    a.liveStartedAt === b.liveStartedAt
   );
 }
 

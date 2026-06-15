@@ -365,6 +365,27 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   }
 }
 
+/** Wall-clock stamp of a display row, whichever variant carries it. */
+function itemTimestamp(item: DisplayItem): number | undefined {
+  return item.type === 'message' ? item.message.timestamp : item.timestamp;
+}
+
+/**
+ * Per-turn token usage contribution of a row. The SDK reducer folds each round's
+ * usage — including the sub-agent rounds a turn spawns — onto the turn's
+ * top-level assistant blocks, so summing the turn's assistant messages yields
+ * its true total cost.
+ */
+function itemAssistantUsage(
+  item: DisplayItem,
+):
+  | { inputTokens: number; outputTokens: number; cachedTokens?: number }
+  | undefined {
+  return item.type === 'message' && item.message.role === 'assistant'
+    ? item.message.usage
+    : undefined;
+}
+
 /**
  * Walk backwards from `index` to the user-message row that heads its turn and
  * return that turn's id, or null when `index` precedes the first turn.
@@ -454,7 +475,10 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    // Final answer = last assistant-with-content row in (start, end].
+    // Final answer = last assistant-with-content row in (start, end]. On an
+    // active turn this is provisional (the latest streamed text), so it is not
+    // counted as a step — keeping a step-less reply step-less — but it is folded
+    // away with everything else when the live turn is collapsed (see below).
     let answerIdx = -1;
     for (let i = end; i > start; i--) {
       if (isAssistantAnswer(items[i])) {
@@ -464,27 +488,69 @@ export function applyTurnCollapse(
     }
 
     let hiddenCount = 0;
+    let lastStepTs: number | undefined;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cachedTokens = 0;
+    let hasUsage = false;
     for (let i = start + 1; i <= end; i++) {
       if (isHideableStep(items[i], i === answerIdx)) hiddenCount++;
+      const ts = itemTimestamp(items[i]);
+      if (ts !== undefined) {
+        lastStepTs = lastStepTs === undefined ? ts : Math.max(lastStepTs, ts);
+      }
+      const usage = itemAssistantUsage(items[i]);
+      if (usage) {
+        inputTokens += usage.inputTokens;
+        outputTokens += usage.outputTokens;
+        cachedTokens += usage.cachedTokens ?? 0;
+        hasUsage = true;
+      }
     }
 
-    if (isActiveTurn || hasPendingApproval || hiddenCount === 0) {
-      // Nothing to fold (still streaming, awaiting an approval, or no steps):
-      // emit the turn untouched so live/actionable rows stay visible.
+    const promptTs = head.message.timestamp;
+    const elapsedMs =
+      promptTs !== undefined &&
+      lastStepTs !== undefined &&
+      lastStepTs >= promptTs
+        ? lastStepTs - promptTs
+        : undefined;
+    const hasMetrics = hasUsage || elapsedMs !== undefined;
+
+    if (hasPendingApproval || (hiddenCount === 0 && !hasMetrics)) {
+      // Nothing to add: the inline approve/reject UI must stay reachable, or the
+      // turn has neither foldable steps nor a measured metric. Emit it untouched.
       for (let i = start; i <= end; i++) result.push(items[i]);
       continue;
     }
 
-    const expanded = overrides.has(turnId)
-      ? (overrides.get(turnId) as boolean)
-      : false;
+    // A turn with foldable steps gets a chevron and defaults to expanded while
+    // streaming, collapsed once complete. A step-less turn (e.g. a plain "hi"
+    // reply) has nothing to fold, so it stays expanded and shows a chevron-less
+    // metrics line. An explicit user toggle always wins.
+    const expanded =
+      hiddenCount === 0
+        ? true
+        : overrides.has(turnId)
+          ? (overrides.get(turnId) as boolean)
+          : isActiveTurn;
     const collapsed = !expanded;
 
     result.push({
       type: 'message',
       key: head.key,
       message: head.message,
-      collapse: { turnId, collapsed, hiddenCount },
+      collapse: {
+        turnId,
+        collapsed,
+        hiddenCount,
+        ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+        ...(hasUsage ? { inputTokens, outputTokens } : {}),
+        ...(cachedTokens > 0 ? { cachedTokens } : {}),
+        ...(isActiveTurn && promptTs !== undefined
+          ? { liveStartedAt: promptTs }
+          : {}),
+      },
     });
 
     if (!collapsed) {
@@ -494,9 +560,11 @@ export function applyTurnCollapse(
 
     // Collapsed: drop the hideable steps; keep the final answer (its own
     // thinking stripped) and any non-step rows (errors, cancellations, command
-    // output) in their original places.
+    // output) in their original places. On an active turn the "answer" is still
+    // streaming, so fold it away too rather than strand a provisional line.
     for (let i = start + 1; i <= end; i++) {
       const item = items[i];
+      if (i === answerIdx && isActiveTurn) continue;
       if (isHideableStep(item, i === answerIdx)) continue;
       if (
         i === answerIdx &&
@@ -618,6 +686,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       ReadonlyMap<string, boolean>
     >(() => new Map());
     const handleToggleCollapse = useCallback((turnId: string) => {
+      // (Un)folding a turn is the user reading history, not following the tail.
+      // Pause follow so the height change does not yank the viewport to the
+      // bottom — the toggled prompt row stays where it is on screen.
+      shouldFollow.current = false;
       setCollapseOverrides((prev) => {
         const currentlyExpanded = prev.get(turnId) ?? false;
         const next = new Map(prev);
