@@ -490,6 +490,7 @@ jobs:
           TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
         run: |
           VERDICT_FILE="$TRIAGE_RESULTS_DIR/product-decision.json"
+          BODY_FILE="$TRIAGE_RESULTS_DIR/product-comment.md"
           if [ -f "$VERDICT_FILE" ]; then
             VERDICT=$(jq -r '.verdict // "fail"' "$VERDICT_FILE")
           else
@@ -499,6 +500,10 @@ jobs:
             else
               VERDICT="fail"
             fi
+          fi
+          if [ "$VERDICT" != "skip" ] && [ ! -f "$BODY_FILE" ]; then
+            echo "::error::Product-decision agent produced verdict=${VERDICT} but no product comment body"
+            exit 1
           fi
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
           echo "::notice::Product decision verdict: $VERDICT"

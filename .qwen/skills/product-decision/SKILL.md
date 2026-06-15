@@ -132,7 +132,7 @@ On approach: <honest assessment — scope feels right / could be simpler / sugge
 — _Qwen Code · qwen3.7-max_
 ```
 
-**Publish-separation mode** — if `QWEN_PRODUCT_EMIT_ONLY` is set, do NOT post the comment yourself. Write the full marker comment body (including `<!-- qwen-triage:product -->`) to `$RESULTS_DIR/product-comment.md`, set `"review_action": "none"` in the verdict JSON, and skip Step 6. A separate privileged CI step dedups and posts it.
+**Publish-separation mode** — if `QWEN_PRODUCT_EMIT_ONLY` is set, do NOT post the comment yourself. For every non-`skip` verdict, write the full marker comment body (including `<!-- qwen-triage:product -->`) to `$RESULTS_DIR/product-comment.md`, set `"review_action": "none"` in the verdict JSON, and skip Step 6. A separate privileged CI step dedups and posts it.
 
 ### 6. Comment Dedup
 
