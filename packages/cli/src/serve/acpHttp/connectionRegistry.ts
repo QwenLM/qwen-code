@@ -87,6 +87,34 @@ export interface PendingClientRequest {
   kind: 'permission';
 }
 
+export interface AcpConnectionDiagnostic {
+  connectionIdPrefix: string;
+  fromLoopback: boolean;
+  destroyed: boolean;
+  lastActiveMs: number;
+  ownedSessionCount: number;
+  sessionBindingCount: number;
+  closingSessionCount: number;
+  pendingClientRequests: number;
+  connectionStreamOpen: boolean;
+  sessionStreams: number;
+  sseStreams: number;
+  wsStreams: number;
+  bufferedConnectionFrames: number;
+  bufferedSessionFrames: number;
+}
+
+export interface ConnectionRegistrySnapshot {
+  connectionCount: number;
+  connectionCap: number | null;
+  connectionStreams: number;
+  sessionStreams: number;
+  sseStreams: number;
+  wsStreams: number;
+  pendingClientRequests: number;
+  connections: AcpConnectionDiagnostic[];
+}
+
 export class AcpConnection {
   readonly connectionId: string;
   /** Connection-scoped SSE stream (the client's `GET /acp` with only the conn header). */
@@ -178,6 +206,45 @@ export class AcpConnection {
       this.sessions.set(sessionId, binding);
     }
     return binding;
+  }
+
+  getDiagnostic(): AcpConnectionDiagnostic {
+    const liveStreams = new Set<TransportStream>();
+    if (this.connStream && !this.connStream.isClosed) {
+      liveStreams.add(this.connStream);
+    }
+    let sessionStreams = 0;
+    let bufferedSessionFrames = 0;
+    for (const binding of this.sessions.values()) {
+      bufferedSessionFrames += binding.buffer.length;
+      if (binding.stream && !binding.stream.isClosed) {
+        sessionStreams += 1;
+        liveStreams.add(binding.stream);
+      }
+    }
+    let sseStreams = 0;
+    let wsStreams = 0;
+    for (const stream of liveStreams) {
+      if (stream.kind === 'sse') sseStreams += 1;
+      if (stream.kind === 'ws') wsStreams += 1;
+    }
+    return {
+      connectionIdPrefix: this.connectionId.slice(0, 8),
+      fromLoopback: this.fromLoopback,
+      destroyed: this.destroyed,
+      lastActiveMs: this.lastActiveMs,
+      ownedSessionCount: this.ownedSessions.size,
+      sessionBindingCount: this.sessions.size,
+      closingSessionCount: this.closingSessions.size,
+      pendingClientRequests: this.pending.size,
+      connectionStreamOpen:
+        this.connStream !== undefined && !this.connStream.isClosed,
+      sessionStreams,
+      sseStreams,
+      wsStreams,
+      bufferedConnectionFrames: this.connBuffer.length,
+      bufferedSessionFrames,
+    };
   }
 
   /** Send a frame on the connection-scoped stream (buffer until it attaches). */
@@ -400,6 +467,29 @@ export class ConnectionRegistry {
     return this.maxConnections;
   }
 
+  getSnapshot(): ConnectionRegistrySnapshot {
+    const connections = [...this.byId.values()].map((conn) =>
+      conn.getDiagnostic(),
+    );
+    return {
+      connectionCount: this.byId.size,
+      connectionCap:
+        this.maxConnections > 0 && Number.isFinite(this.maxConnections)
+          ? this.maxConnections
+          : null,
+      connectionStreams: connections.filter((conn) => conn.connectionStreamOpen)
+        .length,
+      sessionStreams: sumBy(connections, (conn) => conn.sessionStreams),
+      sseStreams: sumBy(connections, (conn) => conn.sseStreams),
+      wsStreams: sumBy(connections, (conn) => conn.wsStreams),
+      pendingClientRequests: sumBy(
+        connections,
+        (conn) => conn.pendingClientRequests,
+      ),
+      connections,
+    };
+  }
+
   dispose(): void {
     clearInterval(this.sweepTimer);
     for (const id of [...this.byId.keys()]) this.delete(id);
@@ -421,4 +511,10 @@ export class ConnectionRegistry {
       this.delete(id);
     }
   }
+}
+
+function sumBy<T>(values: readonly T[], select: (value: T) => number): number {
+  let total = 0;
+  for (const value of values) total += select(value);
+  return total;
 }
