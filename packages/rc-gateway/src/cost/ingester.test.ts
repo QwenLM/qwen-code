@@ -75,6 +75,19 @@ describe('extractUsage', () => {
     expect(extractUsage(frame({ inputTokens: 0, outputTokens: 0 }))).toBeNull();
   });
 
+  it('ignores a usage block on a non-agent_message_chunk frame (no double-count)', () => {
+    // A `result`-style frame also carrying usage must NOT be priced — only the
+    // agent_message_chunk locus is, so one turn is never counted twice.
+    const resultFrame = {
+      sessionId: 's1',
+      update: {
+        sessionUpdate: 'result',
+        _meta: { modelId: 'qwen3-coder-plus', usage: { input_tokens: 999 } },
+      },
+    };
+    expect(extractUsage(resultFrame)).toBeNull();
+  });
+
   it('captures modelServiceId and stage when present', () => {
     const u = extractUsage(
       frame({ inputTokens: 1 }, { modelServiceId: 'openai', stage: 'stage1' }),

@@ -564,8 +564,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   let pump: SessionEventPump | undefined;
   if (notifier || usageIngester) {
     pump = new SessionEventPump(handle.daemon, notifier, {
-      enforcer,
-      ...(onSessionIdle ? { onSessionIdle } : {}),
+      enforcer, // already notifier-gated (undefined when push off) → no auto-vote change
+      // Idle suggestions previously rode on the push pump (they only ran when a
+      // notifier was present). Keep that coupling: a cost-only pump (push off) must
+      // NOT newly activate idle suggestions — enabling cost tracking must not change
+      // idle behavior. So gate the idle hook on `notifier`, not just `onSessionIdle`.
+      ...(onSessionIdle && notifier ? { onSessionIdle } : {}),
       ...(usageIngester
         ? {
             onEvent: (sid, ev) =>

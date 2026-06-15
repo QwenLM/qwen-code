@@ -64,11 +64,23 @@ function firstString(...vals: unknown[]): string {
  * Pull a usage block out of a `session_update` frame's `data`, or `null` when the
  * frame carries no usage. Reads `data.update._meta.usage` (the runtime shape) and
  * is tolerant of camelCase/snake_case token spellings.
+ *
+ * Gated to `agent_message_chunk` — the ONE update type the serve demo reads usage
+ * on (at message end). Other frames may ALSO carry a usage block (e.g. a `result`
+ * message in protocol.ts), and counting both would double-charge the same turn; so
+ * usage is taken only from the confirmed locus, never every frame that happens to
+ * carry `_meta.usage`.
  */
 export function extractUsage(data: unknown): ExtractedUsage | null {
   if (!data || typeof data !== 'object') return null;
   const update = (data as { update?: unknown }).update ?? data;
   if (!update || typeof update !== 'object') return null;
+  if (
+    (update as { sessionUpdate?: unknown }).sessionUpdate !==
+    'agent_message_chunk'
+  ) {
+    return null; // only price the assistant message-chunk usage (no double-count)
+  }
   const meta = (update as { _meta?: unknown })._meta;
   if (!meta || typeof meta !== 'object') return null;
   const usage = (meta as { usage?: unknown }).usage;
