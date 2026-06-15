@@ -378,7 +378,13 @@ jobs:
           # shellcheck disable=SC2016
           configure_qwen_network() {
             local openai_host proxy_bin
+            if ! command -v node >/dev/null 2>&1; then
+              fail "node is required to parse OPENAI_BASE_URL for the proxy bypass."
+            fi
             openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            if [ -z "$openai_host" ]; then
+              fail "Could not parse a hostname from OPENAI_BASE_URL."
+            fi
             export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
             export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
 
@@ -389,7 +395,7 @@ jobs:
             export QWEN_CI_https_proxy="${https_proxy:-}"
             export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
             export QWEN_CI_http_proxy="${http_proxy:-}"
-            proxy_bin="$RUNNER_TEMP/qwen-network-bin"
+            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
             mkdir -p "$proxy_bin"
 
             if command -v gh >/dev/null 2>&1; then
