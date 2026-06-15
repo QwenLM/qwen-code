@@ -48,6 +48,13 @@ export default {
   'Uninstalling "{{name}}"...': 'Uninstalling "{{name}}"...',
   'Update available for "{{name}}".': 'Update available for "{{name}}".',
   '"{{name}}" is already up to date.': '"{{name}}" is already up to date.',
+  'Checking "{{name}}" for updates...': 'Checking "{{name}}" for updates...',
+  '"{{name}}" does not support update checks.':
+    '"{{name}}" does not support update checks.',
+  '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).':
+    '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).',
+  'Failed to check "{{name}}" for updates.':
+    'Failed to check "{{name}}" for updates.',
   'Claude plugin marketplace': 'Claude plugin marketplace',
   Commands: 'Commands',
   'Components:': 'Components:',

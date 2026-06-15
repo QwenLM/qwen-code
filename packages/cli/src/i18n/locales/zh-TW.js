@@ -48,6 +48,11 @@ export default {
   'Uninstalling "{{name}}"...': '正在卸載 "{{name}}"...',
   'Update available for "{{name}}".': '"{{name}}" 有可用更新。',
   '"{{name}}" is already up to date.': '"{{name}}" 已是最新。',
+  'Checking "{{name}}" for updates...': '正在檢查 "{{name}}" 的更新...',
+  '"{{name}}" does not support update checks.': '"{{name}}" 不支援檢查更新。',
+  '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).':
+    '"{{name}}" 無法檢查更新（Claude 市場源插件需卸載後重裝來更新）。',
+  'Failed to check "{{name}}" for updates.': '檢查 "{{name}}" 的更新失敗。',
   'Claude plugin marketplace': 'Claude 外掛市場',
   Commands: '命令',
   'Components:': '元件：',

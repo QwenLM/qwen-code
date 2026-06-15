@@ -145,17 +145,48 @@ export const ExtensionActionsView = ({
             break;
           case 'mark-update': {
             // Check only the selected extension (not every installed one), and
-            // surface the result so "Update Now" can appear right away.
-            const checked = await checkForExtensionUpdate(extension, manager);
-            setCheckedUpdateState(checked);
-            const updateAvailable =
-              (checked as string) === ExtensionUpdateState.UPDATE_AVAILABLE;
+            // surface the result so "Update Now" can appear right away. Git /
+            // GitHub-release / npm checks hit the network, so show a pending
+            // line first; other types resolve instantly.
             onStatus({
               type: 'info',
-              text: updateAvailable
-                ? t('Update available for "{{name}}".', { name })
-                : t('"{{name}}" is already up to date.', { name }),
+              text: t('Checking "{{name}}" for updates...', { name }),
             });
+            const checked = (await checkForExtensionUpdate(
+              extension,
+              manager,
+            )) as string;
+            setCheckedUpdateState(checked);
+            if (checked === ExtensionUpdateState.UPDATE_AVAILABLE) {
+              onStatus({
+                type: 'info',
+                text: t('Update available for "{{name}}".', { name }),
+              });
+            } else if (checked === ExtensionUpdateState.ERROR) {
+              onStatus({
+                type: 'error',
+                text: t('Failed to check "{{name}}" for updates.', { name }),
+              });
+            } else if (checked === ExtensionUpdateState.NOT_UPDATABLE) {
+              onStatus({
+                type: 'info',
+                // Claude marketplace plugins are install-time conversions with
+                // no git remote, so there's nothing to diff against — spell out
+                // the reason and the workaround.
+                text:
+                  extension.installMetadata?.originSource === 'Claude'
+                    ? t(
+                        '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).',
+                        { name },
+                      )
+                    : t('"{{name}}" does not support update checks.', { name }),
+              });
+            } else {
+              onStatus({
+                type: 'info',
+                text: t('"{{name}}" is already up to date.', { name }),
+              });
+            }
             break;
           }
           case 'update':
