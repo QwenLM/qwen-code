@@ -288,6 +288,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         mdnsAdvertiser?.advertising
           ? { advertising: true, instanceName: mdnsAdvertiser.instanceName }
           : { advertising: false },
+      clientsManifestReadToml: () =>
+        readFile(join(homedir(), '.qwen', 'rc', 'clients.toml'), 'utf8').then(
+          (text) => text,
+          (err: NodeJS.ErrnoException) => {
+            if (err.code === 'ENOENT') return null; // not configured → warning
+            throw err; // unexpected → route degrades to warning, never 5xx
+          },
+        ),
       onPromptAccepted: usageStore
         ? (sid, attr) => {
             sessionAttribution.set(sid, attr);

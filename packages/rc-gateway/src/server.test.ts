@@ -44,7 +44,10 @@ afterEach(async () => {
   stub = undefined;
 });
 
-async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
+async function boot(
+  stubOpts?: Parameters<typeof startStubDaemon>[0],
+  extraDeps?: Partial<Parameters<typeof createGatewayApp>[0]>,
+): Promise<{
   url: string;
   pairing: PairingService;
   store: TokenStore;
@@ -73,6 +76,7 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
     pushStore,
     snooze,
     commandsUserDir,
+    ...extraDeps,
   }); // `audit` is also returned; boot() does not need it here.
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -1243,5 +1247,54 @@ describe('gateway app', () => {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(403);
+  });
+});
+
+describe('GET /ui/clients-manifest.json (multi-workspace-client)', () => {
+  const TOML = '[[daemon]]\nname = "a"\nurl = "https://h:4170"\n';
+  async function redeem(
+    url: string,
+    pairing: PairingService,
+    scopes: string[],
+  ) {
+    const { code } = pairing.mint(scopes);
+    const r = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'x' }),
+    });
+    return ((await r.json()) as { token: string }).token;
+  }
+
+  it('owner token → 200 parsed manifest (route resolves before the static /ui mount)', async () => {
+    const { url, pairing } = await boot(undefined, {
+      clientsManifestReadToml: async () => TOML,
+    });
+    const token = await redeem(url, pairing, [OWNER]);
+    const r = await fetch(`${url}/ui/clients-manifest.json`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as { daemons: unknown[] };
+    expect(body.daemons).toHaveLength(1);
+  });
+
+  it('read-scope token → 403', async () => {
+    const { url, pairing } = await boot(undefined, {
+      clientsManifestReadToml: async () => TOML,
+    });
+    const token = await redeem(url, pairing, [SESSION_READ]);
+    const r = await fetch(`${url}/ui/clients-manifest.json`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(r.status).toBe(403);
+  });
+
+  it('no token → 401', async () => {
+    const { url } = await boot(undefined, {
+      clientsManifestReadToml: async () => TOML,
+    });
+    const r = await fetch(`${url}/ui/clients-manifest.json`);
+    expect(r.status).toBe(401);
   });
 });

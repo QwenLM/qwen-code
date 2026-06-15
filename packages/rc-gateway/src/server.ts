@@ -41,6 +41,7 @@ import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
 import { createUsageRoute, type UsageReader } from './routes/usage.js';
 import { createCapabilityRoute } from './routes/capabilities.js';
+import { createClientsManifestRoute } from './routes/clientsManifest.js';
 import type { AggregateQuery } from './cost/usageStore.js';
 import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
@@ -161,6 +162,12 @@ export interface GatewayDeps {
    * mdns block is absent (e.g. discovery feature not wired).
    */
   mdnsStatus?: () => { advertising: boolean; instanceName?: string };
+  /**
+   * Read `~/.qwen/rc/clients.toml` for the owner-only multi-workspace registry
+   * (`add-multi-workspace-client`). Resolve `null` on ENOENT, reject on other
+   * errors. When set, `GET /ui/clients-manifest.json` mounts.
+   */
+  clientsManifestReadToml?: () => Promise<string | null>;
 }
 
 export interface GatewayApp {
@@ -282,6 +289,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   };
   app.get('/ui/share', serveSharePage);
   app.get('/ui/share/:token', serveSharePage);
+
+  // Multi-workspace daemon registry (add-multi-workspace-client). Lives in the
+  // unauthenticated /ui/ namespace but is OWNER-only, so it carries route-level
+  // bearerResolve + requireScope(OWNER) and is registered BEFORE the static /ui
+  // mount (the global bearer middleware runs after that mount). The handler reads
+  // ~/.qwen/rc/clients.toml; the body (urls/tokenStorageKeys) is never logged.
+  if (deps.clientsManifestReadToml) {
+    app.get(
+      '/ui/clients-manifest.json',
+      bearerResolve(deps.store, audit),
+      requireScope(OWNER, audit),
+      createClientsManifestRoute({
+        readToml: deps.clientsManifestReadToml,
+        now: () => Date.now(),
+      }),
+    );
+  }
 
   app.use('/ui', express.static(webRoot, { fallthrough: false }));
 
