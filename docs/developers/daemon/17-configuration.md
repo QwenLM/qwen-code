@@ -116,7 +116,7 @@ The daemon reads settings once at boot through `loadSettings(boundWorkspace)` in
 | `fileSystem`                                                                                                            | `BridgeFileSystem` adapter. See [`07-workspace-filesystem.md`](./07-workspace-filesystem.md). |
 | `permissionPolicy`, `permissionConsensusQuorum`, `permissionAudit`                                                      | Mediator wiring.                                                                              |
 | `statusProvider`                                                                                                        | Daemon-host preflight cells.                                                                  |
-| `childEnvOverrides`                                                                                                     | Per-handle environment additions or removals.                                                  |
+| `childEnvOverrides`                                                                                                     | Per-handle environment additions or removals.                                                 |
 | `contextFilename`                                                                                                       | Overrides `getCurrentGeminiMdFilename()`.                                                     |
 | `channelIdleTimeoutMs`                                                                                                  | How long to keep the ACP child alive after the last session closes, in ms; default `0`.       |
 
@@ -132,11 +132,11 @@ The daemon reads settings once at boot through `loadSettings(boundWorkspace)` in
 | `WARN_THRESHOLD_RATIO`            | `eventBus.ts`           | `0.75`            | `slow_client_warning` trigger.                                    |
 | `WARN_RESET_RATIO`                | `eventBus.ts`           | `0.375`           | Hysteresis re-arm threshold.                                      |
 | `DEFAULT_INIT_TIMEOUT_MS`         | `bridge.ts`             | `10_000`          | ACP `initialize` handshake timeout.                               |
-| `MCP_RESTART_TIMEOUT_MS`          | `bridge.ts`             | `300_000`         | Bridge timeout for `/workspace/mcp/:server/restart`.               |
+| `MCP_RESTART_TIMEOUT_MS`          | `bridge.ts`             | `300_000`         | Bridge timeout for `/workspace/mcp/:server/restart`.              |
 | `DEFAULT_PERMISSION_TIMEOUT_MS`   | `bridge.ts`             | `5 * 60_000`      | Per-permission request wallclock.                                 |
 | `DEFAULT_MAX_PENDING_PER_SESSION` | `bridge.ts`             | `64`              | Aligned with `DEFAULT_MAX_SUBSCRIBERS`.                           |
 | `MAX_RESOLVED_PERMISSION_RECORDS` | `permissionMediator.ts` | `512`             | FIFO for recently resolved permissions.                           |
-| `KILL_HARD_DEADLINE_MS`           | `bridge.ts`             | `10_000`          | Per-channel graceful shutdown window.                             |
+| `KILL_HARD_DEADLINE_MS`           | `spawnChannel.ts`       | `10_000`          | Per-channel graceful shutdown window.                             |
 | `SHUTDOWN_FORCE_CLOSE_MS`         | `runQwenServe.ts`       | `5_000`           | HTTP server force-close timer.                                    |
 | `MAX_READ_BYTES`                  | `fs/policy.ts`          | `256 * 1024`      | Read cap.                                                         |
 | `MAX_WRITE_BYTES`                 | `fs/policy.ts`          | `5 * 1024 * 1024` | Write cap.                                                        |

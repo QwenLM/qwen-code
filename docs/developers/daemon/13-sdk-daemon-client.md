@@ -56,7 +56,7 @@ Method groups (every method takes an optional `clientId` to stamp `X-Qwen-Client
 | Files               | `readFile`, `readFileBytes`, `writeFile`, `editFile`, `listDirectory`, `globPaths`, `statPath`                                                                                                                                      |
 | Auth                | `startDeviceFlow`, `pollDeviceFlow`, `cancelDeviceFlow`, `getAuthStatus`                                                                                                                                                            |
 
-### `fetchWithTimeout` (BRN1o behavior)
+### `fetchWithTimeout`
 
 Every request goes through `fetchWithTimeout`. Critical details:
 

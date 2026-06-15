@@ -244,7 +244,7 @@ sequenceDiagram
 
 After authenticating, `caps.features.includes('require_auth')` confirms the deployment is hardened.
 
-### Wave-4 mutation gate on no-token loopback
+### Wave 4 mutation gate on no-token loopback
 
 ```mermaid
 sequenceDiagram

@@ -73,19 +73,26 @@ Typed classes thrown by the bridge / mediator. Most carry an HTTP status via the
 | `UpstreamDeviceFlowError`    | The upstream IdP returns a structured error while polling. | `oauthError` is sanitized with `sanitizeForStderr` before interpolation into stderr or audit hints (CVE-2021-42574 / Trojan Source defense; see [`12-auth-security.md`](./12-auth-security.md)).                                                                                                                                                                                                                                         |
 | `DeviceFlowPollTimeoutError` | The registry race timer fires before the provider returns. | Provider code must not throw this type. It is exported for tests, but the registry gates `pollTimedOut` on the runtime brand `_isRegistryTimeout: boolean`, not `instanceof`. A provider that imports and throws `new DeviceFlowPollTimeoutError(ms)` still follows the generic provider-throw audit path because `_isRegistryTimeout` defaults to `false`; only the internal factory `makeRegistryPollTimeoutError(ms)` sets the brand. |
 
-## Daemon-host error kinds (`packages/cli/src/serve/status.ts`)
+## Daemon-host error kinds (`packages/acp-bridge/src/status.ts`)
 
-`DaemonErrorKind` enum used by `GET /workspace/preflight` cells when the daemon-host check fails:
+`SERVE_ERROR_KINDS` is the closed enum used by diagnostic cells and structured daemon errors:
 
-| Kind             | Meaning                                       |
-| ---------------- | --------------------------------------------- |
-| `missing_binary` | `ripgrep` / `git` / `npm` not on PATH.        |
-| `blocked_egress` | Outbound network probe failed.                |
-| `auth_env_error` | Auth-related env var malformed.               |
-| `init_timeout`   | Daemon-side init step exceeded its wallclock. |
-| `protocol_error` | ACP / HTTP protocol mismatch.                 |
-| `missing_file`   | Required local file missing.                  |
-| `parse_error`    | Local file parse error.                       |
+| Kind                       | Meaning                                                                 |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `missing_binary`           | Required local executable or CLI entry could not be resolved.           |
+| `blocked_egress`           | Outbound network probe failed.                                          |
+| `auth_env_error`           | Auth-related env var, provider, or trust-gate configuration is invalid. |
+| `init_timeout`             | Daemon-side init step exceeded its wallclock.                           |
+| `protocol_error`           | ACP / HTTP protocol mismatch.                                           |
+| `missing_file`             | Required local file missing.                                            |
+| `parse_error`              | Local file or request parse error.                                      |
+| `stat_failed`              | Local filesystem stat failed.                                           |
+| `budget_exhausted`         | MCP budget enforcement refused discovery or a server entry.             |
+| `mcp_budget_would_exceed`  | MCP restart or mutation would exceed the configured budget.             |
+| `mcp_server_spawn_failed`  | MCP server spawn or restart failed.                                     |
+| `invalid_config`           | MCP or daemon configuration was invalid.                                |
+| `prompt_deadline_exceeded` | Prompt wallclock deadline expired.                                      |
+| `writer_idle_timeout`      | SSE writer made no successful writes before its idle timeout.           |
 
 These are surfaced through the preflight cell's `errorKind` so client UIs render structured remediation (not raw stack traces).
 

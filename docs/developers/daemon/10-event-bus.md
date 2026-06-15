@@ -150,7 +150,7 @@ Critical contracts (and what the #4360 review corrected):
 
 - **No `id`** — same no-slot pattern as `client_evicted`, so it does not occupy a slot in the per-session monotonic sequence other subscribers observe.
 - **Stream stays open** — unlike `client_evicted` (genuinely terminal), `state_resync_required` is recovery-oriented. Replay + live frames continue flowing afterward.
-- **Reducer auto-skips deltas** — the SDK side flips `awaitingResync = true` and only applies `state_resync_required` itself + the four terminal frames (`session_died`, `session_closed`, `client_evicted`, `stream_error`) until consumer code calls `loadSession` and clears the flag. See [`09-event-schema.md`](./09-event-schema.md) for `RESYNC_PASSTHROUGH_TYPES`.
+- **Reducer auto-skips deltas** — the SDK side flips `awaitingResync = true` and applies only `state_resync_required`, the terminal frames, and full-state snapshots until consumer code calls `loadSession` and clears the flag. See [`09-event-schema.md`](./09-event-schema.md) for `RESYNC_PASSTHROUGH_TYPES`.
 - **Network-friendly** — frames stay on the wire so the SDK can compute a "what you missed" diff later if it wants to. No extra reconnect cycle is required.
 
 ### Eviction terminal flow
@@ -161,7 +161,7 @@ When a subscriber's live backlog has been at `maxQueued` and the next `push()` r
 2. Construct `client_evicted` frame **without `id`** — `{ v: 1, type: 'client_evicted', data: { reason: 'queue_overflow', droppedAfter: <last delivered id> } }`.
 3. `queue.forcePush(evictionFrame)` so the consumer iterator sees one terminal frame.
 4. `queue.close()` so iteration unwinds after the terminal frame.
-5. Call `sub.dispose()` — removes from `subs` and detaches the `AbortSignal` listener (the **BmJT1 fix**: without this, stalled consumers' closures remain live until `AbortSignal` garbage collection).
+5. Call `sub.dispose()` — removes from `subs` and detaches the `AbortSignal` listener; without this cleanup, stalled consumers' closures remain live until `AbortSignal` garbage collection.
 
 ### Abort flow
 
@@ -198,7 +198,7 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 - **Synthetic frames have no `id`.** SDK consumers using `Last-Event-ID` resume only record frames with ids; `slow_client_warning`, `client_evicted`, `state_resync_required`, and `replay_complete` do not advance the cursor and do not consume per-session sequence numbers. If two id-bearing live frames have a real gap, handle it through the ring-eviction / epoch-reset resync path rather than treating it as a private synthetic frame.
 - `client_evicted` is **per-subscriber**, not per-session. The same client can reconnect.
 - `BoundedAsyncQueue` iterator is **not safe for concurrent drivers** — two simultaneous `.next()` calls would race for the same event. Daemon usage is sequential (`for await ... of` in the SSE route handler), so this is safe in production.
-- The bus is currently package-private; channels and webui that want to subscribe must do so through the daemon's HTTP SSE route, not by reaching into the bus directly. Stage 1.5 will lift this.
+- The bus is currently package-private; channels and the web UI must subscribe through the daemon's HTTP SSE route, not by reaching into the bus directly. Stage 1.5 will lift this.
 
 ## References
 

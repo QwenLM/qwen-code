@@ -102,7 +102,7 @@ Use these anchors when moving from the docs into the latest `main` code:
 ## What is intentionally out of scope
 
 - **Java / Python SDK daemon clients** - only the TypeScript SDK ships a daemon client today. Doc 13 is TypeScript-only.
-- **Web UI product details** - the shared transcript layer and webui daemon entry points are covered here, but product UI layout is tracked in `docs/developers/daemon-ui/` and adapter design notes.
+- **Web UI product details** - the shared transcript layer and web UI daemon entry points are covered here, but product UI layout is tracked in `docs/developers/daemon-ui/` and adapter design notes.
 - **Zed extension (`packages/zed-extension/`)** - it launches `qwen --acp` over stdio directly and bypasses the daemon.
 - **Experimental in-process hosting** - `--no-http-bridge` still falls back to http-bridge today; a stable in-process serve mode would need new docs when it lands.
 
@@ -117,7 +117,7 @@ Use these anchors when moving from the docs into the latest `main` code:
 | Session lifecycle         | `POST /session`, `load`, `resume`, metadata patch, heartbeat, eviction, idle reaping, prompt pending limits, and graceful close are documented.                                  | [`08`](./08-session-lifecycle.md), [`10`](./10-event-bus.md)              |
 | ACP bridge                | Single ACP child multiplexed by default; `sessionScope` supports `single` and `thread`; `BridgeFileSystem`, context filename, env overrides, and channel idle timeout are wired. | [`03`](./03-acp-bridge.md), [`07`](./07-workspace-filesystem.md)          |
 | MCP pool / budget         | Workspace MCP pool is on by default unless `QWEN_SERVE_NO_MCP_POOL=1`; guardrail events and restart semantics are documented.                                                    | [`05`](./05-mcp-transport-pool.md), [`06`](./06-mcp-budget-guardrails.md) |
-| Permissions               | F3 mediator supports `first-responder`, `designated`, `consensus`, and `local-only`; settings validation is fail-loud.                                                           | [`04`](./04-permission-mediation.md), [`12`](./12-auth-security.md)       |
+| Permissions               | F3 mediator supports `first-responder`, `designated`, `consensus`, and `local-only`; invalid settings fail explicitly.                                                           | [`04`](./04-permission-mediation.md), [`12`](./12-auth-security.md)       |
 
 ### Wire protocol
 
@@ -144,7 +144,7 @@ Use these anchors when moving from the docs into the latest `main` code:
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
 | Configuration           | Full `qwen serve` flags, env vars, `settings.json`, `ServeOptions`, `BridgeOptions`, and important constants are collected in one page.                   | [`17`](./17-configuration.md)         |
 | Quickstart / operations | Shortest startup path, launch recipes, curl checks, demo page auth behavior, route split, shutdown behavior, and embedded invocation recipes are covered. | [`20`](./20-quickstart-operations.md) |
-| Errors                  | Boot-time fail-loud errors, route errors, bridge errors, EventBus errors, filesystem errors, and mediator errors are summarized with remediation.         | [`18`](./18-error-taxonomy.md)        |
+| Errors                  | Boot-time explicit failures, route errors, bridge errors, EventBus errors, filesystem errors, and mediator errors are summarized with remediation.        | [`18`](./18-error-taxonomy.md)        |
 | Observability           | `QWEN_SERVE_DEBUG`, curl recipes, useful events, telemetry gaps, and investigation checklists are documented.                                             | [`19`](./19-observability.md)         |
 
 ### Historical or deprecated surfaces

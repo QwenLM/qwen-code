@@ -53,7 +53,7 @@ QWEN_SERVE_DEBUG=1 qwen serve
 # 9. Disable the F2 pool (fallback to per-session MCP clients)
 QWEN_SERVE_NO_MCP_POOL=1 qwen serve
 
-# 10. Allow browser webui cross-origin access
+# 10. Allow browser web UI cross-origin access
 QWEN_SERVER_TOKEN=secret \
   qwen serve --allow-origin 'http://localhost:3000'
 
@@ -141,21 +141,21 @@ Settings I/O failure, such as malformed JSON, falls back to defaults. `InvalidPo
 
 `runQwenServe.ts` intentionally throws instead of falling back in these cases:
 
-| Scenario                                                                      | Error prefix                                                                                       |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Non-loopback bind without token                                               | `Refusing to bind ... without a bearer token`                                                      |
-| `--require-auth` without token                                                | `Refusing to start with --require-auth set but no bearer token`                                    |
-| `--workspace` does not exist, is not a directory, or is not absolute          | `Invalid --workspace ...`                                                                          |
-| `--workspace` stat permission denied                                          | `Invalid --workspace ...: permission denied`                                                       |
-| `--mcp-client-budget` is not a positive integer                               | `Must be a positive integer`                                                                       |
-| `--mcp-budget-mode=enforce` without budget                                    | `requires a positive mcpClientBudget`                                                              |
-| `--hostname` is written as `localhost:4170`                                   | `looks like a "host:port" combination. Use --port`                                                 |
+| Scenario                                                                      | Error prefix                                                                                        |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Non-loopback bind without token                                               | `Refusing to bind ... without a bearer token`                                                       |
+| `--require-auth` without token                                                | `Refusing to start with --require-auth set but no bearer token`                                     |
+| `--workspace` does not exist, is not a directory, or is not absolute          | `Invalid --workspace ...`                                                                           |
+| `--workspace` stat permission denied                                          | `Invalid --workspace ...: permission denied`                                                        |
+| `--mcp-client-budget` is not a positive integer                               | `Must be a positive integer`                                                                        |
+| `--mcp-budget-mode=enforce` without budget                                    | `requires a positive mcpClientBudget`                                                               |
+| `--hostname` is written as `localhost:4170`                                   | `looks like a "host:port" combination. Use --port`                                                  |
 | `--hostname [::1]:8080`                                                       | `Invalid --hostname ... brackets indicate an IPv6 literal but the value is not a clean [addr] form` |
-| `--max-connections` is `NaN` or negative                                      | `Must be >= 0`                                                                                     |
-| `--event-ring-size > 1_000_000`                                               | Thrown during bridge construction                                                                  |
-| `--allow-origin '*'` without token                                            | `Refusing to start with --allow-origin '*' but no bearer token configured`                         |
-| `--prompt-deadline-ms` / `--writer-idle-timeout-ms` is not a positive integer | `Must be a positive integer`                                                                       |
-| Unknown `policy.permissionStrategy` or non-positive `policy.consensusQuorum`  | `InvalidPolicyConfigError`                                                                         |
+| `--max-connections` is `NaN` or negative                                      | `Must be >= 0`                                                                                      |
+| `--event-ring-size > 1_000_000`                                               | Thrown during bridge construction                                                                   |
+| `--allow-origin '*'` without token                                            | `Refusing to start with --allow-origin '*' but no bearer token configured`                          |
+| `--prompt-deadline-ms` / `--writer-idle-timeout-ms` is not a positive integer | `Must be a positive integer`                                                                        |
+| Unknown `policy.permissionStrategy` or non-positive `policy.consensusQuorum`  | `InvalidPolicyConfigError`                                                                          |
 
 ## 7. Curl verification checklist
 
@@ -202,11 +202,11 @@ When bearer auth is enabled, add `-H "Authorization: Bearer $QWEN_SERVER_TOKEN"`
 
 **Yes.** It is implemented by `getDemoHtml(port)` in `packages/cli/src/serve/demo.ts` as self-contained HTML with no external dependency.
 
-| Launch mode                       | Where `/demo` is registered                                         | Direct browser navigation                         |
-| --------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------- |
-| Loopback without `--require-auth` | `server.ts` loopback pre-auth route branch, **before** `bearerAuth` | Works without token                               |
+| Launch mode                       | Where `/demo` is registered                                         | Direct browser navigation                              |
+| --------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------ |
+| Loopback without `--require-auth` | `server.ts` loopback pre-auth route branch, **before** `bearerAuth` | Works without token                                    |
 | Loopback with `--require-auth`    | `server.ts` post-auth route branch, **after** `bearerAuth`          | Difficult to use from a plain browser; use curl or SDK |
-| Non-loopback bind                 | `server.ts` post-auth route branch, **after** `bearerAuth`          | Same as above                                     |
+| Non-loopback bind                 | `server.ts` post-auth route branch, **after** `bearerAuth`          | Same as above                                          |
 
 CSP is `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'`, plus `X-Frame-Options: DENY`. The page can only fetch `'self'` (the daemon) and cannot load external scripts or styles.
 

@@ -245,6 +245,7 @@ While `awaitingResync = true`, the reducer **skips delta application** and only 
 | `session_closed`        | Same as above.                                                                 |
 | `client_evicted`        | Same as above.                                                                 |
 | `stream_error`          | Same as above.                                                                 |
+| `session_snapshot`      | Full-state authoritative frame; safe to apply during resync.                   |
 
 `lastEventId` still advances monotonically through `advanceLastEventId(base)` during resync. After the caller resets and clears `awaitingResync`, subsequent deltas align to the correct cursor.
 

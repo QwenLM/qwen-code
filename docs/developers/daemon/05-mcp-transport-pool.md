@@ -199,7 +199,7 @@ sequenceDiagram
     end
 ```
 
-The preflight budget check at the daemon HTTP layer returns `{restarted:false, skipped:true, reason:'budget_would_exceed'}` (Wave-4 PR 17) when the target's slot is not already reserved and a restart would push live count over `enforce` budget.
+The preflight budget check at the daemon HTTP layer returns `{restarted:false, skipped:true, reason:'budget_would_exceed'}` (Wave 4 mutation control) when the target's slot is not already reserved and a restart would push live count over `enforce` budget.
 
 ### `drainAll`
 
@@ -251,7 +251,7 @@ Transports outside the configured `pooledTransports` allowlist (HTTP, SSE, and S
 
 - Stored in `entries` AND tracked in `unpooledIds: Set<ConnectionId>` so `release` / `releaseSession` can fast-path the close-on-detach behavior (refs always max out at 1).
 - `McpClient.discover()` is used directly instead of pool replay; `applyTools` / `applyPrompts` are no-ops because the session's registries already hold what was registered (W77 / `skipReplay: true` in `attach()`).
-- Workspace budget still gates them — F2 commit 6 closed the prior loophole where unpooled connections bypassed `tryReserve`; the same `WorkspaceMcpBudget` slot is reserved and released on entry close (whether pooled or unpooled).
+- Workspace budget still gates them — the F2 budget follow-up closed the prior loophole where unpooled connections bypassed `tryReserve`; the same `WorkspaceMcpBudget` slot is reserved and released on entry close (whether pooled or unpooled).
 
 The W77 race (`cb206da36`): `createUnpooledConnection` stores the entry in `this.entries` BEFORE awaiting `client.connect()` / `client.discover()`, but only indexes `sessionToEntries[sessionId]` AFTER `attach()` succeeds. A concurrent `closeStoredSession()` / `releaseSession(sessionId)` during the connect/discover window saw an empty index, let the unpooled spawn finish, and `attach()` then registered tools/prompts into an already-closed session. The fix:
 
@@ -277,9 +277,9 @@ When the pool is active, each `ServeWorkspaceMcpStatus` server cell
 ignore them under the additive protocol contract.
 
 Pool snapshots also expose `subprocessCount`. It counts only the `'stdio'`
-family: websocket, HTTP, and SSE dial remote servers and do not create local
-child processes. Early versions counted websocket as local subprocesses, which
-inflated resource dashboards.
+family. WebSocket, HTTP, and SSE transports connect to remote servers and do
+not spawn local child processes. Early versions counted WebSocket transports as
+local subprocesses, which inflated resource dashboards.
 
 ## Drain runs from both shutdown paths
 

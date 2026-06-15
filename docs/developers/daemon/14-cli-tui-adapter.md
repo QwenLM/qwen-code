@@ -124,7 +124,7 @@ flowchart LR
     G --> I["selectors<br/>selectCurrentTool / selectApprovalMode / ..."]
 ```
 
-Hosts can stop at `(E)` and implement their own reducer, or consume `(G)` and the provided selectors. webui uses the full `(B) -> (H)` path. A migrated TUI can consume `(G)` and render with Ink-specific components.
+Hosts can stop at `(E)` and implement their own reducer, or consume `(G)` and the provided selectors. The web UI uses the full `(B) -> (H)` path. A migrated TUI can consume `(G)` and render with Ink-specific components.
 
 ### `state_resync_required`
 
@@ -139,7 +139,7 @@ This landed in [#4328](https://github.com/QwenLM/qwen-code/pull/4328).
 | File                        | Exports                                                                                                                                                                                                                                                                                                                        |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `DaemonSessionProvider.tsx` | React `<DaemonSessionProvider />`; `useDaemonSession()`, `useDaemonTranscriptStore()`, `useDaemonTranscriptState()`, `useDaemonTranscriptBlocks()`, `useDaemonPendingPermissions()`, `useDaemonActions()`, `useDaemonConnection()` hooks; `DaemonConnectionStatus`, `DaemonConnectionState`, `DaemonSessionContextValue` types |
-| `transcriptAdapter.ts`      | Adapts SDK `DaemonTranscriptBlock` into webui `UnifiedMessage`, including markdown streaming chunk merge and tool call summaries                                                                                                                                                                                               |
+| `transcriptAdapter.ts`      | Adapts SDK `DaemonTranscriptBlock` into the web UI's `UnifiedMessage`, including markdown streaming chunk merge and tool call summaries                                                                                                                                                                                        |
 | `index.ts`                  | Subpackage barrel                                                                                                                                                                                                                                                                                                              |
 
 The web UI can now connect directly to daemon HTTP+SSE and render a transcript. The old `ACPAdapter` host `postMessage` path remains available.
@@ -190,4 +190,4 @@ The web UI can now connect directly to daemon HTTP+SSE and render a transcript. 
 - `packages/sdk-typescript/src/daemon/index.ts` (`ui/*` re-export block)
 - `packages/webui/src/daemon/DaemonSessionProvider.tsx`, `transcriptAdapter.ts`
 - Upstream docs: [`../daemon-ui/README.md`](../daemon-ui/README.md), [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md), [`../daemon-client-adapters/web-ui.md`](../daemon-client-adapters/web-ui.md)
-- Context PRs: [#4328](https://github.com/QwenLM/qwen-code/pull/4328) (v1 transcript layer and webui provider), [#4353](https://github.com/QwenLM/qwen-code/pull/4353) (v2 unified completeness follow-up)
+- Context PRs: [#4328](https://github.com/QwenLM/qwen-code/pull/4328) (v1 transcript layer and web UI provider), [#4353](https://github.com/QwenLM/qwen-code/pull/4353) (v2 unified completeness follow-up)

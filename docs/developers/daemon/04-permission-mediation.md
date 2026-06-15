@@ -267,7 +267,7 @@ mechanism does not exist in v1.
 ## References
 
 - `packages/acp-bridge/src/permission.ts` (frozen contract)
-- `packages/acp-bridge/src/permissionMediator.ts` (implementation; F3 commits 6+7)
+- `packages/acp-bridge/src/permissionMediator.ts` (F3 mediator implementation)
 - `packages/acp-bridge/src/bridgeClient.ts` (uses structural sub-typing on `PermissionMediator`)
 - `packages/acp-bridge/src/bridgeErrors.ts` (`CancelSentinelCollisionError`, `InvalidPermissionOptionError`, `PermissionForbiddenError`)
 - `packages/cli/src/serve/permissionAudit.ts` (audit ring + publisher)
