@@ -1226,7 +1226,7 @@ function collectDirectoryRows(options: CrawlOptions): string[] {
       rows.push(row);
     }
 
-    if (options.maxDepth !== undefined && depth >= options.maxDepth) {
+    if (options.maxDepth !== undefined && depth > options.maxDepth) {
       return;
     }
 
