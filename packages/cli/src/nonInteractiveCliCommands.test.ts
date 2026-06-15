@@ -235,6 +235,14 @@ describe('handleSlashCommand', () => {
           text: expect.stringContaining('write a hello world script'),
         }),
       ]);
+      expect(result.outputHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'write a hello world script',
+          setAt: expect.any(Number),
+        }),
+      ]);
     }
   });
 
@@ -304,6 +312,16 @@ describe('handleSlashCommand', () => {
       messageType: 'info',
       content: 'Goal cleared: write a hello world script',
     });
+    if (result.type === 'message') {
+      expect(result.outputHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'goal_status',
+          kind: 'cleared',
+          condition: 'write a hello world script',
+          durationMs: expect.any(Number),
+        }),
+      ]);
+    }
   });
 
   it('should report cleared goal for ACP /goal clear', async () => {

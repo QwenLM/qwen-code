@@ -123,6 +123,32 @@ function copyExtensionExamples(rootDir, distDir) {
 
 function writeDistPackageJson(rootDir, distDir) {
   console.log('Creating package.json for distribution...');
+
+  const cliEntryContent = `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const cliPath = join(__dirname, 'cli.js');
+
+const result = spawnSync(
+  process.execPath,
+  ['--expose-gc', cliPath, ...process.argv.slice(2)],
+  { stdio: 'inherit' },
+);
+
+if (result.signal) {
+  process.kill(process.pid, result.signal);
+} else {
+  process.exit(result.status ?? 1);
+}
+`;
+
+  const cliEntryPath = path.join(distDir, 'cli-entry.js');
+  fs.writeFileSync(cliEntryPath, cliEntryContent, { mode: 0o755 });
+  console.log('Created dist cli-entry.js wrapper');
+
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
@@ -136,9 +162,10 @@ function writeDistPackageJson(rootDir, distDir) {
     type: 'module',
     main: 'cli.js',
     bin: {
-      qwen: 'cli.js',
+      qwen: 'cli-entry.js',
     },
     files: [
+      'cli-entry.js',
       'cli.js',
       // Worker thread entry loaded by FzfWorkerHandle at runtime via
       // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.

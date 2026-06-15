@@ -119,6 +119,11 @@ interface Harness {
   dreamCancelTask: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string; ctrl?: boolean }) => void;
+  pressKeyBroadcast: (key: {
+    name?: string;
+    sequence?: string;
+    ctrl?: boolean;
+  }) => void;
   call: (fn: () => void) => void;
   lastFrame: () => string | undefined;
   probe: { current: ProbeHandle | null };
@@ -143,6 +148,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
+      resolvePendingApproval: vi.fn(),
       setActivityChangeCallback: vi.fn(),
       get: (id: string) => {
         const match = currentEntries.find(
@@ -226,7 +232,15 @@ function setup(initial: readonly DialogEntry[]): Harness {
         if (latest) latest(key);
       });
     },
+    pressKeyBroadcast(key) {
+      act(() => {
+        for (const handler of [...handlers]) {
+          handler(key);
+        }
+      });
+    },
     call(fn) {
+      handlers.length = 0;
       act(() => fn());
     },
     lastFrame,
@@ -428,6 +442,59 @@ describe('BackgroundTasksDialog', () => {
     // a stale armed state inherited from detail mode.
     h.pressKey({ sequence: 'x' });
     expect(h.cancel).not.toHaveBeenCalled();
+  });
+
+  it('lets ask-user-question approvals own all keyboard input in detail mode', () => {
+    const questionApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'ask-1',
+      name: 'ask_user_question',
+      description: 'choose',
+      confirmationDetails: {
+        type: 'ask_user_question',
+        title: 'Need input',
+        questions: [
+          {
+            question: 'Pick one',
+            header: 'Choice',
+            options: [
+              {
+                label: 'Alpha',
+                description: 'Use alpha.',
+              },
+              {
+                label: 'Beta',
+                description: 'Use beta.',
+              },
+            ],
+          },
+        ],
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+    };
+    const bg = entry({
+      agentId: 'bg-question',
+      pendingApprovals: [questionApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.probe.current!.state.dialogOpen).toBe(true);
+
+    h.pressKeyBroadcast({ sequence: 'x' });
+    h.pressKeyBroadcast({ name: 'left' });
+    h.pressKeyBroadcast({ name: 'space' });
+
+    expect(h.cancel).not.toHaveBeenCalled();
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.probe.current!.state.dialogOpen).toBe(true);
   });
 
   it('Esc backs out of an armed foreground cancel without closing the dialog', () => {

@@ -37,8 +37,6 @@ import {
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
 } from '../utils/truncation.js';
-
-const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
@@ -67,6 +65,10 @@ import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
+import {
+  isAlreadyTruncated,
+  persistAndTruncateToolResult,
+} from '../utils/truncation.js';
 import {
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
@@ -128,6 +130,62 @@ import {
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
+
+const debugLogger = createDebugLogger('TOOL_SCHEDULER');
+
+function dedupeRequestsByCallId(
+  requests: ToolCallRequestInfo[],
+): ToolCallRequestInfo[] {
+  const seenCallIds = new Set<string>();
+  const deduped: ToolCallRequestInfo[] = [];
+  for (const request of requests) {
+    if (request.callId) {
+      if (seenCallIds.has(request.callId)) {
+        debugLogger.debug(
+          `dedupeRequestsByCallId: dropping duplicate callId=${request.callId} name=${request.name}`,
+        );
+        continue;
+      }
+      seenCallIds.add(request.callId);
+    }
+    deduped.push(request);
+  }
+  return deduped;
+}
+
+// Gap between the persistence gate and per-tool truncation thresholds.
+// Tools that self-truncate to ~25K add headers bringing output to ~25.4K;
+// the headroom ensures the gate only fires for genuinely un-truncated output
+// and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
+const GATE_HEADROOM = 3000;
+const GATE_EXEMPT_TOOLS = new Set(['read_file']);
+
+function extractTextFromPartListUnion(c: PartListUnion): string {
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    const parts = toParts(c);
+    return parts.map((p) => p.text ?? '').join('\n');
+  }
+  if (c && typeof c === 'object') {
+    if ('text' in c) {
+      const text = (c as { text?: string }).text;
+      if (typeof text === 'string') return text;
+    }
+    if ('functionResponse' in c) {
+      const fr = (
+        c as {
+          functionResponse?: { response?: Record<string, unknown> };
+        }
+      ).functionResponse;
+      const resp = fr?.response;
+      if (resp) {
+        if (typeof resp['output'] === 'string') return resp['output'];
+        if (typeof resp['content'] === 'string') return resp['content'];
+      }
+    }
+  }
+  return '';
+}
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -1625,7 +1683,9 @@ export class CoreToolScheduler {
           'Cannot schedule new tool calls while other tool calls are actively running (executing or awaiting approval).',
         );
       }
-      const requestsToProcess = Array.isArray(request) ? request : [request];
+      const requestsToProcess = dedupeRequestsByCallId(
+        Array.isArray(request) ? request : [request],
+      );
 
       // Prune validation retry state per-tool, not wholesale. Keys are
       // "<toolName>:<errorMessage>"; retain counters only for tools actually
@@ -1871,6 +1931,8 @@ export class CoreToolScheduler {
           const approvalMode = this.config.getApprovalMode();
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
           const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
+          const isEnterPlanModeTool =
+            canonicalName === ToolNames.ENTER_PLAN_MODE;
 
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
@@ -2060,6 +2122,7 @@ export class CoreToolScheduler {
                 isExitPlanModeTool,
                 isAskUserQuestionTool,
                 confirmationDetails,
+                isEnterPlanModeTool,
               )
             ) {
               this.setStatusInternal(reqInfo.callId, 'error', {
@@ -3118,6 +3181,8 @@ export class CoreToolScheduler {
 
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
+        let contentLength: number | undefined =
+          typeof content === 'string' ? content.length : undefined;
 
         // Deferred metadata: PostToolUse hook context and skill/rule reminders
         // are captured here and appended AFTER the model-facing truncation
@@ -3194,6 +3259,14 @@ export class CoreToolScheduler {
             return;
           }
         }
+
+        // Universal post-execution truncation gate — persists oversized
+        // tool results to disk before system-reminders are appended.
+        content = await this.maybePersistLargeToolResult(
+          callId,
+          toolName,
+          content,
+        );
 
         // Collect filesystem paths the tool just touched. Different tools
         // use different parameter names: `file_path` (read/edit/write),
@@ -3417,9 +3490,9 @@ export class CoreToolScheduler {
           );
         }
 
-        // Computed AFTER truncation so it reflects the model-facing length,
+        // Recompute AFTER truncation so it reflects the model-facing length,
         // consistent with the batch-offload path (which also updates it).
-        const contentLength =
+        contentLength =
           typeof content === 'string' ? content.length : undefined;
 
         const response = convertToFunctionResponse(toolName, callId, content);
@@ -3475,6 +3548,22 @@ export class CoreToolScheduler {
           if (failureHookResult.additionalContext) {
             errorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
+        }
+
+        // Truncate oversized error messages (e.g., large stderr)
+        const errorGateThreshold =
+          this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
+        if (
+          errorMessage.length > errorGateThreshold &&
+          !isAlreadyTruncated(errorMessage)
+        ) {
+          const persistResult = await persistAndTruncateToolResult(
+            callId,
+            toolName,
+            errorMessage,
+            this.config,
+          );
+          errorMessage = persistResult.content;
         }
 
         addToolResultAttributes(
@@ -3730,6 +3819,47 @@ export class CoreToolScheduler {
     }
   }
 
+  private async maybePersistLargeToolResult(
+    callId: string,
+    toolName: string,
+    content: PartListUnion,
+  ): Promise<PartListUnion> {
+    if (GATE_EXEMPT_TOOLS.has(toolName)) return content;
+
+    const text = extractTextFromPartListUnion(content);
+    if (!text || isAlreadyTruncated(text)) return content;
+
+    const gateThreshold =
+      this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
+    if (text.length <= gateThreshold) return content;
+
+    const result = await persistAndTruncateToolResult(
+      callId,
+      toolName,
+      text,
+      this.config,
+    );
+
+    if (result.outputFile) {
+      debugLogger.debug(
+        `Persisted ${toolName} result (${result.bytesWritten} bytes) to ${result.outputFile}`,
+      );
+    }
+
+    // Preserve non-text parts (media) when content is Part[]
+    if (Array.isArray(content)) {
+      const mediaParts = content.filter(
+        (p) =>
+          (p as { inlineData?: unknown }).inlineData ||
+          (p as { fileData?: unknown }).fileData,
+      );
+      const stubPart: Part = { text: result.content };
+      return mediaParts.length > 0 ? [stubPart, ...mediaParts] : [stubPart];
+    }
+
+    return result.content;
+  }
+
   /**
    * Records tool results to the chat recording service.
    * This captures both the raw Content (for API reconstruction) and
@@ -3823,6 +3953,7 @@ export class CoreToolScheduler {
     if (typeof output !== 'string') return null;
     if (fr.parts && fr.parts.length > 0) return null; // media present
     if (output.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return null; // already
+    if (output.startsWith('<persisted-output>')) return null;
 
     let truncated: { content: string; outputFile?: string };
     try {

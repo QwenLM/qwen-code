@@ -392,6 +392,32 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).not.toContain('Always allow for this user');
     });
 
+    it('honors hideAlwaysAllow', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'rm -f /tmp/foo.txt',
+        rootCommand: 'rm',
+        hideAlwaysAllow: true,
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).not.toContain('Allow always');
+      expect(frame).toContain('No');
+    });
+
     it('renders MCP server and tool name for mcp confirmations', () => {
       const confirmationDetails: ToolCallConfirmationDetails = {
         type: 'mcp',

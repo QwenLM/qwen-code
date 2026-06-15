@@ -10,8 +10,16 @@ import * as crypto from 'node:crypto';
 import type { Part, PartListUnion } from '@google/genai';
 import { ReadFileTool } from '../tools/read-file.js';
 import type { Config } from '../config/config.js';
+import { atomicWriteFile } from './atomicFileWrite.js';
+import { createDebugLogger } from './debugLogger.js';
 import { logToolOutputTruncated } from '../telemetry/loggers.js';
 import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
+
+const debugLogger = createDebugLogger('TRUNCATION');
+
+const PREVIEW_SIZE_CHARS = 2000;
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
+const MAX_SESSION_BYTES = 500 * 1024 * 1024; // 500MB
 
 /**
  * Stable prefix every truncated tool output starts with. Used as an
@@ -163,7 +171,11 @@ ${truncatedContent}`;
       content: wrappedMessage,
       outputFile,
     };
-  } catch (_error) {
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to save truncated output to ${outputFile}:`,
+      error,
+    );
     return {
       content:
         truncatedContent + `\n[Note: Could not save full output to file]`,
@@ -319,4 +331,147 @@ export async function truncateLlmContent(
     content: [{ text: result.content } as Part, ...mediaParts],
     outputFile: result.outputFile,
   };
+}
+
+export function isAlreadyTruncated(content: string): boolean {
+  return (
+    content.includes('... [CONTENT TRUNCATED] ...') ||
+    content.startsWith('<persisted-output>')
+  );
+}
+
+function generatePreview(content: string): string {
+  let text =
+    content.length <= PREVIEW_SIZE_CHARS
+      ? content
+      : (() => {
+          const slice = content.slice(0, PREVIEW_SIZE_CHARS);
+          const lastNewline = slice.lastIndexOf('\n');
+          return (
+            (lastNewline > 0 ? slice.slice(0, lastNewline) : slice) + '\n...'
+          );
+        })();
+  // Escape tags that could reshape the model-visible structure
+  text = text
+    .replace(/<\/?persisted-output>/g, (m) => `&lt;${m.slice(1, -1)}&gt;`)
+    .replace(/<\/?system-reminder>/g, (m) => `&lt;${m.slice(1, -1)}&gt;`);
+  return text;
+}
+
+export interface PersistResult {
+  content: string;
+  outputFile?: string;
+  bytesWritten: number;
+}
+
+export async function persistAndTruncateToolResult(
+  callId: string,
+  toolName: string,
+  content: string,
+  config: Config,
+): Promise<PersistResult> {
+  const byteSize = Buffer.byteLength(content, 'utf-8');
+
+  // Hard size cap — content already in memory, just skip disk persistence
+  if (byteSize > MAX_FILE_SIZE_BYTES) {
+    debugLogger.warn(
+      `Tool result for ${toolName} exceeds ${MAX_FILE_SIZE_BYTES} bytes (${byteSize}), skipping disk persistence`,
+    );
+    return {
+      content: buildStub(content, byteSize, '(file too large to persist)'),
+      bytesWritten: 0,
+    };
+  }
+
+  // Session budget check — reserve bytes synchronously before async I/O
+  // to prevent parallel tool calls from all passing the check simultaneously.
+  const budgetUsed = config.getToolResultBytesWritten();
+  if (budgetUsed + byteSize > MAX_SESSION_BYTES) {
+    debugLogger.warn(
+      `Session tool result budget exhausted (${budgetUsed} + ${byteSize} > ${MAX_SESSION_BYTES}), skipping disk persistence`,
+    );
+    return {
+      content: buildStub(content, byteSize, '(session disk budget exhausted)'),
+      bytesWritten: 0,
+    };
+  }
+  // Reserve budget before async write; rollback on failure below.
+  config.trackToolResultBytes(byteSize);
+
+  // eslint-disable-next-line no-control-regex
+  const safeCallId = path.basename(callId).replace(/\x00/g, '_');
+  if (!safeCallId || safeCallId === '.' || safeCallId === '..') {
+    debugLogger.warn(
+      `Invalid callId for disk persistence: ${JSON.stringify(callId)}`,
+    );
+    config.trackToolResultBytes(-byteSize);
+    return {
+      content: buildStub(content, byteSize, '(invalid callId)'),
+      bytesWritten: 0,
+    };
+  }
+  const toolResultsDir = config.storage.getToolResultsDir();
+  const outputFile = path.join(toolResultsDir, `${safeCallId}.txt`);
+
+  try {
+    await fs.mkdir(toolResultsDir, { recursive: true });
+    await atomicWriteFile(outputFile, content, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+      flush: false,
+    });
+
+    return {
+      content: buildStub(content, byteSize, outputFile),
+      outputFile,
+      bytesWritten: byteSize,
+    };
+  } catch (error) {
+    // Rollback budget reservation on write failure
+    config.trackToolResultBytes(-byteSize);
+    debugLogger.warn(`Failed to persist tool result to ${outputFile}:`, error);
+    try {
+      const fallback = await truncateAndSaveToFile(
+        content,
+        `${toolName}_${crypto.randomBytes(6).toString('hex')}`,
+        config.storage.getProjectTempDir(),
+        config.getTruncateToolOutputThreshold(),
+        config.getTruncateToolOutputLines(),
+      );
+      return { content: fallback.content, bytesWritten: 0 };
+    } catch (fallbackError) {
+      debugLogger.warn('Fallback truncation also failed:', fallbackError);
+      return {
+        content: buildStub(content, byteSize, '(disk persistence unavailable)'),
+        bytesWritten: 0,
+      };
+    }
+  }
+}
+
+function buildStub(
+  content: string,
+  byteSize: number,
+  filePathOrNote: string,
+): string {
+  const preview = generatePreview(content);
+  const sizeKb = Math.round(byteSize / 1024);
+  const isFilePath = path.isAbsolute(filePathOrNote);
+
+  if (isFilePath) {
+    return `<persisted-output>
+Output too large (${sizeKb} KB). Full output saved to: ${filePathOrNote}
+Note: this file may be cleaned up after 24 hours.
+To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
+
+Preview (up to ${PREVIEW_SIZE_CHARS} chars):
+${preview}
+</persisted-output>`;
+  }
+
+  return `Output too large (${sizeKb} KB). ${filePathOrNote}
+
+Preview (up to ${PREVIEW_SIZE_CHARS} chars):
+${preview}`;
 }

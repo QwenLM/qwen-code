@@ -356,11 +356,14 @@ describe('loggers', () => {
         { model: 'test-model', type: 'output' },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_API_RESPONSE,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      }, 'test-session-id');
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_API_RESPONSE,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
   });
 
@@ -780,11 +783,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      }, 'test-session-id');
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
     it('should log a tool call with a reject decision', () => {
       const call: ErroredToolCall = {
@@ -853,11 +859,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      }, 'test-session-id');
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
 
     it('should log a tool call with a modify decision', () => {
@@ -929,11 +938,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      }, 'test-session-id');
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
 
     it('should log a tool call without a decision', () => {
@@ -1004,11 +1016,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      }, 'test-session-id');
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
 
     it('should log a failed tool call with an error', () => {
@@ -1080,11 +1095,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      }, 'test-session-id');
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
 
     it('should log a tool call with mcp_server_name for MCP tools', () => {

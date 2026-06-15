@@ -76,6 +76,8 @@ export function isValidSessionId(value: string): boolean {
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { assembleMcpServers } from './mcpServers.js';
+import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
@@ -1362,6 +1364,15 @@ export async function loadCliConfig(
    * correctly.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>,
+  /**
+   * MCP servers injected by the embedding session (e.g. ACP / IDE clients).
+   * Treated as a session-level source at the TOP of the precedence stack — above
+   * settings and `.mcp.json`, below `--mcp-config` — and never approval-gated:
+   * they are explicit, per-session, and not checked into the repo. Routing them
+   * here (rather than merging into `settings.mcpServers`) keeps them from being
+   * demoted below a project `.mcp.json` by `assembleMcpServers`. See issue #4615.
+   */
+  sessionMcpServers?: Record<string, MCPServerConfig>,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
@@ -1776,6 +1787,26 @@ export async function loadCliConfig(
 
   const modelProvidersConfig = settings.modelProviders;
 
+  // Assemble MCP servers across all sources in precedence order (user/default
+  // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
+  // and compute which gated (project/workspace) servers are still pending
+  // approval (#4615), so the discovery layer can skip them with no connection
+  // side effect. Loading `.mcp.json` is a pure read.
+  // Top tier = session-injected (ACP/IDE) servers plus `--mcp-config`; CLI wins
+  // over the session source on a name clash. Both sit above settings/`.mcp.json`
+  // and are never gated (#4615).
+  const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+  const topTierMcpServers =
+    sessionMcpServers || cliMcpServers
+      ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
+      : undefined;
+  const mcpServers = bareMode
+    ? {}
+    : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+  const pendingMcpServers = bareMode
+    ? undefined
+    : getPendingGatedMcpServers(mcpServers, cwd);
+
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
@@ -1829,13 +1860,8 @@ export async function loadCliConfig(
       : settings.tools?.discoveryCommand,
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
-    mcpServers: bareMode
-      ? {}
-      : (() => {
-          const base = settings.mcpServers || {};
-          const cliMcpServers = parseMcpConfig(argv.mcpConfig);
-          return cliMcpServers ? { ...base, ...cliMcpServers } : base;
-        })(),
+    mcpServers,
+    pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,

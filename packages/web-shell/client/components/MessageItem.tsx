@@ -1,10 +1,11 @@
-import { memo } from 'react';
+import { memo, type ReactElement } from 'react';
 import type {
   ACPToolCall,
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
 import { AssistantMessage } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
@@ -27,6 +28,9 @@ interface MessageItemProps {
   onShowContextDetail?: () => void;
   workspaceCwd?: string;
   isLatest?: boolean;
+  showRetryHint?: boolean;
+  onRetryClick?: () => void;
+  shellOutputMaxLines: number;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -36,71 +40,89 @@ export const MessageItem = memo(function MessageItem({
   onShowContextDetail,
   workspaceCwd,
   isLatest = false,
+  showRetryHint = false,
+  onRetryClick,
+  shellOutputMaxLines,
 }: MessageItemProps) {
-  switch (message.role) {
-    case 'user':
-      return <UserMessage content={message.content} images={message.images} />;
-    case 'assistant':
-      return (
-        <AssistantMessage
-          content={message.content}
-          thinking={message.thinking}
-          isStreaming={message.isStreaming}
-        />
-      );
-    case 'tool_group':
-      return (
-        <ToolGroup
-          tools={message.tools}
-          pendingApproval={pendingApproval}
-          onConfirm={onConfirm}
-          workspaceCwd={workspaceCwd}
-        />
-      );
-    case 'plan':
-      return <PlanMessage todos={message.todos} />;
-    case 'system':
-      return (
-        <SystemMessage
-          content={message.content}
-          variant={message.variant}
-          onShowContextDetail={onShowContextDetail}
-          isLatest={isLatest}
-        />
-      );
-    case 'user_shell':
-      return (
-        <UserShellMessage command={message.command} output={message.output} />
-      );
-    case 'btw':
-      return (
-        <BtwMessage
-          question={message.question}
-          answer={message.answer}
-          isPending={message.isPending}
-        />
-      );
-    case 'insight_progress':
-      return (
-        <InsightProgress
-          progress={{
-            stage: message.stage,
-            progress: message.progress,
-            detail: message.detail,
-          }}
-        />
-      );
-    case 'insight_ready':
-      return <InsightReady path={message.path} />;
-    case 'insight_error':
-      return (
-        <div style={{ color: 'var(--error-color, #e06c75)' }}>
-          {message.error}
-        </div>
-      );
-    default:
-      return null;
-  }
+  const body = ((): ReactElement | null => {
+    switch (message.role) {
+      case 'user':
+        return (
+          <UserMessage content={message.content} images={message.images} />
+        );
+      case 'assistant':
+        return (
+          <AssistantMessage
+            content={message.content}
+            thinking={message.thinking}
+            isStreaming={message.isStreaming}
+          />
+        );
+      case 'tool_group':
+        return (
+          <ToolGroup
+            tools={message.tools}
+            pendingApproval={pendingApproval}
+            onConfirm={onConfirm}
+            workspaceCwd={workspaceCwd}
+            shellOutputMaxLines={shellOutputMaxLines}
+          />
+        );
+      case 'plan':
+        return <PlanMessage id={message.id} todos={message.todos} />;
+      case 'system':
+        return (
+          <SystemMessage
+            content={message.content}
+            variant={message.variant}
+            source={message.source}
+            data={message.data}
+            onShowContextDetail={onShowContextDetail}
+            isLatest={isLatest}
+            showRetryHint={showRetryHint && message.retryable === true}
+            onRetryClick={onRetryClick}
+          />
+        );
+      case 'user_shell':
+        return (
+          <UserShellMessage command={message.command} output={message.output} />
+        );
+      case 'btw':
+        return (
+          <BtwMessage
+            question={message.question}
+            answer={message.answer}
+            isPending={message.isPending}
+          />
+        );
+      case 'insight_progress':
+        return (
+          <InsightProgress
+            progress={{
+              stage: message.stage,
+              progress: message.progress,
+              detail: message.detail,
+            }}
+          />
+        );
+      case 'insight_ready':
+        return <InsightReady path={message.path} />;
+      case 'insight_error':
+        return (
+          <div style={{ color: 'var(--error-color, #e06c75)' }}>
+            {message.error}
+          </div>
+        );
+      default:
+        return null;
+    }
+  })();
+
+  if (body === null) return null;
+
+  return (
+    <MessageTimestamp timestamp={message.timestamp}>{body}</MessageTimestamp>
+  );
 }, areMessageItemPropsEqual);
 
 function areMessageItemPropsEqual(
@@ -112,12 +134,16 @@ function areMessageItemPropsEqual(
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;
+  if (prev.showRetryHint !== next.showRetryHint) return false;
+  if (prev.onRetryClick !== next.onRetryClick) return false;
+  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
+  if (prev.timestamp !== next.timestamp) return false;
   switch (prev.role) {
     case 'user':
       return (
@@ -136,7 +162,10 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'system' &&
         prev.content === next.content &&
-        prev.variant === next.variant
+        prev.variant === next.variant &&
+        prev.retryable === next.retryable &&
+        prev.source === next.source &&
+        prev.data === next.data
       );
     case 'user_shell':
       return (

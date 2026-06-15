@@ -67,6 +67,7 @@ export * from './core/logger.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
+export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
 
 // ============================================================================
@@ -111,6 +112,7 @@ export {
   buildSkillLlmContent,
   applySkillAllowedTools,
 } from './tools/skill-utils.js';
+export { atomicWriteFile } from './utils/atomicFileWrite.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
@@ -122,6 +124,10 @@ export type {
   ExitPlanModeTool,
   ExitPlanModeParams,
 } from './tools/exitPlanMode.js';
+export type {
+  EnterPlanModeTool,
+  EnterPlanModeParams,
+} from './tools/enterPlanMode.js';
 export type {
   SyntheticOutputTool,
   StructuredOutputParams,
@@ -169,6 +175,7 @@ export {
 } from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
+export type { DurableCronTask } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
@@ -266,6 +273,7 @@ export type {
   OAuthAuthorizationServerMetadata,
   OAuthProtectedResourceMetadata,
 } from './mcp/oauth-utils.js';
+export { hashMcpServerConfig } from './mcp/configHash.js';
 
 // ============================================================================
 // Telemetry

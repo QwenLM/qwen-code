@@ -13,7 +13,7 @@ import {
   fireSessionPermissionDeniedForAutoMode,
   Session,
 } from './Session.js';
-import type { Content } from '@google/genai';
+import type { Content, FunctionCall, Part } from '@google/genai';
 import type { ChatRecord, Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -198,7 +198,15 @@ describe('Session', () => {
     recordToolResult: ReturnType<typeof vi.fn>;
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
+    recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
+    setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+  };
+  let mockFileHistoryService: {
+    makeSnapshot: ReturnType<typeof vi.fn>;
+    getSnapshots: ReturnType<typeof vi.fn>;
+    restoreFromSnapshots: ReturnType<typeof vi.fn>;
+    rewind: ReturnType<typeof vi.fn>;
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
@@ -264,7 +272,15 @@ describe('Session', () => {
       recordToolResult: vi.fn(),
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
+      recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
+      setTitleRecordedCallback: vi.fn(),
+    };
+    mockFileHistoryService = {
+      makeSnapshot: vi.fn().mockResolvedValue(undefined),
+      getSnapshots: vi.fn().mockReturnValue([]),
+      restoreFromSnapshots: vi.fn(),
+      rewind: vi.fn(),
     };
 
     mockToolRegistry = {
@@ -307,12 +323,7 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
-      getFileHistoryService: vi.fn().mockReturnValue({
-        makeSnapshot: vi.fn().mockResolvedValue(undefined),
-        getSnapshots: vi.fn().mockReturnValue([]),
-        restoreFromSnapshots: vi.fn(),
-        rewind: vi.fn(),
-      }),
+      getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
     } as unknown as Config;
 
     mockClient = {
@@ -1149,6 +1160,36 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('records the latest file history snapshot after makeSnapshot', async () => {
+      const latestSnapshot = {
+        promptId: 'test-session-id########1',
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {
+          'a.txt': {
+            backupFileName: 'backup-a',
+            version: 1,
+            backupTime: new Date('2026-06-13T00:00:01.000Z'),
+          },
+        },
+      };
+      mockFileHistoryService.getSnapshots.mockReturnValue([latestSnapshot]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'edit file' }],
+      });
+
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
+        'test-session-id########1',
+      );
+      expect(
+        mockChatRecordingService.recordFileHistorySnapshot,
+      ).toHaveBeenCalledWith(latestSnapshot);
+    });
+
     it('drains background task notifications through ACP after the prompt is idle', async () => {
       mockChat.sendMessageStream = vi
         .fn()
@@ -3120,6 +3161,7 @@ describe('Session', () => {
       it('runs automatic compression before cron-fired ACP prompt sends', async () => {
         const scheduler = {
           size: 1,
+          hasPendingWork: true,
           start: vi.fn((callback: (job: { prompt: string }) => void) => {
             callback({ prompt: 'scheduled prompt' });
           }),
@@ -3170,6 +3212,7 @@ describe('Session', () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {
           size: 1,
+          hasPendingWork: true,
           start: vi.fn((callback: (job: { prompt: string }) => void) => {
             cronCallback = callback;
             callback({ prompt: 'scheduled prompt' });
@@ -5027,6 +5070,102 @@ describe('Session', () => {
         );
         expect(hasPlanReminder).toBe(false);
       });
+    });
+  });
+
+  describe('runToolCalls', () => {
+    type ToolCallInternals = {
+      runToolCalls: (
+        abortSignal: AbortSignal,
+        promptId: string,
+        functionCalls: FunctionCall[],
+      ) => Promise<Part[]>;
+    };
+
+    it('executes only the first duplicate functionCall id in one batch', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'first result',
+        returnDisplay: 'first result',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read File',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { file_path: 'a.ts' },
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      const parts = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-dup', [
+        {
+          id: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+        {
+          id: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+        },
+      ]);
+
+      expect(execute).toHaveBeenCalledOnce();
+      expect(parts.map((part) => part.functionResponse?.id)).toEqual([
+        'dup_id_0001',
+      ]);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledOnce();
+    });
+
+    it('does not dedupe function calls with empty ids in one batch', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'result',
+        returnDisplay: 'result',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read File',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { file_path: 'a.ts' },
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      const parts = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-empty', [
+        {
+          id: '',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+        {
+          id: '',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+        },
+      ]);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(parts).toHaveLength(2);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
+        2,
+      );
     });
   });
 

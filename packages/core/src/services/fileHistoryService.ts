@@ -15,7 +15,7 @@ import {
   stat,
   unlink,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { diffLines, structuredPatch, type Hunk } from 'diff';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -48,6 +48,8 @@ export interface FileHistoryState {
   snapshots: FileHistorySnapshot[];
   trackedFiles: Set<string>;
 }
+
+type FileHistorySnapshotRecorder = (snapshot: FileHistorySnapshot) => void;
 
 export interface DiffStats {
   filesChanged: string[];
@@ -206,12 +208,16 @@ function getBackupFileName(filePath: string, version: number): string {
 }
 
 function resolveBackupPath(backupFileName: string, sessionId: string): string {
-  return join(
+  const baseDir = resolve(
     Storage.getGlobalQwenDir(),
     FILE_HISTORY_DIR,
     sessionId,
-    backupFileName,
   );
+  const backupPath = resolve(baseDir, backupFileName);
+  if (!backupPath.startsWith(baseDir + sep)) {
+    throw new Error(`backupFileName escapes base directory: ${backupFileName}`);
+  }
+  return backupPath;
 }
 
 // Copy `src` to `dst`, creating the destination directory if it doesn't exist.
@@ -550,11 +556,18 @@ export class FileHistoryService {
   private readonly sessionId: string;
   private readonly enabled: boolean;
   private readonly cwd: string;
+  private readonly onSnapshotUpdated?: FileHistorySnapshotRecorder;
 
-  constructor(sessionId: string, enabled: boolean, cwd: string) {
+  constructor(
+    sessionId: string,
+    enabled: boolean,
+    cwd: string,
+    onSnapshotUpdated?: FileHistorySnapshotRecorder,
+  ) {
     this.sessionId = sessionId;
     this.enabled = enabled;
     this.cwd = cwd;
+    this.onSnapshotUpdated = onSnapshotUpdated;
   }
 
   isEnabled(): boolean {
@@ -563,6 +576,14 @@ export class FileHistoryService {
 
   getSnapshots(): FileHistorySnapshot[] {
     return this.state.snapshots;
+  }
+
+  private recordSnapshotUpdate(snapshot: FileHistorySnapshot): void {
+    try {
+      this.onSnapshotUpdated?.(snapshot);
+    } catch (error) {
+      debugLogger.error(`FileHistory: recordSnapshotUpdate failed: ${error}`);
+    }
   }
 
   restoreFromSnapshots(snapshots: FileHistorySnapshot[]): void {
@@ -603,9 +624,18 @@ export class FileHistoryService {
     for (let i = 0; i < names.length; i += BATCH_SIZE) {
       const batch = names.slice(i, i + BATCH_SIZE);
       const results = await Promise.all(
-        batch.map((name) =>
-          pathExists(resolveBackupPath(name, this.sessionId)),
-        ),
+        batch.map(async (name) => {
+          let backupPath: string;
+          try {
+            backupPath = resolveBackupPath(name, this.sessionId);
+          } catch (e) {
+            debugLogger.error(
+              `FileHistory: rejected backupFileName during validation: ${name}: ${e}`,
+            );
+            return false;
+          }
+          return await pathExists(backupPath);
+        }),
       );
       for (let j = 0; j < batch.length; j++) {
         if (!results[j]) missing.add(batch[j]);
@@ -616,12 +646,17 @@ export class FileHistoryService {
 
     // Single synchronous pass to mark failures — minimizes the mutation
     // window so concurrent makeSnapshot/trackEdit see a consistent state.
+    const affectedSnapshots = new Set<FileHistorySnapshot>();
     for (const snapshot of this.state.snapshots) {
       for (const backup of Object.values(snapshot.trackedFileBackups)) {
         if (backup.backupFileName && missing.has(backup.backupFileName)) {
           backup.failed = true;
+          affectedSnapshots.add(snapshot);
         }
       }
+    }
+    for (const snapshot of affectedSnapshots) {
+      this.recordSnapshotUpdate(snapshot);
     }
 
     debugLogger.warn(
@@ -664,6 +699,10 @@ export class FileHistoryService {
 
     // Re-check after async backup — concurrent calls write the same
     // deterministic path, so the second overwrites the first harmlessly.
+    if (!this.state.snapshots.includes(mostRecent)) {
+      return;
+    }
+
     // Allow overwriting a `failed` entry so the heal path actually
     // records the fresh backup (otherwise we'd leave the failed marker
     // in place even though we successfully captured the file).
@@ -671,11 +710,17 @@ export class FileHistoryService {
     if (!current || current.failed) {
       mostRecent.trackedFileBackups[trackingPath] = backup;
       this.state.trackedFiles.add(trackingPath);
+      this.recordSnapshotUpdate(mostRecent);
+      debugLogger.debug(
+        `FileHistory: Tracked file modification for ${filePath}`,
+      );
     }
-
-    debugLogger.debug(`FileHistory: Tracked file modification for ${filePath}`);
   }
 
+  /**
+   * Creates the next turn snapshot. Callers that need session persistence must
+   * record `getSnapshots().at(-1)` after this resolves.
+   */
   async makeSnapshot(promptId: string): Promise<void> {
     if (!this.enabled) return;
 

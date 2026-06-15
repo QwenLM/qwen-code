@@ -9,6 +9,7 @@ import { IdeIntegrationNudge } from '../IdeIntegrationNudge.js';
 import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
+import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
@@ -128,6 +129,18 @@ export const DialogManager = ({
       <FolderTrustDialog
         onSelect={uiActions.handleFolderTrustSelect}
         isRestarting={uiState.isRestarting}
+      />
+    );
+  }
+  if (uiState.isMcpApprovalDialogOpen && uiState.currentMcpApproval) {
+    return (
+      <MCPServerApprovalDialog
+        serverName={uiState.currentMcpApproval.name}
+        summary={uiState.currentMcpApproval.summary}
+        source={uiState.currentMcpApproval.source}
+        pendingServers={uiState.pendingMcpApprovals}
+        remaining={uiState.mcpApprovalRemaining}
+        onSelect={uiActions.handleMcpApprovalSelect}
       />
     );
   }

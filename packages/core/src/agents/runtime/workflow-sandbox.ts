@@ -158,10 +158,15 @@ export interface WorkflowAgentOpts {
 }
 
 /**
- * Forward-compatibility alias for the agent dispatch return type. P1: always
- * `string`. P3 will widen this to support StructuredOutput.
+ * Agent dispatch return type. P1/P2 was `string` (the subagent's final text
+ * verbatim). P3 widens to also allow a JSON-serializable object — the
+ * validated arguments of the subagent's `structured_output` call when
+ * `agent({schema})` is used. Strings remain the no-schema return shape;
+ * the sandbox's `agent` wrapper revives object returns into the vm realm
+ * per-call so a host-realm prototype escape (T1/T8/T14) cannot ride the
+ * structured payload back into a script.
  */
-export type WorkflowAgentResult = string;
+export type WorkflowAgentResult = string | object;
 
 /**
  * P5: budget global API surface. P1 default is throwing stubs (total = null,
@@ -505,32 +510,85 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             );
           }
         }
-        if (agentOpts.schema !== undefined) {
+        // P3: schema + model + agentType + isolation are all wired through
+        // createProductionDispatch → SubagentManager.createAgentHeadless.
+        // The dispatch surfaces descriptive errors for "agent type not found",
+        // "isolation:'remote' is not available in this build", parent-dirty
+        // refuse, worktree creation failures, and StructuredOutput contract
+        // violations ("completed without calling StructuredOutput after 2
+        // in-conversation nudges").
+        if (
+          agentOpts.isolation !== undefined &&
+          agentOpts.isolation !== 'worktree' &&
+          agentOpts.isolation !== 'remote'
+        ) {
           throw new Error(
-            'agent({schema}) is not supported in P1. ' +
-            'Schema enforcement / StructuredOutput contract is scheduled for P3.'
+            "agent({isolation: '" + agentOpts.isolation + "'}): unknown isolation mode. " +
+            "Known modes are: 'worktree', 'remote'."
           );
-        }
-        if (agentOpts.isolation !== undefined) {
-          throw new Error(
-            "agent({isolation: '" + agentOpts.isolation + "'}) is not supported in P1. " +
-            'Worktree / remote isolation is scheduled for a later phase.'
-          );
-        }
-        if (agentOpts.model !== undefined) {
-          throw new Error(
-            'agent({model}) is not supported in P1. Model override is scheduled for a later phase.'
-          );
-        }
-        if (agentOpts.agentType !== undefined) {
-          throw new Error('agent({agentType}) is not supported in P1.');
         }
         if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
           if (__b.lastPhase() !== agentOpts.phase) {
             __b.pushPhase(agentOpts.phase);
           }
         }
-        return __b.hostAgent(prompt, agentOpts);
+        // SECURITY (P3 R2 self-review): user-script-controlled agentOpts
+        // cross the vm/host boundary verbatim via vmAsync's hostFn.apply.
+        // A Proxy / inherited-getter / non-plain object in agentOpts.schema
+        // would let host-side code (SyntheticOutputTool constructor + AJV
+        // compile) trigger user-controlled trap handlers that execute with
+        // the host realm's full surface. Revive agentOpts through JSON
+        // round-trip BEFORE crossing so the host only ever sees vm-realm
+        // plain objects with vm-realm prototypes. Same mechanism that
+        // makes args + parallel/pipeline results safe.
+        var safeOpts;
+        try {
+          safeOpts = JSON.parse(JSON.stringify(agentOpts));
+        } catch (e) {
+          throw new Error(
+            "agent() opts contain a non-JSON-serializable value: " +
+            String(e && e.message != null ? e.message : e)
+          );
+        }
+        // SECURITY (PR #4947 R1 wenshao, extended for P3): vmAsync's resolve
+        // path is verbatim (no re-wrap of resolved values). Host-realm
+        // strings cross the boundary harmlessly because primitives have no
+        // prototype identity. But P3's schema-mode dispatch returns the
+        // validated structured_output args as a host-realm OBJECT --
+        // handing that to the script reopens the T1/T8/T14 escape:
+        // result.constructor.constructor("return process")() would walk
+        // the host Object.prototype chain to the host Function
+        // constructor. Per-call JSON revival inside this vm runInContext
+        // block makes the returned object carry vm-realm prototypes (same
+        // mechanism as parallel/pipeline reviveInRealm and the args
+        // global revival). The fallback to null on a non-serializable
+        // resolve mirrors the errors-as-data convention parallel/pipeline
+        // already use for individual slot failures.
+        // R3 review (wenshao T3 [Suggestion]): the null fallback below is
+        // a SECURITY backstop, not a contract path. In schema mode the
+        // host return is the validated args of a structured_output tool
+        // call -- LLM tool_call payloads are always JSON-serializable
+        // (the model sends them through the OpenAI tool-call protocol
+        // which serializes through JSON itself) and SyntheticOutputTool's
+        // AJV validation runs over the parsed JSON, so a non-serializable
+        // host return is unreachable in production schema mode. The
+        // sentinel preserves the errors-as-data convention parallel /
+        // pipeline already use for individual slot failures, and stays as
+        // residual defense for any future dispatch path whose return
+        // value isn't a tool_call payload. logRevivalFailure surfaces
+        // the actionable detail (slot 0 + the error string) to operators
+        // so a real trigger in production isn't silent.
+        return __b.hostAgent(prompt, safeOpts).then(function (value) {
+          if (value === null || typeof value !== 'object') {
+            return value;
+          }
+          try {
+            return JSON.parse(JSON.stringify(value));
+          } catch (e) {
+            __b.logRevivalFailure(0, String(e && e.message != null ? e.message : e));
+            return null;
+          }
+        });
       });
 
       // --- parallel / pipeline ---

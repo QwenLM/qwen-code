@@ -5,7 +5,9 @@ import {
   type PropsWithChildren,
 } from 'react';
 
-export type WebShellLanguage = 'en' | 'zh-CN';
+export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
+
+export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
 type MessageValue =
   | string
@@ -161,17 +163,10 @@ const EN: Messages = {
   'agents.closed': 'Agents panel closed.',
   'agents.title': 'Agents',
   'insight.ready': 'Insight report generated successfully!',
-  'activeAgents.collapseHint': 'Enter/Space collapse',
-  'activeAgents.footer':
-    'From input: ↓ focus agents · ↑/↓ move · Enter/Space details · Esc back to input · Home/End jump',
-  'activeAgents.moreAbove': (v) => `^ ${v?.count ?? 0} more above`,
-  'activeAgents.openHint': 'Enter/Space for details',
-  'activeAgents.title': (v) =>
-    `Active agents (${v?.visible ?? 0}/${v?.total ?? 0})`,
-  'activeAgents.tools': (v) => `${v?.count ?? 0} tools`,
   'request.cancelled': 'Request cancelled.',
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
+  'approval.launchAgentQuestion': 'Launch this agent?',
   'approval.option.allowOnce': 'Yes, allow once',
   'approval.option.rejectOnce': 'No, suggest changes (esc)',
   'approval.option.allowAllEdits': 'Allow All Edits',
@@ -303,6 +298,11 @@ const EN: Messages = {
   'dialog.footer.search': 'Type to search · Enter to commit · Esc to clear',
   'dialog.footer.select': 'Enter to select',
   'editor.escClearHint': 'Press Esc again to clear.',
+  'editor.hintCommands': 'commands',
+  'editor.hintFiles': 'files',
+  'editor.hintNext': 'next',
+  'editor.hintPrev': 'previous',
+  'editor.hintSearch': 'search',
   'editor.noHistory': 'No matching history',
   'editor.placeholder': 'Type a message or @ file path',
   'editor.processing': 'Processing. New messages will be queued.',
@@ -333,12 +333,16 @@ const EN: Messages = {
   'help.shortcut.commandMenu': 'Open command menu',
   'help.shortcut.completion': 'Accept completion or switch help tabs',
   'help.shortcut.history': 'Cycle prompt history or scroll lists',
+  'help.shortcut.searchHistory': 'Search prompt history',
   'help.shortcut.newline': 'Insert a newline',
   'help.shortcut.pasteImages': 'Paste images',
   'help.shortcut.shell': 'Run shell commands',
   'help.shortcut.togglePanel': 'Toggle this panel',
   'help.shortcut.retry': 'Retry last request',
   'help.shortcut.compact': 'Toggle compact mode',
+  'retry.hint': 'Press Ctrl+Y to retry or click to retry',
+  'retry.none': 'No failed request to retry.',
+  'command.hidden': 'This command is not available.',
   'help.shortcut.approvals': 'Cycle approval modes',
   'help.shortcut.cancel': 'Close dialogs or cancel operation',
   'bug.failed': 'Failed to load system info for bug report.',
@@ -349,6 +353,7 @@ const EN: Messages = {
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
   'compact.hint': 'Press Ctrl+O to show full tool output',
+  'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'commands',
   'help.tab.custom': 'custom-commands',
@@ -517,6 +522,8 @@ const EN: Messages = {
     'Note: First startup may take longer. Tool availability will update automatically.',
   'mcp.restartSkipped': (v) => `Skipped ${v?.name ?? ''}: ${v?.reason ?? ''}`,
   'mcp.restarted': (v) => `Restarted ${v?.name ?? ''} in ${v?.duration ?? 0}ms`,
+  'mcp.restartEntries': (v) =>
+    `Restarted ${v?.restarted ?? 0}/${v?.total ?? 0} ${v?.name ?? ''} entries${v?.failedReasons ? ` (failed: ${v.failedReasons})` : ''}`,
   'mcp.source': 'Source',
   'mcp.source.extension': 'Extension',
   'mcp.source.project': 'Workspace Settings',
@@ -735,12 +742,20 @@ const EN: Messages = {
   'stream.cancel': 'esc to cancel',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
   'theme.current': (v) => `current: ${v?.theme ?? ''}`,
+  'theme.auto': 'Auto',
   'theme.dark': 'Dark',
   'theme.dark.desc': 'Terminal-style dark skin.',
   'theme.light': 'Light',
   'theme.light.desc': 'Terminal-style light skin.',
   'theme.title': 'Theme',
-  'todo.more': (v) => `... and ${v?.count ?? 0} more`,
+  'todo.allDone': 'All tasks completed',
+  'todo.collapse': 'Collapse task list',
+  'todo.completedAbove': (v) => `✓ ${v?.count ?? 0} completed`,
+  'todo.expand': 'Expand task list',
+  'todo.locate': 'Show in transcript',
+  'todo.more': (v) => `... ${v?.count ?? 0} more`,
+  'todo.moreAbove': (v) => `... ${v?.count ?? 0} earlier`,
+  'todo.showLess': 'Show less',
   'todo.title': 'Current tasks',
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
@@ -820,6 +835,7 @@ const EN: Messages = {
   'settings.footer':
     '↑↓ Navigate  Enter Toggle  Tab Scope  r Reload  ESC Close',
   'settings.footer.edit': 'Enter Save  ESC Cancel',
+  'settings.footer.theme': '↑↓ Navigate  Enter Select  ESC Back',
   'settings.scope.user': 'User',
   'settings.scope.workspace': 'Workspace',
   'settings.value.on': 'ON',
@@ -976,17 +992,10 @@ const ZH: Messages = {
   'agents.closed': '智能体面板已关闭。',
   'agents.title': '智能体',
   'insight.ready': 'Insight 报告已生成！',
-  'activeAgents.collapseHint': 'Enter/Space 收起',
-  'activeAgents.footer':
-    '输入框按 ↓ 聚焦智能体 · ↑/↓ 切换 · Enter/Space 查看详情 · Esc 返回输入框 · Home/End 跳转',
-  'activeAgents.moreAbove': (v) => `^ 上方还有 ${v?.count ?? 0} 个`,
-  'activeAgents.openHint': 'Enter/Space 查看详情',
-  'activeAgents.title': (v) =>
-    `活跃智能体 (${v?.visible ?? 0}/${v?.total ?? 0})`,
-  'activeAgents.tools': (v) => `${v?.count ?? 0} 个工具`,
   'request.cancelled': '请求已取消。',
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
+  'approval.launchAgentQuestion': '启动这个 agent？',
   'approval.option.allowOnce': '是，允许一次',
   'approval.option.rejectOnce': '否，建议更改 (esc)',
   'approval.option.allowAllEdits': '允许所有编辑',
@@ -1105,6 +1114,11 @@ const ZH: Messages = {
   'dialog.footer.search': '输入搜索 · Enter 确认 · Esc 清空',
   'dialog.footer.select': 'Enter 选择',
   'editor.escClearHint': '再按一次 Esc 清空输入。',
+  'editor.hintCommands': '命令',
+  'editor.hintFiles': '文件',
+  'editor.hintNext': '下一条',
+  'editor.hintPrev': '上一条',
+  'editor.hintSearch': '搜索',
   'editor.noHistory': '没有匹配的历史记录',
   'editor.placeholder': '输入消息或 @ 文件路径',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -1134,12 +1148,16 @@ const ZH: Messages = {
   'help.shortcut.commandMenu': '打开命令菜单',
   'help.shortcut.completion': '接受补全或切换帮助标签',
   'help.shortcut.history': '切换历史 prompt 或滚动列表',
+  'help.shortcut.searchHistory': '搜索历史 prompt',
   'help.shortcut.newline': '插入换行',
   'help.shortcut.pasteImages': '粘贴图片',
   'help.shortcut.shell': '运行 shell 命令',
   'help.shortcut.togglePanel': '切换此面板',
   'help.shortcut.retry': '重试上次请求',
   'help.shortcut.compact': '切换紧凑模式',
+  'retry.hint': '按 Ctrl+Y 重试或点击重试',
+  'retry.none': '没有可重试的失败请求。',
+  'command.hidden': '该命令不可用。',
   'help.shortcut.approvals': '切换审批模式',
   'help.shortcut.cancel': '关闭弹窗或取消操作',
   'bug.failed': '加载系统信息失败，无法提交 Bug 报告。',
@@ -1150,6 +1168,7 @@ const ZH: Messages = {
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
   'compact.hint': '按 Ctrl+O 显示完整工具输出',
+  'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '命令',
   'help.tab.custom': '自定义命令',
@@ -1308,6 +1327,8 @@ const ZH: Messages = {
   'mcp.startingNote': '注意：首次启动可能需要更长时间。工具可用性会自动更新。',
   'mcp.restartSkipped': (v) => `已跳过 ${v?.name ?? ''}：${v?.reason ?? ''}`,
   'mcp.restarted': (v) => `已重启 ${v?.name ?? ''}，耗时 ${v?.duration ?? 0}ms`,
+  'mcp.restartEntries': (v) =>
+    `已重启 ${v?.name ?? ''} 的 ${v?.restarted ?? 0}/${v?.total ?? 0} 个条目${v?.failedReasons ? `（失败：${v.failedReasons}）` : ''}`,
   'mcp.source': '来源',
   'mcp.source.extension': '扩展',
   'mcp.source.project': '工作区设置',
@@ -1521,12 +1542,20 @@ const ZH: Messages = {
   'stream.cancel': 'esc 取消',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
   'theme.current': (v) => `当前：${v?.theme ?? ''}`,
+  'theme.auto': '自动',
   'theme.dark': '暗色',
   'theme.dark.desc': '仿终端暗色皮肤。',
   'theme.light': '亮色',
   'theme.light.desc': '仿终端亮色皮肤。',
   'theme.title': '主题',
-  'todo.more': (v) => `... 以及其他 ${v?.count ?? 0} 个`,
+  'todo.allDone': '任务已全部完成',
+  'todo.collapse': '折叠任务列表',
+  'todo.completedAbove': (v) => `✓ 已完成 ${v?.count ?? 0} 项`,
+  'todo.expand': '展开任务列表',
+  'todo.locate': '在会话中定位',
+  'todo.more': (v) => `... 还有 ${v?.count ?? 0} 项`,
+  'todo.moreAbove': (v) => `... 前面还有 ${v?.count ?? 0} 项`,
+  'todo.showLess': '收起',
   'todo.title': '当前任务',
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
@@ -1607,6 +1636,7 @@ const ZH: Messages = {
   'settings.empty': '暂无可用设置。',
   'settings.footer': '↑↓ 导航  Enter 切换  Tab 切换作用域  r 刷新  ESC 关闭',
   'settings.footer.edit': 'Enter 保存  ESC 取消',
+  'settings.footer.theme': '↑↓ 导航  Enter 选择  ESC 返回',
   'settings.scope.user': '用户',
   'settings.scope.workspace': '工作区',
   'settings.value.on': '开',
@@ -1618,6 +1648,103 @@ const ZH: Messages = {
   'settings.requiresRestart': '此更改需要重启后才能生效。',
   'settings.corrupted': (v) =>
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
+  'settings.category.General': '通用',
+  'settings.category.UI': '界面',
+  'settings.category.Privacy': '隐私',
+  'settings.category.Model': '模型',
+  'settings.category.Context': '上下文',
+  'settings.category.Tools': '工具',
+  'settings.category.Daemon': '守护进程',
+  'settings.category.Experimental': '实验性',
+  'settings.category.Advanced': '高级',
+  'settings.label.general.enableAutoUpdate': '启用自动更新',
+  'settings.description.general.enableAutoUpdate': '启动时自动检查并安装更新。',
+  'settings.label.general.showSessionRecap': '显示会话回顾',
+  'settings.description.general.showSessionRecap':
+    '离开终端一段时间后返回时，自动显示一行“上次停在这里”的回顾。默认关闭。也可以随时使用 /recap 手动触发。',
+  'settings.label.general.sessionRecapAwayThresholdMinutes':
+    '会话回顾离开阈值（分钟）',
+  'settings.description.general.sessionRecapAwayThresholdMinutes':
+    '终端失焦多少分钟后，下一次重新聚焦时触发自动回顾。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
+  'settings.label.general.cleanupPeriodDays': '清理周期（天）',
+  'settings.description.general.cleanupPeriodDays':
+    '~/.qwen/file-history/ 中用于 /rewind 的会话备份保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
+  'settings.label.general.gitCoAuthor.commit': '归因：commit',
+  'settings.description.general.gitCoAuthor.commit':
+    '通过 Qwen Code 创建 commit 时，添加 Co-authored-by trailer，并写入逐文件 AI 归因 git note。关闭后两者都会跳过。',
+  'settings.label.general.gitCoAuthor.pr': '归因：PR',
+  'settings.description.general.gitCoAuthor.pr':
+    '运行 gh pr create 时，在 PR 描述中追加 Qwen Code 归因行。',
+  'settings.label.general.language': '语言：界面',
+  'settings.description.general.language':
+    '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
+  'settings.label.general.dynamicCommandTranslation': '语言：动态命令翻译',
+  'settings.description.general.dynamicCommandTranslation':
+    '为动态 slash command 描述启用 AI 翻译。关闭后动态命令使用原始描述，也不会触发翻译模型调用。',
+  'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
+  'settings.description.general.preventSystemSleep':
+    '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
+  'settings.label.ui.theme': '主题',
+  'settings.description.ui.theme': '界面的颜色主题。',
+  'settings.label.ui.hideTips': '隐藏提示',
+  'settings.description.ui.hideTips': '隐藏界面中的帮助提示。',
+  'settings.label.ui.enableWelcomeBack': '显示欢迎回来对话框',
+  'settings.description.ui.enableWelcomeBack':
+    '回到有历史会话的项目时显示欢迎回来对话框。选择“开始新的聊天会话”后，在项目摘要变化前不会再次显示。',
+  'settings.label.ui.enableUserFeedback': '启用用户反馈',
+  'settings.description.ui.enableUserFeedback':
+    '对话结束后显示可选反馈对话框，帮助改进 Qwen 表现。',
+  'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
+  'settings.description.ui.enableFollowupSuggestions':
+    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
+  'settings.label.ui.compactMode': '紧凑模式',
+  'settings.description.ui.compactMode':
+    '隐藏工具输出和思考内容，显示更简洁的视图（可用 Ctrl+O 切换）。',
+  'settings.label.ui.compactInline': '紧凑内联',
+  'settings.description.ui.compactInline':
+    '在每个分组内紧凑显示工具内容，而不是跨分组合并。需要先启用紧凑模式。',
+  'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
+  'settings.description.ui.shellOutputMaxLines':
+    '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
+  'settings.label.privacy.usageStatisticsEnabled': '启用使用统计',
+  'settings.description.privacy.usageStatisticsEnabled': '启用使用统计收集。',
+  'settings.label.fastModel': '快速模型',
+  'settings.description.fastModel':
+    '用于生成提示建议和推测执行的模型。留空则使用主模型。较小/更快的模型（例如 qwen3-coder-flash）可以降低延迟和成本。',
+  'settings.label.context.fileFiltering.respectGitIgnore': '遵守 .gitignore',
+  'settings.description.context.fileFiltering.respectGitIgnore':
+    '搜索时遵守 .gitignore 文件。',
+  'settings.label.context.fileFiltering.respectQwenIgnore': '遵守 .qwenignore',
+  'settings.description.context.fileFiltering.respectQwenIgnore':
+    '搜索时遵守 .qwenignore 文件。',
+  'settings.label.context.fileFiltering.enableFuzzySearch': '启用模糊搜索',
+  'settings.description.context.fileFiltering.enableFuzzySearch':
+    '搜索文件时启用模糊搜索。',
+  'settings.label.tools.toolSearch.enabled': '启用 ToolSearch',
+  'settings.description.tools.toolSearch.enabled':
+    '启用后，MCP 工具会通过 ToolSearch 按需加载，以减少提示词大小。对于依赖前缀 KV 缓存的模型（如 DeepSeek），可关闭此项来保持提示词前缀稳定并提高缓存命中率。',
+  'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
+  'settings.description.tools.shell.enableInteractiveShell':
+    '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
+  'settings.label.tools.computerUse.enabled': '启用 Computer Use',
+  'settings.description.tools.computerUse.enabled':
+    '启用后（默认），会注册 9 个 computer_use__* 延迟内置工具。',
+  'settings.label.policy.permissionStrategy': '权限协调策略',
+  'settings.description.policy.permissionStrategy':
+    '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',
+  'settings.option.policy.permissionStrategy.first-responder': '先响应者',
+  'settings.option.policy.permissionStrategy.designated': '指定发起方',
+  'settings.option.policy.permissionStrategy.consensus': '共识法定人数',
+  'settings.option.policy.permissionStrategy.local-only': '仅本机',
+  'settings.label.experimental.enableCronTools': '启用 Cron/Loop 工具',
+  'settings.description.experimental.enableCronTools':
+    '启用会话内 cron/loop 工具（实验性）。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_ENABLE_CRON=1 环境变量启用。',
+  'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
+  'settings.description.experimental.emitToolUseSummaries':
+    '每个工具批次完成后生成一个简短的 LLM 标签。紧凑模式下会替代通用的 Tool × N 标题；完整模式下显示为工具组下方的弱化 ● <label> 行。需要配置快速模型。',
+  'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
+  'settings.description.agents.arena.preserveArtifacts':
+    '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
   'welcome.modeHint': 'Shift+Tab 或 /approval-mode',
   'welcome.tipLabel': '提示：',
 };
@@ -1649,6 +1776,35 @@ export function normalizeLanguage(
     return 'zh-CN';
   }
   return 'en';
+}
+
+export function languageSettingToWebShellLanguage(
+  value: unknown,
+): WebShellLanguage | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase().replace(/_/g, '-');
+  if (!normalized) return undefined;
+  if (normalized === 'auto') {
+    return normalizeLanguage(
+      typeof navigator !== 'undefined' ? navigator.language : undefined,
+    );
+  }
+  if (
+    normalized === 'zh' ||
+    normalized === 'zh-cn' ||
+    normalized === 'chinese' ||
+    normalized === '中文'
+  ) {
+    return 'zh-CN';
+  }
+  if (
+    normalized === 'en' ||
+    normalized === 'en-us' ||
+    normalized === 'english'
+  ) {
+    return 'en';
+  }
+  return undefined;
 }
 
 export function languageLabel(language: WebShellLanguage): string {

@@ -15,11 +15,13 @@ import type {
 import type {
   DaemonMessage,
   DaemonMessageToolCall,
+  DaemonMessageToolCallContent,
   DaemonMessageToolCallStatus,
   DaemonMessageToolKind,
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
+import { isTodoWriteToolName } from '../utils/todos.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -30,6 +32,11 @@ type DaemonPermissionTranscriptBlock = Extract<
   DaemonTranscriptBlock,
   { kind: 'permission' }
 >;
+
+type ExtendedDaemonStatusTranscriptBlock = DaemonStatusTranscriptBlock & {
+  source?: string;
+  data?: unknown;
+};
 
 interface TranscriptMessageLabels {
   promptCancelled?: string;
@@ -85,6 +92,10 @@ export function transcriptBlocksToDaemonMessages(
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
+    // Wall-clock of this block, surfaced as a hover tooltip on the rendered
+    // message. Prefer the daemon-authoritative stamp so every client agrees;
+    // fall back to the local receive time when the daemon left it unset.
+    const blockTime = block.serverTimestamp ?? block.clientReceivedAt;
 
     switch (block.kind) {
       case 'user': {
@@ -95,6 +106,7 @@ export function transcriptBlocksToDaemonMessages(
           id: block.id,
           role: 'user',
           content: textBlock.text,
+          timestamp: blockTime,
         };
         // Attach images if present
         if (textBlock.images && textBlock.images.length > 0) {
@@ -134,6 +146,7 @@ export function transcriptBlocksToDaemonMessages(
                   id: `${block.id}-ir-${readyCount++}`,
                   role: 'insight_ready',
                   path: seg.data.path,
+                  timestamp: blockTime,
                 });
               } else if (seg.data.type === 'insight_error') {
                 hasTerminal = true;
@@ -141,6 +154,7 @@ export function transcriptBlocksToDaemonMessages(
                   id: `${block.id}-ie-${errorCount++}`,
                   role: 'insight_error',
                   error: seg.data.error,
+                  timestamp: blockTime,
                 });
               }
             } else {
@@ -148,6 +162,7 @@ export function transcriptBlocksToDaemonMessages(
                 id: `${block.id}-t-${messages.length}`,
                 role: 'assistant',
                 content: seg.text,
+                timestamp: blockTime,
               });
               currentAssistantIdx = messages.length - 1;
             }
@@ -159,6 +174,7 @@ export function transcriptBlocksToDaemonMessages(
               stage: lastProgress.stage,
               progress: lastProgress.progress,
               detail: lastProgress.detail,
+              timestamp: blockTime,
             });
           }
           needsNewContentMessage = true;
@@ -182,6 +198,7 @@ export function transcriptBlocksToDaemonMessages(
             role: 'assistant',
             content: textBlock.text,
             isStreaming: textBlock.streaming,
+            timestamp: blockTime,
           });
           currentAssistantIdx = messages.length - 1;
           needsNewContentMessage = false;
@@ -221,6 +238,7 @@ export function transcriptBlocksToDaemonMessages(
             content: '',
             thinking: textBlock.text,
             isStreaming: textBlock.streaming,
+            timestamp: blockTime,
           });
           currentAssistantIdx = messages.length - 1;
           needsNewContentMessage = false;
@@ -254,7 +272,7 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
 
-        appendToolCallMessage(messages, block.id, toolCall);
+        appendToolCallMessage(messages, block.id, toolCall, blockTime);
         toolsByCallId.set(toolCall.callId, toolCall);
         needsNewContentMessage = true;
         break;
@@ -300,6 +318,7 @@ export function transcriptBlocksToDaemonMessages(
                 rawOutput: shellBlock.text,
               },
             ],
+            timestamp: blockTime,
           });
           needsNewContentMessage = true;
         }
@@ -314,6 +333,7 @@ export function transcriptBlocksToDaemonMessages(
           command: shellBlock.command,
           output: shellBlock.text,
           ...(shellBlock.cwd ? { cwd: shellBlock.cwd } : {}),
+          timestamp: blockTime,
         });
         needsNewContentMessage = true;
         break;
@@ -367,13 +387,23 @@ export function transcriptBlocksToDaemonMessages(
             if (!isSubAgentPermission) {
               permissionToolCall.status = 'in_progress';
             }
-            appendToolCallMessage(messages, block.id, permissionToolCall);
+            appendToolCallMessage(
+              messages,
+              block.id,
+              permissionToolCall,
+              blockTime,
+            );
             toolsByCallId.set(permissionToolCall.callId, permissionToolCall);
             needsNewContentMessage = true;
           } else {
             permissionToolCall.status = 'failed';
             permissionToolCall.endTime = permBlock.updatedAt;
-            appendToolCallMessage(messages, block.id, permissionToolCall);
+            appendToolCallMessage(
+              messages,
+              block.id,
+              permissionToolCall,
+              blockTime,
+            );
             toolsByCallId.set(permissionToolCall.callId, permissionToolCall);
             needsNewContentMessage = true;
           }
@@ -385,13 +415,15 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'status':
       case 'debug': {
-        const text = (block as DaemonStatusTranscriptBlock).text;
+        const statusBlock = block as ExtendedDaemonStatusTranscriptBlock;
+        const text = statusBlock.text;
         const todos = parsePlanTodos(text);
         if (todos) {
           messages.push({
             id: block.id,
             role: 'plan',
             todos,
+            timestamp: blockTime,
           });
           needsNewContentMessage = true;
           break;
@@ -405,20 +437,29 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: text,
           variant: 'info',
+          timestamp: blockTime,
+          ...(statusBlock.source ? { source: statusBlock.source } : {}),
+          ...(statusBlock.data !== undefined ? { data: statusBlock.data } : {}),
         });
         needsNewContentMessage = true;
         break;
       }
 
-      case 'error':
+      case 'error': {
+        const errorBlock = block as ExtendedDaemonStatusTranscriptBlock;
         messages.push({
           id: block.id,
           role: 'system',
-          content: (block as DaemonStatusTranscriptBlock).text,
+          content: errorBlock.text,
           variant: 'error',
+          retryable: errorBlock.source === 'turn_error',
+          timestamp: blockTime,
+          ...(errorBlock.source ? { source: errorBlock.source } : {}),
+          ...(errorBlock.data !== undefined ? { data: errorBlock.data } : {}),
         });
         needsNewContentMessage = true;
         break;
+      }
 
       case 'prompt_cancelled':
         messages.push({
@@ -426,6 +467,7 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: promptCancelledText,
           variant: 'info',
+          timestamp: blockTime,
         });
         needsNewContentMessage = true;
         break;
@@ -454,6 +496,7 @@ function appendToolCallMessage(
   messages: DaemonMessage[],
   blockId: string,
   toolCall: DaemonMessageToolCall,
+  timestamp?: number,
 ): void {
   // Native CLI groups every tool call of one scheduler batch into a single
   // bordered tool_group (mapToDisplay in useReactToolScheduler). The daemon
@@ -467,13 +510,18 @@ function appendToolCallMessage(
   //
   // Synthetic raw-shell groups (pushed by the `shell` block fallback) use the
   // bare block id without the `tg-` prefix and never absorb real tool calls.
+  // Sub-agent calls and todo_write updates each stand alone in their own group
+  // box instead of being crammed in with the tools around them: an agent renders
+  // an expandable panel, and a todo update is its own collapsible checklist.
+  const isStandalone = (t: DaemonMessageToolCall) =>
+    isSubAgentToolCall(t) || isTodoWriteToolName(t.toolName);
   const last = messages[messages.length - 1];
   if (
     last &&
     last.role === 'tool_group' &&
     last.id.startsWith('tg-') &&
-    !isSubAgentToolCall(toolCall) &&
-    !last.tools.some(isSubAgentToolCall)
+    !isStandalone(toolCall) &&
+    !last.tools.some(isStandalone)
   ) {
     last.tools.push(toolCall);
     return;
@@ -482,6 +530,7 @@ function appendToolCallMessage(
     id: `tg-${blockId}`,
     role: 'tool_group',
     tools: [toolCall],
+    timestamp,
   });
 }
 
@@ -603,6 +652,7 @@ function daemonToolBlockToToolCall(
 ): DaemonMessageToolCall {
   const rawOutput = getToolRawOutput(block);
   const isBackgroundAgent = isBackgroundAgentBlock(block, rawOutput);
+  const content = normalizeToolContent(block.content);
   const statusMap: Record<string, DaemonMessageToolCallStatus> = {
     running: 'in_progress',
     pending: 'pending',
@@ -634,6 +684,7 @@ function daemonToolBlockToToolCall(
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
+    ...(content ? { content } : {}),
   };
 }
 
@@ -769,6 +820,59 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
         ? block.rawOutput
         : block.details,
   };
+}
+
+function normalizeToolContent(
+  value: unknown,
+): DaemonMessageToolCallContent[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const content = value.flatMap((entry): DaemonMessageToolCallContent[] => {
+    const item = getRecord(entry);
+    if (!item) return [];
+
+    const type = item['type'];
+    if (type === 'content') {
+      const body = getRecord(item['content']);
+      if (!body || typeof body['type'] !== 'string') return [];
+      return [
+        {
+          type: 'content',
+          content: { ...body, type: body['type'] },
+        },
+      ];
+    }
+
+    if (type === 'diff') {
+      const newText = item['newText'];
+      if (typeof newText !== 'string') return [];
+
+      const path = item['path'];
+      const oldText = item['oldText'];
+      return [
+        {
+          type: 'diff',
+          ...(typeof path === 'string' ? { path } : {}),
+          ...(typeof oldText === 'string' ? { oldText } : {}),
+          newText,
+        },
+      ];
+    }
+
+    if (type === 'terminal') {
+      const terminalId = item['terminalId'];
+      return [
+        {
+          type: 'terminal',
+          ...(typeof terminalId === 'string' ? { terminalId } : {}),
+        },
+      ];
+    }
+
+    return [];
+  });
+
+  return content.length > 0 ? content : undefined;
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {

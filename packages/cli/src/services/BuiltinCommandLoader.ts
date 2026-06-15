@@ -35,6 +35,7 @@ import { goalCommand } from '../ui/commands/goalCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
+import { importConfigCommand } from '../ui/commands/importConfigCommand.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { initCommand } from '../ui/commands/initCommand.js';
 import { languageCommand } from '../ui/commands/languageCommand.js';
@@ -124,6 +125,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       helpCommand,
       hooksCommand,
       resolvedIdeCommand,
+      importConfigCommand,
       initCommand,
       languageCommand,
       mcpCommand,

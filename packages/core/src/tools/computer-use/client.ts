@@ -10,24 +10,26 @@ import type {
   CallToolResult,
   ListToolsResult,
 } from '@modelcontextprotocol/sdk/types.js';
-import { resolveComputerUsePackageSpec } from './constants.js';
+import { homedir } from 'node:os';
+import { binaryPath } from './constants.js';
 
 /**
- * Singleton stdio MCP client for the upstream open-computer-use binary.
+ * Singleton stdio MCP client for the cua-driver binary.
  *
- * Spawned via `npx -y <packageSpec> mcp`. First spawn pays the npx
- * download cost (up to ~60s for a fresh cache); subsequent spawns reuse
- * the npx cache and are sub-second.
+ * Spawned via `<binary> mcp`, where `<binary>` is the pinned cua-driver
+ * downloaded under `~/.qwen/computer-use/` (the bootstrap state machine
+ * downloads + verifies it before the first spawn). Spawns are sub-second
+ * — there is no npx/download cost on this path anymore.
  *
  * Lifecycle: lazy spawn on first `callTool` invocation. The process
  * stays alive until `stop()` or qwen-code exits. State (element_index
- * map per app) lives in the process — if the process restarts, the
- * model must call `get_app_state` again before any element-targeted
+ * map per window) lives in the process — if the process restarts, the
+ * model must call `get_window_state` again before any element-targeted
  * action.
  */
 export interface ComputerUseClientOptions {
-  /** npm package spec to npx. Example: "@qwen-code/open-computer-use@0.2.3". */
-  packageSpec: string;
+  /** Absolute path to the spawnable `cua-driver` binary. */
+  binary: string;
   /** Streaming hook for progress messages during slow operations. */
   onProgress?: (message: string) => void;
 }
@@ -35,30 +37,28 @@ export interface ComputerUseClientOptions {
 export class ComputerUseClient {
   private static singleton: ComputerUseClient | undefined;
 
-  private readonly packageSpec: string;
+  private readonly binary: string;
   private readonly onProgress: (message: string) => void;
   private client: Client | undefined;
   private startPromise: Promise<void> | undefined;
 
   constructor(options: ComputerUseClientOptions) {
-    this.packageSpec = options.packageSpec;
+    this.binary = options.binary;
     this.onProgress = options.onProgress ?? (() => {});
   }
 
   /**
    * Shared singleton instance, created with default options on first
    * access. Tests can replace it via `setSharedForTest()`.
+   *
+   * The binary path is derived from the pinned `CUA_DRIVER_VERSION` in
+   * constants.ts, the single source of truth the downloaded binary +
+   * generated `schemas.ts` agree on.
    */
   static shared(): ComputerUseClient {
     if (!ComputerUseClient.singleton) {
-      // Use the single source of truth for the package spec
-      // (PINNED_OPEN_COMPUTER_USE_VERSION in constants.ts). The previous
-      // inline `?? 'open-computer-use@latest'` fallback meant the actual
-      // MCP server could run a newer upstream than the schemas.ts pin
-      // was generated against — DragonnZhang flagged the schema-drift
-      // window in PR review.
       ComputerUseClient.singleton = new ComputerUseClient({
-        packageSpec: resolveComputerUsePackageSpec(),
+        binary: binaryPath(homedir()),
       });
     }
     return ComputerUseClient.singleton;
@@ -97,31 +97,20 @@ export class ComputerUseClient {
 
   private async doStart(onProgress?: (message: string) => void): Promise<void> {
     const progress = onProgress ?? this.onProgress;
-    progress('Starting Computer Use...');
+    progress('Starting Computer Use driver...');
 
-    // After ~3s, surface a hint that the slow path is download.
-    const downloadHintTimer = setTimeout(() => {
-      progress(
-        'Downloading Computer Use binary (this can take ~60s on first use)...',
-      );
-    }, 3000);
-
-    try {
-      const transport = new StdioClientTransport({
-        command: 'npx',
-        args: ['-y', this.packageSpec, 'mcp'],
-        // Inherit env so HTTPS_PROXY etc. flow through to npx
-        env: { ...process.env } as Record<string, string>,
-      });
-      const client = new Client(
-        { name: 'qwen-code-computer-use', version: '1.0.0' },
-        { capabilities: {} },
-      );
-      await client.connect(transport);
-      this.client = client;
-    } finally {
-      clearTimeout(downloadHintTimer);
-    }
+    const transport = new StdioClientTransport({
+      command: this.binary,
+      args: ['mcp'],
+      // Inherit env so HTTPS_PROXY / cua-driver config env flow through.
+      env: { ...process.env } as Record<string, string>,
+    });
+    const client = new Client(
+      { name: 'qwen-code-computer-use', version: '1.0.0' },
+      { capabilities: {} },
+    );
+    await client.connect(transport);
+    this.client = client;
   }
 
   /**
@@ -156,24 +145,37 @@ export class ComputerUseClient {
       })) as CallToolResult;
     } catch (err) {
       if (!isTransportClosedError(err)) throw err;
-      // Reconnect: upstream binary is commonly killed by macOS after the
-      // user grants Screen Recording (a TCC restart prompt). The child
-      // process is dead but the user's task is mid-flight. Transparent
-      // reconnect + single retry keeps the model's flow uninterrupted.
+      // The connection died. Two recoverable causes, both fixed by respawning
+      // the proxy (which relaunches the cua-driver daemon):
+      //   1. stdio "Connection closed" — the `cua-driver mcp` child was killed.
+      //   2. "daemon transport error … Connection refused" — the CuaDriver
+      //      DAEMON behind the proxy restarted. macOS forces a restart right
+      //      after the Screen Recording grant, so the proxy's Unix socket to
+      //      the daemon goes dead and every subsequent tool fails. This is the
+      //      first-use failure mode (grant SR → restart → all tools error).
       //
-      // Element index state lives in the upstream process and is therefore
-      // lost across the restart. The model is already instructed (via
-      // schema descriptions) to call get_app_state before any
-      // element-targeted action — if its retry uses a stale element_index
-      // it will get a normal upstream error ("element_index out of range")
-      // and naturally re-snapshot.
-      await this.stop();
-      await this.start();
-      if (!this.client) throw new Error('ComputerUseClient reconnect failed');
-      return (await this.client.callTool({
-        name,
-        arguments: args,
-      })) as CallToolResult;
+      // Respawn + retry, with a few attempts to absorb the daemon's restart /
+      // startup window (a single retry can land before the new daemon is up).
+      // Element-index state is lost across the restart; the model re-snapshots
+      // via get_window_state on a stale-index error.
+      let lastErr: unknown = err;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await this.stop();
+        await this.start();
+        if (!this.client) throw new Error('ComputerUseClient reconnect failed');
+        try {
+          return (await this.client.callTool({
+            name,
+            arguments: args,
+          })) as CallToolResult;
+        } catch (retryErr) {
+          if (!isTransportClosedError(retryErr)) throw retryErr;
+          lastErr = retryErr;
+          // Daemon may still be coming up after a restart — back off, retry.
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
+      throw lastErr;
     }
   }
 
@@ -192,15 +194,20 @@ export class ComputerUseClient {
 }
 
 /**
- * Returns true when `err` indicates the MCP transport closed unexpectedly
- * (e.g. the upstream child process was killed by macOS after a TCC permission
- * grant). The patterns below cover all observed SDK error messages:
+ * Returns true when `err` indicates a recoverable connection failure — either
+ * the stdio transport to the `cua-driver mcp` proxy closed, OR the proxy's
+ * Unix-socket link to the CuaDriver daemon died (daemon restart). Both are
+ * fixed by respawning the proxy. Observed SDK / cua-driver messages:
  *
- *   "Connection closed" – StdioClientTransport stream closed
- *   "MCP error -32000: ..." – JSON-RPC internal error, often wraps the above
- *   "Not connected" – Client.callTool guard before transport is open
+ *   "Connection closed"            – StdioClientTransport stream closed
+ *   "Not connected"                – Client guard before transport is open
+ *   "daemon transport error …"     – proxy → daemon Unix socket forward failed
+ *   "Connection refused (os error 61)" – daemon not listening (restarted/down)
+ *   "MCP error -32603 / -32000: …" – JSON-RPC wrapper around the above
  */
 export function isTransportClosedError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /connection closed|not connected/i.test(msg);
+  return /connection closed|not connected|connection refused|daemon transport error|os error 61/i.test(
+    msg,
+  );
 }

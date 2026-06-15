@@ -738,18 +738,43 @@ export async function runNonInteractive(
        * helper returns (main-turn → emitStructuredSuccess(); drain-turn
        * → return so the post-drain code emits success).
        */
-      const handledProviderToolCallIds = new Set<string>();
+      const handledProviderToolCallIds =
+        geminiClient.getHistoryFunctionResponseIds();
 
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => void,
       ): Promise<Part[]> => {
         const toolResponseParts: Part[] = [];
-        const respondedCallIds = new Set<string>();
+        const structuredOutputActive =
+          config.getJsonSchema() &&
+          batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
+        const seenBatchCallIds = new Set<string>();
+        const duplicateBatchRequests: ToolCallRequestInfo[] = [];
+        const uniqueBatchRequests = batchRequests.filter((request) => {
+          if (request.callId) {
+            if (seenBatchCallIds.has(request.callId)) {
+              if (
+                structuredOutputActive &&
+                request.name === ToolNames.STRUCTURED_OUTPUT
+              ) {
+                return true;
+              }
+              debugLogger.debug(
+                `Dropping duplicate non-interactive tool callId=${request.callId} name=${request.name}`,
+              );
+              duplicateBatchRequests.push(request);
+              return false;
+            }
+            seenBatchCallIds.add(request.callId);
+          }
+          return true;
+        });
+        const respondedRequests = new Set<ToolCallRequestInfo>();
         const executableBatchRequests: ToolCallRequestInfo[] = [];
         const duplicatePendingResponses: Part[] = [];
 
-        for (const requestInfo of batchRequests) {
+        for (const requestInfo of uniqueBatchRequests) {
           if (!requestInfo.providerCallId) {
             executableBatchRequests.push(requestInfo);
             continue;
@@ -766,7 +791,7 @@ export async function runNonInteractive(
           debugLogger.debug(
             `[runNonInteractive] Suppressing duplicate provider tool-call id: ${requestInfo.providerCallId} (tool: ${requestInfo.name})`,
           );
-          respondedCallIds.add(requestInfo.callId);
+          respondedRequests.add(requestInfo);
           adapter.emitToolResult(requestInfo, toolResponse);
           duplicatePendingResponses.push(...toolResponse.responseParts);
         }
@@ -784,20 +809,17 @@ export async function runNonInteractive(
         // examples in the main loop's prior comment for the
         // [bad/good/side-effect] permutations.
         let requestsToExecute = executableBatchRequests;
-        const structuredOutputActive =
-          config.getJsonSchema() &&
-          executableBatchRequests.some(
-            (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
-          );
         if (structuredOutputActive) {
           requestsToExecute = executableBatchRequests.filter(
             (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
           );
         }
-        const executedCallIds = new Set(respondedCallIds);
+        const executedRequests = new Set<ToolCallRequestInfo>(
+          respondedRequests,
+        );
 
         for (const requestInfo of requestsToExecute) {
-          executedCallIds.add(requestInfo.callId);
+          executedRequests.add(requestInfo);
 
           const inputFormat =
             typeof config.getInputFormat === 'function'
@@ -922,7 +944,7 @@ export async function runNonInteractive(
         // AND the retry-turn payload (when reached) doesn't leave
         // Anthropic / OpenAI staring at unpaired tool_use blocks.
         const unexecutedCalls = executableBatchRequests.filter(
-          (r) => !executedCallIds.has(r.callId),
+          (r) => !executedRequests.has(r),
         );
         if (unexecutedCalls.length > 0) {
           const skippedOutput = suppressedOutputBody(
@@ -947,6 +969,13 @@ export async function runNonInteractive(
             });
             toolResponseParts.push(...responseParts);
           }
+        }
+
+        for (const requestInfo of duplicateBatchRequests) {
+          const toolResponse =
+            createDuplicateProviderToolCallResponse(requestInfo);
+          adapter.emitToolResult(requestInfo, toolResponse);
+          toolResponseParts.push(...toolResponse.responseParts);
         }
 
         return toolResponseParts;
@@ -1318,15 +1347,32 @@ export async function runNonInteractive(
           };
 
           // Start cron scheduler — fires enqueue onto the shared queue.
+          // Durable support is fully enabled: file tasks load, the lock
+          // is acquired or probed, and missed one-shots are detected —
+          // start() below flushes them onto the queue so they execute
+          // during this run. The hold-open stays keyed on session-only
+          // jobs alone, so durable jobs never pin the process: once
+          // session jobs and the drain are done, stop() releases the
+          // lock and the run exits; durable jobs persist for a future
+          // owning session.
           const scheduler = !config.isCronEnabled()
             ? null
             : config.getCronScheduler();
 
-          if (scheduler && scheduler.size > 0) {
+          if (scheduler) {
+            // Durable tasks live under ~/.qwen (user-owned, not in the
+            // working tree), so no folder-trust gate is needed here.
+            await scheduler
+              .enableDurable(config.getSessionId())
+              .catch((err) => {
+                debugLogger.warn(
+                  `Durable cron init failed — persistent tasks will not fire in this run: ${err}`,
+                );
+              });
             await new Promise<void>((resolve, reject) => {
               // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
-              // drop scheduler.size to 0 on their own, so without this the
-              // hold-back loop below is unreachable after an abort.
+              // drop scheduler.sessionSize to 0 on their own, so without
+              // this the hold-back loop below is unreachable after an abort.
               const onAbort = () => {
                 scheduler.stop();
                 resolve();
@@ -1350,7 +1396,7 @@ export async function runNonInteractive(
                   resolve();
                   return;
                 }
-                if (scheduler.size === 0 && !drainPromise) {
+                if (scheduler.sessionSize === 0 && !drainPromise) {
                   abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
                   resolve();

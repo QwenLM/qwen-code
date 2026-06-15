@@ -14,6 +14,7 @@ interface FakeSkill {
   name: string;
   description?: string;
   priority?: number;
+  userInvocable?: boolean;
 }
 
 function makeContext(opts: {
@@ -125,6 +126,28 @@ describe('skillsCommand bare entry', () => {
     );
   });
 
+  it('omits non-user-invocable skills from the non-interactive listing', async () => {
+    if (!skillsCommand.action) throw new Error('action missing');
+    const context = makeContext({
+      skills: [
+        { name: 'alpha' },
+        { name: 'model-only', userInvocable: false },
+        { name: 'gamma' },
+      ],
+      executionMode: 'non_interactive',
+    });
+
+    await skillsCommand.action(context, '');
+
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.SKILLS_LIST,
+        skills: [{ name: 'alpha' }, { name: 'gamma' }],
+      },
+      expect.any(Number),
+    );
+  });
+
   it('omits disabled skills from the non-interactive listing', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
@@ -140,6 +163,24 @@ describe('skillsCommand bare entry', () => {
       {
         type: MessageType.SKILLS_LIST,
         skills: [{ name: 'alpha' }, { name: 'gamma' }],
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('shows no available skills when all loaded skills are not user invocable', async () => {
+    if (!skillsCommand.action) throw new Error('action missing');
+    const context = makeContext({
+      skills: [{ name: 'model-only', userInvocable: false }],
+      executionMode: 'acp',
+    });
+
+    await skillsCommand.action(context, '');
+
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text: 'All skills are marked as non-user-invocable.',
       },
       expect.any(Number),
     );

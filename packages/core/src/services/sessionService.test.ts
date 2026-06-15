@@ -22,6 +22,7 @@ import {
   SessionService,
   buildApiHistoryFromConversation,
   getResumePromptTokenCount,
+  getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
 import { CompressionStatus } from '../core/turn.js';
@@ -411,6 +412,252 @@ describe('SessionService', () => {
       expect(loaded?.conversation.messages[0].uuid).toBe('b1');
       expect(loaded?.conversation.messages[1].uuid).toBe('b2');
       expect(loaded?.lastCompletedUuid).toBe('b2');
+    });
+
+    it('keeps the latest file history snapshot for a prompt id', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+
+      const firstSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 's1',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'old-backup',
+                  version: 1,
+                  backupTime: '2026-06-13T00:00:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      const updatedSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 's2',
+        parentUuid: 's1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:01:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'updated-backup',
+                  version: 2,
+                  backupTime: '2026-06-13T00:01:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        firstSnapshotRecord,
+        updatedSnapshotRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'updated-backup',
+              version: 2,
+              backupTime: new Date('2026-06-13T00:01:01.000Z'),
+              failed: undefined,
+            },
+          },
+        },
+      ]);
+    });
+
+    it('ignores file history snapshots on a rewound inactive branch', async () => {
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+
+      const staleSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'stale-snapshot',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'stale-backup',
+                  version: 1,
+                  backupTime: '2026-06-13T00:00:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      const rewindRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'rewind',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'rewind',
+        message: undefined,
+        systemPayload: { truncatedCount: 1 },
+      };
+      const survivingSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'surviving-snapshot',
+        parentUuid: 'rewind',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:01:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'surviving-backup',
+                  version: 2,
+                  backupTime: '2026-06-13T00:01:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        staleSnapshotRecord,
+        rewindRecord,
+        survivingSnapshotRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'surviving-backup',
+              version: 2,
+              backupTime: new Date('2026-06-13T00:01:01.000Z'),
+              failed: undefined,
+            },
+          },
+        },
+      ]);
+    });
+
+    it('leaves file history snapshots undefined when none are recorded', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toBeUndefined();
+    });
+
+    it('skips malformed file history snapshot records and keeps later valid ones', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+
+      const malformedSnapshotRecord = {
+        ...recordB1,
+        uuid: 'bad-snapshot',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'bad',
+              timestamp: 'not-enough-fields',
+            },
+          ],
+        },
+      } as unknown as ChatRecord;
+      const validSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'good-snapshot',
+        parentUuid: 'bad-snapshot',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'backup-a',
+                  version: 1,
+                  backupTime: '2026-06-13T00:00:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        malformedSnapshotRecord,
+        validSnapshotRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'backup-a',
+              version: 1,
+              backupTime: new Date('2026-06-13T00:00:01.000Z'),
+              failed: undefined,
+            },
+          },
+        },
+      ]);
     });
 
     it('should return undefined when session file is empty', async () => {
@@ -1049,6 +1296,9 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(450);
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 450, outputTokenCount: 0 });
     });
 
     it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
@@ -1064,6 +1314,26 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(200);
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 200, outputTokenCount: 250 });
+    });
+
+    it('should restore disjoint candidate and thought output tokens when total is unavailable', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: {
+          promptTokenCount: 200,
+          candidatesTokenCount: 40,
+          thoughtsTokenCount: 60,
+        },
+      };
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 200, outputTokenCount: 100 });
     });
 
     it('should fall back to compression when latest assistant has zero usage', () => {
@@ -1079,6 +1349,9 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(300);
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 300, outputTokenCount: 0 });
     });
   });
 
