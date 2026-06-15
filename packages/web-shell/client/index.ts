@@ -10,5 +10,13 @@ export type {
   ToolHeaderKind,
   WelcomeHeaderRenderer,
   WebShellMarkdownCustomization,
+  WebShellFooterRenderInfo,
+  FooterRenderer,
+  WebShellTaskInfo,
+  WebShellAgentTask,
+  WebShellShellTask,
+  WebShellMonitorTask,
+  WebShellModelInfo,
+  WebShellSkillInfo,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
