@@ -825,6 +825,53 @@ describe('computeTodoDetails', () => {
     expect(detail?.resources?.apiTimeMs).toBe(200);
   });
 
+  it('resets the window when a task reopens via pending (completed → pending → in_progress)', () => {
+    // The intervening `pending` makes prev `pending` (not `completed`) at the
+    // re-activation, so this relies on the "ever completed" tracking; the
+    // reopened run must diff its own window (900→1000, 5000→5200), not span
+    // back to the original start.
+    const details = computeTodoDetails([
+      at(
+        todoWriteMessage(
+          'a1',
+          [item('1', 'Build', 'in_progress')],
+          stats(100, 0, 0, 100),
+        ),
+        1000,
+      ),
+      at(
+        todoWriteMessage(
+          'a2',
+          [item('1', 'Build', 'completed')],
+          stats(200, 0, 0, 300),
+        ),
+        2000,
+      ),
+      at(todoWriteMessage('a3', [item('1', 'Build', 'pending')]), 3000),
+      at(
+        todoWriteMessage(
+          'a4',
+          [item('1', 'Build', 'in_progress')],
+          stats(900, 0, 0, 5000),
+        ),
+        8000,
+      ),
+      at(
+        todoWriteMessage(
+          'a5',
+          [item('1', 'Build', 'completed')],
+          stats(1000, 0, 0, 5200),
+        ),
+        9000,
+      ),
+    ]);
+    const detail = details.get(todoStateKey(item('1', 'Build', 'completed')));
+    expect(detail?.startTs).toBe(8000);
+    expect(detail?.endTs).toBe(9000);
+    expect(detail?.resources?.inputTokens).toBe(100);
+    expect(detail?.resources?.apiTimeMs).toBe(200);
+  });
+
   it('sums only tool spans whose start falls within the task window', () => {
     const details = computeTodoDetails([
       toolMessage('t-before', 100, 500),

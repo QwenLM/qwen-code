@@ -532,6 +532,10 @@ export function computeTodoDetails(
   const result = new Map<string, TodoDetail>();
   const lastStatus = new Map<string, TodoItem['status']>();
   const startStatsByKey = new Map<string, TodoStatsSnapshot | undefined>();
+  // Keys that have reached `completed`. Going active again afterwards (directly,
+  // or via an intervening `pending`) is a re-activation that must start a fresh
+  // window rather than diff against the prior completion's baseline.
+  const completedKeys = new Set<string>();
   const toolSpans = collectToolSpans(messages);
 
   const ensure = (stateKey: string): TodoDetail => {
@@ -550,12 +554,16 @@ export function computeTodoDetails(
         const stateKey = todoStateKey(todo);
         const prev = lastStatus.get(stateKey);
         if (todo.status === 'in_progress' && prev !== 'in_progress') {
-          // A key seen active again after it already completed is a *new* task
-          // reusing a positional id (`plan-N` numbering repeats across plans).
-          // Reset so its window diffs against its own start, not the prior
-          // task's far-earlier boundary — otherwise the detail row would show a
-          // window spanning both tasks with wildly inflated token/time numbers.
-          if (prev === 'completed') {
+          // Re-activated after a completion (a reopened task, or a new task
+          // reusing a positional `plan-N` id) — reset so its window diffs
+          // against its own start, not the prior completion's far-earlier
+          // boundary, which would render a window spanning both with wildly
+          // inflated token/time numbers. Keyed on "ever completed" so an
+          // intervening `pending` (completed → pending → in_progress) still
+          // resets, while a pause/resume that never completed
+          // (in_progress → pending → in_progress) keeps its first baseline.
+          if (completedKeys.has(stateKey)) {
+            completedKeys.delete(stateKey);
             startStatsByKey.delete(stateKey);
             result.delete(stateKey);
           }
@@ -586,6 +594,7 @@ export function computeTodoDetails(
             if (resources) detail.resources = resources;
           }
         }
+        if (todo.status === 'completed') completedKeys.add(stateKey);
         lastStatus.set(stateKey, todo.status);
       }
     }
