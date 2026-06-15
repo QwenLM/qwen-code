@@ -25,10 +25,11 @@ Final gate in the PR triage pipeline. Read all prior stage results, reflect hone
   `${TRIAGE_RESULTS_DIR:-/tmp/triage-results}`; the CI workflow publishes them
   with the write-capable token.
 - This skill ONLY runs when product-decision passed (or was explicitly
-  skipped by a review-only trigger) AND code review completed without
-  requesting changes. Upstream failures post their own request-changes and
-  stop the pipeline — so never re-litigate an upstream rejection here; this
-  stage weighs review nits + tmux results and issues the final verdict
+  skipped by a review-only trigger), code review completed without requesting
+  changes, and tmux-testing produced a real verdict (`pass`, `fail`, or
+  `timeout`). Upstream failures and tmux skips stop the pipeline — so never
+  re-litigate an upstream rejection here; this stage weighs review nits + tmux
+  results and issues the final verdict.
 
 ## Procedure
 

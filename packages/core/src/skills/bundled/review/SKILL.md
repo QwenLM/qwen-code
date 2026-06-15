@@ -620,17 +620,30 @@ fi
 If there are **no confirmed findings**, submit a single-line review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body. **In emit-only mode**, build the same `{commit_id, event, body}` object and write it to `QWEN_REVIEW_OUTPUT_FILE` instead of calling `gh api`:
 
 ```bash
-# downgradeApprove=false (non-self PR, green CI):
-gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
-  -f commit_id="{commit_sha}" \
-  -f event="APPROVE" \
-  -f body="No issues found. LGTM! ✅ _— YOUR_MODEL_ID via Qwen Code /review_"
+EVENT="APPROVE"
+BODY="No issues found. LGTM! ✅ _— YOUR_MODEL_ID via Qwen Code /review_"
 
-# downgradeApprove=true (self-PR, CI failing, or CI still running):
-gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
-  -f commit_id="{commit_sha}" \
-  -f event="COMMENT" \
-  -f body="No review findings. Downgraded from Approve to Comment: <downgradeReasons joined with '; '>. _— YOUR_MODEL_ID via Qwen Code /review_"
+if [ "<downgradeApprove>" = "true" ]; then
+  EVENT="COMMENT"
+  BODY="No review findings. Downgraded from Approve to Comment: <downgradeReasons joined with '; '>. _— YOUR_MODEL_ID via Qwen Code /review_"
+fi
+
+if [ -n "${QWEN_REVIEW_EMIT_ONLY:-}" ]; then
+  OUTPUT_FILE="${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
+  TMP_OUTPUT="${OUTPUT_FILE}.tmp"
+  jq -n \
+    --arg commit_id "{commit_sha}" \
+    --arg event "$EVENT" \
+    --arg body "$BODY" \
+    '{commit_id:$commit_id, event:$event, body:$body}' > "$TMP_OUTPUT"
+  mv "$TMP_OUTPUT" "$OUTPUT_FILE"
+  echo "Emit-only: wrote no-findings review JSON to $OUTPUT_FILE"
+else
+  gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
+    -f commit_id="{commit_sha}" \
+    -f event="$EVENT" \
+    -f body="$BODY"
+fi
 ```
 
 Clean up the JSON file in Step 11.

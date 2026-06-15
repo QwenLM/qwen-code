@@ -708,6 +708,18 @@ jobs:
           fi
 
           RESULT="$QWEN_REVIEW_OUTPUT_FILE"
+          if [ -f "$RESULT" ]; then
+            RESULT_BODY="$(jq -r '.body // ""' "$RESULT" 2>/dev/null || echo "")"
+            if [[ "$RESULT_BODY" == *"<!-- qwen-triage:review-unavailable -->"* ]]; then
+              ALT_RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
+              if [ -n "${ALT_RESULT:-}" ] && [ -f "$ALT_RESULT" ]; then
+                ALT_BODY="$(jq -r '.body // ""' "$ALT_RESULT" 2>/dev/null || echo "")"
+                if [[ "$ALT_BODY" != *"<!-- qwen-triage:review-unavailable -->"* ]]; then
+                  RESULT="$ALT_RESULT"
+                fi
+              fi
+            fi
+          fi
           if [ ! -f "$RESULT" ]; then
             RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
           fi
@@ -864,7 +876,18 @@ jobs:
           PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
         run: |
           set -euo pipefail
-          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
+          pr_data=""
+          for attempt in 1 2 3; do
+            if pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to read PR state before tmux testing after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::gh pr view failed before tmux testing (attempt ${attempt}/3), retrying..."
+            sleep $((attempt * 15))
+          done
           IFS=$'\t' read -r state is_draft <<< "$pr_data"
           if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
             echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
@@ -967,8 +990,9 @@ jobs:
     #   - review fail        → /review posts CHANGES_REQUESTED, stop
     #   - review pass        → approval-decision posts the final verdict here
     # So this job only runs when product-decision passed (or was explicitly
-    # skipped via a review_only trigger) AND review completed with verdict
-    # pass — never alongside an upstream stage's request-changes.
+    # skipped via a review_only trigger), review completed with verdict pass,
+    # and tmux-testing produced a real verdict — never alongside an upstream
+    # stage's request-changes or a skipped tmux run.
     if: >-
       always() &&
       needs.resolve.outputs.should_run == 'true' &&
@@ -978,7 +1002,10 @@ jobs:
        needs.resolve.outputs.trigger_type == 'review_only') &&
       needs.review.result == 'success' &&
       needs.review.outputs.verdict == 'pass' &&
-      (needs.tmux-testing.result == 'success' || needs.tmux-testing.result == 'skipped')
+      needs.tmux-testing.result == 'success' &&
+      (needs.tmux-testing.outputs.verdict == 'pass' ||
+       needs.tmux-testing.outputs.verdict == 'fail' ||
+       needs.tmux-testing.outputs.verdict == 'timeout')
     timeout-minutes: 10
     concurrency:
       group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'

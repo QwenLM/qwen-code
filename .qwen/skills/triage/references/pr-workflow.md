@@ -73,7 +73,9 @@ When running locally via `/triage <N>`, follow this dependency chain:
     ├─ requested changes → STOP (the review's CHANGES_REQUESTED is the verdict)
     │
     ▼ passed
-tmux-real-user-testing (skip for fork PRs)
+tmux-real-user-testing (internal PRs only)
+    │
+    ├─ skipped → STOP (fork, closed, draft, or no runnable environment)
     │
     ▼
 /approval-decision (reads all prior comments, decides final verdict)
@@ -85,7 +87,8 @@ stage owns the formal review verdict on every path:
 - **product-decision fails** → it posts request-changes; nothing else runs
 - **review requests changes** → that review IS the verdict; tmux and approval skipped
 - **tmux fails** → approval still runs and weighs the failure (review passed, so there is no competing verdict)
-- **approval-decision runs only when product and review both passed** — it issues the single final approve/request-changes
+- **tmux is skipped** → stop; do not approve without real-scenario evidence
+- **approval-decision runs only when product, review, and tmux gates completed** — it issues the single final approve/request-changes
 
 Each stage posts its own comment with a unique marker. Re-runs update in place.
 
