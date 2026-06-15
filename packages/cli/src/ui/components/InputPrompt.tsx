@@ -646,7 +646,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (key.paste) {
         // Dismiss follow-up suggestion when user starts typing/pasting
-        if (buffer.text.length === 0 && followup.state.isVisible) {
+        if (
+          buffer.text.length === 0 &&
+          (followup.state.isVisible || promptSuggestion)
+        ) {
           followup.dismiss();
           onPromptSuggestionDismiss?.();
         }
@@ -987,10 +990,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !showCompletionSuggestions &&
         !reverseSearchActive &&
         !commandSearchActive &&
-        followup.state.isVisible &&
-        followup.state.suggestion
+        (followup.state.isVisible || promptSuggestion) &&
+        (followup.state.suggestion ?? promptSuggestion)
       ) {
-        followup.accept('tab');
+        // If followup state has a suggestion, use the normal accept path.
+        // Otherwise use `promptSuggestion` directly (e.g. after user typed
+        // and deleted — the followup controller was dismissed but the
+        // placeholder text is still available).
+        if (followup.state.suggestion) {
+          followup.accept('tab');
+        } else if (promptSuggestion) {
+          buffer.insert(promptSuggestion);
+        }
         return true;
       }
 
@@ -1000,10 +1011,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.ctrl &&
         !key.meta &&
         buffer.text.length === 0 &&
-        followup.state.isVisible &&
-        followup.state.suggestion
+        (followup.state.isVisible || promptSuggestion) &&
+        (followup.state.suggestion ?? promptSuggestion)
       ) {
-        followup.accept('right');
+        if (followup.state.suggestion) {
+          followup.accept('right');
+        } else if (promptSuggestion) {
+          buffer.insert(promptSuggestion);
+        }
         return true;
       }
 
@@ -1242,10 +1257,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Accept and submit prompt suggestion on Enter when input is truly empty
         if (
           buffer.text.length === 0 &&
-          followup.state.isVisible &&
-          followup.state.suggestion
+          (followup.state.isVisible || promptSuggestion) &&
+          (followup.state.suggestion ?? promptSuggestion)
         ) {
-          const text = followup.state.suggestion;
+          const text = followup.state.suggestion ?? promptSuggestion!;
           // Skip onAccept (buffer.insert) — we pass the text directly to
           // handleSubmitAndClear which clears the buffer synchronously.
           // Without skipOnAccept the microtask in accept() would re-insert
@@ -1344,7 +1359,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Dismiss follow-up suggestion only on printable character input
       if (
         buffer.text.length === 0 &&
-        followup.state.isVisible &&
+        (followup.state.isVisible || promptSuggestion) &&
         key.sequence &&
         key.sequence.length === 1 &&
         !key.ctrl &&
@@ -1426,6 +1441,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setBgSelectedIndex,
       followup,
       onPromptSuggestionDismiss,
+      promptSuggestion,
       exportCompletion,
       isHistoryRestoredText,
       showCompletionSuggestions,
@@ -1581,6 +1597,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const hasTabConsumer =
     shouldShowSuggestions ||
     (followup.state.isVisible && Boolean(followup.state.suggestion)) ||
+    Boolean(promptSuggestion) ||
     Boolean(completion.midInputGhostText?.acceptText);
 
   // Narrow signal — autocomplete dropdown only. Composer hides Footer /
@@ -1679,8 +1696,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         onKeypress={handleInput}
         showCursor={showCursor}
         placeholder={
-          followup.state.isVisible && followup.state.suggestion
-            ? followup.state.suggestion
+          (followup.state.isVisible || promptSuggestion) &&
+          (followup.state.suggestion ?? promptSuggestion)
+            ? (followup.state.suggestion ?? promptSuggestion ?? undefined)
             : placeholder
         }
         prefix={prefixNode}

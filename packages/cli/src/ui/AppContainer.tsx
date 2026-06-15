@@ -1470,9 +1470,10 @@ export const AppContainer = (props: AppContainerProps) => {
   const speculationRef = useRef<SpeculationState>(IDLE_SPECULATION);
   const suggestionAbortRef = useRef<AbortController | null>(null);
 
-  // Dismiss callback — clears suggestion + aborts in-flight generation/speculation
+  // Dismiss callback — aborts in-flight generation/speculation. Does NOT
+  // clear `promptSuggestion` so the placeholder can restore it when the
+  // buffer becomes empty again (user types then deletes).
   const dismissPromptSuggestion = useCallback(() => {
-    setPromptSuggestion(null);
     suggestionAbortRef.current?.abort();
     suggestionAbortRef.current = null;
   }, []);

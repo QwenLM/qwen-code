@@ -158,7 +158,9 @@ export const Composer = () => {
           placeholder={
             vimEnabled
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
-              : '  ' + t('Type your message or @path/to/file')
+              : uiState.promptSuggestion
+                ? '  ' + uiState.promptSuggestion
+                : '  ' + t('Type your message or @path/to/file')
           }
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.dismissPromptSuggestion}
