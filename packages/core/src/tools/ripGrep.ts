@@ -468,6 +468,7 @@ class GrepToolInvocation extends BaseToolInvocation<
     if (filteringOptions.respectQwenIgnore) {
       // Load ignore files from each workspace directory, not just the primary one.
       const seenIgnoreFiles = new Set<string>();
+      // Pass .qwenignore last so custom ignore negations cannot override it.
       const nonQwenIgnorePaths: string[] = [];
       const qwenIgnorePathsForRipgrep: string[] = [];
       const ignoreFileNames = getQwenIgnoreFileNames(

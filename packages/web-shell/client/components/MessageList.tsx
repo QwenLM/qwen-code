@@ -12,13 +12,14 @@ import {
   type MutableRefObject,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type { Message, ACPToolCall } from '../adapters/types';
+import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
+import { useWebShellCustomization } from '../customization';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
@@ -38,6 +39,11 @@ interface MessageListProps {
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   catchingUp?: boolean;
+  /**
+   * True while the agent is still answering. The newest turn then stays
+   * expanded and un-collapsible so streaming output is never hidden.
+   */
+  isResponding?: boolean;
   welcomeHeader?: ReactNode;
   workspaceCwd?: string;
   tailContent?: ReactNode;
@@ -83,7 +89,16 @@ function getLastUserMessageId(messages: Message[]): string | null {
 }
 
 export type DisplayItem =
-  | { type: 'message'; key: string; message: Message }
+  | {
+      type: 'message';
+      key: string;
+      message: Message;
+      /**
+       * Present only on a turn's leading user-message row when the turn is
+       * collapsible; drives the prompt-row expand/collapse toggle.
+       */
+      collapse?: TurnCollapseHead;
+    }
   | {
       type: 'parallel_agents';
       key: string;
@@ -282,6 +297,227 @@ export function getDisplayItemVirtualKey(item: DisplayItem): string {
     : `msg:${item.key}`;
 }
 
+export interface ApplyTurnCollapseOptions {
+  /**
+   * Per-turn user override keyed by the turn's user-message id:
+   * `true` = forced expanded, `false` = forced collapsed. Turns absent from the
+   * map follow the default (completed turns collapse).
+   */
+  overrides: ReadonlyMap<string, boolean>;
+  /**
+   * True while the agent is still answering. The final turn then stays expanded
+   * and un-collapsible so live output is never hidden.
+   */
+  isResponding: boolean;
+  /**
+   * Tool-call id of a pending approval, if any. The turn containing it is
+   * force-expanded so the inline approve/reject UI is never folded away (mirrors
+   * compact mode's `isForceExpandGroup`).
+   */
+  pendingApprovalCallId?: string | null;
+  /** Master switch; when false the items pass through untouched. */
+  enabled: boolean;
+}
+
+function isAssistantAnswer(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'assistant' &&
+    // `content` is typed `string`, but daemon SSE text can be undefined at
+    // runtime (transcriptToMessages copies `textBlock.text` through). Guard it:
+    // `applyTurnCollapse` runs in render, so a bare `.trim()` would blank the
+    // whole transcript.
+    !!item.message.content &&
+    item.message.content.trim().length > 0
+  );
+}
+
+/**
+ * A turn's hideable "steps": tool activity, plans, and mid-turn assistant text.
+ * The final answer and any system/shell/insight rows (errors, cancellations,
+ * command output) are kept visible even when the turn is collapsed.
+ */
+function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
+  if (item.type === 'parallel_agents') return true;
+  switch (item.message.role) {
+    case 'tool_group':
+    case 'plan':
+      return true;
+    case 'assistant':
+      return !isFinalAnswer;
+    case 'user':
+    case 'system':
+    case 'user_shell':
+    case 'btw':
+    case 'insight_progress':
+    case 'insight_ready':
+    case 'insight_error':
+      return false;
+    default: {
+      // Compile-time exhaustiveness: a newly added DaemonMessage role fails to
+      // assign to `never` here. At runtime (e.g. a newer daemon sending an
+      // unknown role) it falls through as not-hideable — kept visible rather
+      // than crashing the transcript or vanishing from a collapsed turn.
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _exhaustive: never = item.message;
+      return false;
+    }
+  }
+}
+
+/**
+ * Walk backwards from `index` to the user-message row that heads its turn and
+ * return that turn's id, or null when `index` precedes the first turn.
+ */
+export function findTurnIdForIndex(
+  items: readonly DisplayItem[],
+  index: number,
+): string | null {
+  for (let i = Math.min(index, items.length - 1); i >= 0; i--) {
+    const item = items[i];
+    if (item.type === 'message' && item.message.role === 'user') {
+      return item.message.id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Fold each completed turn down to its prompt and final answer, hiding the
+ * intermediate steps (thinking, tool calls, mid-turn assistant text) behind a
+ * toggle attached to the prompt row. A turn spans one user message up to the
+ * next; its "final answer" is the last assistant row carrying visible content.
+ * The leading user row of every collapsible turn is tagged with a
+ * `TurnCollapseHead`; when collapsed, the hidden middle rows are dropped and the
+ * final answer's own thinking is stripped so only its purple-prefixed content
+ * remains. Returns the original array untouched when disabled or when there is
+ * nothing to collapse.
+ */
+/** Does any tool group / parallel-agents row in [start, end] own `callId`? */
+function turnOwnsCallId(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+  callId: string | null | undefined,
+): boolean {
+  if (!callId) return false;
+  for (let i = start; i <= end; i++) {
+    const item = items[i];
+    if (item.type === 'parallel_agents') {
+      if (item.agents.some((agent) => toolContainsCallId(agent, callId))) {
+        return true;
+      }
+    } else if (item.message.role === 'tool_group') {
+      if (item.message.tools.some((tool) => toolContainsCallId(tool, callId))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function applyTurnCollapse(
+  items: DisplayItem[],
+  {
+    overrides,
+    isResponding,
+    pendingApprovalCallId,
+    enabled,
+  }: ApplyTurnCollapseOptions,
+): DisplayItem[] {
+  if (!enabled || items.length === 0) return items;
+
+  const userIdxs: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type === 'message' && item.message.role === 'user') {
+      userIdxs.push(i);
+    }
+  }
+  if (userIdxs.length === 0) return items;
+
+  const result: DisplayItem[] = [];
+  // Anything before the first prompt (e.g. a session-restore banner) is not
+  // part of any turn and passes through verbatim.
+  for (let i = 0; i < userIdxs[0]; i++) result.push(items[i]);
+
+  for (let k = 0; k < userIdxs.length; k++) {
+    const start = userIdxs[k];
+    const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    const head = items[start] as Extract<DisplayItem, { type: 'message' }>;
+    const turnId = head.message.id;
+    const isActiveTurn = k === userIdxs.length - 1 && isResponding;
+    const hasPendingApproval = turnOwnsCallId(
+      items,
+      start,
+      end,
+      pendingApprovalCallId,
+    );
+
+    // Final answer = last assistant-with-content row in (start, end].
+    let answerIdx = -1;
+    for (let i = end; i > start; i--) {
+      if (isAssistantAnswer(items[i])) {
+        answerIdx = i;
+        break;
+      }
+    }
+
+    let hiddenCount = 0;
+    for (let i = start + 1; i <= end; i++) {
+      if (isHideableStep(items[i], i === answerIdx)) hiddenCount++;
+    }
+
+    if (isActiveTurn || hasPendingApproval || hiddenCount === 0) {
+      // Nothing to fold (still streaming, awaiting an approval, or no steps):
+      // emit the turn untouched so live/actionable rows stay visible.
+      for (let i = start; i <= end; i++) result.push(items[i]);
+      continue;
+    }
+
+    const expanded = overrides.has(turnId)
+      ? (overrides.get(turnId) as boolean)
+      : false;
+    const collapsed = !expanded;
+
+    result.push({
+      type: 'message',
+      key: head.key,
+      message: head.message,
+      collapse: { turnId, collapsed, hiddenCount },
+    });
+
+    if (!collapsed) {
+      for (let i = start + 1; i <= end; i++) result.push(items[i]);
+      continue;
+    }
+
+    // Collapsed: drop the hideable steps; keep the final answer (its own
+    // thinking stripped) and any non-step rows (errors, cancellations, command
+    // output) in their original places.
+    for (let i = start + 1; i <= end; i++) {
+      const item = items[i];
+      if (isHideableStep(item, i === answerIdx)) continue;
+      if (
+        i === answerIdx &&
+        item.type === 'message' &&
+        item.message.role === 'assistant' &&
+        item.message.thinking
+      ) {
+        result.push({
+          type: 'message',
+          key: item.key,
+          message: { ...item.message, thinking: undefined },
+        });
+      } else {
+        result.push(item);
+      }
+    }
+  }
+
+  return result;
+}
+
 /**
  * Locate a display item by message id, falling back to the tool call id for
  * tool groups that were merged (compact mode) or grouped (parallel agents)
@@ -343,6 +579,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       onConfirm,
       onShowContextDetail,
       catchingUp,
+      isResponding = false,
       welcomeHeader,
       workspaceCwd,
       tailContent,
@@ -367,6 +604,44 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       () => groupParallelAgents(mergedMessages),
       [mergedMessages],
     );
+
+    // ── Per-turn collapse ────────────────────────────────────────────────
+    // Completed turns fold down to their prompt + final answer (toggle on the
+    // prompt row). `collapseOverrides` records explicit user toggles keyed by
+    // the turn's user-message id; turns absent from it follow the default
+    // (collapsed once complete). `displayItems` stays the full, pre-collapse
+    // list — used only to locate rows hidden inside a collapsed turn — while
+    // `visibleItems` is what actually renders.
+    const { collapseCompletedTurns } = useWebShellCustomization();
+    const collapseEnabled = collapseCompletedTurns ?? true;
+    const [collapseOverrides, setCollapseOverrides] = useState<
+      ReadonlyMap<string, boolean>
+    >(() => new Map());
+    const handleToggleCollapse = useCallback((turnId: string) => {
+      setCollapseOverrides((prev) => {
+        const currentlyExpanded = prev.get(turnId) ?? false;
+        const next = new Map(prev);
+        next.set(turnId, !currentlyExpanded);
+        return next;
+      });
+    }, []);
+    const visibleItems = useMemo(
+      () =>
+        applyTurnCollapse(displayItems, {
+          overrides: collapseOverrides,
+          isResponding,
+          pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
+          enabled: collapseEnabled,
+        }),
+      [
+        displayItems,
+        collapseOverrides,
+        isResponding,
+        pendingApproval?.toolCallId,
+        collapseEnabled,
+      ],
+    );
+
     const containerRef = useRef<HTMLDivElement>(null);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
@@ -434,7 +709,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const hasTailContent = tailContent !== undefined && tailContent !== null;
     const hasHeader = !!welcomeHeader;
     const headerOffset = hasHeader ? 1 : 0;
-    const tailApprovalIndex = headerOffset + displayItems.length;
+    const tailApprovalIndex = headerOffset + visibleItems.length;
     const tailContentIndex = tailApprovalIndex + (hasTailApproval ? 1 : 0);
     const totalCount = tailContentIndex + (hasTailContent ? 1 : 0);
     const useVirtualScroll = shouldUseVirtualScroll(
@@ -453,7 +728,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         if (hasTailContent && index === tailContentIndex) {
           return `slot:tail:${tailKey}`;
         }
-        const item = displayItems[index - headerOffset];
+        const item = visibleItems[index - headerOffset];
         return item ? getDisplayItemVirtualKey(item) : `slot:row:${index}`;
       },
       [
@@ -464,7 +739,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         hasTailContent,
         tailContentIndex,
         tailKey,
-        displayItems,
+        visibleItems,
         headerOffset,
       ],
     );
@@ -513,11 +788,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       return () => clearTimeout(timer);
     }, [flashKey]);
 
-    const scrollToMessage = useCallback(
-      (messageId: string, callId?: string): boolean => {
-        const itemIndex = findDisplayItemIndex(displayItems, messageId, callId);
-        if (itemIndex < 0) return false;
-        const rowIndex = itemIndex + headerOffset;
+    // Scroll a visible row to center and flash it.
+    const performScrollToRow = useCallback(
+      (rowIndex: number) => {
         // Explicit navigation away from the tail — pause follow so the
         // auto-scroll driver doesn't yank the viewport straight back down,
         // and engage the same cooldown scrollToBottom uses so the scroll
@@ -547,12 +820,62 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         const key = getItemKey(rowIndex);
         setFlashKey(null);
         requestAnimationFrame(() => setFlashKey(key));
+      },
+      [useVirtualScroll, virtualizer, getItemKey],
+    );
+
+    // A scroll target that currently sits inside a collapsed turn: expand the
+    // turn, then finish the scroll once its rows materialize in `visibleItems`.
+    const pendingScrollRef = useRef<{
+      messageId: string;
+      callId?: string;
+    } | null>(null);
+
+    const scrollToMessage = useCallback(
+      (messageId: string, callId?: string): boolean => {
+        const visibleIndex = findDisplayItemIndex(
+          visibleItems,
+          messageId,
+          callId,
+        );
+        if (visibleIndex >= 0) {
+          pendingScrollRef.current = null;
+          performScrollToRow(visibleIndex + headerOffset);
+          return true;
+        }
+        // Not on screen — it may be folded inside a collapsed turn. Locate it
+        // in the full list, expand that turn, and defer the scroll.
+        const fullIndex = findDisplayItemIndex(displayItems, messageId, callId);
+        if (fullIndex < 0) return false;
+        const turnId = findTurnIdForIndex(displayItems, fullIndex);
+        if (!turnId) return false;
+        pendingScrollRef.current = { messageId, callId };
+        setCollapseOverrides((prev) => {
+          if (prev.get(turnId) === true) return prev;
+          const next = new Map(prev);
+          next.set(turnId, true);
+          return next;
+        });
         return true;
       },
-      [displayItems, headerOffset, useVirtualScroll, virtualizer, getItemKey],
+      [visibleItems, displayItems, headerOffset, performScrollToRow],
     );
 
     useImperativeHandle(ref, () => ({ scrollToMessage }), [scrollToMessage]);
+
+    // Flush a deferred scroll once the expanded turn's rows are visible.
+    useEffect(() => {
+      const pending = pendingScrollRef.current;
+      if (!pending) return;
+      const idx = findDisplayItemIndex(
+        visibleItems,
+        pending.messageId,
+        pending.callId,
+      );
+      if (idx < 0) return;
+      pendingScrollRef.current = null;
+      performScrollToRow(idx + headerOffset);
+    }, [visibleItems, headerOffset, performScrollToRow]);
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
     // Runs synchronously in the scroll handler — no rAF needed since
@@ -582,10 +905,14 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       }
     }, []);
 
-    // Clear screen (e.g. /clear) → reset to follow mode.
+    // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
+    // collapse overrides, and disarm any deferred scroll so it can't fire
+    // against the next session.
     useEffect(() => {
       if (messages.length === 0) {
         shouldFollow.current = true;
+        pendingScrollRef.current = null;
+        setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
       }
     }, [messages.length]);
 
@@ -619,6 +946,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       }
       if (lastId && lastId !== prevLastUserMsgId.current) {
         shouldFollow.current = true;
+        // A new prompt supersedes any pending "Show in transcript" scroll.
+        pendingScrollRef.current = null;
         requestAnimationFrame(scrollToBottom);
       }
       prevLastUserMsgId.current = lastId;
@@ -684,7 +1013,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         }
 
         const itemIndex = index - headerOffset;
-        const item = displayItems[itemIndex];
+        const item = visibleItems[itemIndex];
         if (!item) return null;
 
         if (item.type === 'parallel_agents') {
@@ -706,10 +1035,12 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
             onConfirm={onConfirm}
             onShowContextDetail={onShowContextDetail}
             workspaceCwd={workspaceCwd}
-            isLatest={itemIndex === displayItems.length - 1}
+            isLatest={itemIndex === visibleItems.length - 1}
             showRetryHint={showRetryHint}
             onRetryClick={onRetryClick}
             shellOutputMaxLines={shellOutputMaxLines}
+            collapse={item.collapse}
+            onToggleCollapse={handleToggleCollapse}
           />
         );
       },
@@ -725,11 +1056,12 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         onConfirm,
         onShowContextDetail,
         headerOffset,
-        displayItems,
+        visibleItems,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
         shellOutputMaxLines,
+        handleToggleCollapse,
       ],
     );
 

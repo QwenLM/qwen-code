@@ -2041,7 +2041,10 @@ describe('Gemini Client (client.ts)', () => {
     // Real on-disk files so client.ts's `fsPromises.stat(filePath)` (used
     // to resolve a blanked path to its inode) succeeds. `node:fs` is
     // mocked in this suite but `node:fs/promises` is not.
-    async function makeReadFileResponses(count: number): Promise<{
+    async function makeReadFileResponses(
+      count: number,
+      outputLength?: number,
+    ): Promise<{
       history: Content[];
       paths: string[];
     }> {
@@ -2071,7 +2074,12 @@ describe('Gemini Client (client.ts)', () => {
               functionResponse: {
                 id: callId,
                 name: 'read_file',
-                response: { output: `content of ${i}` },
+                response: {
+                  output:
+                    outputLength === undefined
+                      ? `content of ${i}`
+                      : String(i).repeat(outputLength),
+                },
               },
             },
           ],
@@ -2184,6 +2192,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(setHistory).toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('[TIME-BASED MC]'),
+      );
       expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThan(
         Date.now() - 60_000,
       );
@@ -2632,7 +2643,7 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalled();
     });
 
-    it('does not run microcompaction on SendMessageType.ToolResult', async () => {
+    it('does not run idle microcompaction on SendMessageType.ToolResult', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       const { history } = await makeReadFileResponses(6);
       const setHistory = vi.fn();
@@ -2653,10 +2664,104 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      // Microcompaction did NOT run
+      // Idle gap alone does not trigger compaction on ToolResult turns.
       expect(setHistory).not.toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('runs size-only microcompaction on SendMessageType.ToolResult with pending content counted', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(4, 120_000);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+      client['lastApiCompletionTimestamp'] = Date.now();
+
+      const stream = client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              id: 'pending-shell',
+              name: 'run_shell_command',
+              response: { output: 'Y'.repeat(50_000) },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'prompt-toolresult-size-budget',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      const compacted = setHistory.mock.calls[0]![0] as Content[];
+      expect(
+        compacted[1]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe('[Old tool result content cleared]');
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '[TOOL-RESULT MC] tool result chars 530000 > 500000',
+        ),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('history now 360000 (+50000 pending)'),
+      );
+    });
+
+    it('logs size overages when protected results leave nothing to clear', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(2, 400_000);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 2,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+      client['lastApiCompletionTimestamp'] = Date.now();
+      mockClientDebugLogger.info.mockClear();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-size-overage-all-protected',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '[TOOL-RESULT MC] tool result chars 800000 > 500000',
+        ),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('cleared 0 tool result(s)'),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('history now 800000'),
+      );
     });
 
     it('runs microcompaction on SendMessageType.Cron', async () => {
@@ -6070,7 +6175,7 @@ Other open files:
       expect(mockCheckNextSpeaker).not.toHaveBeenCalled();
     });
 
-    it('keeps deterministic tool-call checks when skipLoopDetection is true', async () => {
+    it('does not run loop checks when skipLoopDetection is true', async () => {
       // Arrange
       // Ensure config returns true for skipLoopDetection
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
@@ -6106,13 +6211,14 @@ Other open files:
         // consume stream
       }
 
-      expect(ldMock.addAndCheckDeterministicToolCallLoop).toHaveBeenCalledTimes(
-        2,
-      );
+      // Assert - neither detector path runs when skipLoopDetection is true
+      expect(
+        ldMock.addAndCheckDeterministicToolCallLoop,
+      ).not.toHaveBeenCalled();
       expect(ldMock.addAndCheckHeuristicLoops).not.toHaveBeenCalled();
     });
 
-    it('hard-stops identical tool calls even when skipLoopDetection is true', async () => {
+    it('does not hard-stop identical tool calls when skipLoopDetection is true', async () => {
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
 
       mockTurnRunFn.mockReturnValue(
@@ -6141,6 +6247,45 @@ Other open files:
           [{ text: 'repeat a tool' }],
           new AbortController().signal,
           'prompt-id-skip-loop-identical',
+        ),
+      );
+
+      // skipLoopDetection defaults to true, so even repeated identical calls
+      // must not be halted — the documented escape hatch stays effective.
+      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
+        false,
+      );
+    });
+
+    it('hard-stops identical tool calls when loop detection is enabled', async () => {
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(false);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          for (let i = 0; i < 5; i++) {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: `repeat-${i}`,
+                name: 'run_shell_command',
+                args: { command: 'echo repeated' },
+              },
+            };
+          }
+        })(),
+      );
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'repeat a tool' }],
+          new AbortController().signal,
+          'prompt-id-loop-identical',
         ),
       );
 

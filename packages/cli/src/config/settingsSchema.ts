@@ -18,6 +18,7 @@ import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
+  DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
@@ -1371,7 +1372,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: {},
         description:
-          'Settings for clearing stale context after idle periods. Use -1 to disable a threshold.',
+          'Settings for clearing stale or oversized tool result context. Use -1 to disable a threshold.',
         showInDialog: false,
         properties: {
           toolResultsThresholdMinutes: {
@@ -1392,6 +1393,16 @@ const SETTINGS_SCHEMA = {
             default: 5 as number,
             description:
               'Number of most-recent compactable tool results to preserve when clearing. Floor at 1.',
+            showInDialog: false,
+          },
+          toolResultsTotalCharsThreshold: {
+            type: 'number',
+            label: 'Tool Results Total Chars Threshold',
+            category: 'Context',
+            requiresRestart: false,
+            default: DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD as number,
+            description:
+              'Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.',
             showInDialog: false,
           },
         },
@@ -2005,6 +2016,16 @@ const SETTINGS_SCHEMA = {
             description:
               'When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.',
             showInDialog: true,
+          },
+          maxImageDimension: {
+            type: 'number',
+            label: 'Max Screenshot Dimension',
+            category: 'Tools',
+            requiresRestart: true,
+            default: -1,
+            description:
+              "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
+            showInDialog: false,
           },
         },
       },
