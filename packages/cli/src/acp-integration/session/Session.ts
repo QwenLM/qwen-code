@@ -2312,8 +2312,14 @@ export class Session implements SessionContext {
         ) {
           break;
         }
+        // ACP processes notifications one-at-a-time (no batch) because each
+        // notification carries distinct task metadata (taskId, status, kind,
+        // toolUseId) used in display and response _meta. Merging would
+        // misattribute the combined response to a single task.
         const item = this.notificationQueue.shift()!;
-        await this.#executeBackgroundNotificationPrompt(item);
+        await sessionIdContext.run(this.config.getSessionId(), () =>
+          this.#executeBackgroundNotificationPromptInner(item),
+        );
       }
     } finally {
       this.notificationProcessing = false;
@@ -2331,15 +2337,6 @@ export class Session implements SessionContext {
         void this.#drainNotificationQueue();
       }
     }
-  }
-
-  async #executeBackgroundNotificationPrompt(
-    item: BackgroundNotificationQueueItem,
-  ): Promise<void> {
-    // Same session-ID binding rationale as #executePrompt.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeBackgroundNotificationPromptInner(item),
-    );
   }
 
   async #executeBackgroundNotificationPromptInner(
