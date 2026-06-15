@@ -16,7 +16,7 @@ flowchart LR
         WUI["Web UI<br/>(packages/webui/src/daemon)"]
         TUI["CLI TUI<br/>(packages/cli/src/ui/daemon)"]
         IDE["VS Code IDE<br/>(packages/vscode-ide-companion)"]
-        CH["Channel bots<br/>(DingTalk / WeChat / Telegram)"]
+        CH["Channel bots<br/>(DingTalk / WeChat / Telegram / Feishu)"]
         SDK["Any SDK consumer<br/>(packages/sdk-typescript/src/daemon)"]
     end
 

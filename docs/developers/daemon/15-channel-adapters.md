@@ -2,13 +2,13 @@
 
 ## Overview
 
-`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into a daemon prompt and the daemon's outbound events into chat platform messages. Three concrete channels ship today: DingTalk, WeChat (Weixin), and Telegram. They share a base layer (`packages/channels/base/`) plus a `DaemonChannelBridge` that handles session multiplexing and SSE consumption.
+`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into a daemon prompt and the daemon's outbound events into chat platform messages. Four concrete channels ship today: DingTalk, WeChat (Weixin), Telegram, and Feishu. They share a base layer (`packages/channels/base/`) plus a `DaemonChannelBridge` that handles session multiplexing and SSE consumption.
 
 Each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)).
 
 ## Responsibilities
 
-- Receive inbound messages from the channel's native transport (DingTalk WebSocket stream, WeChat HTTP long-poll, Telegram Bot long-poll).
+- Receive inbound messages from the channel's native transport (DingTalk WebSocket stream, WeChat HTTP long-poll, Telegram Bot long-poll, Feishu WebSocket or HTTP webhook).
 - Resolve `(senderId, groupId?)` into a daemon session via `DaemonChannelSessionFactory`.
 - Forward the user message as a daemon prompt and stream the response back as outbound chat messages, possibly chunked.
 - Render permission requests as chat-native prompts when interactive; otherwise auto-approve according to `ChannelConfig.approvalMode`.
@@ -172,15 +172,15 @@ sequenceDiagram
 | `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                        |
 | `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                               |
 
-Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`).
+Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`; Feishu: `appId`, `appSecret`, `verificationToken`).
 
 ## Caveats & Known Limits
 
 - **Channels do not directly import `@qwen-code/sdk`.** They go through `ChannelBase` → `DaemonChannelBridge` → `DaemonChannelSessionClient` (which the bridge constructs from the SDK). The indirection lets the bridge swap implementations, such as a test stub, without requiring channel changes.
-- **Permission UX is per-channel.** DingTalk uses markdown buttons; WeChat is text-only; Telegram uses inline keyboards. No common "interactive permission widget" abstraction yet.
+- **Permission UX is per-channel.** DingTalk uses markdown buttons; WeChat is text-only; Telegram uses inline keyboards; Feishu uses interactive card buttons. No common "interactive permission widget" abstraction yet.
 - **Auto-approve is a deployment-side decision**, not a daemon-side one. The daemon's `permission_mediation` policy still applies; auto-approve only means the channel responds without prompting the human. Do not combine `auto` with `enforce`-grade workflows.
 - **Per-channel rate limits / message-size limits are the adapter's job.** `DaemonChannelBridge` only handles chunking; pushing past WeChat's per-message size or Telegram's flood limit is on the adapter.
-- **No DingTalk / WeChat / Telegram reverse-call** — channels are one-way (chat → daemon → chat). The IM platform's native push path, such as a DingTalk card callback, is not wired into the bridge yet.
+- **No DingTalk / WeChat / Telegram / Feishu reverse-call** — channels are one-way (chat → daemon → chat). The IM platform's native push path, such as a DingTalk card callback, is not wired into the bridge yet.
 
 ## References
 
