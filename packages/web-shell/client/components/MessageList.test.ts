@@ -596,6 +596,74 @@ describe('applyTurnCollapse', () => {
     expect(rowIds(out)).toEqual(['u1', 'a1']);
     expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
   });
+
+  it('records elapsed (prompt → last step) and token usage on the head', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'completed' }],
+        timestamp: 2_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'final',
+        timestamp: 5_000,
+        usage: { inputTokens: 3100, outputTokens: 5100 },
+      },
+    ]);
+    const out = collapseItems(items);
+    expect(messageRow(out[0]).collapse).toEqual({
+      turnId: 'u1',
+      collapsed: true,
+      hiddenCount: 1,
+      elapsedMs: 4_000,
+      inputTokens: 3100,
+      outputTokens: 5100,
+    });
+  });
+
+  it('sums token usage across a turn (hidden mid-turn text + final answer)', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'a0',
+        role: 'assistant',
+        content: 'mid-turn note',
+        timestamp: 2_000,
+        usage: { inputTokens: 100, outputTokens: 50 },
+      },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'completed' }],
+        timestamp: 3_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'final',
+        timestamp: 4_000,
+        usage: { inputTokens: 200, outputTokens: 80 },
+      },
+    ]);
+    const head = messageRow(collapseItems(items)[0]).collapse;
+    expect(head?.inputTokens).toBe(300);
+    expect(head?.outputTokens).toBe(130);
+    expect(head?.elapsedMs).toBe(3_000);
+  });
+
+  it('omits elapsed/usage when the turn carries no timestamps or usage', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const head = messageRow(collapseItems(items)[0]).collapse;
+    expect(head).toEqual({ turnId: 'u1', collapsed: true, hiddenCount: 1 });
+  });
 });
 
 describe('findTurnIdForIndex', () => {

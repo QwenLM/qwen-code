@@ -51,6 +51,20 @@ export interface TurnCollapseHead {
   collapsed: boolean;
   /** number of display rows hidden behind the toggle while collapsed. */
   hiddenCount: number;
+  /**
+   * Wall-clock span from the prompt to the turn's last step, in ms. Derived
+   * from block timestamps (so it survives replay); undefined when either end
+   * lacks a timestamp. Approximate — a step's own runtime past its start is not
+   * captured.
+   */
+  elapsedMs?: number;
+  /**
+   * Per-turn token usage, summed from the turn's assistant messages. Both fields
+   * are present together or the pair is undefined (older sessions stamp no
+   * usage). Sub-agent tokens are excluded (see the SDK reducer).
+   */
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 export interface ContentBlock {

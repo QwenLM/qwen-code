@@ -365,6 +365,23 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   }
 }
 
+/** Wall-clock stamp of a display row, whichever variant carries it. */
+function itemTimestamp(item: DisplayItem): number | undefined {
+  return item.type === 'message' ? item.message.timestamp : item.timestamp;
+}
+
+/**
+ * Per-turn token usage contribution of a row: only top-level assistant messages
+ * carry usage (sub-agent rounds are excluded upstream in the SDK reducer).
+ */
+function itemAssistantUsage(
+  item: DisplayItem,
+): { inputTokens: number; outputTokens: number } | undefined {
+  return item.type === 'message' && item.message.role === 'assistant'
+    ? item.message.usage
+    : undefined;
+}
+
 /**
  * Walk backwards from `index` to the user-message row that heads its turn and
  * return that turn's id, or null when `index` precedes the first turn.
@@ -464,8 +481,22 @@ export function applyTurnCollapse(
     }
 
     let hiddenCount = 0;
+    let lastStepTs: number | undefined;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let hasUsage = false;
     for (let i = start + 1; i <= end; i++) {
       if (isHideableStep(items[i], i === answerIdx)) hiddenCount++;
+      const ts = itemTimestamp(items[i]);
+      if (ts !== undefined) {
+        lastStepTs = lastStepTs === undefined ? ts : Math.max(lastStepTs, ts);
+      }
+      const usage = itemAssistantUsage(items[i]);
+      if (usage) {
+        inputTokens += usage.inputTokens;
+        outputTokens += usage.outputTokens;
+        hasUsage = true;
+      }
     }
 
     if (isActiveTurn || hasPendingApproval || hiddenCount === 0) {
@@ -480,11 +511,25 @@ export function applyTurnCollapse(
       : false;
     const collapsed = !expanded;
 
+    const promptTs = head.message.timestamp;
+    const elapsedMs =
+      promptTs !== undefined &&
+      lastStepTs !== undefined &&
+      lastStepTs >= promptTs
+        ? lastStepTs - promptTs
+        : undefined;
+
     result.push({
       type: 'message',
       key: head.key,
       message: head.message,
-      collapse: { turnId, collapsed, hiddenCount },
+      collapse: {
+        turnId,
+        collapsed,
+        hiddenCount,
+        ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+        ...(hasUsage ? { inputTokens, outputTokens } : {}),
+      },
     });
 
     if (!collapsed) {

@@ -46,7 +46,7 @@ describe('UserMessage collapse toggle', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
-  it('shows the hidden-step count and aria-expanded=false when collapsed', () => {
+  it('shows the step count and aria-expanded=false when collapsed', () => {
     const container = render(
       <UserMessage
         content="hi"
@@ -56,11 +56,11 @@ describe('UserMessage collapse toggle', () => {
     );
     const btn = container.querySelector('button')!;
     expect(btn).not.toBeNull();
-    expect(btn.textContent).toContain('5 steps');
+    expect(container.textContent).toContain('5 steps');
     expect(btn.getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('pluralizes a single hidden step as "1 step"', () => {
+  it('pluralizes a single step as "1 step"', () => {
     const container = render(
       <UserMessage
         content="hi"
@@ -68,7 +68,7 @@ describe('UserMessage collapse toggle', () => {
         onToggleCollapse={() => {}}
       />,
     );
-    const text = container.querySelector('button')!.textContent ?? '';
+    const text = container.textContent ?? '';
     expect(text).toContain('1 step');
     expect(text).not.toContain('1 steps');
   });
@@ -86,7 +86,7 @@ describe('UserMessage collapse toggle', () => {
     ).toBe('true');
   });
 
-  it('calls onToggleCollapse with the turn id on click', () => {
+  it('calls onToggleCollapse with the turn id when the chevron is clicked', () => {
     const onToggle = vi.fn();
     const container = render(
       <UserMessage
@@ -97,5 +97,87 @@ describe('UserMessage collapse toggle', () => {
     );
     click(container.querySelector('button')!);
     expect(onToggle).toHaveBeenCalledWith('turn-7');
+  });
+
+  it('appends elapsed and ↑input ↓output tokens when present', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({
+          hiddenCount: 5,
+          elapsedMs: 12_400,
+          inputTokens: 3100,
+          outputTokens: 5100,
+        })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('5 steps');
+    expect(text).toContain('12.4s');
+    expect(text).toContain('↑3.1k');
+    expect(text).toContain('↓5.1k');
+  });
+
+  it('keeps only the chevron clickable; the summary is inert text', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({
+          hiddenCount: 5,
+          elapsedMs: 12_400,
+          inputTokens: 3100,
+        })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const btn = container.querySelector('button')!;
+    // The button carries only the chevron glyph — never the summary text.
+    expect(btn.textContent).toBe('▸');
+    const meta = btn.nextElementSibling!;
+    expect(meta.tagName).toBe('SPAN');
+    expect(meta.textContent).toContain('5 steps');
+  });
+
+  it('renders identical summary text collapsed vs expanded (no reflow)', () => {
+    const base = {
+      hiddenCount: 5,
+      elapsedMs: 12_400,
+      inputTokens: 3100,
+      outputTokens: 5100,
+    };
+    const metaOf = (c: HTMLElement) =>
+      c.querySelector('button')!.nextElementSibling!.textContent;
+    const collapsed = render(
+      <UserMessage
+        content="hi"
+        collapse={head({ ...base, collapsed: true })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const expanded = render(
+      <UserMessage
+        content="hi"
+        collapse={head({ ...base, collapsed: false })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    // Same summary in both states — only the chevron glyph flips.
+    expect(metaOf(collapsed)).toBe(metaOf(expanded));
+    expect(collapsed.querySelector('button')!.textContent).toBe('▸');
+    expect(expanded.querySelector('button')!.textContent).toBe('▾');
+  });
+
+  it('renders just the step count when no metadata is measured', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({ hiddenCount: 3 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const meta = container.querySelector('button')!.nextElementSibling!;
+    expect(meta.textContent).toContain('3 steps');
+    expect(meta.textContent).not.toContain('·');
   });
 });

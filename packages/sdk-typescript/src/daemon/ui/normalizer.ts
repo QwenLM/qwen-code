@@ -15,6 +15,7 @@ import type {
   DaemonUiEvent,
   DaemonUiPermissionOption,
   DaemonUiToolProvenance,
+  DaemonTurnUsage,
   NormalizeDaemonEventOptions,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
@@ -471,16 +472,29 @@ function normalizeSessionUpdate(
     }
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
-      if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
-      return [
-        {
+      const events: DaemonUiEvent[] = [];
+      if (text) {
+        events.push({
           ...base,
           type: 'assistant.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
-        },
-      ];
+        });
+      }
+      // A turn's per-round token usage rides on an otherwise-empty
+      // `agent_message_chunk` (`_meta.usage`, text blank), so this frame is the
+      // only carrier — emit it even when there is no assistant text to show.
+      const usage = extractAssistantUsage(update);
+      if (usage) {
+        events.push({
+          ...base,
+          type: 'assistant.usage' as const,
+          usage,
+          ...(parentToolCallId ? { parentToolCallId } : {}),
+        });
+      }
+      return events;
     }
     case 'agent_thought_chunk': {
       const text = getTextContent(update['content']);
@@ -551,6 +565,24 @@ function extractParentToolCallId(
 ): string | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   return meta ? getString(meta, 'parentToolCallId') : undefined;
+}
+
+/**
+ * Read the token usage the daemon stamps on `agent_message_chunk._meta.usage`.
+ * Returns undefined when no usage is present (older agents, non-usage chunks) so
+ * the caller emits no `assistant.usage` event; a present-but-partial frame keeps
+ * whichever side it has and zero-fills the other.
+ */
+function extractAssistantUsage(
+  update: Record<string, unknown>,
+): DaemonTurnUsage | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const usage = meta && isRecord(meta['usage']) ? meta['usage'] : undefined;
+  if (!usage) return undefined;
+  const inputTokens = numberField(usage, 'inputTokens');
+  const outputTokens = numberField(usage, 'outputTokens');
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  return { inputTokens: inputTokens ?? 0, outputTokens: outputTokens ?? 0 };
 }
 
 function normalizeToolUpdate(

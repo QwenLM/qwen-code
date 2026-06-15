@@ -5,6 +5,16 @@
   align-items: baseline;
 }
 
+/*
+ * Collapsed turn: tighten the gap below the prompt+toggle seam so the fold
+ * summary sits snug against the final answer rather than carrying a full
+ * inter-message gap. Scoped to the collapsed state — an expanded turn keeps the
+ * normal 12px down to its first revealed step.
+ */
+.message.collapsedHead {
+  margin-bottom: 2px;
+}
+
 .prefix {
   color: var(--user-color);
   font-weight: 700;
@@ -20,29 +30,44 @@
 }
 
 /*
- * Per-turn fold toggle, right-aligned on the prompt row but inset by a gutter
- * so it clears the hover timestamp that MessageTimestamp pins to the row's
- * top-right corner (position: absolute; right: 4px). The gutter fits a same-day
- * HH:mm:ss stamp, so the toggle and the timestamp sit side by side instead of
- * overlapping.
+ * Per-turn fold seam: its own line below the prompt text, clear of the hover
+ * timestamp pinned to the row's top-right. Only the chevron button toggles the
+ * turn; the trailing summary is inert text. `fit-content` keeps the row hugging
+ * its content rather than spanning the width.
  */
-.collapseToggle {
-  flex-shrink: 0;
-  align-self: baseline;
-  margin-right: 64px;
-  background: none;
-  border: none;
-  padding: 0 2px;
-  color: var(--text-dimmed);
-  font-family: inherit;
+.collapseRow {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  width: fit-content;
+  margin-top: 2px;
   font-size: 12px;
   line-height: 1.2;
-  white-space: nowrap;
+}
+
+/* The sole expand/collapse control — just the chevron glyph. */
+.collapseToggle {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-dimmed);
+  font: inherit;
   cursor: pointer;
 }
 
 .collapseToggle:hover {
   color: var(--text-secondary);
+}
+
+/*
+ * Step count · duration · tokens. Inert (no fold affordance) and identical in
+ * both states, so toggling never reflows the row.
+ */
+.collapseMeta {
+  color: var(--text-dimmed);
+  white-space: nowrap;
+  cursor: default;
 }
 
 .images {

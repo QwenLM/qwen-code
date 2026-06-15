@@ -69,6 +69,23 @@ function parseDaemonTodoItemsFromEntries(
   return todos.length > 0 ? todos : undefined;
 }
 
+/**
+ * Sum the per-block token usage the SDK reducer stamped onto assistant blocks
+ * when several merge into one rendered message. Returns undefined when neither
+ * side has usage, so the message field stays absent rather than a spurious 0/0.
+ */
+function mergeAssistantUsage(
+  a: { inputTokens: number; outputTokens: number } | undefined,
+  b: { inputTokens: number; outputTokens: number } | undefined,
+): { inputTokens: number; outputTokens: number } | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+  };
+}
+
 export function transcriptBlocksToDaemonMessages(
   blocks: readonly DaemonTranscriptBlock[],
   options: TranscriptMessageOptions = {},
@@ -186,10 +203,12 @@ export function transcriptBlocksToDaemonMessages(
             ? messages[currentAssistantIdx]
             : undefined;
         if (target && target.role === 'assistant' && !needsNewContentMessage) {
+          const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
+            ...(usage ? { usage } : {}),
           };
           needsNewContentMessage = false;
         } else {
@@ -199,6 +218,7 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
+            ...(textBlock.usage ? { usage: textBlock.usage } : {}),
           });
           currentAssistantIdx = messages.length - 1;
           needsNewContentMessage = false;

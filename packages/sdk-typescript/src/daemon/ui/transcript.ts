@@ -239,6 +239,9 @@ function applyDaemonTranscriptEvent(
         propagateCancellationToInFlightTools(next);
       }
       break;
+    case 'assistant.usage':
+      applyAssistantUsage(next, event);
+      break;
     case 'thought.text.delta':
       appendTextDelta(
         next,
@@ -415,6 +418,30 @@ function finalizeStreamingTextBlock(
 function clearActiveAssistant(state: DaemonTranscriptState): void {
   finalizeStreamingTextBlock(state, state.activeAssistantBlockId);
   state.activeAssistantBlockId = undefined;
+}
+
+/**
+ * Fold a round's token usage onto the active assistant block. The daemon emits
+ * usage right after that round's assistant text, so the active block is the one
+ * it belongs to; multiple rounds accumulate, and renderers sum a turn's blocks.
+ * No active block (a rare usage frame with no preceding assistant text) drops
+ * the count rather than minting a stray empty block.
+ */
+function applyAssistantUsage(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
+): void {
+  // Top-level turn usage only — a sub-agent round arrives with parentToolCallId,
+  // and folding it onto the parent's block would over-count the turn.
+  if (event.parentToolCallId != null) return;
+  const block = getWritableBlockById(state, state.activeAssistantBlockId);
+  if (!block || block.kind !== 'assistant') return;
+  const prev = block.usage;
+  block.usage = {
+    inputTokens: (prev?.inputTokens ?? 0) + event.usage.inputTokens,
+    outputTokens: (prev?.outputTokens ?? 0) + event.usage.outputTokens,
+  };
+  block.updatedAt = state.now;
 }
 
 function clearActiveThought(state: DaemonTranscriptState): void {
