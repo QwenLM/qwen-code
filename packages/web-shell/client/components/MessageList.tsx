@@ -686,6 +686,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       ReadonlyMap<string, boolean>
     >(() => new Map());
     const handleToggleCollapse = useCallback((turnId: string) => {
+      // (Un)folding a turn is the user reading history, not following the tail.
+      // Pause follow so the height change does not yank the viewport to the
+      // bottom — the toggled prompt row stays where it is on screen.
+      shouldFollow.current = false;
       setCollapseOverrides((prev) => {
         const currentlyExpanded = prev.get(turnId) ?? false;
         const next = new Map(prev);
