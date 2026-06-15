@@ -160,17 +160,39 @@ export class MessageEmitter extends BaseEmitter {
       cachedReadTokens: usageMetadata.cachedContentTokenCount,
     };
 
-    // Advance the running cumulative usage so PlanEmitter can snapshot it onto
-    // the next todo update. apiTimeMs only moves when a per-turn duration is
-    // present (live), keeping API time live-only on replay by design.
+    // ORDERING INVARIANT: this runs before PlanEmitter.emitPlan within a turn —
+    // usage advances the cumulative accumulator, then the plan update snapshots
+    // it. Reordering or batching emissions so a plan is sent before its turn's
+    // usage would zero out that task's per-task stats.
+    //
+    // Only fold in finite values: a NaN/Infinity from a provider (or a NaN that
+    // slips through `?? 0`, since `NaN ?? 0 === NaN`) would poison the running
+    // total forever (`NaN + x === NaN`), so every later snapshot would fail
+    // extractTodoStats's Number.isFinite check and silently show "not captured"
+    // for the rest of the session. apiTimeMs only advances on the live path
+    // (a per-turn duration is present), keeping API time live-only on replay.
     const cumulative = this.ctx.cumulativeUsage;
     if (cumulative) {
-      cumulative.promptTokens += usage.inputTokens;
-      cumulative.candidateTokens += usage.outputTokens;
-      cumulative.cachedTokens += usage.cachedReadTokens ?? 0;
-      if (typeof durationMs === 'number') {
-        cumulative.apiTimeMs += durationMs;
-      }
+      const addFinite = (
+        total: number,
+        value: number | null | undefined,
+      ): number =>
+        typeof value === 'number' && Number.isFinite(value)
+          ? total + value
+          : total;
+      cumulative.promptTokens = addFinite(
+        cumulative.promptTokens,
+        usage.inputTokens,
+      );
+      cumulative.candidateTokens = addFinite(
+        cumulative.candidateTokens,
+        usage.outputTokens,
+      );
+      cumulative.cachedTokens = addFinite(
+        cumulative.cachedTokens,
+        usage.cachedReadTokens,
+      );
+      cumulative.apiTimeMs = addFinite(cumulative.apiTimeMs, durationMs);
     }
 
     const meta =

@@ -361,16 +361,22 @@ export function extractTodoStats(
   const promptTokens = num('promptTokens');
   const cachedTokens = num('cachedTokens');
   const candidateTokens = num('candidateTokens');
-  const apiTimeMs = num('apiTimeMs');
   if (
     promptTokens === undefined ||
     cachedTokens === undefined ||
-    candidateTokens === undefined ||
-    apiTimeMs === undefined
+    candidateTokens === undefined
   ) {
     return undefined;
   }
-  return { promptTokens, cachedTokens, candidateTokens, apiTimeMs };
+  // apiTimeMs is the "live-only" field — a snapshot may legitimately omit it
+  // (e.g. a future agent on the replay path). Default it to 0 rather than
+  // dropping the whole snapshot and losing the valid token counts.
+  return {
+    promptTokens,
+    cachedTokens,
+    candidateTokens,
+    apiTimeMs: num('apiTimeMs') ?? 0,
+  };
 }
 
 /**
@@ -567,10 +573,12 @@ export function computeTodoDetails(
             startStatsByKey.delete(stateKey);
             result.delete(stateKey);
           }
-          // First start within a task's lifecycle wins: record the start
-          // snapshot for the resource diff even when this message has no
-          // timestamp.
-          if (!startStatsByKey.has(stateKey)) {
+          // First start *with stats* wins: record the baseline for the resource
+          // diff even when this message has no timestamp. Checking the stored
+          // value (not `Map.has`) lets a real snapshot upgrade a baseline that a
+          // stats-less start (e.g. a plain `plan` message) recorded as
+          // `undefined`, which `has` would otherwise treat as already set.
+          if (startStatsByKey.get(stateKey) === undefined) {
             startStatsByKey.set(stateKey, stats);
             if (ts !== undefined) ensure(stateKey).startTs = ts;
           }

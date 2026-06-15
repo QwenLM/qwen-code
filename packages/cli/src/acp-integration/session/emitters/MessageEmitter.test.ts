@@ -346,5 +346,38 @@ describe('MessageEmitter', () => {
         apiTimeMs: 0,
       });
     });
+
+    it('skips non-finite usage and durations so they do not poison the accumulator', async () => {
+      const cumulativeUsage = {
+        promptTokens: 5,
+        cachedTokens: 1,
+        candidateTokens: 2,
+        apiTimeMs: 100,
+      };
+      const ctx: SessionContext = {
+        sessionId: 'test-session-id',
+        config: {} as Config,
+        sendUpdate: sendUpdateSpy,
+        cumulativeUsage,
+      };
+      // NaN survives `?? 0` (NaN ?? 0 === NaN); a non-finite duration or token
+      // would otherwise make every later snapshot NaN forever.
+      await new MessageEmitter(ctx).emitUsageMetadata(
+        {
+          promptTokenCount: Number.NaN,
+          candidatesTokenCount: 10,
+          cachedContentTokenCount: Number.POSITIVE_INFINITY,
+        },
+        '',
+        Number.NaN,
+      );
+
+      expect(cumulativeUsage).toEqual({
+        promptTokens: 5, // NaN skipped
+        cachedTokens: 1, // Infinity skipped
+        candidateTokens: 12, // 2 + 10
+        apiTimeMs: 100, // NaN duration skipped
+      });
+    });
   });
 });

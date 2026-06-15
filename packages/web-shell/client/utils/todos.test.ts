@@ -550,11 +550,12 @@ describe('extractTodoStats', () => {
     expect(extractTodoStats(toolCall({ entries: [] }))).toBeUndefined();
   });
 
-  it('returns undefined when a field is missing or non-numeric', () => {
+  it('returns undefined when a token field is missing or non-numeric', () => {
     expect(
       extractTodoStats(
         toolCall({
-          stats: { promptTokens: 1, cachedTokens: 2, candidateTokens: 3 },
+          // candidateTokens missing
+          stats: { promptTokens: 1, cachedTokens: 2, apiTimeMs: 4 },
         }),
       ),
     ).toBeUndefined();
@@ -562,7 +563,7 @@ describe('extractTodoStats', () => {
       extractTodoStats(
         toolCall({
           stats: {
-            promptTokens: '1',
+            promptTokens: '1', // non-numeric
             cachedTokens: 2,
             candidateTokens: 3,
             apiTimeMs: 4,
@@ -570,6 +571,41 @@ describe('extractTodoStats', () => {
         }),
       ),
     ).toBeUndefined();
+  });
+
+  it('defaults the live-only apiTimeMs to 0 when omitted, keeping the tokens', () => {
+    expect(
+      extractTodoStats(
+        toolCall({
+          stats: { promptTokens: 1, cachedTokens: 2, candidateTokens: 3 },
+        }),
+      ),
+    ).toEqual({
+      promptTokens: 1,
+      cachedTokens: 2,
+      candidateTokens: 3,
+      apiTimeMs: 0,
+    });
+  });
+
+  it('treats a non-finite apiTimeMs as 0 rather than dropping the snapshot', () => {
+    expect(
+      extractTodoStats(
+        toolCall({
+          stats: {
+            promptTokens: 1,
+            cachedTokens: 2,
+            candidateTokens: 3,
+            apiTimeMs: Number.NaN,
+          },
+        }),
+      ),
+    ).toEqual({
+      promptTokens: 1,
+      cachedTokens: 2,
+      candidateTokens: 3,
+      apiTimeMs: 0,
+    });
   });
 });
 
@@ -870,6 +906,35 @@ describe('computeTodoDetails', () => {
     expect(detail?.endTs).toBe(9000);
     expect(detail?.resources?.inputTokens).toBe(100);
     expect(detail?.resources?.apiTimeMs).toBe(200);
+  });
+
+  it('upgrades a stats-less start baseline to a later snapshot that has stats', () => {
+    // A `plan`-message start carries no stats (the baseline is stored as
+    // undefined); a later in_progress snapshot with real stats must become the
+    // baseline, which a plain Map.has guard would block.
+    const details = computeTodoDetails([
+      at(planMessage('p1', [item('1', 'X', 'in_progress')]), 1000),
+      at(planMessage('p2', [item('1', 'X', 'pending')]), 2000),
+      at(
+        todoWriteMessage(
+          'm1',
+          [item('1', 'X', 'in_progress')],
+          stats(100, 0, 0, 500),
+        ),
+        3000,
+      ),
+      at(
+        todoWriteMessage(
+          'm2',
+          [item('1', 'X', 'completed')],
+          stats(300, 0, 0, 900),
+        ),
+        5000,
+      ),
+    ]);
+    const detail = details.get(todoStateKey(item('1', 'X', 'completed')));
+    expect(detail?.resources?.inputTokens).toBe(200); // 300 - 100
+    expect(detail?.resources?.apiTimeMs).toBe(400); // 900 - 500
   });
 
   it('sums only tool spans whose start falls within the task window', () => {
