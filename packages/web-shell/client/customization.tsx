@@ -44,6 +44,42 @@ export type ToolHeaderExtraRenderer = (
 
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
+export interface WebShellComposerTag {
+  id: string;
+  label?: string;
+  value?: string;
+  removable?: boolean;
+}
+
+export type WebShellComposerTagPlacement = 'top' | 'inline';
+
+export interface WebShellComposerTagOptions {
+  placement?: WebShellComposerTagPlacement;
+}
+
+export interface WebShellComposerTextOptions {
+  mode?: 'append' | 'replace';
+}
+
+export interface WebShellComposerInput {
+  text?: string;
+  tags?: readonly WebShellComposerTag[];
+  tagPlacement?: WebShellComposerTagPlacement;
+  submit?: boolean;
+}
+
+export interface WebShellComposerApi {
+  insertText(text: string, options?: WebShellComposerTextOptions): void;
+  setText(text: string): void;
+  addTags(
+    tags: readonly WebShellComposerTag[],
+    options?: WebShellComposerTagOptions,
+  ): void;
+  removeTag(id: string): void;
+  clear(options?: { text?: boolean; tags?: boolean }): void;
+  submit(input?: WebShellComposerInput): void;
+}
+
 export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;

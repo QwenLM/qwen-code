@@ -7,8 +7,22 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from 'react';
-import { EditorView, keymap, placeholder, tooltips } from '@codemirror/view';
-import { EditorState, Compartment, Prec } from '@codemirror/state';
+import {
+  Decoration,
+  EditorView,
+  WidgetType,
+  keymap,
+  placeholder,
+  tooltips,
+  type DecorationSet,
+} from '@codemirror/view';
+import {
+  EditorState,
+  Compartment,
+  Prec,
+  StateEffect,
+  StateField,
+} from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import {
   acceptCompletion,
@@ -42,6 +56,13 @@ import {
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
 import { PromptChevron } from './PromptChevron';
+import type {
+  WebShellComposerApi,
+  WebShellComposerInput,
+  WebShellComposerTag,
+  WebShellComposerTagOptions,
+  WebShellComposerTextOptions,
+} from '../customization';
 import styles from './Editor.module.css';
 
 interface EditorProps {
@@ -65,13 +86,15 @@ interface EditorProps {
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
   sessionName?: string;
+  composerInput?: WebShellComposerInput;
+  composerInputVersion?: number;
 }
 
-export interface EditorHandle {
+export interface EditorHandle extends WebShellComposerApi {
   clearText(): void;
   focus(): void;
   getText(): string;
-  insertText(text: string): void;
+  hasInput(): boolean;
   retryLast(): void;
 }
 
@@ -153,6 +176,177 @@ function getModeClass(mode: string, shellMode: boolean): string {
   }
 }
 
+function serializeComposerTag(tag: WebShellComposerTag): string {
+  return tag.value?.trim() || tag.label?.trim() || tag.id;
+}
+
+function serializeComposerTags(tags: readonly WebShellComposerTag[]): string {
+  return tags.map(serializeComposerTag).join('\n');
+}
+
+function getComposerTagLabel(tag: WebShellComposerTag): string {
+  return tag.label?.trim() ?? '';
+}
+
+function getComposerTagValue(tag: WebShellComposerTag): string {
+  return tag.value?.trim() ?? '';
+}
+
+function getComposerTagDisplay(tag: WebShellComposerTag): string {
+  return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
+}
+
+function buildComposerPrompt(
+  text: string,
+  tags: readonly WebShellComposerTag[],
+): string {
+  const tagText = serializeComposerTags(tags);
+  if (!tagText) return text;
+  if (!text) return tagText;
+  return `${tagText}\n\n${text}`;
+}
+
+interface InlineTagRange {
+  from: number;
+  to: number;
+  tag: WebShellComposerTag;
+}
+
+interface InlineTagDecorationSpec {
+  tag: WebShellComposerTag;
+}
+
+const addInlineTagEffect = StateEffect.define<InlineTagRange>({
+  map: (value, changes) => ({
+    ...value,
+    from: changes.mapPos(value.from),
+    to: changes.mapPos(value.to),
+  }),
+});
+const removeInlineTagEffect = StateEffect.define<{
+  predicate?: (tag: WebShellComposerTag) => boolean;
+}>();
+const clearInlineTagsEffect = StateEffect.define<void>();
+
+class ComposerTagWidget extends WidgetType {
+  constructor(private readonly tag: WebShellComposerTag) {
+    super();
+  }
+
+  eq(other: ComposerTagWidget): boolean {
+    return (
+      this.tag.id === other.tag.id &&
+      this.tag.label === other.tag.label &&
+      this.tag.value === other.tag.value &&
+      this.tag.removable === other.tag.removable
+    );
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const chip = document.createElement('span');
+    chip.className = styles.inlineTag;
+    const tagLabel = getComposerTagLabel(this.tag);
+    const tagValue = getComposerTagValue(this.tag);
+
+    if (tagLabel) {
+      const label = document.createElement('span');
+      label.className = styles.tagLabel;
+      label.textContent = tagLabel;
+      chip.appendChild(label);
+    }
+
+    if (tagValue) {
+      const value = document.createElement('span');
+      value.className = styles.tagValue;
+      value.textContent = tagValue;
+      chip.appendChild(value);
+    } else if (!tagLabel) {
+      const fallback = document.createElement('span');
+      fallback.className = styles.tagLabel;
+      fallback.textContent = this.tag.id;
+      chip.appendChild(fallback);
+    }
+
+    if (this.tag.removable !== false) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = styles.tagRemove;
+      remove.setAttribute(
+        'aria-label',
+        `Remove ${getComposerTagDisplay(this.tag)}`,
+      );
+      remove.textContent = '×';
+      remove.addEventListener('mousedown', (event) => event.preventDefault());
+      remove.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const changes: Array<{ from: number; to: number; insert: string }> = [];
+        view.state
+          .field(inlineComposerTagField)
+          .between(0, view.state.doc.length, (from, to, value) => {
+            const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+            if (tag?.id === this.tag.id && tag.removable !== false) {
+              changes.push({ from, to, insert: '' });
+            }
+          });
+        if (changes.length === 0) return;
+        view.dispatch({
+          changes,
+          effects: removeInlineTagEffect.of({
+            predicate: (tag) => tag.id === this.tag.id,
+          }),
+          scrollIntoView: true,
+        });
+        view.focus();
+      });
+      chip.appendChild(remove);
+    }
+
+    return chip;
+  }
+
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
+function createInlineTagDecoration(range: InlineTagRange) {
+  const spec = {
+    widget: new ComposerTagWidget(range.tag),
+    inclusive: false,
+    tag: range.tag,
+  };
+  return Decoration.replace(spec).range(range.from, range.to);
+}
+
+const inlineComposerTagField = StateField.define<DecorationSet>({
+  create() {
+    return Decoration.none;
+  },
+  update(tags, tr) {
+    let next = tags.map(tr.changes);
+    for (const effect of tr.effects) {
+      if (effect.is(addInlineTagEffect)) {
+        next = next.update({ add: [createInlineTagDecoration(effect.value)] });
+      } else if (effect.is(removeInlineTagEffect)) {
+        next = next.update({
+          filter: (_from, _to, value) => {
+            const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+            if (!tag) return true;
+            return effect.value.predicate ? !effect.value.predicate(tag) : true;
+          },
+        });
+      } else if (effect.is(clearInlineTagsEffect)) {
+        next = Decoration.none;
+      }
+    }
+    return next;
+  },
+  provide: (field) => [
+    EditorView.decorations.from(field),
+    EditorView.atomicRanges.of((view) => view.state.field(field)),
+  ],
+});
+
 export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   {
     onSubmit,
@@ -175,6 +369,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     onAcceptFollowup,
     onDismissFollowup,
     sessionName,
+    composerInput,
+    composerInputVersion,
   },
   ref,
 ) {
@@ -230,6 +426,18 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const pastedImagesRef = useRef<PromptImage[]>([]);
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const nextPasteIdRef = useRef(1);
+  const [composerTags, setComposerTags] = useState<WebShellComposerTag[]>([]);
+  const composerTagsRef = useRef<WebShellComposerTag[]>([]);
+  composerTagsRef.current = composerTags;
+  const composerInputRef = useRef(composerInput);
+  composerInputRef.current = composerInput;
+  const submitTextRef = useRef<
+    (
+      view: EditorView,
+      textOverride?: string,
+      tagsOverride?: readonly WebShellComposerTag[],
+    ) => boolean
+  >(() => true);
   // Tracks a trigger char ('/' or '@') inserted by a hint button so it can be
   // removed if the user cancels completion (Escape) without typing past it.
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
@@ -424,17 +632,23 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       el = el.parentElement;
     }
 
-    const submitText = (view: EditorView, textOverride?: string) => {
+    const submitText = (
+      view: EditorView,
+      textOverride?: string,
+      tagsOverride?: readonly WebShellComposerTag[],
+    ) => {
       const rawText = (textOverride ?? view.state.doc.toString()).trim();
-      if (!rawText) return true;
+      const tags = tagsOverride ?? composerTagsRef.current;
+      if (!rawText && tags.length === 0) return true;
       const text = expandLargePastePlaceholders(
         pendingPastesRef.current,
         rawText,
       );
+      const prompt = buildComposerPrompt(text, tags);
       const images = pastedImagesRef.current;
       const isShellMode = shellModeRef.current;
       const accepted = onSubmitRef.current(
-        isShellMode ? `!${text}` : text,
+        isShellMode ? `!${prompt}` : prompt,
         images.length > 0 ? [...images] : undefined,
       );
       if (accepted === false) return true;
@@ -448,12 +662,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         historyActionsRef.current.push(text);
         historyActionsRef.current.reset();
       }
+      setComposerTags([]);
       setPastedImages([]);
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: '' },
+        effects: clearInlineTagsEffect.of(),
       });
       return true;
     };
+    submitTextRef.current = submitText;
 
     const completionSources: CompletionSource[] = [
       slashCompletionSource(
@@ -476,6 +693,50 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     };
 
     const submitKeymap = keymap.of([
+      {
+        key: 'Backspace',
+        run: (view) => {
+          const selection = view.state.selection.main;
+          if (!selection.empty || selection.from !== 0) return false;
+          let hasInlineTagAtStart = false;
+          view.state.field(inlineComposerTagField).between(0, 1, (from) => {
+            if (from === 0) hasInlineTagAtStart = true;
+          });
+          if (hasInlineTagAtStart) return false;
+          let removableIndex = -1;
+          for (let i = composerTagsRef.current.length - 1; i >= 0; i -= 1) {
+            if (composerTagsRef.current[i]?.removable !== false) {
+              removableIndex = i;
+              break;
+            }
+          }
+          if (removableIndex < 0) return false;
+          setComposerTags((current) =>
+            current.filter((_, index) => index !== removableIndex),
+          );
+          return true;
+        },
+      },
+      {
+        key: 'Delete',
+        run: (view) => {
+          const selection = view.state.selection.main;
+          if (!selection.empty || selection.from !== 0) return false;
+          let hasInlineTagAtStart = false;
+          view.state.field(inlineComposerTagField).between(0, 1, (from) => {
+            if (from === 0) hasInlineTagAtStart = true;
+          });
+          if (hasInlineTagAtStart) return false;
+          const removableIndex = composerTagsRef.current.findIndex(
+            (tag) => tag.removable !== false,
+          );
+          if (removableIndex < 0) return false;
+          setComposerTags((current) =>
+            current.filter((_, index) => index !== removableIndex),
+          );
+          return true;
+        },
+      },
       {
         key: 'Enter',
         run: (view) => {
@@ -809,6 +1070,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           () => languageRef.current,
         ),
         inputHighlightTheme,
+        inlineComposerTagField,
         slashCompletionRestarter,
         triggerCleanupListener,
         EditorView.inputHandler.of((view, from, to, insert) => {
@@ -1079,99 +1341,251 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     viewRef.current?.focus();
   }, []);
 
-  const insertText = useCallback((text: string) => {
-    const view = viewRef.current;
-    if (!view || !text) {
-      view?.focus();
-      return;
-    }
-    const selection = view.state.selection.main;
-    let insert = text;
-    // Make the trigger characters idempotent so a second click re-opens the
-    // menu instead of inserting a duplicate.
-    let skipInsert = false;
-    let caretOverride: number | null = null;
-    // Whether to open the completion menu afterwards. A mid-line '/' no-op
-    // (non-empty draft) must not, since the slash source needs a line-leading
-    // '/' and would otherwise pop an empty/unrelated menu.
-    let openMenu = text === '/' || text === '@';
-    if (text === '/') {
-      // The slash-command menu only triggers on a line-leading '/'. Re-open the
-      // menu (don't insert) when the line already starts with '/', and no-op
-      // when the editor holds other text: inserting a mid-line '/' wouldn't open
-      // the menu, and replacing the draft would silently destroy it. The user
-      // can clear the draft themselves to start a command on an empty line.
-      const line = view.state.doc.lineAt(selection.head);
-      if (line.text.startsWith('/')) {
-        skipInsert = true; // re-open the menu on the existing command
-      } else if (view.state.doc.length > 0) {
-        skipInsert = true;
-        openMenu = false; // no-op on a non-empty draft; don't pop an empty menu
+  const insertText = useCallback(
+    (text: string, options?: WebShellComposerTextOptions) => {
+      const view = viewRef.current;
+      if (!view || !text) {
+        view?.focus();
+        return;
       }
-    } else if (text === '@') {
-      const before =
-        selection.from > 0
-          ? view.state.doc.sliceString(selection.from - 1, selection.from)
-          : '';
-      const after = view.state.doc.sliceString(
-        selection.from,
-        selection.from + 1,
-      );
-      if (after === '@') {
-        // Cursor sits directly before an existing '@'; step over it instead of
-        // inserting a duplicate, so the menu opens on the existing mention.
-        skipInsert = true;
-        caretOverride = selection.from + 1;
-      } else if (before === '@') {
-        // Already an '@' right before the cursor — just re-open the menu.
-        skipInsert = true;
-      } else if (before && !/\s/.test(before)) {
-        // An @-mention only parses at a token boundary, so when it lands
-        // mid-word prepend a space to detach it.
-        insert = ' @';
+      if (options?.mode === 'replace') {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: text },
+          effects: clearInlineTagsEffect.of(),
+          selection: { anchor: text.length },
+          scrollIntoView: true,
+        });
+        view.focus();
+        return;
       }
-    }
-    if (!skipInsert) {
-      view.dispatch({
-        changes: { from: selection.from, to: selection.to, insert },
-        selection: { anchor: selection.from + insert.length },
-        scrollIntoView: true,
-      });
-      // Remember the click-inserted trigger so Escape can undo it if the user
-      // never types past it (see the Escape keymap).
-      if (openMenu) {
-        autoTriggerRef.current = { text: insert, from: selection.from };
-      }
-    } else if (caretOverride !== null) {
-      view.dispatch({
-        selection: { anchor: caretOverride },
-        scrollIntoView: true,
-      });
-    }
-    view.focus();
-    if (openMenu) {
-      window.setTimeout(() => {
-        const nextView = viewRef.current;
-        if (nextView && nextView.hasFocus) {
-          startCompletion(nextView);
+      const selection = view.state.selection.main;
+      let insert = text;
+      // Make the trigger characters idempotent so a second click re-opens the
+      // menu instead of inserting a duplicate.
+      let skipInsert = false;
+      let caretOverride: number | null = null;
+      // Whether to open the completion menu afterwards. A mid-line '/' no-op
+      // (non-empty draft) must not, since the slash source needs a line-leading
+      // '/' and would otherwise pop an empty/unrelated menu.
+      let openMenu = text === '/' || text === '@';
+      if (text === '/') {
+        // The slash-command menu only triggers on a line-leading '/'. Re-open the
+        // menu (don't insert) when the line already starts with '/', and no-op
+        // when the editor holds other text: inserting a mid-line '/' wouldn't open
+        // the menu, and replacing the draft would silently destroy it. The user
+        // can clear the draft themselves to start a command on an empty line.
+        const line = view.state.doc.lineAt(selection.head);
+        if (line.text.startsWith('/')) {
+          skipInsert = true; // re-open the menu on the existing command
+        } else if (view.state.doc.length > 0) {
+          skipInsert = true;
+          openMenu = false; // no-op on a non-empty draft; don't pop an empty menu
         }
-      }, 0);
-    }
-  }, []);
+      } else if (text === '@') {
+        const before =
+          selection.from > 0
+            ? view.state.doc.sliceString(selection.from - 1, selection.from)
+            : '';
+        const after = view.state.doc.sliceString(
+          selection.from,
+          selection.from + 1,
+        );
+        if (after === '@') {
+          // Cursor sits directly before an existing '@'; step over it instead of
+          // inserting a duplicate, so the menu opens on the existing mention.
+          skipInsert = true;
+          caretOverride = selection.from + 1;
+        } else if (before === '@') {
+          // Already an '@' right before the cursor — just re-open the menu.
+          skipInsert = true;
+        } else if (before && !/\s/.test(before)) {
+          // An @-mention only parses at a token boundary, so when it lands
+          // mid-word prepend a space to detach it.
+          insert = ' @';
+        }
+      }
+      if (!skipInsert) {
+        view.dispatch({
+          changes: { from: selection.from, to: selection.to, insert },
+          selection: { anchor: selection.from + insert.length },
+          scrollIntoView: true,
+        });
+        // Remember the click-inserted trigger so Escape can undo it if the user
+        // never types past it (see the Escape keymap).
+        if (openMenu) {
+          autoTriggerRef.current = { text: insert, from: selection.from };
+        }
+      } else if (caretOverride !== null) {
+        view.dispatch({
+          selection: { anchor: caretOverride },
+          scrollIntoView: true,
+        });
+      }
+      view.focus();
+      if (openMenu) {
+        window.setTimeout(() => {
+          const nextView = viewRef.current;
+          if (nextView && nextView.hasFocus) {
+            startCompletion(nextView);
+          }
+        }, 0);
+      }
+    },
+    [],
+  );
 
   const getText = useCallback(() => {
     return viewRef.current?.state.doc.toString() ?? '';
   }, []);
 
-  const clearText = useCallback(() => {
+  const setText = useCallback((text: string) => {
     const view = viewRef.current;
-    if (!view || view.state.doc.length === 0) return;
+    if (!view) return;
     view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: '' },
+      changes: { from: 0, to: view.state.doc.length, insert: text },
+      effects: clearInlineTagsEffect.of(),
+      selection: { anchor: text.length },
+      scrollIntoView: true,
     });
-    setPastedImages([]);
-    pendingPastesRef.current.clear();
-    nextPasteIdRef.current = 1;
+    view.focus();
+  }, []);
+
+  const removeInlineTags = useCallback(
+    (predicate?: (tag: WebShellComposerTag) => boolean) => {
+      const view = viewRef.current;
+      if (!view) return;
+      const changes: Array<{ from: number; to: number; insert: string }> = [];
+      view.state
+        .field(inlineComposerTagField)
+        .between(0, view.state.doc.length, (from, to, value) => {
+          const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+          if (tag && (!predicate || predicate(tag))) {
+            changes.push({ from, to, insert: '' });
+          }
+        });
+      view.dispatch({
+        ...(changes.length > 0 ? { changes } : {}),
+        effects: removeInlineTagEffect.of({ predicate }),
+        scrollIntoView: true,
+      });
+    },
+    [],
+  );
+
+  const clear = useCallback(
+    (options?: { text?: boolean; tags?: boolean }) => {
+      const clearText = options?.text ?? true;
+      const clearTags = options?.tags ?? true;
+      const view = viewRef.current;
+      if (clearText && view && view.state.doc.length > 0) {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: '' },
+          effects: clearInlineTagsEffect.of(),
+        });
+      }
+      if (clearText) {
+        setPastedImages([]);
+        pendingPastesRef.current.clear();
+        nextPasteIdRef.current = 1;
+      }
+      if (clearTags) {
+        setComposerTags([]);
+        if (!clearText) {
+          removeInlineTags();
+        }
+      }
+    },
+    [removeInlineTags],
+  );
+
+  const clearText = useCallback(() => {
+    clear({ text: true, tags: false });
+  }, [clear]);
+
+  const addTags = useCallback(
+    (
+      tags: readonly WebShellComposerTag[],
+      options?: WebShellComposerTagOptions,
+    ) => {
+      if (tags.length === 0) return;
+      if (options?.placement === 'inline') {
+        const view = viewRef.current;
+        if (!view) return;
+        const selection = view.state.selection.main;
+        let at = selection.from;
+        const ranges: InlineTagRange[] = [];
+        const insert = tags
+          .map((tag) => {
+            const text = serializeComposerTag(tag);
+            ranges.push({ from: at, to: at + text.length, tag });
+            at += text.length + 1;
+            return text;
+          })
+          .join(' ');
+        const text = insert ? `${insert} ` : '';
+        view.dispatch({
+          changes: { from: selection.from, to: selection.to, insert: text },
+          selection: { anchor: selection.from + text.length },
+          scrollIntoView: true,
+        });
+        if (ranges.length > 0) {
+          view.dispatch({
+            effects: ranges.map((range) => addInlineTagEffect.of(range)),
+          });
+        }
+        view.focus();
+        return;
+      }
+      setComposerTags((current) => {
+        const next = [...current];
+        for (const tag of tags) {
+          const existingIndex = next.findIndex((item) => item.id === tag.id);
+          if (existingIndex >= 0) {
+            next[existingIndex] = tag;
+          } else {
+            next.push(tag);
+          }
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const removeTag = useCallback(
+    (id: string) => {
+      setComposerTags((current) =>
+        current.filter((tag) => tag.id !== id || tag.removable === false),
+      );
+      removeInlineTags((tag) => tag.id === id && tag.removable !== false);
+    },
+    [removeInlineTags],
+  );
+
+  const hasInput = useCallback(() => {
+    return (
+      (viewRef.current?.state.doc.toString().trim().length ?? 0) > 0 ||
+      composerTagsRef.current.length > 0 ||
+      pastedImagesRef.current.length > 0
+    );
+  }, []);
+
+  const submit = useCallback((input?: WebShellComposerInput) => {
+    const view = viewRef.current;
+    if (!view) return;
+    if (input?.tagPlacement === 'inline' && input.tags) {
+      submitTextRef.current(
+        view,
+        buildComposerPrompt(input.text ?? '', input.tags),
+        [],
+      );
+      return;
+    }
+    submitTextRef.current(
+      view,
+      input?.text,
+      input ? (input.tags ?? []) : undefined,
+    );
   }, []);
 
   const retryLast = useCallback(() => {
@@ -1188,13 +1602,90 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     ref,
     () => ({
       clearText,
+      clear,
       focus,
       getText,
+      hasInput,
+      setText,
+      addTags,
+      removeTag,
       insertText,
       retryLast,
+      submit,
     }),
-    [clearText, focus, getText, insertText, retryLast],
+    [
+      addTags,
+      clear,
+      clearText,
+      focus,
+      getText,
+      hasInput,
+      insertText,
+      removeTag,
+      retryLast,
+      setText,
+      submit,
+    ],
   );
+
+  useEffect(() => {
+    const input = composerInputRef.current;
+    if (!input) return;
+    const view = viewRef.current;
+    if (!view) return;
+
+    const tagPlacement = input.tagPlacement ?? 'top';
+    if (input.tags !== undefined && tagPlacement === 'top') {
+      setComposerTags([...input.tags]);
+    }
+    if (input.text !== undefined || tagPlacement === 'inline') {
+      const inlineTags =
+        tagPlacement === 'inline' ? [...(input.tags ?? [])] : [];
+      const inlineText = inlineTags.map(serializeComposerTag).join(' ');
+      const nextText =
+        tagPlacement === 'inline'
+          ? inlineText && input.text
+            ? `${inlineText} ${input.text}`
+            : inlineText || (input.text ?? '')
+          : (input.text ?? '');
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: nextText },
+        effects: clearInlineTagsEffect.of(),
+        selection: { anchor: nextText.length },
+        scrollIntoView: true,
+      });
+      if (inlineTags.length > 0) {
+        let from = 0;
+        const effects = inlineTags.map((tag) => {
+          const text = serializeComposerTag(tag);
+          const effect = addInlineTagEffect.of({
+            from,
+            to: from + text.length,
+            tag,
+          });
+          from += text.length + 1;
+          return effect;
+        });
+        view.dispatch({ effects });
+      }
+    }
+    if (input.text !== undefined || input.submit) {
+      view.focus();
+    }
+    let submitTimer: number | null = null;
+    if (input.submit) {
+      submitTimer = window.setTimeout(() => {
+        const nextView = viewRef.current;
+        if (!nextView) return;
+        submit(input);
+      }, 0);
+    }
+    return () => {
+      if (submitTimer !== null) {
+        window.clearTimeout(submitTimer);
+      }
+    };
+  }, [composerInputVersion, submit]);
 
   const replaceEditorText = useCallback((text: string) => {
     const view = viewRef.current;
@@ -1397,6 +1888,19 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       handler();
     },
   });
+  const renderComposerTagContent = (tag: WebShellComposerTag) => {
+    const tagLabel = getComposerTagLabel(tag);
+    const tagValue = getComposerTagValue(tag);
+    if (!tagLabel && !tagValue) {
+      return <span className={styles.tagLabel}>{tag.id}</span>;
+    }
+    return (
+      <>
+        {tagLabel && <span className={styles.tagLabel}>{tagLabel}</span>}
+        {tagValue && <span className={styles.tagValue}>{tagValue}</span>}
+      </>
+    );
+  };
 
   return (
     <div className={containerClass} onClick={focus}>
@@ -1469,6 +1973,38 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
                 ×
               </button>
             </div>
+          ))}
+        </div>
+      )}
+      {composerTags.length > 0 && (
+        <div className={styles.tags}>
+          {composerTags.map((tag) => (
+            <span key={tag.id} className={styles.tag}>
+              {renderComposerTagContent(tag)}
+              {tag.removable !== false && (
+                <button
+                  type="button"
+                  className={styles.tagRemove}
+                  aria-label={`Remove ${getComposerTagDisplay(tag)}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeTag(tag.id);
+                    viewRef.current?.focus();
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Backspace' && event.key !== 'Delete') {
+                      return;
+                    }
+                    event.preventDefault();
+                    removeTag(tag.id);
+                    viewRef.current?.focus();
+                  }}
+                >
+                  ×
+                </button>
+              )}
+            </span>
           ))}
         </div>
       )}

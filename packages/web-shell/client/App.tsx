@@ -136,6 +136,8 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellComposerApi,
+  type WebShellComposerInput,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
   type WelcomeHeaderRenderer,
@@ -289,6 +291,33 @@ export interface WebShellProps {
   markdown?: WebShellMarkdownCustomization;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
   onToast?: (tone: ToastTone, message: string) => void;
+  /** Imperative handle for externally controlling the composer input. */
+  composerRef?: React.Ref<WebShellComposerApi>;
+  /** Declarative composer input value. Increment composerInputVersion to replay the same value. */
+  composerInput?: WebShellComposerInput;
+  /** Replay key for composerInput. */
+  composerInputVersion?: number;
+}
+
+const emptyComposerApi: WebShellComposerApi = {
+  insertText: () => {},
+  setText: () => {},
+  addTags: () => {},
+  removeTag: () => {},
+  clear: () => {},
+  submit: () => {},
+};
+
+function assignComposerRef(
+  ref: React.Ref<WebShellComposerApi> | undefined,
+  value: WebShellComposerApi,
+): void {
+  if (!ref) return;
+  if (typeof ref === 'function') {
+    ref(value);
+    return;
+  }
+  (ref as React.MutableRefObject<WebShellComposerApi | null>).current = value;
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -578,6 +607,9 @@ export function App({
   virtualScrollThreshold,
   markdown,
   onToast,
+  composerRef,
+  composerInput,
+  composerInputVersion,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
@@ -733,7 +765,17 @@ export function App({
     [messages],
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
-  const editorRef = useRef<EditorHandle>(null);
+  const editorRef = useRef<EditorHandle | null>(null);
+  const setEditorHandle = useCallback(
+    (handle: EditorHandle | null) => {
+      editorRef.current = handle;
+      assignComposerRef(composerRef, handle ?? emptyComposerApi);
+    },
+    [composerRef],
+  );
+  useEffect(() => {
+    assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
+  }, [composerRef]);
   const messageListRef = useRef<MessageListHandle>(null);
   const handleLocateFloatingTodos = useCallback(() => {
     if (!floatingTodosState.sourceMessageId) return;
@@ -1048,8 +1090,7 @@ export function App({
       if (message.isPending) {
         if (!isPlainEscape && !isCtrlCancel) return;
       } else {
-        const editorHasText =
-          (editorRef.current?.getText().trim().length ?? 0) > 0;
+        const editorHasText = editorRef.current?.hasInput() ?? false;
         const isPlainDismiss =
           !e.ctrlKey &&
           !e.metaKey &&
@@ -2367,8 +2408,7 @@ export function App({
         return;
       }
 
-      const text = editorRef.current?.getText() ?? '';
-      if (text.length > 0) {
+      if (editorRef.current?.hasInput()) {
         e.preventDefault();
         if (escPressCountRef.current === 0) {
           escPressCountRef.current = 1;
@@ -2380,7 +2420,7 @@ export function App({
             resetEscapeState();
           }, 500);
         } else {
-          editorRef.current?.clearText();
+          editorRef.current?.clear();
           resetEscapeState();
         }
         return;
@@ -2743,7 +2783,7 @@ export function App({
               <div className={styles.composer}>
                 <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
                 <Editor
-                  ref={editorRef}
+                  ref={setEditorHandle}
                   onSubmit={handleSubmit}
                   onCycleMode={handleCycleMode}
                   onToggleShortcuts={handleToggleShortcuts}
@@ -2761,6 +2801,8 @@ export function App({
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}
+                  composerInput={composerInput}
+                  composerInputVersion={composerInputVersion}
                   placeholderText={
                     !connected
                       ? t('common.loading')
