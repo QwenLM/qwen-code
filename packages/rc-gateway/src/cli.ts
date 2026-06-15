@@ -18,9 +18,13 @@ import {
   deriveWorkspaceName,
   deriveInstanceName,
   buildTxtRecord,
+  parseDiscoverArgs,
+  formatDaemonsTable,
+  formatDaemonsJson,
   type MdnsSuppressReason,
 } from './mdns/advert.js';
 import { MdnsAdvertiser, type BonjourFactory } from './mdns/advertiser.js';
+import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
 import { startDaemon } from './daemonSupervisor.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
@@ -1390,6 +1394,44 @@ if (process.argv[2] === 'serve') {
   })().catch((err: unknown) => {
     // eslint-disable-next-line no-console
     console.error(`usage: ${(err as Error).message}`);
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'daemons' && process.argv[3] === 'discover') {
+  // `qwen-rc daemons discover [--timeout <d>] [--format json|table]` — browse
+  // the LAN for `_qwen-rc._tcp.local.` daemons (add-mdns-discovery). Daemon-free
+  // and read-only; exits 0 even when nothing advertises. Needs the optional
+  // bonjour-service dependency.
+  void (async () => {
+    let args;
+    try {
+      args = parseDiscoverArgs(process.argv.slice(4));
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`daemons discover: ${(e as Error).message}`);
+      process.exit(2);
+    }
+    const factory = await loadBonjourFactory();
+    if (!factory) {
+      // eslint-disable-next-line no-console
+      console.error(
+        'daemons discover: needs the optional bonjour-service dependency — run: npm install bonjour-service',
+      );
+      process.exit(1);
+    }
+    const records = await browseDaemons({
+      factory: factory as unknown as BrowserFactory,
+      timeoutMs: args.timeoutMs,
+    });
+    // eslint-disable-next-line no-console
+    console.log(
+      args.format === 'json'
+        ? formatDaemonsJson(records)
+        : formatDaemonsTable(records, args.timeoutMs),
+    );
+    process.exit(0);
+  })().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error(`daemons discover: ${(err as Error).message}`);
     process.exit(1);
   });
 }

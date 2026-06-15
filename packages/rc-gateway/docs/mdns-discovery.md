@@ -83,6 +83,24 @@ route was previously gated behind cost-tracking (404 when off); it is now always
 200 so mDNS state is reachable independent of cost tracking. No gateway-side
 consumer keyed off the old 404.
 
+## Browse: `qwen-rc daemons discover`
+
+```
+qwen-rc daemons discover [--timeout <5s|500ms|3>] [--format json|table]
+```
+
+Daemon-free and read-only. Browses `_qwen-rc._tcp.local.` for the timeout
+(default 5 s), normalizes each hit to `{ name, host, port, version, tlsRequired,
+workspace }`, dedupes by service name (latest wins), and sorts by host then port.
+Exits **0 even when nothing advertises** (empty result is not an error).
+
+- `table` (default): `NAME HOST PORT VERSION TLS WORKSPACE` columns + a
+  `N daemon(s) found in <elapsed>s` summary (no header when empty).
+- `json`: a bare array of the six-field objects, suitable for scripting.
+
+Discovery never bypasses auth: a discovered daemon still requires the full
+pairing flow before any session interaction.
+
 ## Goodbye on shutdown
 
 The existing SIGINT/SIGTERM `shutdown` handler calls `MdnsAdvertiser.stop(500)`,
