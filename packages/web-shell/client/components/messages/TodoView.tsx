@@ -90,13 +90,24 @@ export function TodoEventSummary({
   );
 }
 
-function DetailRow({ label, value }: { label: string; value: string }) {
+function DetailRow({
+  label,
+  value,
+  suffix,
+}: {
+  label: string;
+  value: string;
+  suffix?: ReactNode;
+}) {
   // Two bare grid cells so every row's labels and values align in shared
   // columns within a section (see .detailRows).
   return (
     <>
       <span className={styles.detailLabel}>{label}</span>
-      <span className={styles.detailValue}>{value}</span>
+      <span className={styles.detailValue}>
+        {value}
+        {suffix}
+      </span>
     </>
   );
 }
@@ -145,12 +156,14 @@ function TodoDetailBlock({ detail }: { detail: TodoDetail }) {
             <DetailRow
               label={t('todo.detail.end')}
               value={formatTimestamp(endTs)}
-            />
-          )}
-          {startTs !== undefined && endTs !== undefined && (
-            <DetailRow
-              label={t('stats.duration')}
-              value={formatDuration(endTs - startTs)}
+              suffix={
+                startTs !== undefined ? (
+                  <span className={styles.detailDuration}>
+                    {' '}
+                    ({formatDuration(endTs - startTs)})
+                  </span>
+                ) : undefined
+              }
             />
           )}
         </DetailSection>

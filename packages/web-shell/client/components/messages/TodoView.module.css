@@ -127,6 +127,11 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The elapsed duration trails the end time as a dimmed parenthetical. */
+.detailDuration {
+  color: var(--text-dimmed);
+}
+
 .detailHint {
   color: var(--text-dimmed);
   font-style: italic;
