@@ -415,18 +415,20 @@ describe('applyTurnCollapse', () => {
     });
   });
 
-  it('never collapses the active turn while responding', () => {
+  it('tags but keeps the active turn expanded while responding', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
       makeAssistantMessage('a1'),
     ]);
     const out = collapseItems(items, { isResponding: true });
+    // Every row stays visible; the head carries the seam but is not collapsed.
     expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
-    expect(messageRow(out[0]).collapse).toBeUndefined();
+    expect(messageRow(out[0]).collapse?.collapsed).toBe(false);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(1);
   });
 
-  it('collapses earlier turns but leaves the active last turn open', () => {
+  it('collapses earlier turns but leaves the active last turn expanded', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
@@ -437,7 +439,34 @@ describe('applyTurnCollapse', () => {
     const out = collapseItems(items, { isResponding: true });
     expect(rowIds(out)).toEqual(['u1', 'a1', 'u2', 'g2']);
     expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
-    expect(messageRow(out[2]).collapse).toBeUndefined();
+    expect(messageRow(out[2]).collapse?.collapsed).toBe(false);
+  });
+
+  it('shows live metrics on the active turn without collapsing it', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'in_progress' }],
+        timestamp: 3_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'working',
+        timestamp: 3_500,
+        usage: { inputTokens: 120, outputTokens: 30 },
+      },
+    ]);
+    const out = collapseItems(items, { isResponding: true });
+    // Active turn stays fully expanded, yet the seam carries live metrics.
+    expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
+    const head = messageRow(out[0]).collapse;
+    expect(head?.collapsed).toBe(false);
+    expect(head?.elapsedMs).toBe(2_500);
+    expect(head?.inputTokens).toBe(120);
+    expect(head?.outputTokens).toBe(30);
   });
 
   it('does not tag a turn with no intermediate steps', () => {

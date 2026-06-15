@@ -499,16 +499,19 @@ export function applyTurnCollapse(
       }
     }
 
-    if (isActiveTurn || hasPendingApproval || hiddenCount === 0) {
-      // Nothing to fold (still streaming, awaiting an approval, or no steps):
-      // emit the turn untouched so live/actionable rows stay visible.
+    if (hasPendingApproval || hiddenCount === 0) {
+      // Not foldable: the inline approve/reject UI must stay reachable, or the
+      // turn has no steps yet. Emit it untouched.
       for (let i = start; i <= end; i++) result.push(items[i]);
       continue;
     }
 
+    // The active (streaming) turn still gets the seam so its live step / time /
+    // token metrics are visible, but defaults to expanded so the streaming rows
+    // stay shown; a completed turn defaults to collapsed. Either can be toggled.
     const expanded = overrides.has(turnId)
       ? (overrides.get(turnId) as boolean)
-      : false;
+      : isActiveTurn;
     const collapsed = !expanded;
 
     const promptTs = head.message.timestamp;
