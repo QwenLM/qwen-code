@@ -110,12 +110,18 @@ configured (the shell then falls back to a Custom Tab).
     5 attempts; other `4xx` → reject (no retry, no removal); and the orphan guard
     (`isTokenLive` false → remove + no send), closing the Cycle-A flag. All tested
     against a fake transport.
-  - **Ceiling (not exercised in CI):** `createHttp2ApnsTransport` (the live HTTP/2
-    POST to `api[.sandbox].push.apple.com` — needs real Apple credentials, a
-    device, and reachability to Apple) and wiring `ApnsSender` into the live
-    notification routing/coalescing loop. The delivery primitive is complete and
-    tested; the live send + notifier integration are the documented unverified
-    edge, same posture as the matrix-E2EE adapter's olm transport.
+  - `createHttp2ApnsTransport` — the real `node:http2` client is now
+    **integration-tested** against an in-process HTTP/2 server impersonating APNs
+    (`apnsTransport.integration.test.ts`, hermetic): it asserts the `POST
+/3/device/<token>` path, the `apns-topic`/`apns-push-type`/`authorization`
+    headers, a well-formed ES256 JWT, and drives a real-transport `410` → removal
+    through `ApnsSender`. `connectOptions` is a test-only TLS-trust escape hatch
+    that **defaults to strict verification** (a test asserts the production default
+    rejects the self-signed server), so prod never skips cert checks.
+  - **Remaining ceiling (genuinely un-CI-able):** only Apple's own acceptance of
+    the JWT + delivery to a real device (needs an Apple Developer account + a
+    device), and wiring `ApnsSender` into the live notification routing/coalescing
+    loop. Everything up to "bytes correctly sent over real HTTP/2" is now verified.
 
 ### Resolved in Cycle C
 

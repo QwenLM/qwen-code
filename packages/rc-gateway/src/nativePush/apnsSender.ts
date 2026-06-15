@@ -138,15 +138,23 @@ export class ApnsSender {
 }
 
 /**
- * The live HTTP/2 transport to Apple (the runtime ceiling — not unit-tested).
- * Opens a fresh connection per send for simplicity; a production deployment would
- * pool connections. POSTs to `/3/device/<deviceToken>` with the documented headers.
+ * The live HTTP/2 transport to Apple. POSTs to `/3/device/<deviceToken>` with the
+ * documented headers; opens a fresh connection per send (a production deployment
+ * would pool).
+ *
+ * `connectOptions` is an ESCAPE HATCH FOR TESTS ONLY: it defaults to `undefined`,
+ * so production gets node's strict TLS verification against the public Apple CA
+ * chain. The integration test passes its self-signed CA (or `rejectUnauthorized:
+ * false`) here to point the REAL transport at an in-process HTTP/2 server — there
+ * is no code path by which production silently skips cert verification.
  */
-export function createHttp2ApnsTransport(): ApnsTransport {
+export function createHttp2ApnsTransport(
+  connectOptions?: import('node:http2').SecureClientSessionOptions,
+): ApnsTransport {
   return {
     post: (req) =>
       new Promise((resolve, reject) => {
-        const client = connect(`https://${req.host}`);
+        const client = connect(`https://${req.host}`, connectOptions);
         client.on('error', reject);
         const stream = client.request({
           [H2.HTTP2_HEADER_METHOD]: 'POST',
