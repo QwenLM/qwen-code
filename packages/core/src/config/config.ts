@@ -809,6 +809,7 @@ export interface ConfigParameters {
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   computerUseEnabled?: boolean;
+  computerUseMaxImageDimension?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -1241,6 +1242,7 @@ export class Config {
   private readonly agentTeamEnabled: boolean = false;
   private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
+  private readonly computerUseMaxImageDimension?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1434,6 +1436,7 @@ export class Config {
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
+    this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -3831,6 +3834,16 @@ export class Config {
 
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
+  }
+
+  /**
+   * Configured screenshot longest-edge cap for Computer Use, or `undefined`
+   * to leave cua-driver's built-in default (1568) in place. Resolved together
+   * with the `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION` env override at the point
+   * the driver connects (see `resolveMaxImageDimension`).
+   */
+  getComputerUseMaxImageDimension(): number | undefined {
+    return this.computerUseMaxImageDimension;
   }
 
   /**

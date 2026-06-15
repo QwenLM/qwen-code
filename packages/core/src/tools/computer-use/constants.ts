@@ -169,6 +169,49 @@ export function resolveChecksumUrls(
   return resolveAssetUrls('checksums.txt', env, version);
 }
 
+/** Env var name for overriding the screenshot longest-edge cap. */
+export const MAX_IMAGE_DIMENSION_ENV = 'QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION';
+
+/**
+ * Coerce a raw value into a valid `max_image_dimension` override, or
+ * `undefined` if it isn't one. A valid override is a non-negative integer
+ * (`0` = no resizing / full resolution). Anything else — negative (incl. the
+ * `-1` "use default" sentinel), fractional, NaN/Infinity, or empty — yields
+ * `undefined`, meaning "don't override; let cua-driver use its built-in
+ * default (1568)".
+ */
+function coerceImageDimension(
+  value: string | number | undefined,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'string' && value.trim() === '') return undefined;
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(n) || n < 0) return undefined;
+  return n;
+}
+
+/**
+ * Resolve the screenshot longest-edge cap (px) to apply to cua-driver via the
+ * `set_config` `max_image_dimension` knob. Precedence:
+ *
+ *   1. `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION` env var (if a valid override)
+ *   2. the `tools.computerUse.maxImageDimension` setting
+ *   3. `undefined` → no override; cua-driver keeps its built-in default (1568)
+ *
+ * A valid override is a non-negative integer (`0` disables resizing). Negative
+ * values (incl. the `-1` setting default), non-integers, and blanks mean "no
+ * override at this layer" — an invalid env value falls through to the setting
+ * rather than forcing a default.
+ */
+export function resolveMaxImageDimension(
+  settingValue?: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  const fromEnv = coerceImageDimension(env[MAX_IMAGE_DIMENSION_ENV]);
+  if (fromEnv !== undefined) return fromEnv;
+  return coerceImageDimension(settingValue);
+}
+
 /** Install root for all Computer Use artifacts. Footprint stays here. */
 export function computerUseRoot(home: string = homedir()): string {
   return join(home, '.qwen', 'computer-use');

@@ -15,6 +15,7 @@ import { saveInstallState, isPackageSpecApproved } from './install-state.js';
 import { approvalKey } from './constants.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import type { Part } from '@google/genai';
+import type { Config } from '../../config/config.js';
 
 function makeFakeClient(
   callToolImpl: (name: string, args: unknown) => Promise<unknown>,
@@ -28,6 +29,7 @@ function makeFakeClient(
     start: vi.fn(async () => {}),
     callTool: vi.fn(callToolImpl),
     stop: vi.fn(async () => {}),
+    setMaxImageDimension: vi.fn(),
   };
   return fake as unknown as ComputerUseClient;
 }
@@ -76,6 +78,36 @@ describe('ComputerUseTool', () => {
 
     expect(result.error).toBeUndefined();
     expect(fake.callTool).toHaveBeenCalledWith('list_apps', {});
+  });
+
+  it('resolves the configured maxImageDimension and forwards it to the client', async () => {
+    const prev = process.env['QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION'];
+    delete process.env['QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION'];
+    try {
+      const fake = makeFakeClient(async () => ({
+        content: [{ type: 'text', text: '[]' }],
+        isError: false,
+      }));
+      ComputerUseClient.setSharedForTest(fake);
+
+      const config = {
+        getComputerUseMaxImageDimension: () => 1280,
+      } as unknown as Config;
+      const tool = new ComputerUseTool(
+        'list_apps',
+        COMPUTER_USE_SCHEMAS.list_apps,
+        config,
+      );
+      await tool.build({}).execute(new AbortController().signal);
+
+      expect(fake.setMaxImageDimension).toHaveBeenCalledWith(1280);
+    } finally {
+      if (prev === undefined) {
+        delete process.env['QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION'];
+      } else {
+        process.env['QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION'] = prev;
+      }
+    }
   });
 
   it('returns an error result when client returns isError=true', async () => {
