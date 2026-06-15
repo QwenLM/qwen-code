@@ -2721,7 +2721,7 @@ export const useGeminiStream = (
         notificationDisplayText: combinedDisplayText,
       });
     }
-  }, [streamingState, submitQuery, notificationTrigger, addItem, config]);
+  }, [streamingState, submitQuery, notificationTrigger, addItem]);
 
   // ─── Teammate message integration ─────────────────────────
   // Each entry carries the full nonce-tagged envelope (`modelText`,

@@ -727,7 +727,7 @@ export async function runNonInteractive(
 
       /**
        * Shared per-turn tool-call dispatch for the main-turn loop and
-       * `drainOneItem`. Both call sites used to reproduce ~120 lines of
+       * `drainBatch`. Both call sites used to reproduce ~120 lines of
        * near-identical logic that filtered `structured_output` to its
        * own pre-scan when `--json-schema` is active, executed each
        * request through `executeToolCall`, captured the `structured_output`
@@ -1165,7 +1165,7 @@ export async function runNonInteractive(
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
-          const drainOneItem = async () => {
+          const drainBatch = async () => {
             if (localQueue.length === 0) return;
 
             // Batch-drain: take contiguous same-type items from the front
@@ -1319,7 +1319,7 @@ export async function runNonInteractive(
                 // call captured the terminal contract — no point running
                 // more queued prompts that can't influence the result.
                 if (structuredSubmission !== undefined) return;
-                await drainOneItem();
+                await drainBatch();
               }
             })();
             drainPromise = p;
@@ -1388,7 +1388,7 @@ export async function runNonInteractive(
 
               // Propagate drain failures. Without this, a rejected
               // drainLocalQueue() (e.g. a text-mode API error surfacing
-              // out of drainOneItem) would be swallowed by `void` and
+              // out of drainBatch) would be swallowed by `void` and
               // checkCronDone would never fire — hanging the run.
               const onDrainError = (err: unknown) => {
                 abortController.signal.removeEventListener('abort', onAbort);
