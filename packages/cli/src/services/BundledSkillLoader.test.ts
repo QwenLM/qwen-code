@@ -392,6 +392,68 @@ describe('BundledSkillLoader', () => {
     expect(commands[0].name).toBe('review');
   });
 
+  it('adds /proactive as an alias for the bundled loop skill', async () => {
+    const skill = makeSkill({
+      name: 'loop',
+      description: 'Loop command',
+      allowedTools: ['cron_create', 'cron_list', 'cron_delete'],
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    (mockConfig.isCronEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
+      true,
+    );
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('loop');
+    expect(commands[0].altNames).toEqual(['proactive']);
+  });
+
+  it('does not create a separate bundled command for /proactive', async () => {
+    const skill = makeSkill({
+      name: 'loop',
+      description: 'Loop command',
+      allowedTools: ['cron_create', 'cron_list', 'cron_delete'],
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    (mockConfig.isCronEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
+      true,
+    );
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands.map((command) => command.name)).toEqual(['loop']);
+    expect(commands.flatMap((command) => command.altNames ?? [])).toEqual([
+      'proactive',
+    ]);
+  });
+
+  it('hides the loop command and its proactive alias when cron is disabled', async () => {
+    const skills = [
+      makeSkill({ name: 'review', description: 'Review code' }),
+      makeSkill({
+        name: 'loop',
+        description: 'Loop command',
+        allowedTools: ['cron_create', 'cron_list', 'cron_delete'],
+      }),
+    ];
+    mockSkillManager.listSkills.mockResolvedValue(skills);
+    (mockConfig.isCronEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
+      false,
+    );
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands.map((command) => command.name)).toEqual(['review']);
+    expect(commands.flatMap((command) => command.altNames ?? [])).not.toContain(
+      'proactive',
+    );
+  });
+
   describe('skills.disabled filter', () => {
     it('omits disabled bundled skills (case-insensitive)', async () => {
       mockSkillManager.listSkills.mockResolvedValue([

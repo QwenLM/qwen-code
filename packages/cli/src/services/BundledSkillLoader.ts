@@ -22,6 +22,11 @@ import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('BUNDLED_SKILL_LOADER');
 
+/** `/proactive` aliases `/loop`; added post-filter so it shares loop's visibility. */
+function getBundledSkillAltNames(skillName: string): string[] | undefined {
+  return skillName === 'loop' ? ['proactive'] : undefined;
+}
+
 /**
  * Loads bundled skills as slash commands, making them directly invocable
  * via /<skill-name> (e.g., /review).
@@ -75,6 +80,7 @@ export class BundledSkillLoader implements ICommandLoader {
 
       return skills.map((skill) => ({
         name: skill.name,
+        altNames: getBundledSkillAltNames(skill.name),
         description: skill.description,
         modelDescription: skill.description,
         kind: CommandKind.SKILL,
