@@ -23,19 +23,42 @@ export const MAX_RETAINED_FILE_DIFF_CHARS = 50_000;
 export const MAX_RETAINED_FILE_CONTENT_CHARS = 16_000;
 export const MAX_RETAINED_ANSI_OUTPUT_LINES = 200;
 
+type CompactionPurpose = 'history' | 'recording';
+
 function copyString(value: string): string {
   return value.split('').join('');
 }
 
-export function compactStringForHistory(
+function buildStringCompactionMarker(
   value: string,
+  purpose: CompactionPurpose,
+): string {
+  if (purpose === 'recording') {
+    return `\n[... truncated for saved session preview; original length: ${value.length} characters ...]\n`;
+  }
+
+  return `\n[... truncated from ${value.length} characters for CLI history display ...]\n`;
+}
+
+function buildAnsiOutputCompactionMarker(
+  omitted: number,
+  purpose: CompactionPurpose,
+): string {
+  const target =
+    purpose === 'recording' ? 'saved session preview' : 'CLI history display';
+  return `[... ${omitted} terminal lines omitted from ${target} ...]`;
+}
+
+function compactString(
+  value: string,
+  purpose: CompactionPurpose,
   limit = MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
 ): string {
   if (value.length <= limit) {
     return value;
   }
 
-  const marker = `\n[... truncated from ${value.length} characters for CLI history display ...]\n`;
+  const marker = buildStringCompactionMarker(value, purpose);
   const contentBudget = Math.max(0, limit - marker.length);
   const headLength = Math.ceil(contentBudget * 0.6);
   const tailLength = contentBudget - headLength;
@@ -44,6 +67,20 @@ export function compactStringForHistory(
     tailLength > 0 ? copyString(value.slice(value.length - tailLength)) : '';
 
   return head + marker + tail;
+}
+
+export function compactStringForHistory(
+  value: string,
+  limit = MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+): string {
+  return compactString(value, 'history', limit);
+}
+
+export function compactStringForRecording(
+  value: string,
+  limit = MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+): string {
+  return compactString(value, 'recording', limit);
 }
 
 function isFileDiffDisplay(resultDisplay: unknown): resultDisplay is FileDiff {
@@ -68,7 +105,10 @@ function isFileDiffDisplay(resultDisplay: unknown): resultDisplay is FileDiff {
   );
 }
 
-function compactFileDiffForHistory(display: FileDiff): FileDiff {
+function compactFileDiff(
+  display: FileDiff,
+  purpose: CompactionPurpose,
+): FileDiff {
   const fileDiffLength = display.fileDiff.length;
   const originalContentLength =
     typeof display.originalContent === 'string'
@@ -87,19 +127,22 @@ function compactFileDiffForHistory(display: FileDiff): FileDiff {
 
   return {
     ...display,
-    fileDiff: compactStringForHistory(
+    fileDiff: compactString(
       display.fileDiff,
+      purpose,
       MAX_RETAINED_FILE_DIFF_CHARS,
     ),
     originalContent:
       typeof display.originalContent === 'string'
-        ? compactStringForHistory(
+        ? compactString(
             display.originalContent,
+            purpose,
             MAX_RETAINED_FILE_CONTENT_CHARS,
           )
         : display.originalContent,
-    newContent: compactStringForHistory(
+    newContent: compactString(
       display.newContent,
+      purpose,
       MAX_RETAINED_FILE_CONTENT_CHARS,
     ),
     truncatedForSession: true,
@@ -138,33 +181,60 @@ function markerAnsiLine(text: string): AnsiLine {
   ];
 }
 
-function compactAnsiLine(line: AnsiLine): AnsiLine {
-  return line.map((token) => ({
-    ...token,
-    text: compactStringForHistory(token.text),
-  }));
+function compactAnsiLine(line: AnsiLine, purpose: CompactionPurpose): AnsiLine {
+  let changed = false;
+  const compactedLine = line.map((token) => {
+    const compactedText = compactString(token.text, purpose);
+    if (compactedText !== token.text) {
+      changed = true;
+      return {
+        ...token,
+        text: compactedText,
+      };
+    }
+
+    return token;
+  });
+  return changed ? compactedLine : line;
 }
 
-function compactAnsiOutput(output: AnsiOutput): AnsiOutput {
+function compactAnsiOutput(
+  output: AnsiOutput,
+  purpose: CompactionPurpose,
+): AnsiOutput {
   if (output.length <= MAX_RETAINED_ANSI_OUTPUT_LINES) {
-    return output.map(compactAnsiLine);
+    let changed = false;
+    const compactedOutput = output.map((line) => {
+      const compactedLine = compactAnsiLine(line, purpose);
+      if (compactedLine !== line) {
+        changed = true;
+      }
+      return compactedLine;
+    });
+    return changed ? compactedOutput : output;
   }
 
   const omitted = output.length - MAX_RETAINED_ANSI_OUTPUT_LINES + 1;
   return [
-    markerAnsiLine(
-      `[... ${omitted} terminal lines omitted from CLI history display ...]`,
-    ),
-    ...output.slice(-(MAX_RETAINED_ANSI_OUTPUT_LINES - 1)).map(compactAnsiLine),
+    markerAnsiLine(buildAnsiOutputCompactionMarker(omitted, purpose)),
+    ...output
+      .slice(-(MAX_RETAINED_ANSI_OUTPUT_LINES - 1))
+      .map((line) => compactAnsiLine(line, purpose)),
   ];
 }
 
 function compactAnsiOutputDisplay(
   display: AnsiOutputDisplay,
+  purpose: CompactionPurpose,
 ): AnsiOutputDisplay {
+  const ansiOutput = compactAnsiOutput(display.ansiOutput, purpose);
+  if (ansiOutput === display.ansiOutput) {
+    return display;
+  }
+
   return {
     ...display,
-    ansiOutput: compactAnsiOutput(display.ansiOutput),
+    ansiOutput,
   };
 }
 
@@ -179,28 +249,33 @@ function isAgentResultDisplay(
   );
 }
 
-function compactAgentResultDisplayForHistory(
+function compactAgentResultDisplay(
   display: AgentResultDisplay,
+  purpose: CompactionPurpose,
 ): AgentResultDisplay {
   return {
     ...display,
-    taskDescription: compactStringForHistory(
+    taskDescription: compactString(
       display.taskDescription,
+      purpose,
       MAX_RETAINED_AGENT_FIELD_CHARS,
     ),
-    taskPrompt: compactStringForHistory(
+    taskPrompt: compactString(
       display.taskPrompt,
+      purpose,
       MAX_RETAINED_AGENT_FIELD_CHARS,
     ),
     ...(display.terminateReason !== undefined && {
-      terminateReason: compactStringForHistory(
+      terminateReason: compactString(
         display.terminateReason,
+        purpose,
         MAX_RETAINED_AGENT_FIELD_CHARS,
       ),
     }),
     ...(display.result !== undefined && {
-      result: compactStringForHistory(
+      result: compactString(
         display.result,
+        purpose,
         MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
       ),
     }),
@@ -218,19 +293,21 @@ function compactAgentResultDisplayForHistory(
         return {
           ...rest,
           ...(description !== undefined && {
-            description: compactStringForHistory(
+            description: compactString(
               description,
+              purpose,
               MAX_RETAINED_AGENT_FIELD_CHARS,
             ),
           }),
           ...(error !== undefined && {
-            error: compactStringForHistory(
+            error: compactString(
               error,
+              purpose,
               MAX_RETAINED_AGENT_FIELD_CHARS,
             ),
           }),
           ...(resultDisplay !== undefined && {
-            resultDisplay: compactStringForHistory(resultDisplay),
+            resultDisplay: compactString(resultDisplay, purpose),
           }),
         };
       }),
@@ -251,13 +328,15 @@ function isTodoResultDisplay(
 
 function compactTodoResultDisplay(
   display: TodoResultDisplay,
+  purpose: CompactionPurpose,
 ): TodoResultDisplay {
   return {
     ...display,
     todos: display.todos.map((todo) => ({
       ...todo,
-      content: compactStringForHistory(
+      content: compactString(
         todo.content,
+        purpose,
         MAX_RETAINED_AGENT_FIELD_CHARS,
       ),
     })),
@@ -277,15 +356,18 @@ function isPlanResultDisplay(
 
 function compactPlanResultDisplay(
   display: PlanResultDisplay,
+  purpose: CompactionPurpose,
 ): PlanResultDisplay {
   return {
     ...display,
-    message: compactStringForHistory(
+    message: compactString(
       display.message,
+      purpose,
       MAX_RETAINED_AGENT_FIELD_CHARS,
     ),
-    plan: compactStringForHistory(
+    plan: compactString(
       display.plan,
+      purpose,
       MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
     ),
   };
@@ -304,12 +386,14 @@ function isMcpToolProgressData(
 
 function compactMcpToolProgressData(
   display: McpToolProgressData,
+  purpose: CompactionPurpose,
 ): McpToolProgressData {
   return {
     ...display,
     ...(display.message !== undefined && {
-      message: compactStringForHistory(
+      message: compactString(
         display.message,
+        purpose,
         MAX_RETAINED_AGENT_FIELD_CHARS,
       ),
     }),
@@ -329,11 +413,13 @@ function isTeamResultDisplay(
 
 function compactTeamResultDisplay(
   display: TeamResultDisplay,
+  purpose: CompactionPurpose,
 ): TeamResultDisplay {
   return {
     ...display,
-    teamName: compactStringForHistory(
+    teamName: compactString(
       display.teamName,
+      purpose,
       MAX_RETAINED_AGENT_FIELD_CHARS,
     ),
   };
@@ -352,18 +438,21 @@ function isTaskListResultDisplay(
 
 function compactTaskListResultDisplay(
   display: TaskListResultDisplay,
+  purpose: CompactionPurpose,
 ): TaskListResultDisplay {
   return {
     ...display,
     tasks: display.tasks.map((task) => ({
       ...task,
-      subject: compactStringForHistory(
+      subject: compactString(
         task.subject,
+        purpose,
         MAX_RETAINED_AGENT_FIELD_CHARS,
       ),
       ...(task.owner !== undefined && {
-        owner: compactStringForHistory(
+        owner: compactString(
           task.owner,
+          purpose,
           MAX_RETAINED_AGENT_FIELD_CHARS,
         ),
       }),
@@ -371,11 +460,12 @@ function compactTaskListResultDisplay(
   };
 }
 
-export function compactToolResultDisplayForHistory<
-  T extends ToolResultDisplay | undefined,
->(resultDisplay: T): T {
+function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
+  resultDisplay: T,
+  purpose: CompactionPurpose,
+): T {
   if (typeof resultDisplay === 'string') {
-    return compactStringForHistory(resultDisplay) as T;
+    return compactString(resultDisplay, purpose) as T;
   }
 
   if (resultDisplay === undefined) {
@@ -383,36 +473,48 @@ export function compactToolResultDisplayForHistory<
   }
 
   if (isFileDiffDisplay(resultDisplay)) {
-    return compactFileDiffForHistory(resultDisplay) as T;
+    return compactFileDiff(resultDisplay, purpose) as T;
   }
 
   if (isAgentResultDisplay(resultDisplay)) {
-    return compactAgentResultDisplayForHistory(resultDisplay) as T;
+    return compactAgentResultDisplay(resultDisplay, purpose) as T;
   }
 
   if (isAnsiOutputDisplay(resultDisplay)) {
-    return compactAnsiOutputDisplay(resultDisplay) as T;
+    return compactAnsiOutputDisplay(resultDisplay, purpose) as T;
   }
 
   if (isTodoResultDisplay(resultDisplay)) {
-    return compactTodoResultDisplay(resultDisplay) as T;
+    return compactTodoResultDisplay(resultDisplay, purpose) as T;
   }
 
   if (isPlanResultDisplay(resultDisplay)) {
-    return compactPlanResultDisplay(resultDisplay) as T;
+    return compactPlanResultDisplay(resultDisplay, purpose) as T;
   }
 
   if (isMcpToolProgressData(resultDisplay)) {
-    return compactMcpToolProgressData(resultDisplay) as T;
+    return compactMcpToolProgressData(resultDisplay, purpose) as T;
   }
 
   if (isTeamResultDisplay(resultDisplay)) {
-    return compactTeamResultDisplay(resultDisplay) as T;
+    return compactTeamResultDisplay(resultDisplay, purpose) as T;
   }
 
   if (isTaskListResultDisplay(resultDisplay)) {
-    return compactTaskListResultDisplay(resultDisplay) as T;
+    return compactTaskListResultDisplay(resultDisplay, purpose) as T;
   }
 
   return resultDisplay;
+}
+
+export function compactToolResultDisplayForHistory<
+  T extends ToolResultDisplay | undefined,
+>(resultDisplay: T): T {
+  return compactToolResultDisplay(resultDisplay, 'history');
+}
+
+export function compactToolResultDisplayForRecording<
+  T extends ToolResultDisplay | undefined,
+>(resultDisplay: T): T {
+  return compactToolResultDisplay(resultDisplay, 'recording');
 }

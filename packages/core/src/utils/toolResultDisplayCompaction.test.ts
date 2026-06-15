@@ -16,7 +16,9 @@ import type {
 } from '../tools/tools.js';
 import {
   compactStringForHistory,
+  compactStringForRecording,
   compactToolResultDisplayForHistory,
+  compactToolResultDisplayForRecording,
   MAX_RETAINED_AGENT_FIELD_CHARS,
   MAX_RETAINED_ANSI_OUTPUT_LINES,
   MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
@@ -42,6 +44,18 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted).toContain('start-');
     expect(compacted).toContain('-end');
     expect(compacted).toContain('truncated from');
+  });
+
+  it('uses saved session wording when compacting recording strings', () => {
+    const value = `start-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-end`;
+
+    const compacted = compactStringForRecording(value);
+
+    expect(compacted).toContain('truncated for saved session preview');
+    expect(compacted).toContain(`original length: ${value.length} characters`);
+    expect(compacted).not.toContain('CLI history display');
   });
 
   it('preserves unmatched surrogate code units when compacting', () => {
@@ -126,6 +140,28 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted.ansiOutput[0][0].text).toContain('truncated from');
   });
 
+  it('keeps unchanged ansi output displays by reference', () => {
+    const display: AnsiOutputDisplay = {
+      totalLines: 1,
+      ansiOutput: [
+        [
+          {
+            text: 'short',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+            fg: '',
+            bg: '',
+          },
+        ],
+      ],
+    };
+
+    expect(compactToolResultDisplayForRecording(display)).toBe(display);
+  });
+
   it('bounds long ansi output and keeps the tail lines', () => {
     const display: AnsiOutputDisplay = {
       ansiOutput: Array.from(
@@ -151,6 +187,35 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted.ansiOutput[0][0].text).toContain('terminal lines omitted');
     expect(compacted.ansiOutput.at(-1)?.[0].text).toBe(
       `line-${MAX_RETAINED_ANSI_OUTPUT_LINES + 4}`,
+    );
+  });
+
+  it('uses saved session wording when compacting recording ansi output', () => {
+    const display: AnsiOutputDisplay = {
+      ansiOutput: Array.from(
+        { length: MAX_RETAINED_ANSI_OUTPUT_LINES + 5 },
+        (_, index) => [
+          {
+            text: `line-${index}`,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+            fg: '',
+            bg: '',
+          },
+        ],
+      ),
+    };
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.ansiOutput[0][0].text).toContain(
+      'terminal lines omitted from saved session preview',
+    );
+    expect(compacted.ansiOutput[0][0].text).not.toContain(
+      'CLI history display',
     );
   });
 

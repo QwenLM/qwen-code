@@ -19,7 +19,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
+import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
 import type {
@@ -179,7 +179,7 @@ export function sanitizeToolCallResultForRecording<
   }
 
   const sanitizedResultDisplay =
-    compactToolResultDisplayForHistory(resultDisplay);
+    compactToolResultDisplayForRecording(resultDisplay);
   if (sanitizedResultDisplay === resultDisplay) {
     return toolCallResult;
   }

@@ -644,7 +644,8 @@ describe('ChatRecordingService', () => {
       );
       expect(resultDisplay).toContain('head-');
       expect(resultDisplay).toContain('-tail');
-      expect(resultDisplay).toContain('truncated from');
+      expect(resultDisplay).toContain('truncated for saved session preview');
+      expect(resultDisplay).not.toContain('CLI history display');
     });
 
     it('records promptId on tool results when provided', async () => {

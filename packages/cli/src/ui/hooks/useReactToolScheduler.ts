@@ -358,12 +358,12 @@ export function mapToDisplay(
             confirmationDetails: trackedCall.confirmationDetails,
           };
         case 'executing':
+          // React stores compacted live output when handling raw update chunks.
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: compactToolResultDisplayForHistory(
+            resultDisplay:
               (trackedCall as TrackedExecutingToolCall).liveOutput ?? undefined,
-            ),
             confirmationDetails: undefined,
             ptyId: (trackedCall as TrackedExecutingToolCall).pid,
             executionStartTime: (trackedCall as TrackedExecutingToolCall)
