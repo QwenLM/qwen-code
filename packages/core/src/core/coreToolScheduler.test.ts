@@ -3781,6 +3781,8 @@ describe('CoreToolScheduler YOLO mode', () => {
         terminalWidth: 90,
         terminalHeight: 30,
       }),
+      getTruncateToolOutputThreshold: () => 100_000,
+      getTruncateToolOutputLines: () => 10_000,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       isInteractive: () => isInteractive,
