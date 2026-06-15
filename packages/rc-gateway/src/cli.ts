@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { watch, type FSWatcher } from 'node:fs';
+import { watch, readFileSync, type FSWatcher } from 'node:fs';
+import { createServer as createHttpsServer } from 'node:https';
+import { createSecureContext } from 'node:tls';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { resolveBindSecurity, BindSecurityError } from './bindSecurity.js';
 import { startDaemon } from './daemonSupervisor.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
@@ -107,10 +110,55 @@ import {
 export interface ServeOptions {
   gatewayPort?: number;
   daemonPort?: number;
+  /** Bind host (default 127.0.0.1). A non-loopback host requires a TLS story. */
+  host?: string;
+  /** PEM cert path for native TLS termination (with tlsKey). */
+  tlsCert?: string;
+  /** PEM private-key path for native TLS termination (with tlsCert). */
+  tlsKey?: string;
+  /** Assert an upstream TLS terminator → allow a cleartext non-loopback bind. */
+  insecureBehindProxy?: boolean;
 }
 
 /** Boot the daemon + gateway and print the owner pairing code. */
 export async function runServe(opts: ServeOptions = {}): Promise<void> {
+  // Resolve + ENFORCE bind safety BEFORE any side effect (no daemon spawn on a
+  // misconfigured bind). Throws BindSecurityError on a non-loopback bind with no
+  // TLS story; the entrypoint prints the message and exits non-zero.
+  const bind = resolveBindSecurity({
+    host: opts.host,
+    tlsCert: opts.tlsCert,
+    tlsKey: opts.tlsKey,
+    insecureBehindProxy: opts.insecureBehindProxy,
+  });
+  // Read AND validate the cert/key NOW (before spawning the daemon) so a bad
+  // path OR malformed PEM fails fast with a clean BindSecurityError and never
+  // orphans a daemon — keeping the "ENFORCE bind safety before any side effect"
+  // contract genuinely true. createSecureContext builds the context the https
+  // server would build at listen time and throws on malformed PEM, with no bind
+  // and no side effect. (A key that simply doesn't match the cert is only caught
+  // at handshake time and is out of scope here.)
+  let tlsMaterial: { cert: Buffer; key: Buffer } | undefined;
+  if (bind.mode === 'tls') {
+    let cert: Buffer;
+    let key: Buffer;
+    try {
+      cert = readFileSync(bind.tls!.certPath);
+      key = readFileSync(bind.tls!.keyPath);
+    } catch (err) {
+      throw new BindSecurityError(
+        `cannot read TLS cert/key (${bind.tls!.certPath}, ${bind.tls!.keyPath}): ${(err as Error).message}`,
+      );
+    }
+    try {
+      createSecureContext({ cert, key });
+    } catch (err) {
+      throw new BindSecurityError(
+        `invalid TLS cert/key (${bind.tls!.certPath}, ${bind.tls!.keyPath}): ${(err as Error).message}`,
+      );
+    }
+    tlsMaterial = { cert, key };
+  }
   const handle = await startDaemon({ port: opts.daemonPort ?? 4180 });
   const store = await TokenStore.open(
     join(homedir(), '.qwen', 'rc', 'tokens.json'),
@@ -439,26 +487,41 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   }
 
   const port = opts.gatewayPort ?? 4170;
-  app.listen(port, '127.0.0.1', () => {
+  // http vs native-TLS https per the bind decision. The cert/key were already
+  // read+validated above (before startDaemon) so a bad path fails fast without
+  // orphaning the daemon; here we just hand the buffers to the https server.
+  const listener = tlsMaterial ? createHttpsServer(tlsMaterial, app) : app;
+  const scheme = bind.mode === 'tls' ? 'https' : 'http';
+  listener.listen(port, bind.host, () => {
     const { code, expiresAt } = pairing.mint([
       OWNER,
       SESSION_READ,
       APPROVE,
       WRITE,
     ]);
-    // eslint-disable-next-line no-console
-    console.log(
-      [
-        `qwen-rc gateway listening on http://127.0.0.1:${port}`,
-        `web viewer: http://127.0.0.1:${port}/ui/`,
-        `webpush: enabled (key ${vapid.getApplicationServerKey().slice(0, 8)}…)`,
-        `policy: ${policy.rules.length === 0 ? 'default-prompt' : `${policy.rules.length} rule(s)`}`,
-        `routing: ${routingRuleCount === 0 ? 'none' : `${routingRuleCount} rule(s)`}`,
-        `owner pairing code: ${code}`,
-        `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}, ${APPROVE}, ${WRITE}])`,
-        `redeem: POST /rc/pair/redeem { "code": "${code}", "label": "<name>" }`,
-      ].join('\n'),
+    const banner = [
+      `qwen-rc gateway listening on ${scheme}://${bind.host}:${port}`,
+      `web viewer: ${scheme}://${bind.host}:${port}/ui/`,
+    ];
+    if (bind.mode === 'insecure-proxy') {
+      banner.push(
+        '⚠ bound non-loopback as PLAIN HTTP (--insecure-behind-proxy): a ' +
+          'TLS-terminating reverse proxy MUST front this gateway, or bearer ' +
+          'tokens transit in cleartext.',
+      );
+    } else if (bind.mode === 'tls') {
+      banner.push('TLS: native termination enabled');
+    }
+    banner.push(
+      `webpush: enabled (key ${vapid.getApplicationServerKey().slice(0, 8)}…)`,
+      `policy: ${policy.rules.length === 0 ? 'default-prompt' : `${policy.rules.length} rule(s)`}`,
+      `routing: ${routingRuleCount === 0 ? 'none' : `${routingRuleCount} rule(s)`}`,
+      `owner pairing code: ${code}`,
+      `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}, ${APPROVE}, ${WRITE}])`,
+      `redeem: POST /rc/pair/redeem { "code": "${code}", "label": "<name>" }`,
     );
+    // eslint-disable-next-line no-console
+    console.log(banner.join('\n'));
   });
 
   // Idle suggestions (proposal `add-idle-suggestions`): build the gateway-own
@@ -851,9 +914,32 @@ async function confirm(question: string): Promise<boolean> {
 
 // Entrypoint: `qwen-rc serve`
 if (process.argv[2] === 'serve') {
-  runServe().catch((err) => {
+  // Flags: --host <h> --tls <cert> --tls-key <key> --insecure-behind-proxy
+  //        --port <n> --daemon-port <n>
+  const argv = process.argv.slice(3);
+  const flag = (name: string): string | undefined => {
+    const i = argv.indexOf(`--${name}`);
+    if (i >= 0) return argv[i + 1];
+    const eq = argv.find((a) => a.startsWith(`--${name}=`));
+    return eq ? eq.slice(name.length + 3) : undefined;
+  };
+  const port = flag('port');
+  const daemonPort = flag('daemon-port');
+  const serveOpts: ServeOptions = {
+    host: flag('host'),
+    tlsCert: flag('tls'),
+    tlsKey: flag('tls-key'),
+    insecureBehindProxy: argv.includes('--insecure-behind-proxy'),
+    gatewayPort: port ? Number(port) : undefined,
+    daemonPort: daemonPort ? Number(daemonPort) : undefined,
+  };
+  runServe(serveOpts).catch((err) => {
     // eslint-disable-next-line no-console
-    console.error('qwen-rc serve failed:', err);
+    console.error(
+      err instanceof BindSecurityError
+        ? `qwen-rc serve: ${err.message}`
+        : `qwen-rc serve failed: ${err instanceof Error ? (err.stack ?? err.message) : err}`,
+    );
     process.exit(1);
   });
 } else if (process.argv[2] === 'policy' && process.argv[3] === 'lint') {
