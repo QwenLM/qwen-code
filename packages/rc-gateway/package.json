@@ -24,6 +24,7 @@
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.10.0",
+    "bonjour-service": "^1.4.1",
     "matrix-bot-sdk": "^0.8.0"
   },
   "devDependencies": {
