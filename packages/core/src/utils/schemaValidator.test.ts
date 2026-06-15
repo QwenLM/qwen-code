@@ -229,7 +229,7 @@ describe('SchemaValidator', () => {
       expect(params.is_active).toBe(false);
     });
 
-    it('should not coerce string booleans for fields that also accept string', () => {
+    it('should coerce string booleans when boolean is accepted (even if string also accepted)', () => {
       const unionSchema = {
         type: 'object',
         properties: {
@@ -240,8 +240,10 @@ describe('SchemaValidator', () => {
       };
       const params = { value: 'true', is_active: 'true' };
       expect(SchemaValidator.validate(unionSchema, params)).toBeNull();
-      // `value` accepts string, so the literal "true" is left as a string.
-      expect(params.value).toBe('true');
+      // fixBooleanValues coerces "true" → true when boolean is accepted,
+      // even if string is also accepted. fixStringValues then skips because
+      // boolean is already an accepted type (round-trip prevention).
+      expect(params.value).toBe(true);
       expect(params.is_active).toBe(true);
     });
 
@@ -800,6 +802,1458 @@ describe('SchemaValidator', () => {
           properties: { foo: { type: 'string' } },
         }),
       ).toBeNull();
+    });
+  });
+
+  describe('non-string to string coercion', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        old_string: { type: 'string' },
+        content: { type: 'string' },
+        count: { type: 'integer' },
+      },
+      required: ['old_string', 'content'],
+    };
+
+    it('should coerce number values to strings', () => {
+      const params = { old_string: 123, content: 'hello' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.old_string).toBe('123');
+    });
+
+    it('should coerce boolean values to strings', () => {
+      const params = { old_string: true, content: false };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.old_string).toBe('true');
+      expect(params.content).toBe('false');
+    });
+
+    it('should not coerce values that are already strings', () => {
+      const params = { old_string: 'original', content: 'text' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.old_string).toBe('original');
+    });
+
+    it('should not coerce non-string schema fields', () => {
+      const params = { old_string: 'text', content: 'hello', count: 42 };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.count).toBe(42);
+    });
+
+    it('should coerce float to string', () => {
+      const params = { old_string: 3.14, content: 'hello' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.old_string).toBe('3.14');
+    });
+
+    it('should not coerce objects or arrays to strings', () => {
+      const params = { old_string: { x: 1 }, content: 'hello' };
+      expect(SchemaValidator.validate(schema, params)).not.toBeNull();
+      expect(params.old_string).toEqual({ x: 1 });
+
+      const arrayParams = { old_string: [1, 2, 3], content: 'hello' };
+      expect(SchemaValidator.validate(schema, arrayParams)).not.toBeNull();
+      expect(arrayParams.old_string).toEqual([1, 2, 3]);
+    });
+
+    it('should coerce nested string fields', () => {
+      const nestedSchema = {
+        type: 'object',
+        properties: {
+          options: {
+            type: 'object',
+            properties: {
+              label: { type: 'string' },
+              enabled: { type: 'boolean' },
+            },
+          },
+        },
+      };
+      const params = { options: { label: 42, enabled: true } };
+      expect(SchemaValidator.validate(nestedSchema, params)).toBeNull();
+      const opts = params.options as unknown as {
+        label: string;
+        enabled: boolean;
+      };
+      expect(opts.label).toBe('42');
+      expect(opts.enabled).toBe(true);
+    });
+
+    it('should not coerce null values', () => {
+      const params = { old_string: null, content: 'hello' };
+      SchemaValidator.validate(schema, params);
+      // null is left in place — validation result depends on schema nullability
+      expect(params.old_string).toBeNull();
+    });
+
+    it('should handle bigint values', () => {
+      const params = { old_string: BigInt(9007199254740991), content: 'hello' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.old_string).toBe('9007199254740991');
+    });
+
+    it('should not coerce already-valid integers in union types', () => {
+      const unionSchema = {
+        type: 'object',
+        properties: {
+          val: { anyOf: [{ type: 'integer' }, { type: 'string' }] },
+          bad_field: { type: 'number' },
+        },
+        required: ['val', 'bad_field'],
+      };
+      // val=42 is already valid as integer, bad_field causes the failure
+      const params = { val: 42, bad_field: 'not_a_number' };
+      SchemaValidator.validate(unionSchema, params);
+      // val should NOT be coerced to '42' — it was already valid as integer
+      expect(params.val).toBe(42);
+    });
+
+    it('should coerce primitives in string arrays', () => {
+      const arraySchema = {
+        type: 'object',
+        properties: {
+          tags: { type: 'array', items: { type: 'string' } },
+          bad_field: { type: 'number' },
+        },
+        required: ['tags', 'bad_field'],
+      };
+      const params = { tags: [1, 2.5, true], bad_field: 'not_a_number' };
+      SchemaValidator.validate(arraySchema, params);
+      expect(params.tags).toEqual(['1', '2.5', 'true']);
+    });
+  });
+
+  describe('schema-aware boolean coercion', () => {
+    it('should not coerce "true" on enum-only schemas', () => {
+      const enumSchema = {
+        type: 'object',
+        properties: {
+          status: { enum: ['active', 'true', 'false'] },
+          count: { type: 'number' },
+        },
+        required: ['count'],
+      };
+      // count missing causes validation failure → coercion runs
+      const params = { status: 'true' };
+      SchemaValidator.validate(enumSchema, params);
+      // "true" should NOT be coerced to boolean — enum-only schema has no boolean type
+      expect(params.status).toBe('true');
+    });
+
+    it('should not coerce "true" on const-only schemas', () => {
+      const constSchema = {
+        type: 'object',
+        properties: {
+          answer: { const: 'true' },
+          count: { type: 'number' },
+        },
+        required: ['count'],
+      };
+      const params = { answer: 'true' };
+      SchemaValidator.validate(constSchema, params);
+      expect(params.answer).toBe('true');
+    });
+
+    it('should not corrupt string arrays with boolean-like elements', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          tags: { type: 'array', items: { type: 'string' } },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+      };
+      const params = {
+        tags: ['active', 'True', 'false'],
+        bad_field: 'not_a_number',
+      };
+      SchemaValidator.validate(schema, params);
+      expect(params.tags).toEqual(['active', 'True', 'false']);
+    });
+
+    it('should not coerce blindly in nested objects without schema', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          config: { type: 'object' },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+      };
+      // config has type:object but no properties defined — nested fields are unconstrained
+      const params = {
+        config: { name: 'True', mode: 'false' },
+        bad_field: 'not_a_number',
+      };
+      SchemaValidator.validate(schema, params);
+      // Strings should NOT be coerced — no schema info for nested fields
+      expect((params.config as Record<string, unknown>)['name']).toBe('True');
+      expect((params.config as Record<string, unknown>)['mode']).toBe('false');
+    });
+  });
+
+  describe('nested stringified JSON coercion', () => {
+    it('should coerce stringified array in nested objects', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          outer: {
+            type: 'object',
+            properties: {
+              inner: {
+                anyOf: [
+                  { type: 'array', items: { type: 'string' } },
+                  { type: 'null' },
+                ],
+              },
+            },
+          },
+        },
+      };
+      const params = { outer: { inner: '["url"]' } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.outer as Record<string, unknown>)['inner']).toEqual([
+        'url',
+      ]);
+    });
+  });
+
+  describe('allOf support in getAcceptedTypes', () => {
+    it('should coerce number to string when type is defined via allOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          name: { allOf: [{ type: 'string' }] },
+        },
+      };
+      const params = { name: 42 };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.name).toBe('42');
+    });
+
+    it('should coerce string to boolean when type is defined via allOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          flag: { allOf: [{ type: 'boolean' }] },
+        },
+      };
+      const params = { flag: 'true' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.flag).toBe(true);
+    });
+  });
+
+  describe('integer/number subtype handling', () => {
+    it('should not coerce integers when schema accepts number via anyOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { anyOf: [{ type: 'number' }, { type: 'string' }] },
+          bad_field: { type: 'number' },
+        },
+        required: ['val', 'bad_field'],
+      };
+      // 42 is an integer, which is a subtype of number — should not coerce
+      const params = { val: 42, bad_field: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      expect(params.val).toBe(42);
+    });
+
+    it('should not coerce integers in arrays when items accept number', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          vals: {
+            type: 'array',
+            items: { anyOf: [{ type: 'number' }, { type: 'string' }] },
+          },
+          bad_field: { type: 'number' },
+        },
+        required: ['vals', 'bad_field'],
+      };
+      const params = { vals: [1, 2, 3], bad_field: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      expect(params.vals).toEqual([1, 2, 3]);
+    });
+  });
+
+  describe('deeply nested composition keywords', () => {
+    it('should resolve types from nested allOf containing anyOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          val: {
+            allOf: [{ anyOf: [{ type: 'string' }, { type: 'integer' }] }],
+          },
+        },
+      };
+      const params = { val: 42 };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      // 42 is integer, which is accepted by the nested anyOf
+      expect(params.val).toBe(42);
+    });
+
+    it('should coerce to string when nested allOf/anyOf defines string type', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          name: { allOf: [{ anyOf: [{ type: 'string' }] }] },
+        },
+      };
+      const params = { name: 42 };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.name).toBe('42');
+    });
+  });
+
+  describe('fixBooleanValues with arrays', () => {
+    it('should coerce primitives in boolean arrays', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          flags: { type: 'array', items: { type: 'boolean' } },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+      };
+      const params = {
+        flags: ['true', 'false', 'True'],
+        bad_field: 'not_a_number',
+      };
+      SchemaValidator.validate(schema, params);
+      expect(params.flags).toEqual([true, false, true]);
+    });
+
+    it('should coerce booleans in arrays of objects', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { enabled: { type: 'boolean' } },
+            },
+          },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+      };
+      const params = {
+        items: [{ enabled: 'true' }, { enabled: 'false' }],
+        bad_field: 'not_a_number',
+      };
+      SchemaValidator.validate(schema, params);
+      expect(params.items).toEqual([{ enabled: true }, { enabled: false }]);
+    });
+  });
+
+  describe('fixStringValues with oneOf', () => {
+    it('should not coerce already-valid integers in oneOf types', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { oneOf: [{ type: 'integer' }, { type: 'string' }] },
+          bad_field: { type: 'number' },
+        },
+        required: ['val', 'bad_field'],
+      };
+      const params = { val: 42, bad_field: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      expect(params.val).toBe(42);
+    });
+  });
+
+  describe('fixStringifiedJsonValues with arrays', () => {
+    it('should coerce stringified JSON in arrays of objects', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                tags: {
+                  anyOf: [
+                    { type: 'array', items: { type: 'string' } },
+                    { type: 'null' },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+      const params = { items: [{ tags: '["a","b"]' }, { tags: '["c"]' }] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.items).toEqual([{ tags: ['a', 'b'] }, { tags: ['c'] }]);
+    });
+
+    it('should coerce stringified JSON via allOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          data: { allOf: [{ type: 'array', items: { type: 'string' } }] },
+        },
+      };
+      const params = { data: '["x","y"]' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.data).toEqual(['x', 'y']);
+    });
+  });
+
+  describe('$ref resolution', () => {
+    it('should coerce number to string via $ref', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          name: { $ref: '#/definitions/NameProp' },
+        },
+        definitions: {
+          NameProp: { type: 'string' },
+        },
+      };
+      const params = { name: 42 };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.name).toBe('42');
+    });
+
+    it('should coerce string to boolean via $ref in $defs', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          flag: { $ref: '#/$defs/FlagProp' },
+        },
+        $defs: {
+          FlagProp: { type: 'boolean' },
+        },
+      };
+      const params = { flag: 'true' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.flag).toBe(true);
+    });
+
+    it('should coerce stringified JSON via $ref', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          urls: { $ref: '#/definitions/UrlsProp' },
+        },
+        definitions: {
+          UrlsProp: {
+            anyOf: [
+              { type: 'array', items: { type: 'string' } },
+              { type: 'null' },
+            ],
+          },
+        },
+      };
+      const params = { urls: '["https://example.com"]' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.urls).toEqual(['https://example.com']);
+    });
+
+    it('should handle unresolvable $ref gracefully', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { $ref: '#/definitions/MissingDef' },
+        },
+      };
+      const params = { val: 'true' };
+      // Unresolvable $ref — coercion should be skipped, not crash
+      expect(() => SchemaValidator.validate(schema, params)).not.toThrow();
+    });
+  });
+
+  describe('fixStringValues array-of-objects recursion', () => {
+    it('should coerce string fields in arrays of objects', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                count: { type: 'integer' },
+              },
+            },
+          },
+        },
+      };
+      const params = {
+        items: [
+          { name: 42, count: 5 },
+          { name: true, count: 0 },
+        ],
+      };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.items).toEqual([
+        { name: '42', count: 5 },
+        { name: 'true', count: 0 },
+      ]);
+    });
+  });
+
+  describe('NaN/Infinity guard', () => {
+    it('should not coerce NaN to string', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { type: 'string' },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+      };
+      const params = { val: NaN, bad_field: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      // NaN should NOT be coerced to "NaN"
+      expect(params.val).toBeNaN();
+    });
+
+    it('should not coerce Infinity to string', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { type: 'string' },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+      };
+      const params = { val: Infinity, bad_field: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      // Infinity should NOT be coerced to "Infinity"
+      expect(params.val).toBe(Infinity);
+    });
+  });
+
+  describe('additionalProperties fallback', () => {
+    it('should coerce values in additionalProperties schemas', () => {
+      const schema = {
+        type: 'object',
+        additionalProperties: { type: 'string' },
+      };
+      const params = { key1: 42, key2: true, key3: 'already_string' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.key1).toBe('42');
+      expect(params.key2).toBe('true');
+      expect(params.key3).toBe('already_string');
+    });
+
+    it('should coerce boolean strings in additionalProperties', () => {
+      const schema = {
+        type: 'object',
+        additionalProperties: { type: 'boolean' },
+      };
+      const params = { flag1: 'true', flag2: 'false' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.flag1).toBe(true);
+      expect(params.flag2).toBe(false);
+    });
+  });
+
+  describe('$ref resolution in nested object recursion', () => {
+    it('should coerce booleans in nested objects via $ref', () => {
+      // Finding #1: $ref must be resolved before recursion into nested objects
+      const schema = {
+        type: 'object',
+        properties: {
+          config: { $ref: '#/$defs/Config' },
+        },
+        $defs: {
+          Config: {
+            type: 'object',
+            properties: {
+              enabled: { type: 'boolean' },
+            },
+          },
+        },
+      };
+      const params = { config: { enabled: 'true' } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.config as Record<string, unknown>)['enabled']).toBe(true);
+    });
+
+    it('should coerce strings in nested objects via $ref in definitions', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          settings: { $ref: '#/definitions/Settings' },
+        },
+        definitions: {
+          Settings: {
+            type: 'object',
+            properties: {
+              label: { type: 'string' },
+            },
+          },
+        },
+      };
+      const params = { settings: { label: 42 } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.settings as Record<string, unknown>)['label']).toBe('42');
+    });
+
+    it('should coerce stringified JSON in nested objects via $ref', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          data: { $ref: '#/$defs/Data' },
+        },
+        $defs: {
+          Data: {
+            type: 'object',
+            properties: {
+              tags: {
+                anyOf: [
+                  { type: 'array', items: { type: 'string' } },
+                  { type: 'null' },
+                ],
+              },
+            },
+          },
+        },
+      };
+      const params = { data: { tags: '["a","b"]' } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.data as Record<string, unknown>)['tags']).toEqual([
+        'a',
+        'b',
+      ]);
+    });
+  });
+
+  describe('circular $ref protection', () => {
+    it('should not crash on circular $ref', () => {
+      // Finding #2: circular $ref should not cause stack overflow
+      const schema = {
+        type: 'object',
+        properties: {
+          node: { $ref: '#/$defs/Node' },
+        },
+        $defs: {
+          Node: {
+            type: 'object',
+            properties: {
+              value: { type: 'string' },
+              child: { $ref: '#/$defs/Node' },
+            },
+          },
+        },
+      };
+      const params = { node: { value: 42, child: null } };
+      // Should not throw / stack overflow
+      expect(() => SchemaValidator.validate(schema, params)).not.toThrow();
+    });
+
+    it('should handle deeply nested anyOf without stack overflow', () => {
+      // Finding #6: deeply nested composition keywords should not crash
+      // Build a schema with deep nesting of anyOf (exceeds depth-64 limit)
+      let inner: Record<string, unknown> = { type: 'string' };
+      for (let i = 0; i < 100; i++) {
+        inner = { anyOf: [inner, { type: 'null' }] };
+      }
+      const schema = {
+        type: 'object',
+        properties: {
+          val: inner,
+        },
+      };
+      const params = { val: 42 };
+      expect(() => SchemaValidator.validate(schema, params)).not.toThrow();
+      // Depth limit (64) is exceeded, so getAcceptedTypes returns null and
+      // coercion is skipped — value stays unchanged. This is the safe behavior.
+      expect(params.val).toBe(42);
+    });
+  });
+
+  describe('additionalProperties recursion', () => {
+    it('should coerce booleans in nested additionalProperties', () => {
+      // Finding #3: additionalProperties-only schemas should recurse
+      const schema = {
+        type: 'object',
+        additionalProperties: {
+          type: 'object',
+          additionalProperties: { type: 'boolean' },
+        },
+      };
+      const params = { a: { b: 'true', c: 'false' } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.a as Record<string, unknown>)['b']).toBe(true);
+      expect((params.a as Record<string, unknown>)['c']).toBe(false);
+    });
+
+    it('should coerce strings in nested additionalProperties', () => {
+      const schema = {
+        type: 'object',
+        additionalProperties: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+        },
+      };
+      const params = { outer: { inner: 42 } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.outer as Record<string, unknown>)['inner']).toBe('42');
+    });
+  });
+
+  describe('arrays of arrays coercion', () => {
+    it('should coerce stringified JSON in arrays of arrays', () => {
+      // Finding #4: fixStringifiedJsonValues should recurse into nested arrays
+      const schema = {
+        type: 'object',
+        properties: {
+          matrix: {
+            type: 'array',
+            items: {
+              type: 'array',
+              items: {
+                anyOf: [
+                  { type: 'array', items: { type: 'string' } },
+                  { type: 'null' },
+                ],
+              },
+            },
+          },
+        },
+      };
+      const params = { matrix: [['["a"]'], ['["b","c"]']] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.matrix).toEqual([[['a']], [['b', 'c']]]);
+    });
+  });
+
+  describe('boolean/string round-trip safety', () => {
+    it('should not coerce "true" when schema accepts both boolean and string', () => {
+      // Finding #5: anyOf: [boolean, string] with input "true" — the string
+      // "true" is already valid (string is accepted), so validation passes
+      // and no coercion runs at all. No round-trip occurs.
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { anyOf: [{ type: 'boolean' }, { type: 'string' }] },
+        },
+      };
+      const params = { val: 'true' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      // "true" is a valid string — no coercion needed
+      expect(params.val).toBe('true');
+    });
+
+    it('should not round-trip boolean→string when coercion runs due to other failure', () => {
+      // When coercion runs (triggered by another field failing), fixBooleanValues
+      // coerces "true" → true, then fixStringValues should NOT coerce true → "true"
+      // because boolean is already accepted by the schema.
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { anyOf: [{ type: 'boolean' }, { type: 'string' }] },
+          required_num: { type: 'integer' },
+        },
+        required: ['val', 'required_num'],
+      };
+      const params = { val: 'true', required_num: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      // fixBooleanValues coerces "true" → true (boolean is accepted)
+      // fixStringValues sees true, checks typeIsAccepted('boolean', {boolean,string}) → true → skips
+      expect(params.val).toBe(true);
+    });
+
+    it('should not round-trip boolean→string in tuple position when schema accepts both', () => {
+      // Same round-trip invariant as above, but for prefixItems tuples.
+      // Position 0: anyOf [boolean, string] with value "true"
+      // Position 1: string with value "hello"
+      // Pass 1 (fixBooleanValues) coerces "true" → true at position 0.
+      // Pass 2 (fixStringValues) should skip position 0 because boolean
+      // is accepted by the schema (anyOf includes string too).
+      const schema = {
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              { anyOf: [{ type: 'boolean' }, { type: 'string' }] },
+              { type: 'string' },
+            ],
+          },
+          required_num: { type: 'integer' },
+        },
+        required: ['tuple', 'required_num'],
+      };
+      const params = { tuple: ['true', 'hello'], required_num: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      // Position 0: "true" → true (boolean pass), then NOT reverted to "true"
+      // Position 1: "hello" stays as string
+      expect(params.tuple).toEqual([true, 'hello']);
+    });
+  });
+
+  describe('resolveRef prototype pollution guard', () => {
+    it('should not resolve $ref to __proto__', () => {
+      // Finding #7: $ref of "#/__proto__" should not resolve to Object.prototype
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { $ref: '#/__proto__' },
+        },
+      };
+      const params = { val: 'anything' };
+      // Should not throw or resolve to Object.prototype
+      expect(() => SchemaValidator.validate(schema, params)).not.toThrow();
+    });
+
+    it('should not resolve $ref to constructor', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { $ref: '#/constructor' },
+        },
+      };
+      const params = { val: 'anything' };
+      expect(() => SchemaValidator.validate(schema, params)).not.toThrow();
+    });
+  });
+
+  describe('multi-hop $ref chains', () => {
+    it('should resolve $ref chains of 2+ hops', () => {
+      // $defs/A -> $defs/B -> { type: 'string' }
+      const schema = {
+        type: 'object',
+        properties: {
+          name: { $ref: '#/$defs/A' },
+        },
+        $defs: {
+          A: { $ref: '#/$defs/B' },
+          B: { type: 'string' },
+        },
+      };
+      const params = { name: 42 };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.name).toBe('42');
+    });
+
+    it('should resolve deep $ref chains (3 hops)', () => {
+      // $defs/A -> $defs/B -> $defs/C -> { type: 'boolean' }
+      const schema = {
+        type: 'object',
+        properties: {
+          flag: { $ref: '#/$defs/A' },
+        },
+        $defs: {
+          A: { $ref: '#/$defs/B' },
+          B: { $ref: '#/$defs/C' },
+          C: { type: 'boolean' },
+        },
+      };
+      const params = { flag: 'true' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.flag).toBe(true);
+    });
+  });
+
+  describe('$ref inside composition variants', () => {
+    it('should coerce via $ref inside anyOf variants', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          config: {
+            anyOf: [{ $ref: '#/$defs/Config' }, { type: 'null' }],
+          },
+        },
+        $defs: {
+          Config: {
+            type: 'object',
+            properties: { enabled: { type: 'boolean' } },
+          },
+        },
+      };
+      const params = { config: { enabled: 'true' } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.config as Record<string, unknown>)['enabled']).toBe(true);
+    });
+
+    it('should coerce strings via $ref inside anyOf variants', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          data: {
+            anyOf: [{ $ref: '#/$defs/Data' }, { type: 'null' }],
+          },
+        },
+        $defs: {
+          Data: {
+            type: 'object',
+            properties: { label: { type: 'string' } },
+          },
+        },
+      };
+      const params = { data: { label: 42 } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.data as Record<string, unknown>)['label']).toBe('42');
+    });
+
+    it('should coerce via $ref inside oneOf variants', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          config: {
+            oneOf: [{ $ref: '#/$defs/Config' }, { type: 'null' }],
+          },
+        },
+        $defs: {
+          Config: {
+            type: 'object',
+            properties: { enabled: { type: 'boolean' } },
+          },
+        },
+      };
+      const params = { config: { enabled: 'true' } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.config as Record<string, unknown>)['enabled']).toBe(true);
+    });
+
+    it('should coerce via $ref inside allOf variants', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          config: {
+            allOf: [{ $ref: '#/$defs/Config' }],
+          },
+        },
+        $defs: {
+          Config: {
+            type: 'object',
+            properties: { label: { type: 'string' } },
+          },
+        },
+      };
+      const params = { config: { label: 42 } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.config as Record<string, unknown>)['label']).toBe('42');
+    });
+  });
+
+  describe('Object.hasOwn regression', () => {
+    it('should coerce property named toString (Object.prototype shadow)', () => {
+      // Regression test: getEffectiveProperties uses Object.hasOwn instead of
+      // `in` to avoid prototype chain traversal. Without this guard, a schema
+      // property named 'toString' would be silently skipped because
+      // 'toString' in {} is true (found on Object.prototype).
+      const schema = {
+        type: 'object',
+        properties: {
+          obj: {
+            anyOf: [
+              {
+                type: 'object',
+                properties: { toString: { type: 'string' } },
+              },
+              { type: 'null' },
+            ],
+          },
+        },
+      };
+      const params = { obj: { toString: 42 } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.obj as Record<string, unknown>)['toString']).toBe('42');
+    });
+  });
+
+  describe('composition keyword recursion', () => {
+    it('should recurse into nested objects wrapped in allOf', () => {
+      // allOf wrapping object schema with properties
+      const schema = {
+        type: 'object',
+        properties: {
+          config: {
+            allOf: [
+              {
+                type: 'object',
+                properties: {
+                  enabled: { type: 'boolean' },
+                },
+              },
+            ],
+          },
+        },
+      };
+      const params = { config: { enabled: 'true' } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.config as Record<string, unknown>)['enabled']).toBe(true);
+    });
+
+    it('should recurse into nested objects wrapped in anyOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          config: {
+            anyOf: [
+              {
+                type: 'object',
+                properties: {
+                  label: { type: 'string' },
+                },
+              },
+              { type: 'null' },
+            ],
+          },
+        },
+      };
+      const params = { config: { label: 42 } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.config as Record<string, unknown>)['label']).toBe('42');
+    });
+
+    it('should recurse into arrays of objects wrapped in allOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            items: {
+              allOf: [
+                {
+                  type: 'object',
+                  properties: {
+                    enabled: { type: 'boolean' },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      };
+      const params = { items: [{ enabled: 'true' }, { enabled: 'false' }] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.items).toEqual([{ enabled: true }, { enabled: false }]);
+    });
+
+    it('should coerce stringified JSON in nested objects wrapped in allOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          data: {
+            allOf: [
+              {
+                type: 'object',
+                properties: {
+                  tags: {
+                    anyOf: [
+                      { type: 'array', items: { type: 'string' } },
+                      { type: 'null' },
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      };
+      const params = { data: { tags: '["a","b"]' } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.data as Record<string, unknown>)['tags']).toEqual([
+        'a',
+        'b',
+      ]);
+    });
+  });
+
+  describe('prefixItems (tuple) coercion', () => {
+    it('should coerce stringified JSON in tuple with prefixItems-only schema', () => {
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              {
+                anyOf: [
+                  { type: 'array', items: { type: 'string' } },
+                  { type: 'null' },
+                ],
+              },
+              { type: 'string' },
+            ],
+          },
+        },
+      };
+      const params = { tuple: ['["a","b"]', 'hello'] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.tuple).toEqual([['a', 'b'], 'hello']);
+    });
+
+    it('should coerce boolean strings in tuple with prefixItems', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [{ type: 'boolean' }, { type: 'string' }],
+          },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+      };
+      const params = { tuple: ['true', 'hello'], bad_field: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      expect(params.tuple).toEqual([true, 'hello']);
+    });
+
+    it('should coerce non-string values to strings in tuple with prefixItems', () => {
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [{ type: 'string' }, { type: 'integer' }],
+          },
+        },
+      };
+      const params = { tuple: [42, 7] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.tuple).toEqual(['42', 7]);
+    });
+
+    it('should handle mixed prefixItems + items', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          data: {
+            type: 'array',
+            prefixItems: [{ type: 'boolean' }],
+            items: { type: 'string' },
+          },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+      };
+      const params = { data: ['true', 42, 99], bad_field: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      // Position 0: prefixItems boolean coercion
+      // Positions 1+: items string coercion
+      expect(params.data).toEqual([true, '42', '99']);
+    });
+
+    it('should skip elements beyond prefixItems range when no items', () => {
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [{ type: 'boolean' }],
+            items: true, // Accept any additional items without constraint
+          },
+        },
+      };
+      const params = { tuple: ['true', 'should_stay', 'also_stay'] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.tuple).toEqual([true, 'should_stay', 'also_stay']);
+    });
+
+    it('should recurse into object elements in prefixItems tuple', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              {
+                type: 'object',
+                properties: {
+                  enabled: { type: 'boolean' },
+                  name: { type: 'string' },
+                },
+              },
+              { type: 'integer' },
+            ],
+          },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+      };
+      const params = {
+        tuple: [{ enabled: 'true', name: 42 }, 99],
+        bad_field: 'not_a_number',
+      };
+      SchemaValidator.validate(schema, params);
+      expect(params.tuple).toEqual([{ enabled: true, name: '42' }, 99]);
+    });
+
+    it('should resolve $ref inside prefixItems entries', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              { $ref: '#/$defs/FlagProp' },
+              { $ref: '#/$defs/NameProp' },
+            ],
+          },
+          bad_field: { type: 'number' },
+        },
+        required: ['bad_field'],
+        $defs: {
+          FlagProp: { type: 'boolean' },
+          NameProp: { type: 'string' },
+        },
+      };
+      const params = { tuple: ['true', 42], bad_field: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      expect(params.tuple).toEqual([true, '42']);
+    });
+
+    it('should coerce stringified JSON inside nested tuple elements', () => {
+      // Exercises the fixStringifiedJsonValuesInArray path when a tuple
+      // element is itself an array with prefixItems (nested tuple).
+      // Note: boolean/string passes do NOT recurse into nested array
+      // elements (consistent with existing uniform-array behavior).
+      // The JSON-stringify pass (pass 3) does recurse.
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              {
+                type: 'array',
+                prefixItems: [
+                  {
+                    anyOf: [
+                      { type: 'array', items: { type: 'string' } },
+                      { type: 'null' },
+                    ],
+                  },
+                  { type: 'string' },
+                ],
+              },
+              { type: 'string' },
+            ],
+          },
+        },
+      };
+      // tuple[0] = ['["a"]', 'hello'] — an array where position 0 is a
+      // JSON string. Pass 3 recurses into the nested array via
+      // fixStringifiedJsonValuesInArray, which handles the prefixItems
+      // on the inner array and coerces '["a"]' → ['a'].
+      const params = { tuple: [['["a"]', 'hello'], 'world'] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.tuple).toEqual([[['a'], 'hello'], 'world']);
+    });
+
+    it('should handle stringified JSON array inside nested tuple element', () => {
+      // Value at tuple[0] is a JSON string that parses to an array.
+      // The outer prefixItems[0] accepts array (not string), so pass 3
+      // coerces '["hello"]' → ["hello"]. The inner array is then
+      // validated by Ajv against the nested prefixItems schema.
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              {
+                type: 'array',
+                prefixItems: [{ type: 'string' }],
+              },
+              { type: 'string' },
+            ],
+          },
+        },
+      };
+      const params = { tuple: ['["hello"]', 'x'] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.tuple).toEqual([['hello'], 'x']);
+    });
+  });
+
+  describe('getEffectiveProperties prototype pollution guard', () => {
+    it('should not coerce data via __proto__-polluted property prototype', () => {
+      // Critical: a malicious MCP schema can register
+      // `properties: {__proto__: {trigger_field: {type: 'boolean'}}, safe: ...}`.
+      // With the unfixed code, `merged['__proto__'] = v` on a plain `{}`
+      // triggers the prototype setter, polluting `merged` with `trigger_field`.
+      // A subsequent lookup of `merged['trigger_field']` (for a data key not
+      // actually defined in the schema) returns the polluted schema and
+      // coerces a legitimate 'true' string to boolean.
+      //
+      // The fix uses Object.create(null) (no prototype chain to pollute)
+      // AND skips dangerous keys (__proto__/constructor/prototype) during
+      // the copy.
+      //
+      // A safe sibling property is included so that getEffectiveProperties
+      // returns a non-undefined value (the early-return check is
+      // `Object.keys(merged).length > 0`; without a sibling, the polluted
+      // merged has zero own keys and is treated as empty).
+      //
+      // A required 'bad' field forces Ajv to fail initially so the coercion
+      // passes actually run.
+      //
+      // JSON.parse is used to make __proto__ an OWN enumerable property.
+      // Object-literal `{__proto__: ...}` would set the prototype chain
+      // instead and defeat the test.
+      const schema = JSON.parse(`{
+        "type": "object",
+        "properties": {
+          "__proto__": { "trigger_field": { "type": "boolean" } },
+          "safe": { "type": "string" },
+          "bad": { "type": "string" }
+        },
+        "required": ["bad"]
+      }`);
+      // Sanity: __proto__ is an own property of schema.properties
+      expect(Object.hasOwn(schema.properties, '__proto__')).toBe(true);
+
+      // trigger_field is not a real property of the schema. It happens to
+      // match a field inside the __proto__'s value. bad is a number, schema
+      // expects a string — Ajv fails, triggering coercion.
+      const params = { trigger_field: 'true', bad: 5 };
+      expect(() => SchemaValidator.validate(schema, params)).not.toThrow();
+      // Without the fix: 'true' would be coerced to true via the polluted
+      // prototype. With the fix: trigger_field is not in the schema's own
+      // properties and the value stays as a string.
+      expect(params.trigger_field).toBe('true');
+      // bad should still coerce normally to its expected string type.
+      expect(params.bad).toBe('5');
+    });
+
+    it('should still coerce legitimate sibling keys when __proto__ is in properties', () => {
+      // Defence-in-depth: even if __proto__ is present, legitimate sibling
+      // keys must still coerce normally.
+      const schema = JSON.parse(`{
+        "type": "object",
+        "properties": {
+          "__proto__": { "type": "boolean" },
+          "legitimate": { "type": "string" }
+        }
+      }`);
+      const params = { legitimate: 42 };
+      expect(() => SchemaValidator.validate(schema, params)).not.toThrow();
+      expect(params.legitimate).toBe('42');
+      // Object.prototype must not be modified either.
+      expect(
+        (Object.prototype as Record<string, unknown>)['polluted'],
+      ).toBeUndefined();
+    });
+
+    it('should skip constructor and prototype keys as own properties', () => {
+      // Use JSON.parse to make constructor/prototype OWN enumerable properties.
+      // Include a sibling so getEffectiveProperties returns non-undefined.
+      const schema = JSON.parse(`{
+        "type": "object",
+        "properties": {
+          "constructor": { "type": "boolean" },
+          "prototype": { "type": "string" },
+          "name": { "type": "string" }
+        }
+      }`);
+      // Sanity: all three are own properties of schema.properties
+      expect(Object.hasOwn(schema.properties, 'constructor')).toBe(true);
+      expect(Object.hasOwn(schema.properties, 'prototype')).toBe(true);
+      expect(Object.hasOwn(schema.properties, 'name')).toBe(true);
+
+      const params = { name: 99 };
+      expect(() => SchemaValidator.validate(schema, params)).not.toThrow();
+      // The safe 'name' key still gets coerced; the dangerous keys are
+      // skipped so they cannot fabricate behavior via prototype traversal.
+      expect(params.name).toBe('99');
+    });
+  });
+
+  describe('fixStringifiedJsonValuesInArray element-level schema', () => {
+    it('should coerce stringified JSON in nested uniform arrays of objects', () => {
+      // Regression: previously getAcceptedTypes was called on the OUTER array
+      // schema (yielding {array}), not the element-level schema. Parsed
+      // objects would never match {array}, so coercion was silently skipped.
+      // The fix resolves the inner items schema before checking accepted types.
+      //
+      // The data shape is matrix: [ ['{"a":1}'] ] — an array containing an
+      // array containing a stringified JSON object. The outer uniform-items
+      // pass in fixStringifiedJsonValues dispatches into
+      // fixStringifiedJsonValuesInArray for each sub-array.
+      const schema = {
+        type: 'object',
+        properties: {
+          matrix: {
+            type: 'array',
+            items: {
+              type: 'array',
+              items: { type: 'object' },
+            },
+          },
+        },
+      };
+      const params = { matrix: [['{"a":1}']] };
+      // With the fix, '{"a":1}' is parsed and coerced to {a:1} because the
+      // element schema accepts 'object'. Without the fix, the helper would
+      // check {array} (the outer schema's type), find no match for 'object',
+      // and silently skip — leaving validation to fail with "must be object".
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.matrix).toEqual([[{ a: 1 }]]);
+    });
+  });
+
+  describe('getAcceptedTypes memoization (branching $ref DoS guard)', () => {
+    it('collapses an exponentially branching $ref type tree to linear time', () => {
+      // Regression guard for the [Critical] review finding (PR #4793): a
+      // compact schema can encode an exponentially branching type tree via
+      // $ref, e.g.
+      //   $defs/D0 = {type: number}
+      //   $defs/Dn = {anyOf: [{$ref: Dn-1}, {$ref: Dn-1}]}
+      // Before memoization, getAcceptedTypes re-traversed every shared
+      // $defs/Dk target once per path reaching it — O(2^depth) calls
+      // (~9s at depth 24 on a laptop, projected to days by depth 40). The
+      // memoization cache keys on the *resolved* $defs object (shared across
+      // all refs to it), collapsing the descent to O(depth).
+      //
+      // `val` holds a value that is VALID against the branching schema (a
+      // number, since D0 accepts number). That keeps Ajv's work linear — it
+      // short-circuits anyOf on the first passing branch and emits no
+      // exponential error array — so the test bounds memory regardless of
+      // depth. A sibling `bad` field fails, triggering the coercion path that
+      // calls getAcceptedTypes on the full branching tree for `val`.
+      const DEPTH = 24;
+      const $defs: Record<string, unknown> = { D0: { type: 'number' } };
+      for (let i = 1; i <= DEPTH; i++) {
+        $defs[`D${i}`] = {
+          anyOf: [{ $ref: `#/$defs/D${i - 1}` }, { $ref: `#/$defs/D${i - 1}` }],
+        };
+      }
+      const schema = {
+        type: 'object',
+        properties: {
+          val: { $ref: `#/$defs/D${DEPTH}` },
+          bad: { type: 'string' },
+        },
+        required: ['val', 'bad'],
+        $defs,
+      };
+      const params = { val: 42, bad: 123 };
+
+      const start = Date.now();
+      const result = SchemaValidator.validate(schema, params);
+      const elapsed = Date.now() - start;
+
+      expect(result).toBeNull();
+      // val is a valid number — its schema accepts number, so it is unchanged.
+      expect(params.val).toBe(42);
+      // bad is coerced number → string.
+      expect(params.bad).toBe('123');
+      // Fixed: <50ms. Unfixed (2^24 ≈ 16M getAcceptedTypes calls): ~9s. The
+      // 1s budget catches a regression on any realistic hardware without
+      // flaking on slow CI (the fixed path does linear work in both Ajv and
+      // the coercion passes).
+      expect(elapsed).toBeLessThan(1000);
     });
   });
 });

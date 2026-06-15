@@ -9246,9 +9246,9 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     const tool = new StrictStringTool();
     const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
 
-    // Turn 1: bad params (value is number, not string)
+    // Turn 1: bad params (value is object, not string — not coercible by fixStringValues)
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     let msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9257,7 +9257,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 2: same bad params
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9265,7 +9265,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 3: same bad params — should trigger directive
     await scheduler.schedule(
-      [makeRequest('c3', 'strictStringTool', { value: 123 })],
+      [makeRequest('c3', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9307,11 +9307,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 1-2: tool fails twice
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
 
@@ -9324,7 +9324,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 4: back to tool — should be count 1 again (no directive)
     await scheduler.schedule(
-      [makeRequest('c4', 'strictStringTool', { value: 123 })],
+      [makeRequest('c4', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     const msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9338,11 +9338,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Two validation failures with the same error.
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
 
@@ -9354,11 +9354,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Two more failures — count should restart at 1, not jump to 3+.
     await scheduler.schedule(
-      [makeRequest('c4', 'strictStringTool', { value: 123 })],
+      [makeRequest('c4', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('c5', 'strictStringTool', { value: 123 })],
+      [makeRequest('c5', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
 
@@ -9485,18 +9485,18 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Tool A fails twice, accumulating a retry count of 2.
     await scheduler.schedule(
-      [makeRequest('a1', StrictStringTool.Name, { value: 123 })],
+      [makeRequest('a1', StrictStringTool.Name, { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('a2', StrictStringTool.Name, { value: 123 })],
+      [makeRequest('a2', StrictStringTool.Name, { value: {} })],
       new AbortController().signal,
     );
 
     // Now a batch for tool B only — tool A's counter must be pruned because
     // A is not present in this batch.
     await scheduler.schedule(
-      [makeRequest('b1', StrictToolAlt.Name, { other: 456 })],
+      [makeRequest('b1', StrictToolAlt.Name, { other: {} })],
       new AbortController().signal,
     );
 
@@ -9505,7 +9505,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     // Under per-tool pruning the counter starts fresh at 1 and no directive
     // should be emitted.
     await scheduler.schedule(
-      [makeRequest('a3', StrictStringTool.Name, { value: 123 })],
+      [makeRequest('a3', StrictStringTool.Name, { value: {} })],
       new AbortController().signal,
     );
     const msg = getLastErrorMessage(onToolCallsUpdate);
