@@ -115,6 +115,11 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
 export interface DaemonTurnUsage {
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Cached-read tokens for the round — a subset of `inputTokens` (already
+   * counted in it, not additive). Absent when the round reported none.
+   */
+  cachedTokens?: number;
 }
 
 /**

@@ -582,7 +582,14 @@ function extractAssistantUsage(
   const inputTokens = numberField(usage, 'inputTokens');
   const outputTokens = numberField(usage, 'outputTokens');
   if (inputTokens === undefined && outputTokens === undefined) return undefined;
-  return { inputTokens: inputTokens ?? 0, outputTokens: outputTokens ?? 0 };
+  // Cached-read tokens are a subset already counted in inputTokens; carried so
+  // renderers can break out the cache hit, not added to the total again.
+  const cachedTokens = numberField(usage, 'cachedReadTokens');
+  return {
+    inputTokens: inputTokens ?? 0,
+    outputTokens: outputTokens ?? 0,
+    ...(cachedTokens !== undefined ? { cachedTokens } : {}),
+  };
 }
 
 function normalizeToolUpdate(

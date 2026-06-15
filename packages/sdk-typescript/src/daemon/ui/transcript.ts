@@ -421,25 +421,32 @@ function clearActiveAssistant(state: DaemonTranscriptState): void {
 }
 
 /**
- * Fold a round's token usage onto the active assistant block. The daemon emits
- * usage right after that round's assistant text, so the active block is the one
- * it belongs to; multiple rounds accumulate, and renderers sum a turn's blocks.
- * No active block (a rare usage frame with no preceding assistant text) drops
- * the count rather than minting a stray empty block.
+ * Fold a round's token usage onto the active top-level assistant block. The
+ * daemon emits usage right after that round's assistant text, so the active
+ * block is the one it belongs to; multiple rounds accumulate, and renderers sum
+ * a turn's blocks for the total.
+ *
+ * Sub-agent rounds (which arrive with a parentToolCallId) are folded in too:
+ * their tokens are part of the spawning turn's real cost, and the parent is
+ * blocked on the Task call while they run, so the top-level active block is
+ * still that turn's. Excluding them made the turn under-count badly against
+ * /stats. The sub-agent's own *text* still lives on its parent-keyed block; only
+ * the usage counter rides the top-level block.
+ *
+ * No active block (a rare usage frame with no preceding top-level assistant
+ * text) drops the count rather than minting a stray empty block.
  */
 function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  // Top-level turn usage only — a sub-agent round arrives with parentToolCallId,
-  // and folding it onto the parent's block would over-count the turn.
-  if (event.parentToolCallId != null) return;
   const block = getWritableBlockById(state, state.activeAssistantBlockId);
   if (!block || block.kind !== 'assistant') return;
   const prev = block.usage;
   block.usage = {
     inputTokens: (prev?.inputTokens ?? 0) + event.usage.inputTokens,
     outputTokens: (prev?.outputTokens ?? 0) + event.usage.outputTokens,
+    cachedTokens: (prev?.cachedTokens ?? 0) + (event.usage.cachedTokens ?? 0),
   };
   block.updatedAt = state.now;
 }

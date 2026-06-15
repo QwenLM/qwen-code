@@ -65,6 +65,8 @@ export interface TurnCollapseHead {
    */
   inputTokens?: number;
   outputTokens?: number;
+  /** Cached-read tokens — a subset of inputTokens, surfaced only when > 0. */
+  cachedTokens?: number;
 }
 
 export interface ContentBlock {

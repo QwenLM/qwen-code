@@ -93,7 +93,7 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
    * turn's assistant messages for the per-turn total shown on the fold toggle.
    * Absent on sessions whose agent predates usage stamping.
    */
-  usage?: { inputTokens: number; outputTokens: number };
+  usage?: { inputTokens: number; outputTokens: number; cachedTokens?: number };
 }
 
 export interface DaemonToolGroupMessage extends DaemonMessageMeta {

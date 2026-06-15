@@ -43,13 +43,23 @@ function formatTokenCount(tokens: number): string {
  * `3 steps · 12.4s · ↑3.1k ↓5.1k`.
  */
 function collapseMetaText(collapse: TurnCollapseHead, t: Translate): string {
-  const parts = [t('turn.hiddenSteps', { count: collapse.hiddenCount })];
+  const parts: string[] = [];
+  // A step-less turn (nothing to fold) still shows time/tokens, just no count.
+  if (collapse.hiddenCount > 0) {
+    parts.push(t('turn.hiddenSteps', { count: collapse.hiddenCount }));
+  }
   if (collapse.elapsedMs !== undefined) {
     parts.push(formatDuration(collapse.elapsedMs));
   }
   if (collapse.inputTokens !== undefined && collapse.outputTokens !== undefined) {
+    // Cached reads are a subset of input — shown parenthetically on ↑input so
+    // it reads as "of which N cached", not an extra additive figure.
+    const cached =
+      collapse.cachedTokens && collapse.cachedTokens > 0
+        ? ` (${formatTokenCount(collapse.cachedTokens)} ${t('turn.cached')})`
+        : '';
     parts.push(
-      `↑${formatTokenCount(collapse.inputTokens)} ↓${formatTokenCount(
+      `↑${formatTokenCount(collapse.inputTokens)}${cached} ↓${formatTokenCount(
         collapse.outputTokens,
       )}`,
     );
@@ -97,18 +107,22 @@ export const UserMessage = memo(function UserMessage({
         {content}
         {collapse && onToggleCollapse && (
           <div className={styles.collapseRow}>
-            <button
-              type="button"
-              className={styles.collapseToggle}
-              onClick={() => onToggleCollapse(collapse.turnId)}
-              aria-expanded={!collapse.collapsed}
-              aria-label={
-                collapse.collapsed ? t('turn.expand') : t('turn.collapse')
-              }
-              title={collapse.collapsed ? t('turn.expand') : t('turn.collapse')}
-            >
-              {collapse.collapsed ? '▸' : '▾'}
-            </button>
+            {collapse.hiddenCount > 0 && (
+              <button
+                type="button"
+                className={styles.collapseToggle}
+                onClick={() => onToggleCollapse(collapse.turnId)}
+                aria-expanded={!collapse.collapsed}
+                aria-label={
+                  collapse.collapsed ? t('turn.expand') : t('turn.collapse')
+                }
+                title={
+                  collapse.collapsed ? t('turn.expand') : t('turn.collapse')
+                }
+              >
+                {collapse.collapsed ? '▸' : '▾'}
+              </button>
+            )}
             <span className={styles.collapseMeta}>
               {collapseMetaText(collapse, t)}
             </span>

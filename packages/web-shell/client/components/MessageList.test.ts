@@ -712,6 +712,50 @@ describe('applyTurnCollapse', () => {
     const head = messageRow(collapseItems(items)[0]).collapse;
     expect(head).toEqual({ turnId: 'u1', collapsed: true, hiddenCount: 1 });
   });
+
+  it('shows a chevron-less metrics seam on a step-less turn', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: '你好', timestamp: 1_000 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '你好！有什么可以帮你的吗？',
+        timestamp: 1_900,
+        usage: { inputTokens: 1200, outputTokens: 45 },
+      },
+    ]);
+    const out = collapseItems(items);
+    // Nothing foldable, but the metrics still surface and all rows stay visible.
+    expect(rowIds(out)).toEqual(['u1', 'a1']);
+    const head = messageRow(out[0]).collapse;
+    expect(head?.hiddenCount).toBe(0);
+    expect(head?.collapsed).toBe(false);
+    expect(head?.elapsedMs).toBe(900);
+    expect(head?.inputTokens).toBe(1200);
+    expect(head?.outputTokens).toBe(45);
+  });
+
+  it('sums cached-read tokens across the turn', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'completed' }],
+        timestamp: 2_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'done',
+        timestamp: 3_000,
+        usage: { inputTokens: 2000, outputTokens: 100, cachedTokens: 1800 },
+      },
+    ]);
+    expect(messageRow(collapseItems(items)[0]).collapse?.cachedTokens).toBe(
+      1800,
+    );
+  });
 });
 
 describe('findTurnIdForIndex', () => {

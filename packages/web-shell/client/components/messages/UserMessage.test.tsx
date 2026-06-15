@@ -180,4 +180,54 @@ describe('UserMessage collapse toggle', () => {
     expect(meta.textContent).toContain('3 steps');
     expect(meta.textContent).not.toContain('·');
   });
+
+  it('shows cached reads parenthetically on input when present', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({
+          inputTokens: 3100,
+          outputTokens: 5100,
+          cachedTokens: 2800,
+        })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('↑3.1k (2.8k cached) ↓5.1k');
+  });
+
+  it('omits the cached note when there are no cached reads', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({ inputTokens: 3100, outputTokens: 5100 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('↑3.1k ↓5.1k');
+    expect(text).not.toContain('cached');
+  });
+
+  it('renders a chevron-less metrics line for a step-less turn', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({
+          hiddenCount: 0,
+          elapsedMs: 1_200,
+          inputTokens: 1200,
+          outputTokens: 45,
+        })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    // No fold control when there is nothing to fold…
+    expect(container.querySelector('button')).toBeNull();
+    // …but the metrics still show, without a step count.
+    const text = container.textContent ?? '';
+    expect(text).toContain('1.2s');
+    expect(text).toContain('↑1.2k');
+    expect(text).not.toContain('step');
+  });
 });

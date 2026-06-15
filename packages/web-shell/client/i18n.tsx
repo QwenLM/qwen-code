@@ -773,6 +773,7 @@ const EN: Messages = {
   'todo.title': 'Current tasks',
   'turn.collapse': 'Collapse steps',
   'turn.expand': 'Expand steps',
+  'turn.cached': 'cached',
   'turn.hiddenSteps': (v) => {
     const n = v?.count ?? 0;
     return `${n} step${n === 1 ? '' : 's'}`;
@@ -1592,6 +1593,7 @@ const ZH: Messages = {
   'todo.title': '当前任务',
   'turn.collapse': '折叠步骤',
   'turn.expand': '展开步骤',
+  'turn.cached': '缓存',
   'turn.hiddenSteps': (v) => `${v?.count ?? 0} 步`,
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',

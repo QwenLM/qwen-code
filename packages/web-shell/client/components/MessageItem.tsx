@@ -165,7 +165,8 @@ function turnCollapseEqual(
     a.hiddenCount === b.hiddenCount &&
     a.elapsedMs === b.elapsedMs &&
     a.inputTokens === b.inputTokens &&
-    a.outputTokens === b.outputTokens
+    a.outputTokens === b.outputTokens &&
+    a.cachedTokens === b.cachedTokens
   );
 }
 
