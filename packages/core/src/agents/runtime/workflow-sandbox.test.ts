@@ -320,6 +320,45 @@ describe('extractAndStripMeta', () => {
       /meta values must not be Promises/,
     );
   });
+
+  // P4 Round 4 (wenshao): the R3 thenable walker recursed without a
+  // seen-guard. A meta literal that builds a cyclic object via spread
+  // (no getters, no Promises, no exotic constructs — just self-reference)
+  // overflows the call stack. The walker's RangeError propagates OUT of
+  // extractAndStripMeta because the try/catch only wraps the vm-eval, so
+  // the run failure surfaces as `Maximum call stack size exceeded` rather
+  // than the meta-validation error this guard exists to produce. A
+  // WeakSet bounds the recursion against cycles AND against future
+  // shapes where the same node is reached through multiple keys.
+  it('rejects a cyclic meta value built via spread without stack-overflowing', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'y',
+      ...(function () { const a = {}; a.self = a; return a; })(),
+    }
+    return 1`;
+    // The cyclic field should be silently ignored by validateMeta (it's
+    // not a contract field), so the run succeeds with just the required
+    // fields surviving — but only if the walker terminates first.
+    const { meta } = extractAndStripMeta(src);
+    expect(meta).toEqual({ name: 'x', description: 'y' });
+  });
+
+  it('rejects a cyclic meta value reached through nested arrays/objects', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'y',
+      // Cycle reached through phases[0].back → ref back to outer container.
+      ...(function () {
+        const outer = { items: [] };
+        outer.items.push({ ref: outer });
+        return outer;
+      })(),
+    }
+    return 1`;
+    const { meta } = extractAndStripMeta(src);
+    expect(meta).toEqual({ name: 'x', description: 'y' });
+  });
 });
 
 describe('createWorkflowSandbox', () => {

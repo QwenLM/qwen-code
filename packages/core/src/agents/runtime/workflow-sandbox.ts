@@ -227,8 +227,19 @@ export function extractAndStripMeta(source: string): {
  * Recurses through plain objects and arrays — `phases[]` entries may
  * embed an `import()` below the top level.
  */
-function rejectThenablesInMeta(value: unknown): void {
+function rejectThenablesInMeta(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet(),
+): void {
   if (value === null || typeof value !== 'object') return;
+  // P4 Round 4 (wenshao): a cyclic meta literal built via spread of a
+  // self-referential object would otherwise overflow the call stack on
+  // this walk — the walker exists to reject Promises before they leave
+  // a dangling rejection, but the walk itself must terminate on any
+  // shape vm-eval can return. Track visited nodes in a WeakSet so cycles
+  // and shared subgraphs both early-return without re-walking.
+  if (seen.has(value as object)) return;
+  seen.add(value as object);
   const maybeThen = (value as { then?: unknown }).then;
   if (typeof maybeThen === 'function') {
     // Mark handled so Node's unhandled-rejection trap does not later kill
@@ -245,11 +256,11 @@ function rejectThenablesInMeta(value: unknown): void {
     );
   }
   if (Array.isArray(value)) {
-    for (const v of value) rejectThenablesInMeta(v);
+    for (const v of value) rejectThenablesInMeta(v, seen);
     return;
   }
   for (const v of Object.values(value as Record<string, unknown>)) {
-    rejectThenablesInMeta(v);
+    rejectThenablesInMeta(v, seen);
   }
 }
 
