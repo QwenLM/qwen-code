@@ -1002,11 +1002,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               ? completion.suggestions[targetIndex]
               : undefined;
           acceptActiveCompletionSuggestion();
-          // On Enter, dismiss the completion after accepting the suggestion
-          // so the dropdown stays closed (important for @folder paths which
-          // don't append a trailing space by design). Without this, the
-          // @ completion pattern re-matches and re-shows the dropdown.
-          if (key.name === 'return') {
+          // On Enter for @folder paths, dismiss the completion so the
+          // dropdown stays closed. Folder paths don't append a trailing
+          // space by design, so the @ completion pattern re-matches and
+          // re-shows the dropdown. Only gate on isDirectory to avoid
+          // suppressing slash-command sub-suggestions.
+          if (key.name === 'return' && accepted?.isDirectory) {
             dismissCompletion();
           }
           // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`

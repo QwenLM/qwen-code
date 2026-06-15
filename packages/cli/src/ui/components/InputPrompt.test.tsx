@@ -1933,6 +1933,7 @@ describe('InputPrompt', () => {
 
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     expect(mockCommandCompletion.resetCompletionState).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
     unmount();
   });
