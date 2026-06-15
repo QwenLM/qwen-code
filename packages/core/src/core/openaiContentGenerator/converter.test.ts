@@ -12,6 +12,7 @@ import type { RequestContext } from './types.js';
 import {
   Type,
   FinishReason,
+  type GenerateContentResponse,
   type GenerateContentParameters,
   type Content,
   type Part,
@@ -63,6 +64,36 @@ describe('OpenAIContentConverter', () => {
     };
   }
 
+  function hasOpenAIToolCalls(
+    message: OpenAI.Chat.ChatCompletionMessageParam,
+  ): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+    tool_calls: OpenAI.Chat.ChatCompletionMessageToolCall[];
+  } {
+    return (
+      message.role === 'assistant' &&
+      'tool_calls' in message &&
+      Array.isArray(message.tool_calls)
+    );
+  }
+
+  function isOpenAISplitMediaMessage(
+    message: OpenAI.Chat.ChatCompletionMessageParam,
+  ): boolean {
+    return (
+      message.role === 'user' &&
+      Array.isArray(message.content) &&
+      message.content.some((part) => {
+        const typedPart = part as { type?: string };
+        return (
+          typedPart.type === 'image_url' ||
+          typedPart.type === 'input_audio' ||
+          typedPart.type === 'video_url' ||
+          typedPart.type === 'file'
+        );
+      })
+    );
+  }
+
   describe('stream-local parser state', () => {
     it('creates fresh parser instances', () => {
       const ctx1 = new StreamingToolCallParser();
@@ -88,6 +119,39 @@ describe('OpenAIContentConverter', () => {
       expect(ctx2.getBuffer(0)).toBe('{"b":2}');
       expect(ctx1.getToolCallMeta(0).id).toBe('call_A');
       expect(ctx2.getToolCallMeta(0).id).toBe('call_B');
+    });
+
+    it('ignores replay chunks after an id already has complete JSON args', () => {
+      const parser = new StreamingToolCallParser();
+
+      parser.addChunk(0, '{"cmd":"echo hi"}', 'dup_id_0001', 'shell');
+      parser.addChunk(0, '{"cmd":"echo hi"}', 'dup_id_0001', 'shell');
+
+      expect(parser.getBuffer(0)).toBe('{"cmd":"echo hi"}');
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'dup_id_0001',
+          name: 'shell',
+          args: { cmd: 'echo hi' },
+          index: 0,
+        },
+      ]);
+    });
+
+    it('keeps accumulating normal fragmented JSON before it is complete', () => {
+      const parser = new StreamingToolCallParser();
+
+      parser.addChunk(0, '{"cmd"', 'call_fragmented', 'shell');
+      parser.addChunk(0, ':"echo hi"}', 'call_fragmented', 'shell');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_fragmented',
+          name: 'shell',
+          args: { cmd: 'echo hi' },
+          index: 0,
+        },
+      ]);
     });
 
     it('demuxes interleaved chunks from two concurrent streams correctly (#3516)', () => {
@@ -266,15 +330,45 @@ describe('OpenAIContentConverter', () => {
       };
     };
 
+    it('preserves ordered multi-part startup reminder user content', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: '<system-reminder>\ndeferred tools' },
+              { text: '<system-reminder>\nstartup context' },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>\ndeferred tools' },
+            { type: 'text', text: '<system-reminder>\nstartup context' },
+          ],
+        },
+      ]);
+    });
+
     it('should extract raw output from function response objects', () => {
       const request = createRequestWithFunctionResponse({
         output: 'Raw output text',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(
-        request,
-        requestContext,
-      );
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
       const toolMessage = messages.find((message) => message.role === 'tool');
 
       expect(toolMessage).toBeDefined();
@@ -756,10 +850,11 @@ describe('OpenAIContentConverter', () => {
       expect(img?.image_url?.url).toBe('data:image/png;base64,xxx');
     });
 
-    it('should preserve prior embedded-media behavior when splitToolMedia is false (default) on parallel tool calls (issue #3616)', () => {
+    it('should preserve embedded-media behavior when splitToolMedia is explicitly false (opt-out) on parallel tool calls (issue #3616, #4876)', () => {
       // Same input as the parallel-tool-calls split test, but with the flag
-      // off. Asserts that the opt-in is actually opt-in: media stays embedded
-      // in the tool message and no follow-up user message is synthesised.
+      // explicitly off. Since #4876 the default is true (spec-compliant), so
+      // this asserts the opt-out path: media stays embedded in the tool
+      // message and no follow-up user message is synthesised.
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -795,11 +890,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      // requestContext default has splitToolMedia undefined / false
-      const messages = converter.convertGeminiRequestToOpenAI(
-        request,
-        requestContext,
-      );
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: false,
+      });
 
       const toolMessages = messages.filter((m) => m.role === 'tool');
       const userMessages = messages.filter((m) => m.role === 'user');
@@ -1474,6 +1568,692 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
+    it('should drop tool responses that are not adjacent to their assistant tool call', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  args: { path: 'a.txt' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'call_b',
+                  name: 'grep',
+                  args: { pattern: 'needle' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'history text inserted between tool results' }],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_c',
+                  name: 'list_files',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_c',
+                  name: 'list_files',
+                  response: { output: 'C' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_b',
+                  name: 'grep',
+                  response: { output: 'B' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistantWithCallA = messages.find(
+        (message): message is OpenAI.Chat.ChatCompletionAssistantMessageParam =>
+          message.role === 'assistant' &&
+          'tool_calls' in message &&
+          Array.isArray(message.tool_calls) &&
+          message.tool_calls.some((toolCall) => toolCall.id === 'call_a'),
+      );
+
+      expect(
+        assistantWithCallA?.tool_calls?.map((toolCall) => toolCall.id),
+      ).toEqual(['call_a']);
+
+      const toolCallIds = messages
+        .filter(
+          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+            message.role === 'tool' && 'tool_call_id' in message,
+        )
+        .map((message) => message.tool_call_id);
+
+      expect(toolCallIds).toEqual(['call_a', 'call_c']);
+    });
+
+    it('should keep assistant text when all tool calls are orphaned', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { text: 'I can answer without the tool.' },
+              {
+                functionCall: {
+                  id: 'call_missing',
+                  name: 'read_file',
+                  args: { path: 'missing.txt' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'continue' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistant = messages.find(
+        (message): message is OpenAI.Chat.ChatCompletionAssistantMessageParam =>
+          message.role === 'assistant',
+      );
+
+      expect(assistant?.content).toBe('I can answer without the tool.');
+      expect('tool_calls' in (assistant ?? {})).toBe(false);
+      expect(messages.some((message) => message.role === 'tool')).toBe(false);
+    });
+
+    it('should drop assistant-only tool calls when all responses are orphaned', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_missing',
+                  name: 'read_file',
+                  args: { path: 'missing.txt' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'break adjacency' }],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'continue' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages.some((message) => message.role === 'assistant')).toBe(
+        false,
+      );
+      expect(messages.some((message) => message.role === 'tool')).toBe(false);
+    });
+
+    it('should drop later assistant tool calls that reuse a previous surviving id', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'b.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'B' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const assistantToolCallIds = messages.flatMap((message) =>
+        hasOpenAIToolCalls(message)
+          ? message.tool_calls.map((toolCall) => toolCall.id)
+          : [],
+      );
+      const toolResultIds = messages
+        .filter(
+          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+            message.role === 'tool' && 'tool_call_id' in message,
+        )
+        .map((message) => message.tool_call_id);
+
+      expect(assistantToolCallIds).toEqual(['dup_id_0001']);
+      expect(toolResultIds).toEqual(['dup_id_0001']);
+    });
+
+    it('should drop duplicate tool call IDs within a single assistant message', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'b.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistant = messages.find(hasOpenAIToolCalls);
+
+      expect(assistant?.tool_calls).toHaveLength(1);
+      expect(assistant?.tool_calls?.[0].id).toBe('dup_id_0001');
+      expect(assistant?.tool_calls?.[0].function.arguments).toBe(
+        JSON.stringify({ file_path: 'a.ts' }),
+      );
+    });
+
+    it('should keep only the first adjacent tool response and its split media for a surviving id', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_image',
+                  name: 'screenshot',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_image',
+                  name: 'screenshot',
+                  response: { output: 'first' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'first' } },
+                  ],
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_image',
+                  name: 'screenshot',
+                  response: { output: 'second' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'second' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+      const toolMessages = messages.filter(
+        (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+          message.role === 'tool' && 'tool_call_id' in message,
+      );
+      const splitMediaMessages = messages.filter(isOpenAISplitMediaMessage);
+
+      expect(toolMessages).toHaveLength(1);
+      expect(toolMessages[0]?.content).toBe('first');
+      expect(splitMediaMessages).toHaveLength(1);
+      expect(JSON.stringify(splitMediaMessages[0])).toContain('first');
+      expect(JSON.stringify(splitMediaMessages[0])).not.toContain('second');
+    });
+
+    it('should keep a tool response after an empty-id tool message', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  args: { path: 'a.txt' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'empty_id',
+                  response: { output: 'no id' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const toolCallIds = messages
+        .filter(
+          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+            message.role === 'tool' && 'tool_call_id' in message,
+        )
+        .map((message) => message.tool_call_id);
+
+      expect(toolCallIds).toEqual(['call_a']);
+    });
+
+    it('should clean after merging consecutive assistant turns', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  args: { path: 'a.txt' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'A short follow-up.' }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages[0]).toMatchObject({
+        role: 'assistant',
+        content: 'A short follow-up.',
+      });
+      expect(
+        (
+          messages[0] as OpenAI.Chat.ChatCompletionAssistantMessageParam
+        ).tool_calls?.map((toolCall) => toolCall.id),
+      ).toEqual(['call_a']);
+      expect(messages[1]).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call_a',
+      });
+    });
+
+    it('should keep split media after all adjacent tool responses across content items', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_a', name: 'shot_a', args: {} },
+              },
+              {
+                functionCall: { id: 'call_b', name: 'shot_b', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'shot_a',
+                  response: { output: 'A' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_b',
+                  name: 'shot_b',
+                  response: { output: 'B' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'bbb' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+      const assistantIndex = messages.findIndex(
+        (message) => message.role === 'assistant',
+      );
+
+      expect(messages[assistantIndex + 1]).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call_a',
+      });
+      expect(messages[assistantIndex + 2]).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call_b',
+      });
+      expect(messages[assistantIndex + 3]?.role).toBe('user');
+      expect(messages[assistantIndex + 4]?.role).toBe('user');
+    });
+
+    it('should not keep split media from orphaned tool responses', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_a', name: 'shot_a', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_x',
+                  name: 'shot_x',
+                  response: { output: 'X' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'xxx' } },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'shot_a',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      expect(messages.map((message) => message.role)).toEqual([
+        'assistant',
+        'tool',
+      ]);
+      expect(messages[1]).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call_a',
+      });
+    });
+
+    it('should merge assistant turns created by orphan cleanup', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_a', name: 'read_file', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Next I will call another tool.' }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_orphan',
+                  name: 'stale_tool',
+                  response: { output: 'stale' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_b', name: 'grep', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_b',
+                  name: 'grep',
+                  response: { output: 'B' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      for (let index = 1; index < messages.length; index += 1) {
+        expect([messages[index - 1].role, messages[index].role]).not.toEqual([
+          'assistant',
+          'assistant',
+        ]);
+      }
+      expect(
+        messages
+          .filter(
+            (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+              message.role === 'tool' && 'tool_call_id' in message,
+          )
+          .map((message) => message.tool_call_id),
+      ).toEqual(['call_a', 'call_b']);
+    });
+
     describe('assistant message with reasoning-only content (issue #3421)', () => {
       /**
        * Regression tests for https://github.com/QwenLM/qwen-code/issues/3421
@@ -1512,6 +2292,41 @@ describe('OpenAIContentConverter', () => {
         expect(
           (assistantMsg as { reasoning_content?: string }).reasoning_content,
         ).toBe('I reasoned about it.');
+      });
+
+      it('should keep reasoning content when orphaned tool calls are removed', () => {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            {
+              role: 'model',
+              parts: [
+                { text: 'I need to inspect this.', thought: true },
+                {
+                  functionCall: {
+                    id: 'call_missing',
+                    name: 'read_file',
+                    args: {},
+                  },
+                },
+              ],
+            },
+            { role: 'user', parts: [{ text: 'break adjacency' }] },
+          ],
+        };
+
+        const messages = converter.convertGeminiRequestToOpenAI(
+          request,
+          requestContext,
+        );
+
+        const assistantMsg = messages.find((m) => m.role === 'assistant');
+        expect(assistantMsg).toBeDefined();
+        expect((assistantMsg as { content: unknown }).content).toBe('');
+        expect(
+          (assistantMsg as { reasoning_content?: string }).reasoning_content,
+        ).toBe('I need to inspect this.');
+        expect('tool_calls' in (assistantMsg ?? {})).toBe(false);
       });
 
       it('should keep content null when assistant has only tool_calls and no reasoning', () => {
@@ -1738,6 +2553,63 @@ describe('OpenAIContentConverter', () => {
       const userMessages = messages.filter((m) => m.role === 'user');
       expect(userMessages).toHaveLength(0);
     });
+
+    it('passes text-only nested parts (e.g. compaction slimmer placeholders) through to the tool message', () => {
+      // The compaction slimming module replaces inlineData inside
+      // functionResponse.parts with `{ text: '[image: image/png]' }`
+      // before the side-query. createToolMessage must surface those
+      // text placeholders, otherwise the summary model receives an
+      // empty tool response with no signal that an image existed.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_strip',
+                  name: 'read_file',
+                  args: { path: '/x.png' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_strip',
+                  name: 'read_file',
+                  response: { output: '' },
+                  // After slimming: nested part is a text placeholder.
+                  parts: [{ text: '[image: image/png]' }] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      const toolContent = toolMessage?.content;
+      // Either string or array, depending on how OpenAI shapes single-part
+      // content. Either way the placeholder must be visible verbatim.
+      const flattened =
+        typeof toolContent === 'string'
+          ? toolContent
+          : JSON.stringify(toolContent);
+      expect(flattened).toContain('[image: image/png]');
+      // Crucially, NO base64 image bytes leaked through.
+      expect(flattened).not.toContain('data:image/');
+    });
   });
 
   describe('convertOpenAIResponseToGemini', () => {
@@ -1906,6 +2778,918 @@ describe('OpenAIContentConverter', () => {
 
       const parts = chunk.candidates?.[0]?.content?.parts;
       expect(parts).toEqual([]);
+    });
+
+    it('should normalize cumulative streaming content deltas to suffixes', () => {
+      const ctx = withStreamParser();
+      const chunks = [
+        'Here',
+        'Here is a Flowchart Syntax Reference:',
+        'Here is a Flowchart Syntax Reference:\n| `flowchart TD` | Direction |',
+        'Here is a Flowchart Syntax Reference:\n| `flowchart TD` | Direction |\n| `A[Text]` | Node |',
+      ];
+
+      const emitted = chunks.map((content, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-cumulative-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      });
+
+      expect(emitted).toEqual([
+        'Here',
+        ' is a Flowchart Syntax Reference:',
+        '\n| `flowchart TD` | Direction |',
+        '\n| `A[Text]` | Node |',
+      ]);
+      expect(emitted.join('')).toBe(chunks[chunks.length - 1]);
+    });
+
+    it('should ignore repeated cumulative chunks with no new suffix', () => {
+      const ctx = withStreamParser();
+      // Must be ≥ CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH (64 chars) so the
+      // exact-repeat branch enters cumulative mode rather than treating this
+      // as a short legitimate repeat. Realistic cumulative providers replay
+      // buffers of hundreds of bytes, so this length is representative.
+      const content =
+        'The following section starts with more than enough text for cumulative-mode detection.';
+      const emitted = [content, content].map((chunkContent, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-cumulative-repeat-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { content: chunkContent },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      });
+
+      expect(emitted).toEqual([content, '']);
+    });
+
+    it('should preserve repeated short incremental content chunks', () => {
+      const ctx = withStreamParser();
+      const emitted = ['ha', 'ha'].map((content, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-repeat-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      });
+
+      expect(emitted).toEqual(['ha', 'ha']);
+    });
+
+    it('should normalize cumulative streaming reasoning_content deltas to suffixes', () => {
+      const ctx = withStreamParser();
+      const chunks = [
+        'Let me think',
+        'Let me think about the request carefully.',
+        'Let me think about the request carefully.\nFirst, identify the table format.',
+      ];
+
+      const emitted = chunks.map((reasoning_content, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-cumulative-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        const part = chunk.candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      expect(emitted).toEqual([
+        { text: 'Let me think', thought: true },
+        { text: ' about the request carefully.', thought: true },
+        { text: '\nFirst, identify the table format.', thought: true },
+      ]);
+      expect(emitted.map((e) => e.text).join('')).toBe(
+        chunks[chunks.length - 1],
+      );
+    });
+
+    it('should exit cumulative mode when a chunk does not match prior accumulated text', () => {
+      const ctx = withStreamParser();
+      // Three chunks that establish cumulative mode, then one that breaks it.
+      const chunks = [
+        'Step one is to gather inputs.',
+        'Step one is to gather inputs.\nStep two is to validate them.',
+        'Brand new unrelated message.',
+      ];
+
+      const emitted = chunks.map((content, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-cumulative-exit-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      });
+
+      // Chunk 1: emits as-is (initial)
+      // Chunk 2: cumulative mode entered, emits suffix only
+      // Chunk 3: NOT a prefix-extension — cumulative mode must exit and the
+      //          new chunk must be appended verbatim (no silent loss)
+      expect(emitted[0]).toBe('Step one is to gather inputs.');
+      expect(emitted[1]).toBe('\nStep two is to validate them.');
+      expect(emitted[2]).toBe('Brand new unrelated message.');
+    });
+
+    it('should resume prefix detection cleanly after exiting cumulative mode', () => {
+      const ctx = withStreamParser();
+      // Establish cumulative mode, then break it, then send another cumulative
+      // stream — the fresh baseline should allow re-entry into cumulative mode.
+      const chunks = [
+        'Step one is to gather inputs.',
+        'Step one is to gather inputs.\nStep two is to validate them.',
+        'Brand new unrelated message.',
+        'Brand new unrelated message. And more.',
+      ];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-reentry-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      expect(emitted[0]).toBe('Step one is to gather inputs.');
+      expect(emitted[1]).toBe('\nStep two is to validate them.');
+      // Cumulative mode exits; fresh baseline = chunk 3
+      expect(emitted[2]).toBe('Brand new unrelated message.');
+      // Chunk 4 prefix-extends chunk 3 — re-enters cumulative, emits suffix only
+      expect(emitted[3]).toBe(' And more.');
+    });
+
+    it('should not poison the baseline when short chunks repeat before threshold', () => {
+      const ctx = withStreamParser();
+      // Short exact-repeat followed by a prefix-extending chunk.
+      // The repeat must NOT corrupt emittedText so the extension is detected.
+      const chunks = ['Hi', 'Hi', 'Hi there, how are you today?'];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-short-repeat-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial
+      expect(emitted[0]).toBe('Hi');
+      // Chunk 2: short exact repeat — passthrough, baseline stays 'Hi'
+      expect(emitted[1]).toBe('Hi');
+      // Chunk 3: prefix-extends 'Hi' — enters cumulative, emits suffix
+      expect(emitted[2]).toBe(' there, how are you today?');
+    });
+
+    it('should normalize cumulative reasoning_content deltas across multi-line growth (newline-prefixed suffixes)', () => {
+      // Distinct from the single-line cumulative reasoning test above:
+      // this case grows the accumulated text across newline boundaries so the
+      // emitted suffixes themselves begin with '\n', exercising the slice
+      // arithmetic at the newline.
+      const ctx = withStreamParser();
+      const chunks = [
+        'Let me reason step by step.',
+        'Let me reason step by step.\nFirst: check the inputs.',
+        'Let me reason step by step.\nFirst: check the inputs.\nSecond: validate.',
+      ];
+
+      const emitted = chunks.map((reasoning_content, index) => {
+        const part = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-cumulative2-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      expect(emitted[0]).toEqual({
+        text: 'Let me reason step by step.',
+        thought: true,
+      });
+      expect(emitted[1]).toEqual({
+        text: '\nFirst: check the inputs.',
+        thought: true,
+      });
+      expect(emitted[2]).toEqual({
+        text: '\nSecond: validate.',
+        thought: true,
+      });
+    });
+
+    it('should ignore repeated cumulative reasoning_content chunks with no new suffix', () => {
+      // Mirrors the content-channel `should ignore repeated cumulative chunks
+      // with no new suffix` test: the reasoning channel uses a separate state
+      // object, so the exact-repeat entry path is exercised independently.
+      const ctx = withStreamParser();
+      // Must be ≥ CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH (64 chars).
+      const reasoning =
+        'The reasoning section also starts with more than enough text to pass detection.';
+      const emitted = [reasoning, reasoning].map((reasoning_content, index) => {
+        const part = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-repeat-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      // Chunk 1: emits as a thought part.
+      expect(emitted[0]).toEqual({ text: reasoning, thought: true });
+      // Chunk 2: exact repeat — enters cumulative mode, suppressed (no part).
+      expect(emitted[1]).toEqual({ text: '', thought: false });
+    });
+
+    it('should exit cumulative mode on reasoning_content channel when chunk does not match prior accumulated text', () => {
+      // Mirrors the content-channel `should exit cumulative mode` test against
+      // the reasoning channel's independent state.
+      const ctx = withStreamParser();
+      const chunks = [
+        'Step one of my reasoning is to gather inputs.',
+        'Step one of my reasoning is to gather inputs.\nStep two: validate.',
+        'Brand new unrelated reasoning.',
+      ];
+
+      const emitted = chunks.map((reasoning_content, index) => {
+        const part = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-exit-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      // Chunk 1: initial passthrough.
+      expect(emitted[0]).toEqual({
+        text: 'Step one of my reasoning is to gather inputs.',
+        thought: true,
+      });
+      // Chunk 2: cumulative mode entered, emits suffix only.
+      expect(emitted[1]).toEqual({
+        text: '\nStep two: validate.',
+        thought: true,
+      });
+      // Chunk 3: NOT a prefix-extension — cumulative mode must exit and the
+      //          new chunk must be appended verbatim (no silent loss).
+      expect(emitted[2]).toEqual({
+        text: 'Brand new unrelated reasoning.',
+        thought: true,
+      });
+    });
+
+    it('should resume prefix detection on reasoning_content channel after exiting cumulative mode', () => {
+      // Mirrors the content-channel `should resume prefix detection cleanly
+      // after exiting cumulative mode` test. After the exit path resets the
+      // baseline to the new chunk, the reasoning channel must be able to
+      // re-enter cumulative mode on the next prefix-extending chunk.
+      const ctx = withStreamParser();
+      const chunks = [
+        'Step one of my reasoning is to gather inputs.',
+        'Step one of my reasoning is to gather inputs.\nStep two: validate.',
+        'Brand new unrelated reasoning.',
+        'Brand new unrelated reasoning. And further reflection.',
+      ];
+
+      const emitted = chunks.map((reasoning_content, index) => {
+        const part = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-reentry-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      expect(emitted[0]).toEqual({
+        text: 'Step one of my reasoning is to gather inputs.',
+        thought: true,
+      });
+      expect(emitted[1]).toEqual({
+        text: '\nStep two: validate.',
+        thought: true,
+      });
+      // Cumulative mode exits; fresh baseline = chunk 3.
+      expect(emitted[2]).toEqual({
+        text: 'Brand new unrelated reasoning.',
+        thought: true,
+      });
+      // Chunk 4 prefix-extends chunk 3 — re-enters cumulative, emits suffix only.
+      expect(emitted[3]).toEqual({
+        text: ' And further reflection.',
+        thought: true,
+      });
+    });
+
+    it('should deduplicate interleaved reasoning_content and content channels independently', () => {
+      const ctx = withStreamParser();
+      // reasoning_content and content each use a separate state object;
+      // cumulative detection in one channel must not bleed into the other.
+      const chunks: Array<{ reasoning_content?: string; content?: string }> = [
+        { reasoning_content: 'Let me think about this carefully.' },
+        { content: 'Here' },
+        { reasoning_content: 'Let me think about this carefully.\nStep two.' },
+        { content: 'Here is the answer.' },
+      ];
+
+      const emitted = chunks.map(
+        (delta, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-interleaved-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta,
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts ?? [],
+      );
+
+      // Reasoning chunk 1: emits as thought
+      expect(emitted[0]).toEqual([
+        { text: 'Let me think about this carefully.', thought: true },
+      ]);
+      // Content chunk 1: emits as text (independent state)
+      expect(emitted[1]).toEqual([{ text: 'Here' }]);
+      // Reasoning chunk 2: cumulative extension — emits suffix only
+      expect(emitted[2]).toEqual([{ text: '\nStep two.', thought: true }]);
+      // Content chunk 2: cumulative extension of content channel
+      expect(emitted[3]).toEqual([{ text: ' is the answer.' }]);
+    });
+
+    it('should enter cumulative mode on exact 64-char repeat (at threshold)', () => {
+      const ctx = withStreamParser();
+      // Exactly 64 chars — meets CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH.
+      // The threshold sits well above realistic legit-repeat lengths (e.g. a
+      // duplicate `import { foo } from './module';` is ~31 chars) so that
+      // legitimate repeats are never silently suppressed.
+      const atThreshold = 'A'.repeat(64);
+      const chunks = [atThreshold, atThreshold, atThreshold + ' and more'];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-threshold64-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial passthrough
+      expect(emitted[0]).toBe(atThreshold);
+      // Chunk 2: exact 64-char repeat — enters cumulative mode, suppressed
+      expect(emitted[1]).toBe('');
+      // Chunk 3: cumulative extension — emits suffix only
+      expect(emitted[2]).toBe(' and more');
+    });
+
+    it('should pass through 63-char exact repeat without entering cumulative mode (below threshold)', () => {
+      const ctx = withStreamParser();
+      // 63 chars — one short of CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
+      const belowThreshold = 'A'.repeat(63);
+      const chunks = [
+        belowThreshold,
+        belowThreshold,
+        belowThreshold + ' extra',
+      ];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-threshold63-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial passthrough
+      expect(emitted[0]).toBe(belowThreshold);
+      // Chunk 2: 63-char repeat — below threshold, passes through unchanged
+      expect(emitted[1]).toBe(belowThreshold);
+      // Chunk 3: prefix-extends prior — enters cumulative, emits suffix only
+      expect(emitted[2]).toBe(' extra');
+    });
+
+    it('should preserve legitimate duplicate import-line chunks (regression: silent data loss)', () => {
+      // Regression for https://github.com/QwenLM/qwen-code/pull/3896 review
+      // (wenshao, 2026-05-13 CHANGES_REQUESTED, finding #1). Realistic
+      // incremental streams emit duplicate import/boilerplate lines and the
+      // exact-repeat threshold must be high enough that those legitimate
+      // repeats are NOT silently suppressed. A duplicate ~31-char import is
+      // the canonical motivating case.
+      const ctx = withStreamParser();
+      const importLine = "import { foo } from './module';"; // 31 chars
+      const chunks = [importLine, importLine, '\nconst x = 1;'];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-import-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // All three chunks must reach the user — no suppression.
+      expect(emitted[0]).toBe(importLine);
+      expect(emitted[1]).toBe(importLine);
+      expect(emitted[2]).toBe('\nconst x = 1;');
+      // Sanity: the reassembled stream equals the user-visible total.
+      expect(emitted.join('')).toBe(importLine + importLine + '\nconst x = 1;');
+    });
+
+    it('should pass incremental chunks through verbatim past the detection window cap (none of them overlap)', () => {
+      // Incremental providers send fresh, non-overlapping chunks. Even after
+      // emittedText growth exceeds CUMULATIVE_DETECTION_WINDOW_BYTES (1024)
+      // and the baseline stops growing, every subsequent chunk that lacks
+      // prefix overlap with the frozen baseline must still be emitted
+      // verbatim (i.e., it must fall through to the final passthrough
+      // branch). This guards against any future regression that would, e.g.,
+      // wrongly short-circuit the passthrough path once the cap is reached.
+      //
+      // Note: this test does NOT cover the (currently unhandled) case where a
+      // later chunk happens to start with the frozen baseline — that chunk
+      // would still trigger prefix-overlap detection against a stale
+      // baseline. Such a chunk is vanishingly unlikely on a true incremental
+      // stream (≥1024 bytes of exact-prefix coincidence) but is not
+      // explicitly defended against here.
+      const ctx = withStreamParser();
+      // 100 distinct incremental chunks of 20 chars = 2000 chars, well past the cap.
+      const incrementalChunks = Array.from(
+        { length: 100 },
+        (_, i) => `chunk${String(i).padStart(3, '0')}-payload__`,
+      );
+      const allEmitted = incrementalChunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-cap-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Every chunk should pass through verbatim — none of them overlap
+      // with prior emittedText, so prefix/exact-repeat detection never fires.
+      expect(allEmitted).toEqual(incrementalChunks);
+    });
+
+    it('should detect cumulative mode even when the first chunk exceeds the detection window cap', () => {
+      // Regression for https://github.com/QwenLM/qwen-code/pull/3896 review:
+      // Some cumulative providers ship a large initial chunk (>1024 chars)
+      // and then accumulate more text on subsequent chunks. The detection
+      // window cap must not short-circuit prefix-overlap detection before the
+      // second chunk gets a chance to be classified, otherwise the entire
+      // first chunk gets duplicated.
+      const ctx = withStreamParser();
+      const firstChunk = 'A'.repeat(1500); // well past CUMULATIVE_DETECTION_WINDOW_BYTES (1024)
+      const secondChunk = firstChunk + 'B'.repeat(200); // cumulative extension
+      const thirdChunk = secondChunk + 'C'.repeat(50); // further cumulative extension
+
+      const emitted = [firstChunk, secondChunk, thirdChunk].map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-large-first-${index}`,
+              created: 789 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial passthrough.
+      expect(emitted[0]).toBe(firstChunk);
+      // Chunk 2: prefix-extends → cumulative mode, emits the 200-char suffix only.
+      expect(emitted[1]).toBe('B'.repeat(200));
+      // Chunk 3: continues in cumulative mode, emits only the new 50-char suffix.
+      expect(emitted[2]).toBe('C'.repeat(50));
+    });
+
+    it('should not duplicate emitted bytes when an incremental stream transitions into cumulative mode past the window cap', () => {
+      // Regression for https://github.com/QwenLM/qwen-code/pull/3896 review
+      // (wenshao, 2026-05-13 CHANGES_REQUESTED, finding #2). Hybrid scenario:
+      // upstream emits 200 distinct incremental chunks of 8 bytes each (1600
+      // bytes of user-visible content, well past the 1024-byte detection-
+      // window cap), then sends a single cumulative chunk that replays the
+      // full 1600 bytes and appends new content. The internal baseline froze
+      // at 1024 bytes; without tracking the true emitted length, the suffix
+      // would be sliced from byte 1024 of the cumulative chunk and the user
+      // would see bytes 1024..1600 a second time. The fix tracks emittedLength
+      // separately so the slice starts from the real user-visible boundary
+      // (1600). The chunks must be DISTINCT (otherwise the short-exact-repeat
+      // branch keeps emittedText pinned and the cap is never reached).
+      const ctx = withStreamParser();
+      const incremental = Array.from(
+        { length: 200 },
+        (_, i) => `c${String(i).padStart(3, '0')}=AB_`, // 8 bytes, distinct per chunk
+      );
+      const accumulated = incremental.join(''); // 1600 bytes
+      const tail = '|CONTINUATION|'; // 14 bytes
+      const cumulativeChunk = accumulated + tail; // 1614 bytes
+
+      const incrementalEmitted = incremental.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-hybrid-incr-${index}`,
+              created: 1000 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      const cumulativeEmitted =
+        converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-hybrid-cum',
+            created: 2000,
+            choices: [
+              {
+                index: 0,
+                delta: { content: cumulativeChunk },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+      // Incremental phase: every chunk passes through verbatim.
+      expect(incrementalEmitted).toEqual(incremental);
+      // Cumulative chunk: only the new 14-byte tail must be emitted — not the
+      // ~576 bytes between the cap (1024) and the true emitted total (1600).
+      expect(cumulativeEmitted).toBe(tail);
+      // Sanity: reassembled stream equals the original accumulated text.
+      const userVisible = incrementalEmitted.join('') + cumulativeEmitted;
+      expect(userVisible).toBe(cumulativeChunk);
+      expect(userVisible.length).toBe(1614);
+    });
+
+    it('should suppress cumulative rewind (provider re-sends shorter accumulated string)', () => {
+      const ctx = withStreamParser();
+      // Scenario: provider sends Hello → Hello World (extension) → Hello (rewind) → Hello World! (extension again)
+      const chunks = ['Hello', 'Hello World', 'Hello', 'Hello World!'];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-rewind-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial passthrough
+      expect(emitted[0]).toBe('Hello');
+      // Chunk 2: prefix-extends 'Hello' → enters cumulative, emits suffix
+      expect(emitted[1]).toBe(' World');
+      // Chunk 3: rewind — 'Hello' is a strict prefix of emitted 'Hello World' → suppressed
+      expect(emitted[2]).toBe('');
+      // Chunk 4: extension resumes from 'Hello World' → emits '!'
+      expect(emitted[3]).toBe('!');
+    });
+
+    it('should still call into convertOpenAITextToParts on finish_reason when the cumulative-mode normalized delta is empty', () => {
+      // Targets the `normalizedContent || choice.finish_reason` guard on the
+      // content path: in cumulative mode an exact-repeat final chunk yields a
+      // normalized delta of '' but must still flush buffered tagged-thinking
+      // content (and any other finish-time side effects) via
+      // convertOpenAITextToParts. The earlier cumulative tests all use
+      // `finish_reason: null`, so this exercises the empty-normalized +
+      // non-null finish_reason path in a cumulative context.
+      const ctx = withStreamParser();
+      // 1) Prefix-extension chunk pair establishes cumulative mode and primes
+      //    `emittedText` so the next exact-repeat is the cumulative branch.
+      converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-cum-empty-finish-0',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'Answer: forty-two' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'gpt-test',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        ctx,
+      );
+      converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-cum-empty-finish-1',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'Answer: forty-two and more.' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'gpt-test',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        ctx,
+      );
+
+      // 2) Final chunk: re-sends the accumulated string verbatim along with
+      //    `finish_reason: 'stop'`. The normalized delta is '' (cumulative
+      //    suffix-of-self), but the finish_reason must still drive
+      //    convertOpenAITextToParts.
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-cum-empty-finish-2',
+          created: 458,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'Answer: forty-two and more.' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'gpt-test',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        ctx,
+      );
+
+      // The cumulative-suppressed empty delta produces no text part, but
+      // because finish_reason is set, the converter still reaches the parts
+      // pipeline; on a clean (no buffered tag) state this yields parts: [].
+      // The crucial invariant: no exception thrown, finishReason propagates,
+      // and no spurious duplicate text emerges.
+      expect(finalChunk.candidates?.[0]?.finishReason).toBe('STOP');
+      const finalText =
+        finalChunk.candidates?.[0]?.content?.parts
+          ?.filter((p) => 'text' in p)
+          ?.map((p) => (p as { text: string }).text)
+          ?.join('') ?? '';
+      expect(finalText).toBe('');
+    });
+
+    it('should handle a single chunk delta with both reasoning_content and content simultaneously', () => {
+      const ctx = withStreamParser();
+      const part =
+        converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-dual-1',
+            created: 456,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  reasoning_content: 'I need to think.',
+                  content: 'Here is my answer.',
+                },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts ?? [];
+
+      // Both channels should emit independently in the same response
+      const thoughtPart = part.find((p) => p.thought === true);
+      const textPart = part.find((p) => !p.thought);
+      expect(thoughtPart?.text).toBe('I need to think.');
+      expect(textPart?.text).toBe('Here is my answer.');
     });
   });
 
@@ -3259,6 +5043,41 @@ describe('Truncated tool call detection in streaming', () => {
     );
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+});
+
+describe('mapGeminiFinishReasonToOpenAI', () => {
+  it.each([
+    [FinishReason.STOP, 'stop'],
+    [FinishReason.MAX_TOKENS, 'length'],
+    [FinishReason.SAFETY, 'content_filter'],
+    [FinishReason.RECITATION, 'content_filter'],
+    [FinishReason.BLOCKLIST, 'content_filter'],
+    [FinishReason.PROHIBITED_CONTENT, 'content_filter'],
+    [FinishReason.SPII, 'content_filter'],
+    [FinishReason.IMAGE_SAFETY, 'content_filter'],
+    [FinishReason.IMAGE_RECITATION, 'content_filter'],
+    [FinishReason.IMAGE_PROHIBITED_CONTENT, 'content_filter'],
+    [FinishReason.IMAGE_OTHER, 'content_filter'],
+    [FinishReason.NO_IMAGE, 'stop'],
+    [undefined, 'stop'],
+  ])('maps %s to %s', (geminiReason, expected) => {
+    const response = OpenAIContentConverter.convertGeminiResponseToOpenAI(
+      {
+        candidates: [{ finishReason: geminiReason, content: { parts: [] } }],
+      } as unknown as GenerateContentResponse,
+      {
+        model: 'test-model',
+        modalities: {
+          image: true,
+          pdf: true,
+          audio: true,
+          video: true,
+        },
+        startTime: 0,
+      },
+    );
+    expect(response.choices[0].finish_reason).toBe(expected);
   });
 });
 

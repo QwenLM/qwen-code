@@ -16,6 +16,7 @@ import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { McpPromptLoader } from './services/McpPromptLoader.js';
 import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
@@ -24,9 +25,15 @@ import {
   type ExecutionMode,
 } from './ui/commands/types.js';
 import { createNonInteractiveUI } from './ui/noninteractive/nonInteractiveUi.js';
+import type { HistoryItemWithoutId } from './ui/types.js';
 import type { LoadedSettings } from './config/settings.js';
 import type { SessionStatsState } from './ui/contexts/SessionContext.js';
 import { t } from './i18n/index.js';
+import {
+  appendUserPromptExpansionAdditionalContext,
+  formatUserPromptExpansionBlockedMessage,
+  serializeUserPromptExpansionPrompt,
+} from './utils/userPromptExpansionHook.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
 
@@ -44,16 +51,18 @@ export type NonInteractiveSlashCommandResult =
   | {
       type: 'submit_prompt';
       content: PartListUnion;
+      outputHistoryItems?: HistoryItemWithoutId[];
     }
   | {
       type: 'message';
-      messageType: 'info' | 'error';
+      messageType: 'info' | 'warning' | 'error';
       content: string;
+      outputHistoryItems?: HistoryItemWithoutId[];
     }
   | {
       type: 'stream_messages';
       messages: AsyncGenerator<
-        { messageType: 'info' | 'error'; content: string },
+        { messageType: 'info' | 'warning' | 'error'; content: string },
         void,
         unknown
       >;
@@ -82,12 +91,14 @@ export type NonInteractiveSlashCommandResult =
  */
 function handleCommandResult(
   result: SlashCommandActionReturn,
+  outputHistoryItems?: HistoryItemWithoutId[],
 ): NonInteractiveSlashCommandResult {
   switch (result.type) {
     case 'submit_prompt':
       return {
         type: 'submit_prompt',
         content: result.content,
+        ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 
     case 'message':
@@ -95,6 +106,7 @@ function handleCommandResult(
         type: 'message',
         messageType: result.messageType,
         content: result.content,
+        ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 
     case 'stream_messages':
@@ -167,6 +179,60 @@ function handleCommandResult(
   }
 }
 
+async function fireUserPromptExpansionHook(
+  config: Config,
+  commandName: string,
+  commandArgs: string,
+  content: PartListUnion,
+  signal: AbortSignal,
+): Promise<{
+  blockedResult?: NonInteractiveSlashCommandResult;
+  content: PartListUnion;
+}> {
+  if (
+    config.getDisableAllHooks?.() ||
+    !(config.hasHooksForEvent?.('UserPromptExpansion') ?? false)
+  ) {
+    return { content };
+  }
+
+  const hookSystem = config.getHookSystem();
+  if (!hookSystem) {
+    return { content };
+  }
+
+  const output = await hookSystem.fireUserPromptExpansionEvent(
+    commandName,
+    commandArgs,
+    serializeUserPromptExpansionPrompt(content),
+    signal,
+  );
+  if (!output) {
+    return { content };
+  }
+
+  const blockingError = output.getBlockingError();
+  if (blockingError.blocked || output.shouldStopExecution()) {
+    return {
+      blockedResult: {
+        type: 'message',
+        messageType: 'error',
+        content: formatUserPromptExpansionBlockedMessage(
+          blockingError.reason || output.getEffectiveReason(),
+        ),
+      },
+      content,
+    };
+  }
+
+  return {
+    content: appendUserPromptExpansionAdditionalContext(
+      content,
+      output.getAdditionalContext(),
+    ),
+  };
+}
+
 /**
  * Processes a slash command in a non-interactive environment.
  *
@@ -199,6 +265,7 @@ export const handleSlashCommand = async (
 
   // Load all commands to check if the command exists but is not allowed
   const allLoaders = [
+    new McpPromptLoader(config),
     new BuiltinCommandLoader(config),
     new BundledSkillLoader(config),
     new SkillCommandLoader(config),
@@ -224,13 +291,12 @@ export const handleSlashCommand = async (
     allLoaders,
     abortController.signal,
   );
-  // Register model-invocable commands provider so SkillTool description stays
-  // up-to-date in non-interactive / ACP mode.
+  // Register model-invocable commands provider so the startup snapshot and
+  // per-turn drain include these in non-interactive / ACP mode.
   config.setModelInvocableCommandsProvider(() =>
     commandService.getModelInvocableCommands().map((cmd) => ({
       name: cmd.name,
-      description:
-        typeof cmd.description === 'string' ? cmd.description : cmd.description,
+      description: cmd.modelDescription ?? cmd.description,
     })),
   );
   // Register executor so SkillTool can invoke model-invocable commands
@@ -247,11 +313,23 @@ export const handleSlashCommand = async (
           name,
           args,
         },
-        services: { config, settings, git: undefined, logger: null },
+        services: { config, settings, logger: null },
       } as unknown as CommandContext;
       const result = await cmd.action(minimalContext, args);
       if (!result || result.type !== 'submit_prompt') return null;
-      const content = result.content;
+      const hookResult = await fireUserPromptExpansionHook(
+        config,
+        name,
+        args,
+        result.content,
+        abortController.signal,
+      );
+      if (hookResult.blockedResult) {
+        return hookResult.blockedResult.type === 'message'
+          ? { error: hookResult.blockedResult.content }
+          : null;
+      }
+      const content = hookResult.content;
       if (typeof content === 'string') return content;
       if (Array.isArray(content)) {
         return content
@@ -318,22 +396,30 @@ export const handleSlashCommand = async (
   const sessionStats: SessionStatsState = {
     sessionId: config?.getSessionId(),
     sessionStartTime: new Date(),
-    metrics: uiTelemetryService.getMetrics(),
+    metrics: config
+      ? uiTelemetryService.getMetricsForSession(config.getSessionId())
+      : uiTelemetryService.getMetrics(),
     lastPromptTokenCount: 0,
     promptCount: 1,
   };
 
   const logger = new Logger(config?.getSessionId() || '', config?.storage);
 
+  const outputHistoryItems: HistoryItemWithoutId[] = [];
+  const ui = createNonInteractiveUI();
+  ui.addItem = (item) => {
+    outputHistoryItems.push(item);
+    return 0;
+  };
+
   const context: CommandContext = {
     executionMode,
     services: {
       config,
       settings,
-      git: undefined,
       logger,
     },
-    ui: createNonInteractiveUI(),
+    ui,
     session: {
       stats: sessionStats,
       sessionShellAllowlist: new Set(),
@@ -356,8 +442,25 @@ export const handleSlashCommand = async (
     };
   }
 
+  if (result.type === 'submit_prompt') {
+    const hookResult = await fireUserPromptExpansionHook(
+      config,
+      commandToExecute.name,
+      args,
+      result.content,
+      abortController.signal,
+    );
+    if (hookResult.blockedResult) {
+      return hookResult.blockedResult;
+    }
+    return handleCommandResult(
+      { ...result, content: hookResult.content },
+      outputHistoryItems,
+    );
+  }
+
   // Handle different result types
-  return handleCommandResult(result);
+  return handleCommandResult(result, outputHistoryItems);
 };
 
 /**
@@ -375,6 +478,7 @@ export const getAvailableCommands = async (
 ): Promise<SlashCommand[]> => {
   try {
     const loaders = [
+      new McpPromptLoader(config),
       new BuiltinCommandLoader(config),
       new BundledSkillLoader(config),
       new SkillCommandLoader(config),

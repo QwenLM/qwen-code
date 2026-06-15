@@ -56,24 +56,74 @@ export interface FileReadEntry {
   /** ms epoch of the last successful write. Undefined if never written. */
   lastWriteAt?: number;
   /**
-   * True iff the most recent Read consumed the whole file (no offset /
-   * limit / pages). Used by the Read fast-path to decide whether a
-   * follow-up "no-args" Read can return a `file_unchanged` placeholder
-   * instead of re-emitting the full content. Range-scoped Reads never
-   * trigger the placeholder, since the model may legitimately ask for a
-   * different range next time.
+   * True iff the most recent Read produced the whole file's current
+   * content: no offset / limit / pages on the request AND the content
+   * was not truncated by the truncate-tool-output limit. A truncated
+   * full read records `false` here because the model only saw the
+   * head of the file.
+   *
+   * Sole consumer is the Read fast-path, which uses this flag
+   * (combined with `lastReadCacheable` and a write-newer-than-read
+   * check) to decide whether a follow-up "no-args" Read can return
+   * a `file_unchanged` placeholder.
+   *
+   * **`priorReadEnforcement.ts` does NOT consult this flag and must
+   * not start.** PR #3932 wired it into a `requireFullRead` option
+   * for WriteFile's overwrite path; PR #4002 removed that wiring
+   * because the truncate-tool-output limit makes "fully read" an
+   * impossible precondition on files larger than the limit (issue
+   * #3945 deadlock). The current contract aligns with Claude Code's
+   * `readFileState`: any prior read clears enforcement, the
+   * mtime/size drift check is the safety net. `fileReadCacheDisabled:
+   * true` is an OPT-OUT (it bypasses the cache and thus enforcement
+   * entirely so application-level locking can take over) — it is NOT
+   * an opt-in to stricter behaviour.
    */
   lastReadWasFull: boolean;
   /**
-   * True iff the content the most recent Read produced is one we are
-   * willing to substitute with a `file_unchanged` placeholder. Plain
-   * text reads set this to true; binary, image, audio, video, PDF, and
-   * notebook reads set it to false, because the model will likely need
-   * the structured / multi-modal payload again rather than a stub. The
-   * cache itself does not interpret this flag — it is a hint produced
-   * and consumed by the Read tool.
+   * True iff the most recent Read produced plain-text content — i.e.
+   * a text payload the Edit / WriteFile tools can mutate as text.
+   * False for binary, image, audio, video, PDF, and notebook reads,
+   * which produce structured payloads the mutating tools cannot
+   * safely alter.
+   *
+   * Note: this flag is purely about *content type* (text vs.
+   * non-text), not about whether the read was complete. Truncation
+   * is tracked separately on {@link lastReadWasFull}; conflating
+   * the two caused the issue #3964 regression where a partial /
+   * truncated text read caused the next Edit to be rejected with
+   * the misleading "binary / image / audio / video / PDF / notebook
+   * payload" error.
+   *
+   * Two independent consumers read this flag:
+   *  - the ReadFile fast-path uses it (combined with
+   *    `lastReadWasFull`) to decide whether to serve the
+   *    `file_unchanged` placeholder.
+   *  - `priorReadEnforcement.ts` uses it to detect non-text payloads
+   *    and reject Edit / WriteFile against them (re-reading would
+   *    produce the same non-text payload, so the message tells the
+   *    model to use a different mechanism rather than re-read).
    */
   lastReadCacheable: boolean;
+  /**
+   * True iff the read/write that the fast-path would point at is still
+   * quotable from conversation history — i.e. it has NOT been blanked
+   * by idle microcompaction.
+   *
+   * Sole consumer is the ReadFile fast-path: the `file_unchanged`
+   * placeholder ("you already have this earlier in the conversation")
+   * is only honest while that content is still in history. Set `true`
+   * only by a full {@link recordRead} / {@link recordWrite} (a partial
+   * read does not make the whole file resident); flipped to `false` by
+   * {@link markReadEvictedFromHistory} when microcompaction blanks it.
+   *
+   * `priorReadEnforcement.ts` does NOT consult this flag and must not
+   * start: read-before-write only needs that the model saw the file
+   * and the on-disk fingerprint is current, neither of which history
+   * blanking invalidates. Wiping read-rights on idle cleanup was the
+   * issue #4239 false-block this whole marker exists to avoid.
+   */
+  readResidentInHistory: boolean;
 }
 
 /** Result of {@link FileReadCache.check}. */
@@ -84,6 +134,7 @@ export type FileReadCheckResult =
 
 export class FileReadCache {
   private readonly byInode = new Map<string, FileReadEntry>();
+  private static readonly MAX_ENTRIES = 4096;
 
   /** Build the canonical key for a file from its Stats. */
   static inodeKey(stats: Stats): string {
@@ -93,12 +144,22 @@ export class FileReadCache {
   /**
    * Record a successful Read of `absPath`.
    *
-   *  - `full`      — the Read covered the entire file (no offset / limit
-   *    / pages). Only full Reads enable the `file_unchanged` fast-path
-   *    on subsequent reads.
-   *  - `cacheable` — the produced content is suitable for substitution
-   *    with a `file_unchanged` placeholder. Set true for plain text,
-   *    false for binary / image / audio / video / PDF / notebook.
+   *  - `full`      — the Read produced the entire current content of
+   *    the file: no offset / limit / pages on the request AND the
+   *    output was not truncated. Pass `false` for ranged reads OR
+   *    for full-request reads whose content was truncated by the
+   *    truncate-tool-output limit; both leave the model without
+   *    sight of every current byte. This gates the `file_unchanged`
+   *    fast-path and notebook-specific prior-read checks.
+   *  - `cacheable` — the produced content is plain text (vs. binary /
+   *    image / audio / video / PDF / notebook). This flag is purely
+   *    about content type, not about whether the read was complete:
+   *    a partial / truncated text read still records `cacheable: true`
+   *    because the bytes the model saw were text. (Bundling
+   *    truncation into `cacheable` was the issue #3964 regression
+   *    that caused partial reads of `.kt` / `.cpp` / `.py` files to
+   *    be rejected on the next Edit with a misleading "binary
+   *    payload" message.)
    *
    * The `lastReadWasFull` and `lastReadCacheable` flags are
    * **sticky-on-true** when the recorded fingerprint matches the
@@ -132,6 +193,14 @@ export class FileReadCache {
       existing.sizeBytes === stats.size;
     const entry = this.upsert(absPath, stats);
     entry.lastReadAt = Date.now();
+    if (opts.full) {
+      // Only a full read re-arms: a partial read leaves a mere slice
+      // in history while sticky `lastReadWasFull` stays true, so
+      // re-arming on it would resurrect a dangling placeholder for an
+      // evicted full read. Leaving it untouched for partial reads is
+      // correct either way (a still-resident full read stays true).
+      entry.readResidentInHistory = true;
+    }
     if (sameFingerprint) {
       // Same bytes the entry already described — sticky-on-true
       // preserves prior `true` flags from full reads or writes.
@@ -144,6 +213,10 @@ export class FileReadCache {
     } else {
       // Drift detected (or fresh entry): the prior flags described
       // different bytes. Reset to what this read actually produced.
+      // `readResidentInHistory` is intentionally NOT reset here — it
+      // tracks whether the read is still quotable from history, which
+      // is orthogonal to the on-disk fingerprint and already handled
+      // by the `opts.full` branch above.
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
     }
@@ -158,22 +231,27 @@ export class FileReadCache {
    * see its own write as a "stale" external change.
    *
    * Read metadata is **always** refreshed alongside the write, not
-   * just for brand-new entries: the model authored the entire current
-   * content, so for prior-read enforcement purposes it has now "seen"
-   * all bytes — regardless of whether the prior recordRead happened
-   * to be partial (`lastReadWasFull=false`) or non-cacheable
-   * (`lastReadCacheable=false`). Without this, a sequence such as
-   * `ReadFile(limit=10)` → `WriteFile` (full content) → `Edit` would
-   * be rejected on the Edit because `lastReadWasFull=false` from the
-   * earlier partial read would persist through the write.
+   * just for brand-new entries: the model authored the current content
+   * produced by the mutating tool, so for prior-read enforcement purposes
+   * it has now "seen" the bytes that tool wrote. Plain text writers use
+   * the default `cacheable: true`; structured writers such as notebook cell
+   * editors can set `cacheable: false` so regular Edit / WriteFile still
+   * reject the file as a non-text payload.
    */
-  recordWrite(absPath: string, stats: Stats): FileReadEntry {
+  recordWrite(
+    absPath: string,
+    stats: Stats,
+    opts: { cacheable?: boolean } = {},
+  ): FileReadEntry {
     const entry = this.upsert(absPath, stats);
     const now = Date.now();
     entry.lastWriteAt = now;
     entry.lastReadAt = now;
     entry.lastReadWasFull = true;
-    entry.lastReadCacheable = true;
+    entry.lastReadCacheable = opts.cacheable ?? true;
+    // The model authored the current bytes and that result is in
+    // history, so the fast-path may serve a placeholder again.
+    entry.readResidentInHistory = true;
     return entry;
   }
 
@@ -202,6 +280,33 @@ export class FileReadCache {
     return { state: 'fresh', entry };
   }
 
+  /**
+   * Mark the entry for `stats` as no longer quotable from conversation
+   * history — its read/edit/write output was blanked by idle
+   * microcompaction.
+   *
+   * Surgical alternative to {@link clear} for microcompaction: only
+   * {@link FileReadEntry.readResidentInHistory} is disarmed; the
+   * fingerprint / `lastReadAt` / `lastReadCacheable` that
+   * read-before-write depends on are preserved (that is the issue
+   * #4239 fix).
+   *
+   * Returns `true` if a matching entry was found and disarmed; `false`
+   * if there is no entry for `stats` (never tracked, or `stats`
+   * resolved to a different inode than recorded — file replaced /
+   * symlink retargeted since the read). A `false` is NOT harmless: the
+   * stale entry stays armed, so the caller must fall back to
+   * {@link clear} just as it does for an unstattable path.
+   */
+  markReadEvictedFromHistory(stats: Stats): boolean {
+    const entry = this.byInode.get(FileReadCache.inodeKey(stats));
+    if (entry) {
+      entry.readResidentInHistory = false;
+      return true;
+    }
+    return false;
+  }
+
   /** Remove the entry for the given Stats, if any. */
   invalidate(stats: Stats): void {
     this.byInode.delete(FileReadCache.inodeKey(stats));
@@ -210,6 +315,36 @@ export class FileReadCache {
   /** Drop every entry. Used by tests and on Config shutdown. */
   clear(): void {
     this.byInode.clear();
+  }
+
+  /**
+   * Evict entries whose most recent Read (or Write; both set
+   * {@link FileReadEntry.lastReadAt}) is older than `minutes`.
+   *
+   * This is a memory-pressure-driven eviction: it targets entries the
+   * model is least likely to need again, trading cache hit rate for lower
+   * memory footprint. Unlike {@link clear}, it preserves recently-read
+   * entries so the file_unchanged fast-path stays available for active
+   * files.
+   *
+   * @returns Number of entries evicted.
+   */
+  evictNotAccessedSince(minutes: number): number {
+    if (!Number.isFinite(minutes) || minutes < 1) {
+      return 0;
+    }
+
+    const cutoff = Date.now() - minutes * 60 * 1000;
+    let evicted = 0;
+
+    for (const [key, entry] of this.byInode) {
+      if (entry.lastReadAt !== undefined && entry.lastReadAt < cutoff) {
+        this.byInode.delete(key);
+        evicted++;
+      }
+    }
+
+    return evicted;
   }
 
   /** Number of tracked entries. Diagnostic / test use only. */
@@ -221,10 +356,21 @@ export class FileReadCache {
     const key = FileReadCache.inodeKey(stats);
     const existing = this.byInode.get(key);
     if (existing) {
+      // Bump: move existing entry to the end of the FIFO queue so that
+      // frequently-updated entries survive eviction.
+      this.byInode.delete(key);
       existing.realPath = absPath;
       existing.mtimeMs = stats.mtimeMs;
       existing.sizeBytes = stats.size;
+      this.byInode.set(key, existing);
       return existing;
+    }
+    // Evict oldest entry when cache exceeds MAX_ENTRIES (FIFO)
+    if (this.byInode.size >= FileReadCache.MAX_ENTRIES) {
+      const oldestKey = this.byInode.keys().next().value;
+      if (oldestKey) {
+        this.byInode.delete(oldestKey);
+      }
     }
     const entry: FileReadEntry = {
       inodeKey: key,
@@ -233,6 +379,7 @@ export class FileReadCache {
       sizeBytes: stats.size,
       lastReadWasFull: false,
       lastReadCacheable: false,
+      readResidentInHistory: false,
     };
     this.byInode.set(key, entry);
     return entry;

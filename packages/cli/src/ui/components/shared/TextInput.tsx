@@ -4,18 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// no hooks needed beyond keypress handled inside
-import { Box, Text } from 'ink';
+import { Box, Text, useStdin } from 'ink';
 import chalk from 'chalk';
 import stringWidth from 'string-width';
 import { useTextBuffer } from './text-buffer.js';
+import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { cpSlice, cpLen } from '../../utils/textUtils.js';
 import { theme } from '../../semantic-colors.js';
 import { Colors } from '../../colors.js';
 import type { Key } from '../../hooks/useKeypress.js';
-import { useCallback, useRef, useEffect } from 'react';
+import { useCallback, useRef, useEffect, useState } from 'react';
 
 export interface TextInputProps {
   value: string;
@@ -33,6 +33,21 @@ export interface TextInputProps {
   validationErrors?: string[];
   inputWidth?: number;
   initialCursorOffset?: number;
+  ellipsizeOverflow?: boolean;
+}
+
+function ellipsizeMiddle(text: string, width: number): string {
+  if (width <= 0) return '';
+  if (stringWidth(text) <= width) return text;
+  if (width <= 3) return cpSlice(text, 0, width);
+
+  const available = width - 3;
+  const headLength = Math.ceil(available / 2);
+  const tailLength = Math.floor(available / 2);
+  return `${cpSlice(text, 0, headLength)}...${cpSlice(
+    text,
+    cpLen(text) - tailLength,
+  )}`;
 }
 
 export function TextInput({
@@ -48,8 +63,10 @@ export function TextInput({
   validationErrors = [],
   inputWidth = 80,
   initialCursorOffset,
+  ellipsizeOverflow = false,
 }: TextInputProps) {
   const allowMultiline = height > 1;
+  const [cursorVisible, setCursorVisible] = useState(isActive);
 
   // Stabilize onChange to avoid triggering useTextBuffer's onChange effect every render
   const onChangeRef = useRef(onChange);
@@ -60,13 +77,32 @@ export function TextInput({
     onChangeRef.current?.(text);
   }, []);
 
+  const preferredEditor = usePreferredEditor();
+  const { stdin, setRawMode } = useStdin();
+
   const buffer = useTextBuffer({
     initialText: value || '',
     initialCursorOffset,
     viewport: { height, width: inputWidth },
+    stdin,
+    setRawMode,
     isValidPath: () => false,
     onChange: stableOnChange,
+    preferredEditor,
   });
+
+  useEffect(() => {
+    if (!isActive) {
+      setCursorVisible(false);
+      return;
+    }
+
+    setCursorVisible(true);
+    const interval = setInterval(() => {
+      setCursorVisible((visible) => !visible);
+    }, 530);
+    return () => clearInterval(interval);
+  }, [isActive]);
 
   const handleSubmit = () => {
     if (!onSubmit) return;
@@ -151,6 +187,7 @@ export function TextInput({
   const [cursorVisualRowAbsolute, cursorVisualColAbsolute] =
     buffer.visualCursor;
   const scrollVisualRow = buffer.visualScrollRow;
+  const shouldRenderCursor = isActive && cursorVisible;
 
   return (
     <Box flexDirection="column" gap={1}>
@@ -158,10 +195,16 @@ export function TextInput({
         <Text color={theme.text.accent}>{'> '}</Text>
         <Box flexGrow={1} flexDirection="column">
           {buffer.text.length === 0 && placeholder ? (
-            <Text>
-              {chalk.inverse(placeholder.slice(0, 1))}
-              <Text color={Colors.Gray}>{placeholder.slice(1)}</Text>
-            </Text>
+            shouldRenderCursor ? (
+              <Text>
+                {chalk.inverse(placeholder.slice(0, 1))}
+                <Text color={Colors.Gray}>{placeholder.slice(1)}</Text>
+              </Text>
+            ) : (
+              <Text color={Colors.Gray}>{placeholder}</Text>
+            )
+          ) : ellipsizeOverflow && stringWidth(buffer.text) > inputWidth ? (
+            <Text>{ellipsizeMiddle(buffer.text, inputWidth)}</Text>
           ) : (
             linesToRender.map((lineText, visualIdxInRenderedSet) => {
               const cursorVisualRow = cursorVisualRowAbsolute - scrollVisualRow;
@@ -171,7 +214,10 @@ export function TextInput({
                 display = display + ' '.repeat(inputWidth - currentVisualWidth);
               }
 
-              if (visualIdxInRenderedSet === cursorVisualRow) {
+              if (
+                shouldRenderCursor &&
+                visualIdxInRenderedSet === cursorVisualRow
+              ) {
                 const relativeVisualColForHighlight = cursorVisualColAbsolute;
                 if (relativeVisualColForHighlight >= 0) {
                   if (relativeVisualColForHighlight < cpLen(display)) {

@@ -154,7 +154,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
-    // Construct the permission rule for this specific MCP tool.
     const permissionRule = `mcp__${this.serverName}__${this.serverToolName}`;
 
     const confirmationDetails: ToolMcpConfirmationDetails = {
@@ -174,8 +173,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     return confirmationDetails;
   }
 
-  // Determine if the response contains tool errors
-  // This is needed because CallToolResults should return errors inside the response.
+  // MCP spec: errors are returned inside the CallToolResult, not as exceptions.
   // ref: https://modelcontextprotocol.io/specification/2025-06-18/schema#calltoolresult
   isMCPToolError(rawResponseParts: Part[]): boolean {
     const functionResponse = rawResponseParts?.[0]?.functionResponse;
@@ -318,7 +316,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         callToolResult,
       );
 
-      // Ensure the response is not an error
       if (this.isMCPToolError(rawResponseParts)) {
         const errorMessage = `MCP tool '${
           this.serverToolName
@@ -394,7 +391,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           });
       });
 
-      // Ensure the response is not an error
       if (this.isMCPToolError(rawResponseParts)) {
         const errorMessage = `MCP tool '${
           this.serverToolName
@@ -439,6 +435,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.cliConfig,
           `mcp__${this.serverName}__${this.serverToolName}`,
           part.text,
+          // Per-tool char budget; mirrors DiscoveredMCPTool.maxOutputChars
+          // (10x the global default, since MCP servers return large structured
+          // output). char-only (lines: Infinity) so the global line cap can't
+          // undercut the 500k char budget — many short lines (structured JSON,
+          // tables) would otherwise truncate while chars remain. Consistent
+          // with the shell tool's in-tool truncation.
+          { threshold: 500_000, lines: Number.POSITIVE_INFINITY },
         );
         result.push({ text: truncated.content });
       } else {
@@ -457,6 +460,13 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
   ToolParams,
   ToolResult
 > {
+  // MCP servers often return large structured payloads; allow 10x the global
+  // budget (mirrors Claude Code's MCP `maxResultSizeChars`) before the
+  // scheduler offloads. truncateTextParts uses the same ceiling per text part.
+  override get maxOutputChars(): number {
+    return 500_000;
+  }
+
   constructor(
     private readonly mcpTool: CallableTool,
     readonly serverName: string,
@@ -479,6 +489,12 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       parameterSchema,
       true, // isOutputMarkdown
       true, // canUpdateOutput — enables streaming progress for MCP tools
+      true, // shouldDefer — MCP tools are discovered via ToolSearch to keep the
+      //   initial tool-declaration list small when many MCP servers are attached.
+      false, // alwaysLoad
+      // searchHint: server name boosts fuzzy matching when the user references
+      // the server in their query ("send a slack message").
+      `mcp ${serverName}`,
     );
   }
 
@@ -491,6 +507,41 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.parameterSchema,
       this.trust,
       generateValidName(`mcp__${this.serverName}__${this.serverToolName}`),
+      this.cliConfig,
+      this.mcpClient,
+      this.mcpTimeout,
+      this.annotations,
+    );
+  }
+
+  /**
+   * Return a clone of this tool with a different `trust` value while
+   * keeping every other field (including the shared underlying
+   * `CallableTool` / MCP transport) identical.
+   *
+   * pool path: a single shared pool entry produces one
+   * `DiscoveredMCPTool` snapshot; each `SessionMcpView` clones with
+   * its own per-session trust before registering into its session's
+   * `ToolRegistry`. Without this clone, mutating `trust` on the shared
+   * instance would cross-contaminate sessions.
+   *
+   * Trust is the only field that legitimately varies per session;
+   * everything else (transport, schema, name) is transport-level.
+   */
+  withTrust(trust: boolean | undefined): DiscoveredMCPTool {
+    if (trust === this.trust) return this;
+    return new DiscoveredMCPTool(
+      this.mcpTool,
+      this.serverName,
+      this.serverToolName,
+      this.description,
+      this.parameterSchema,
+      trust,
+      // Preserve the original name (do NOT re-call generateValidName)
+      // — equal-by-name is the registry's deduplication key, and a
+      // different name would race-register two tools in the same
+      // session.
+      this.name,
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,

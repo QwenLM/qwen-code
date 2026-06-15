@@ -725,6 +725,53 @@ describe('errors', () => {
         );
       });
     });
+
+    describe('with --json-schema active', () => {
+      // When the structured-output run hits maxSessionTurns the generic
+      // "increase maxSessionTurns" message can be misleading: the real
+      // cause is usually that structured_output never got called (denied
+      // by permissions, unsatisfiable schema, prompt didn't instruct the
+      // model). Append a contextual hint so users debugging a stuck
+      // --json-schema run know where to look.
+      beforeEach(() => {
+        (mockConfig as unknown as { getJsonSchema: Mock }).getJsonSchema = vi
+          .fn()
+          .mockReturnValue({ type: 'object' });
+      });
+
+      it('appends a json-schema-specific hint in text mode', async () => {
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        await expect(handleMaxTurnsExceededError(mockConfig)).rejects.toThrow(
+          'process.exit called with code: 53',
+        );
+
+        const written = mockWriteStderrLine.mock.calls[0]?.[0] as string;
+        expect(written).toMatch(/Reached max session turns for this session\./);
+        expect(written).toMatch(/--json-schema is active/);
+        expect(written).toMatch(/permissions\.deny.*--exclude-tools/);
+      });
+
+      it('appends a json-schema-specific hint inside the JSON error message', async () => {
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.JSON);
+
+        await expect(handleMaxTurnsExceededError(mockConfig)).rejects.toThrow(
+          'process.exit called with code: 53',
+        );
+
+        const written = mockWriteStderrLine.mock.calls[0]?.[0] as string;
+        const parsed = JSON.parse(written) as {
+          error: { type: string; message: string; code: number };
+        };
+        expect(parsed.error.type).toBe('FatalTurnLimitedError');
+        expect(parsed.error.code).toBe(53);
+        expect(parsed.error.message).toMatch(/--json-schema is active/);
+      });
+    });
   });
 
   describe('cleanup-before-exit invariant', () => {

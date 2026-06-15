@@ -151,6 +151,24 @@ describe('HistoryReplayer', () => {
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
+
+    it('should replay mid-turn user messages using display text', async () => {
+      const record: ChatRecord = {
+        ...createUserRecord(
+          '\n[User message received during tool execution]: save logs',
+        ),
+        subtype: 'mid_turn_user_message',
+        systemPayload: { displayText: 'save logs' },
+      };
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'save logs' },
+        _meta: { timestamp: toEpochMs(record.timestamp) },
+      });
+    });
   });
 
   describe('assistant message replay', () => {
@@ -241,6 +259,11 @@ describe('HistoryReplayer', () => {
           rawInput: { path: '/test.ts' },
           _meta: {
             toolName: 'read_file',
+            // #4175 F4 prereq — ToolCallEmitter now stamps provenance
+            // on every tool_call / tool_call_update event so the UI can
+            // dispatch on builtin / mcp / subagent without string-
+            // matching toolName.
+            provenance: 'builtin',
             timestamp: toEpochMs(record.timestamp),
           },
         }),
@@ -296,6 +319,8 @@ describe('HistoryReplayer', () => {
         rawOutput: 'File contents here',
         _meta: {
           toolName: 'read_file',
+          // #4175 F4 prereq — provenance stamped on update events too.
+          provenance: 'builtin',
           timestamp: toEpochMs(record.timestamp),
         },
       });

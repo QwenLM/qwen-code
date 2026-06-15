@@ -1,7 +1,24 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
+import type { Config } from '../../config/config.js';
+import type { SubagentConfig } from '../../subagents/types.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
+
+/**
+ * Fork subagent availability gate.
+ *
+ * Fork is available by default in interactive sessions. Non-interactive
+ * sessions (e.g. `qwen -p`, SDK headless, CI/CD) lack a terminal UI for fork
+ * progress display and permission prompts, which can cause hangs or silent
+ * failures.
+ *
+ * When fork is unavailable, omitting `subagent_type` falls back to a
+ * general-purpose subagent instead of forking.
+ */
+export function isForkSubagentEnabled(config: Config): boolean {
+  return config.isInteractive();
+}
 
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
 export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
@@ -13,8 +30,9 @@ export const FORK_AGENT = {
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',
+  approvalMode: 'default',
   level: 'session' as const,
-};
+} satisfies SubagentConfig;
 
 // Recursive-fork guard. A fork child keeps the `agent` tool in its declarations
 // for byte-identical cache parity with the parent, so tool-availability
@@ -125,6 +143,29 @@ export function buildForkedMessages(
   };
 
   return [fullAssistantMessage, toolResultMessage];
+}
+
+/**
+ * Notice injected into a subagent that has been spun up inside an isolated
+ * git worktree (via `AgentTool` `isolation: 'worktree'`). Tells the agent
+ * to confine all file operations to the worktree path and to re-read any
+ * file inherited from the parent's context before editing it.
+ *
+ * Mirrors claude-code's `buildWorktreeNotice` in
+ * `tools/AgentTool/forkSubagent.ts`.
+ */
+export function buildWorktreeNotice(
+  parentCwd: string,
+  worktreeCwd: string,
+): string {
+  return (
+    `You are operating in an isolated git worktree at ${worktreeCwd}. ` +
+    `The parent agent is in ${parentCwd}. Same repository, same relative file layout, separate working copy. ` +
+    `All your file edits, writes, and shell commands MUST target paths under ${worktreeCwd}. ` +
+    `When the inherited context references a path under ${parentCwd}, translate it to the corresponding path under ${worktreeCwd} before acting on it. ` +
+    `Re-read any file you intend to edit (the parent may have modified it after the snapshot in your context). ` +
+    `Your changes stay in this worktree and do not affect the parent's working tree.`
+  );
 }
 
 export function buildChildMessage(directive: string): string {

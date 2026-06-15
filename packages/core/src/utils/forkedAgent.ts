@@ -29,8 +29,14 @@ import type {
   GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
+import {
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from '../agents/runtime/agent-context.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
+import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
+import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -42,6 +48,11 @@ import {
   type RunConfig,
   type ToolConfig,
 } from '../agents/index.js';
+import {
+  buildModelIdContext,
+  resolveModelId,
+  type ResolvedModelId,
+} from './modelId.js';
 
 // ---------------------------------------------------------------------------
 // CacheSafeParams — shared prompt-cache slot
@@ -55,7 +66,7 @@ import {
 export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
-  /** Curated conversation history (deep clone) */
+  /** Curated conversation history (shallow copy; consumers must not mutate) */
   history: Content[];
   /** Model identifier */
   model: string;
@@ -154,6 +165,85 @@ export function createForkedChat(
   );
 }
 
+interface ForkedModelRuntime {
+  model: string;
+  runtimeView?: RuntimeContentGeneratorView;
+}
+
+async function buildForkedModelRuntime(
+  base: Config,
+  contentGeneratorOwner: Config,
+  modelSelector: string,
+): Promise<ForkedModelRuntime> {
+  const resolvedModel = resolveModelId(
+    modelSelector,
+    buildModelIdContext(base),
+  );
+  // When the selector cannot resolve (e.g. `fast` with no fast model
+  // configured, or `inherit` on a config without a current model), fall back
+  // to the parent session model instead of passing the raw selector string
+  // to the provider. Matches the subagent path, where an unresolvable
+  // selector means "inherit parent".
+  const model = resolvedModel?.modelId ?? base.getModel();
+  const runtimeView = await buildForkedRuntimeContentGeneratorView(
+    base,
+    contentGeneratorOwner,
+    resolvedModel,
+  );
+
+  return { model, runtimeView };
+}
+
+async function buildForkedRuntimeContentGeneratorView(
+  base: Config,
+  contentGeneratorOwner: Config,
+  resolvedModel: ResolvedModelId | undefined,
+): Promise<RuntimeContentGeneratorView | undefined> {
+  if (!resolvedModel?.authType) return undefined;
+
+  const currentContentGeneratorConfig = base.getContentGeneratorConfig?.();
+  const currentAuthType = currentContentGeneratorConfig?.authType;
+  const currentModel =
+    currentContentGeneratorConfig?.model ?? base.getModel?.();
+  if (
+    resolvedModel.authType === currentAuthType &&
+    resolvedModel.modelId === currentModel
+  ) {
+    return undefined;
+  }
+
+  return createRuntimeContentGeneratorView(
+    base,
+    contentGeneratorOwner,
+    resolvedModel.modelId,
+    { authType: resolvedModel.authType },
+  );
+}
+
+function runWithForkedModelRuntime<T>(
+  runtime: ForkedModelRuntime,
+  fn: (model: string) => Promise<T>,
+): Promise<T> {
+  const run = () => fn(runtime.model);
+  return runtime.runtimeView
+    ? runWithRuntimeContentGenerator(runtime.runtimeView, run)
+    : run();
+}
+
+/**
+ * Run a direct forked-chat loop under the runtime view required by the
+ * selected model. This is used by speculation, which owns its own multi-turn
+ * loop instead of going through runForkedAgent().
+ */
+export async function runWithForkedChatModel<T>(
+  config: Config,
+  modelSelector: string,
+  fn: (model: string) => Promise<T>,
+): Promise<T> {
+  const runtime = await buildForkedModelRuntime(config, config, modelSelector);
+  return runWithForkedModelRuntime(runtime, fn);
+}
+
 // ---------------------------------------------------------------------------
 // ForkedQueryResult — returned by cache-path runForkedAgent
 // ---------------------------------------------------------------------------
@@ -224,7 +314,7 @@ export interface AgentPathParams {
   taskPrompt: string;
   /** System prompt defining the agent's persona and constraints. */
   systemPrompt: string;
-  /** Model override (defaults to config.getFastModel() ?? config.getModel()). */
+  /** Model override (defaults to fast model selector, then current model). */
   model?: string;
   /** Maximum number of agent turns (default: unlimited). */
   maxTurns?: number;
@@ -254,17 +344,6 @@ export interface ForkedAgentResult {
   terminateReason?: string;
   /** File paths observed in Write/Edit tool calls during execution. */
   filesTouched: string[];
-}
-
-/**
- * Returns a shallow clone of config with ApprovalMode forced to YOLO.
- * Background agents must never block on permission prompts — there is
- * no user present to answer them.
- */
-function createYoloConfig(config: Config): Config {
-  const yoloConfig = Object.create(config) as Config;
-  yoloConfig.getApprovalMode = () => ApprovalMode.YOLO;
-  return yoloConfig;
 }
 
 /**
@@ -327,56 +406,82 @@ export async function runForkedAgent(
   if ('cacheSafeParams' in params) {
     const { config, userMessage, cacheSafeParams, jsonSchema, abortSignal } =
       params;
-    const model = params.model ?? cacheSafeParams.model;
-    const chat = createForkedChat(config, cacheSafeParams);
-
-    const requestConfig: GenerateContentConfig = { ...NO_TOOLS };
-    if (abortSignal) requestConfig.abortSignal = abortSignal;
-    if (jsonSchema) {
-      requestConfig.responseMimeType = 'application/json';
-      requestConfig.responseJsonSchema = jsonSchema;
-    }
-
-    const stream = await chat.sendMessageStream(
-      model,
-      { message: [{ text: userMessage }], config: requestConfig },
-      'forked_query',
+    const modelSelector = params.model ?? cacheSafeParams.model;
+    const modelRuntime = await buildForkedModelRuntime(
+      config,
+      config,
+      modelSelector,
     );
 
-    let fullText = '';
-    let usage: ForkedQueryResult['usage'] = {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheHitTokens: 0,
-    };
+    return runWithForkedModelRuntime(modelRuntime, async (model) => {
+      const chat = createForkedChat(config, cacheSafeParams);
 
-    for await (const event of stream) {
-      if (event.type !== StreamEventType.CHUNK) continue;
-      const response = event.value;
-      const text = response.candidates?.[0]?.content?.parts
-        ?.filter((p) => !(p as Record<string, unknown>)['thought'])
-        .map((p) => p.text ?? '')
-        .join('');
-      if (text) fullText += text;
-      if (response.usageMetadata)
-        usage = extractQueryUsage(response.usageMetadata);
-    }
-
-    const trimmed = fullText.trim() || null;
-    let jsonResult: Record<string, unknown> | undefined;
-    if (jsonSchema && trimmed) {
-      try {
-        jsonResult = JSON.parse(trimmed) as Record<string, unknown>;
-      } catch {
-        // non-JSON response despite schema constraint — treat as text
+      const requestConfig: GenerateContentConfig = { ...NO_TOOLS };
+      if (abortSignal) requestConfig.abortSignal = abortSignal;
+      if (jsonSchema) {
+        requestConfig.responseMimeType = 'application/json';
+        requestConfig.responseJsonSchema = jsonSchema;
       }
-    }
 
-    return { text: trimmed, jsonResult, usage };
+      const stream = await chat.sendMessageStream(
+        model,
+        { message: [{ text: userMessage }], config: requestConfig },
+        'forked_query',
+      );
+
+      let fullText = '';
+      let usage: ForkedQueryResult['usage'] = {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheHitTokens: 0,
+      };
+
+      for await (const event of stream) {
+        if (event.type !== StreamEventType.CHUNK) continue;
+        const response = event.value;
+        const text = response.candidates?.[0]?.content?.parts
+          ?.filter((p) => !(p as Record<string, unknown>)['thought'])
+          .map((p) => p.text ?? '')
+          .join('');
+        if (text) fullText += text;
+        if (response.usageMetadata)
+          usage = extractQueryUsage(response.usageMetadata);
+      }
+
+      const trimmed = fullText.trim() || null;
+      let jsonResult: Record<string, unknown> | undefined;
+      if (jsonSchema && trimmed) {
+        try {
+          jsonResult = JSON.parse(trimmed) as Record<string, unknown>;
+        } catch {
+          // non-JSON response despite schema constraint — treat as text
+        }
+      }
+
+      return { text: trimmed, jsonResult, usage };
+    });
   }
 
   // ── AgentHeadless path ────────────────────────────────────────────────────
-  const yoloConfig = createYoloConfig(params.config);
+  // `createApprovalModeOverride` rebuilds the tool registry on the YOLO
+  // wrapper Config so core file tools (`EditTool` / `WriteFileTool` /
+  // `ReadFileTool`) resolve `this.config` to the wrapper, not to the
+  // parent. Without that rebuild the YOLO override is silently ignored
+  // on the bound-tool path (parent's pre-bound tool instances keep
+  // reading the parent's approval mode), and the wrapper's own
+  // `FileReadCache` lazy-init is bypassed too.
+  //
+  // Consumers that pre-wrap with `createMemoryScopedAgentConfig`
+  // (memory extraction / dream agent) compose correctly: the YOLO
+  // wrapper's bound tools resolve `this.config.getPermissionManager()`
+  // through the prototype chain to the scoped wrapper's own override,
+  // while `this.config.getApprovalMode()` lands on YOLO.
+  const { config: yoloConfig, cleanup: restoreParentPM } =
+    await createApprovalModeOverride(params.config, ApprovalMode.YOLO);
+  // YOLO never triggers strip → restoreParentPM is a no-op. Kept for
+  // API symmetry with the other createApprovalModeOverride callers; if
+  // this function ever switches away from YOLO the lifecycle stays
+  // correct without further refactor.
   const filesTouched = new Set<string>();
 
   const emitter = new AgentEventEmitter();
@@ -390,9 +495,15 @@ export async function runForkedAgent(
     systemPrompt: params.systemPrompt,
     initialMessages: params.extraHistory,
   };
+  const modelSelector =
+    params.model ?? params.config.getFastModel?.() ?? params.config.getModel();
+  const modelRuntime = await buildForkedModelRuntime(
+    params.config,
+    yoloConfig,
+    modelSelector,
+  );
   const modelConfig: ModelConfig = {
-    model:
-      params.model ?? params.config.getFastModel() ?? params.config.getModel(),
+    model: modelRuntime.model,
   };
   const runConfig: RunConfig = {
     max_turns: params.maxTurns,
@@ -401,47 +512,63 @@ export async function runForkedAgent(
   const toolConfig: ToolConfig | undefined =
     params.tools !== undefined ? { tools: params.tools } : undefined;
 
-  const headless = await AgentHeadless.create(
-    params.name,
-    yoloConfig,
-    promptConfig,
-    modelConfig,
-    runConfig,
-    toolConfig,
-    emitter,
-  );
+  try {
+    const headless = await AgentHeadless.create(
+      params.name,
+      yoloConfig,
+      promptConfig,
+      modelConfig,
+      runConfig,
+      toolConfig,
+      emitter,
+      undefined,
+      modelRuntime.runtimeView,
+    );
 
-  const context = new ContextState();
-  context.set('task_prompt', params.taskPrompt);
-  await headless.execute(context, params.abortSignal);
+    const context = new ContextState();
+    context.set('task_prompt', params.taskPrompt);
+    await runWithForkedModelRuntime(modelRuntime, async () => {
+      await headless.execute(context, params.abortSignal);
+    });
 
-  const terminateReason = headless.getTerminateMode();
-  const finalText = headless.getFinalText() || undefined;
-  const touched = [...filesTouched];
+    const terminateReason = headless.getTerminateMode();
+    const finalText = headless.getFinalText() || undefined;
+    const touched = [...filesTouched];
 
-  if (terminateReason === AgentTerminateMode.CANCELLED) {
+    if (terminateReason === AgentTerminateMode.CANCELLED) {
+      return {
+        status: 'cancelled',
+        terminateReason,
+        finalText,
+        filesTouched: touched,
+      };
+    }
+    if (
+      terminateReason === AgentTerminateMode.ERROR ||
+      terminateReason === AgentTerminateMode.TIMEOUT
+    ) {
+      return {
+        status: 'failed',
+        terminateReason,
+        finalText,
+        filesTouched: touched,
+      };
+    }
     return {
-      status: 'cancelled',
+      status: 'completed',
       terminateReason,
       finalText,
       filesTouched: touched,
     };
+  } finally {
+    // Release the per-fork ToolRegistry so AgentTool / SkillTool
+    // instances dispose their change-listeners on shared
+    // SubagentManager / SkillManager. Same shape as the spawn-path
+    // finallys in `agent.ts` and `background-agent-resume.ts`.
+    void yoloConfig
+      .getToolRegistry()
+      .stop()
+      .catch(() => {});
+    restoreParentPM();
   }
-  if (
-    terminateReason === AgentTerminateMode.ERROR ||
-    terminateReason === AgentTerminateMode.TIMEOUT
-  ) {
-    return {
-      status: 'failed',
-      terminateReason,
-      finalText,
-      filesTouched: touched,
-    };
-  }
-  return {
-    status: 'completed',
-    terminateReason,
-    finalText,
-    filesTouched: touched,
-  };
 }

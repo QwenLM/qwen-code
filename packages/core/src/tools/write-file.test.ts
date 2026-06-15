@@ -28,6 +28,7 @@ import { GeminiClient } from '../core/client.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const rootDir = path.resolve(os.tmpdir(), 'qwen-code-test-root');
 
@@ -39,6 +40,7 @@ let mockGeminiClientInstance: Mocked<GeminiClient>;
 // Mock Config
 const fsService = new StandardFileSystemService();
 const fileReadCache = new FileReadCache();
+const mockFileHistoryService = { trackEdit: vi.fn() };
 const mockConfigInternal = {
   getTargetDir: () => rootDir,
   getProjectRoot: () => rootDir,
@@ -71,6 +73,7 @@ const mockConfigInternal = {
   getDefaultFileEncoding: () => 'utf-8',
   getFileReadCache: () => fileReadCache,
   getFileReadCacheDisabled: () => false,
+  getFileHistoryService: () => mockFileHistoryService,
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -350,6 +353,7 @@ describe('WriteFileTool', () => {
       expect(result.llmContent).toMatch(
         /Successfully created and wrote to new file/,
       );
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       expect(fs.existsSync(filePath)).toBe(true);
       const { content: writtenContent } = await fsService.readTextFile({
         path: filePath,
@@ -362,6 +366,107 @@ describe('WriteFileTool', () => {
       expect(display.fileDiff).toMatch(
         proposedContent.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&'),
       );
+    });
+
+    // trackEdit is best-effort: a FileHistoryService failure (disk full,
+    // permissions, corrupted state) must never break the write_file tool.
+    it('completes the write even when trackEdit throws', async () => {
+      const filePath = path.join(rootDir, 'write_when_trackedit_fails.txt');
+      const proposedContent = 'Content that survives trackEdit failure.';
+      mockFileHistoryService.trackEdit.mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      const params = { file_path: filePath, content: proposedContent };
+      const invocation = tool.build(params);
+
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
+      if (
+        typeof confirmDetails === 'object' &&
+        'onConfirm' in confirmDetails &&
+        confirmDetails.onConfirm
+      ) {
+        await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+
+      const result = await invocation.execute(abortSignal);
+
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      expect(result.llmContent).toMatch(
+        /Successfully created and wrote to new file/,
+      );
+      expect(fs.existsSync(filePath)).toBe(true);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
+      expect(writtenContent).toBe(proposedContent);
+    });
+
+    // Pin the upstream-aligned ordering: trackEdit MUST run before the
+    // pre-write checkPriorRead. The upstream `claude-code/src/tools/
+    // FileEditTool` comment on the equivalent block says:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // Without this ordering the multi-hundred-ms `trackEdit` sat
+    // between checkPriorRead and writeTextFile, widening the
+    // already-acknowledged stat-then-write race window.
+    //
+    // Test strategy: install a `trackEdit` mock that mutates the file
+    // on disk before returning. That mutation must be detected by the
+    // pre-write `checkPriorRead`. That only happens if `trackEdit`
+    // runs BEFORE the pre-write check — the broken ordering would run
+    // the pre-write check first (passing on pre-mutation stats), then
+    // trackEdit (which mutates), then write (which clobbers the
+    // external mutation silently).
+    //
+    // Asserting on `result.error` directly tests the behavioral
+    // invariant rather than the call-ordering proxy, so it survives
+    // future refactors that preserve the invariant even if they shift
+    // the number of `cache.check` calls.
+    it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
+      const filePath = path.join(rootDir, 'toctou_ordering.txt');
+      const initialContent = 'pre-existing content';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: true,
+        cacheable: true,
+      });
+
+      mockFileHistoryService.trackEdit.mockImplementation(async () => {
+        // Simulate an external write that lands while trackEdit is
+        // copying the file. Bumping mtime by 5 s makes the change
+        // reliably "newer" under the cache's ~1 s comparison
+        // granularity on macOS.
+        const newTime = new Date(Date.now() + 5000);
+        fs.utimesSync(filePath, newTime, newTime);
+      });
+
+      const params = { file_path: filePath, content: 'new content' };
+      const invocation = tool.build(params);
+
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
+      if (
+        typeof confirmDetails === 'object' &&
+        'onConfirm' in confirmDetails &&
+        confirmDetails.onConfirm
+      ) {
+        await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+      const result = await invocation.execute(abortSignal);
+
+      // trackEdit must have actually fired.
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      // The pre-write check must have caught the in-trackEdit mutation
+      // and rejected, proving trackEdit ran BEFORE the pre-write check.
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      // The file on disk is unchanged (rejected, not overwritten).
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
     });
 
     it('should overwrite an existing file and return diff', async () => {
@@ -826,6 +931,79 @@ describe('WriteFileTool', () => {
     });
   });
 
+  // Same as edit.test's wiring guard: the WriteFileTool feeds the
+  // commit-attribution singleton on success. The recordEdit call
+  // distinguishes a true file creation (`null` old content) from
+  // overwriting an existing empty file (`''` old content); these
+  // tests pin both shapes so the distinction can't drift silently.
+  describe('commit-attribution wiring', () => {
+    const abortSignal = new AbortController().signal;
+
+    beforeEach(() => {
+      CommitAttributionService.resetInstance();
+    });
+
+    it('records AI-originated writes in the attribution service', async () => {
+      const filePath = path.join(rootDir, 'attr_write.txt');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'fresh content',
+      });
+      await invocation.execute(abortSignal);
+
+      const attribution =
+        CommitAttributionService.getInstance().getFileAttribution(filePath);
+      expect(attribution).toBeDefined();
+      expect(attribution!.aiContribution).toBeGreaterThan(0);
+      // A truly new file should be flagged so deletions later in the
+      // session can be reconciled.
+      expect(attribution!.aiCreated).toBe(true);
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('skips attribution when modified_by_user', async () => {
+      const filePath = path.join(rootDir, 'attr_skip.txt');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'human-edited',
+        modified_by_user: true,
+      });
+      await invocation.execute(abortSignal);
+
+      expect(
+        CommitAttributionService.getInstance().getFileAttribution(filePath),
+      ).toBeUndefined();
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('marks aiCreated=false when overwriting an existing empty file', async () => {
+      const filePath = path.join(rootDir, 'attr_existing_empty.txt');
+      // Create an empty file first — the distinction we're guarding
+      // is that overwriting an empty existing file should NOT be
+      // counted as a creation, even though both old contents are
+      // length-0.
+      fs.writeFileSync(filePath, '', 'utf8');
+      // Prior-read enforcement (origin/main #3774) requires the file
+      // to have been Read before WriteFile can overwrite it.
+      seedPriorRead(filePath);
+
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'overwrite content',
+      });
+      await invocation.execute(abortSignal);
+
+      const attribution =
+        CommitAttributionService.getInstance().getFileAttribution(filePath);
+      expect(attribution).toBeDefined();
+      expect(attribution!.aiCreated).toBe(false);
+
+      fs.unlinkSync(filePath);
+    });
+  });
+
   describe('prior-read enforcement', () => {
     const abortSignal = new AbortController().signal;
 
@@ -843,7 +1021,7 @@ describe('WriteFileTool', () => {
 
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
       expect(result.error?.message).toMatch(
-        /has not been fully read in this session/,
+        /has not been read in this session/,
       );
       // File must remain at its pre-call content, and the tool must
       // not have slurped the existing bytes into memory before
@@ -855,7 +1033,18 @@ describe('WriteFileTool', () => {
       fs.unlinkSync(filePath);
     });
 
-    it('rejects a write when the previous read was ranged (offset/limit)', async () => {
+    it('allows a write after a ranged (offset/limit) read', async () => {
+      // Aligns WriteFile with EditTool and Claude Code's
+      // `readFileState`: any prior read clears enforcement. The
+      // earlier asymmetric stance (full read required for
+      // overwrite, partial OK for Edit) created a deadlock on
+      // files larger than the truncate-tool-output limit, where
+      // `read_file` without offset/limit still produced a
+      // truncated read and there was no way to satisfy the
+      // "fully read" precondition (issue #3945). The mtime/size
+      // drift check is the gate that distinguishes "model has
+      // seen current bytes" from "model has seen older bytes",
+      // and it fires identically for Edit and WriteFile.
       const filePath = path.join(rootDir, 'enforce-ranged.txt');
       fs.writeFileSync(filePath, 'unchanged', 'utf-8');
       const stats = fs.statSync(filePath);
@@ -867,8 +1056,49 @@ describe('WriteFileTool', () => {
       const result = await tool
         .build({ file_path: filePath, content: 'clobber' })
         .execute(abortSignal);
-      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
-      expect(fs.readFileSync(filePath, 'utf-8')).toBe('unchanged');
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('clobber');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('allows a write after a truncated full read (issue #3945 deadlock fix)', async () => {
+      // Pre-fix, a `read_file` without offset/limit on a file larger
+      // than the truncate-tool-output limit recorded
+      // `lastReadWasFull: false` (the model only saw the head), and
+      // WriteFile's `requireFullRead: true` rejected the follow-up
+      // overwrite with "only been partially read … re-read without
+      // offset / limit / pages" — but a re-read produces the same
+      // truncated state, deadlocking the user. After dropping
+      // `requireFullRead` (aligning with Claude Code), the truncated
+      // read is enough to clear enforcement; the mtime/size drift
+      // check remains the gate that distinguishes "model saw current
+      // bytes" from "model saw older bytes".
+      //
+      // Coverage split: this test seeds the cache directly (mockConfig
+      // here lacks the `getFileService` / `getTruncateToolOutputLines`
+      // / `getTruncateToolOutputThreshold` / `getContentGeneratorConfig`
+      // wiring ReadFileTool needs). The matching ReadFile-side coverage
+      // that *produces* `{ full: false, cacheable: true }` for a
+      // truncated full read lives in read-file.test.ts under "records
+      // truncated full reads with lastReadCacheable=true (issue #3964)".
+      // A future cache-entry schema change must update both halves to
+      // keep the deadlock-free guarantee end-to-end.
+      const filePath = path.join(rootDir, 'enforce-truncated-full.txt');
+      fs.writeFileSync(filePath, 'unchanged', 'utf-8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        // `full: false` is what a truncated full read records
+        // (read-file.ts: `full: isFullRead && !result.isTruncated`).
+        full: false,
+        cacheable: true,
+      });
+
+      const result = await tool
+        .build({ file_path: filePath, content: 'rewritten' })
+        .execute(abortSignal);
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('rewritten');
 
       fs.unlinkSync(filePath);
     });
@@ -886,6 +1116,7 @@ describe('WriteFileTool', () => {
         .build({ file_path: filePath, content: 'clobber' })
         .execute(abortSignal);
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(result.error?.message).toContain('notebook_edit');
       // Verb in the dead-end guidance must read correctly for
       // overwrite (the WriteFile path), not "edit".
       expect(result.error?.message).toMatch(/if you need to overwrite it\./);
@@ -938,7 +1169,7 @@ describe('WriteFileTool', () => {
       });
       await expect(
         invocation.getConfirmationDetails(abortSignal),
-      ).rejects.toThrow(/has not been fully read in this session/);
+      ).rejects.toThrow(/has not been read in this session/);
 
       fs.unlinkSync(filePath);
     });

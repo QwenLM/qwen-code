@@ -9,8 +9,14 @@ import {
   parseSkillContent,
   loadSkillsFromDir,
   validateConfig,
+  parsePriorityField,
+  normalizeSkillPriority,
 } from './skill-load.js';
-import { parseModelField, parsePathsField } from './types.js';
+import {
+  parseModelField,
+  parsePathsField,
+  parseUserInvocableField,
+} from './types.js';
 import * as fs from 'fs/promises';
 
 // Mock file system operations
@@ -48,6 +54,13 @@ describe('skill-load', () => {
           name: 'test-skill',
           description: 'A test skill',
           'argument-hint': '[topic]',
+        };
+      }
+      if (yamlString.includes('priority:')) {
+        return {
+          name: 'test-skill',
+          description: 'A test skill',
+          priority: yamlString.includes('priority: 25') ? 25 : true,
         };
       }
       // Default case
@@ -196,6 +209,60 @@ Skill body.
       expect(config.argumentHint).toBe('[topic]');
     });
 
+    it('should parse numeric priority from frontmatter', () => {
+      const markdownWithPriority = `---
+name: test-skill
+description: A test skill
+priority: 25
+---
+
+Body.
+`;
+
+      const config = parseSkillContent(markdownWithPriority, testFilePath);
+
+      expect(config.priority).toBe(25);
+    });
+
+    it('should ignore invalid priority values without dropping the skill', () => {
+      const markdownWithInvalidPriority = `---
+name: test-skill
+description: A test skill
+priority: true
+---
+
+Body.
+`;
+
+      const config = parseSkillContent(
+        markdownWithInvalidPriority,
+        testFilePath,
+      );
+
+      expect(config.priority).toBeUndefined();
+    });
+
+    it('should parse user-invocable from frontmatter', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-skill',
+        description: 'A test skill',
+        'user-invocable': false,
+      });
+
+      const markdown = `---
+name: test-skill
+description: A test skill
+user-invocable: false
+---
+
+Skill body.
+`;
+
+      const config = parseSkillContent(markdown, testFilePath);
+
+      expect(config.userInvocable).toBe(false);
+    });
+
     it('should throw error for invalid format without frontmatter', () => {
       const invalidMarkdown = `# Just a heading
 Some content without frontmatter.
@@ -296,17 +363,12 @@ Valid skill.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // realpath stays within baseDir (in-tree symlink, e.g. user
-      // symlinks one skill directory to another in the same tree).
-      // Use mockImplementation so realpath(baseDir) returns the base
-      // (canonicalization-of-base is now part of the scope check) and
-      // realpath(skillDir) returns the in-tree target.
-      vi.mocked(fs.realpath).mockImplementation((p) => {
-        const s = String(p);
-        if (s === testBaseDir) return Promise.resolve(testBaseDir);
-        return Promise.resolve(`${testBaseDir}/symlinked-skill`);
-      });
-      // stat resolves to a directory (symlink target)
+      // Symlink target — realpath returns wherever the link points.
+      // Out-of-tree targets are allowed (the supported user workflow
+      // is symlinking into ~/.qwen/skills/ from a separate repo).
+      vi.mocked(fs.realpath).mockResolvedValue(
+        '/elsewhere/skills-repo/symlinked-skill',
+      );
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
       } as unknown as Awaited<ReturnType<typeof fs.stat>>);
@@ -322,7 +384,6 @@ Symlinked skill body.
 
       const skills = await loadSkillsFromDir(testBaseDir);
 
-      // Skill is loaded from the symlinked directory.
       expect(skills).toHaveLength(1);
     });
 
@@ -336,11 +397,9 @@ Symlinked skill body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      vi.mocked(fs.realpath).mockImplementation((p) => {
-        const s = String(p);
-        if (s === testBaseDir) return Promise.resolve(testBaseDir);
-        return Promise.resolve(`${testBaseDir}/file-symlink`);
-      });
+      vi.mocked(fs.realpath).mockResolvedValue(
+        '/elsewhere/skills-repo/some-file',
+      );
       // stat resolves to a file (not a directory)
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => false,
@@ -361,94 +420,15 @@ Symlinked skill body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // realpath(baseDir) succeeds (the directory itself is fine);
-      // realpath(symlink target) throws because the link is broken.
-      vi.mocked(fs.realpath).mockImplementation((p) => {
-        const s = String(p);
-        if (s === testBaseDir) return Promise.resolve(testBaseDir);
-        return Promise.reject(new Error('ENOENT: no such file or directory'));
-      });
+      // realpath on the dangling link throws ENOENT; the entry is
+      // skipped with an `invalid` reason.
+      vi.mocked(fs.realpath).mockRejectedValue(
+        new Error('ENOENT: no such file or directory'),
+      );
 
       const skills = await loadSkillsFromDir(testBaseDir);
 
       expect(skills).toHaveLength(0);
-    });
-
-    it('should skip symlinks that escape baseDir (prevents arbitrary-skill-load attack)', async () => {
-      // Regression: an attacker who can write a symlink into a skills
-      // directory (shared monorepo, compromised extension) could load
-      // arbitrary skill content from outside the tree, including hooks
-      // that execute shell commands. The realpath scope check rejects
-      // symlinks whose target falls outside `baseDir`.
-      vi.mocked(fs.readdir).mockResolvedValue([
-        {
-          name: 'escape-symlink',
-          isDirectory: () => false,
-          isFile: () => false,
-          isSymbolicLink: () => true,
-        },
-      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
-
-      // realpath(baseDir) → baseDir; realpath(symlink) → outside-tree
-      // target. Both sides canonicalized so path.relative works as
-      // expected — substring/prefix checks would have an open ambiguity
-      // when baseDir happens to share a prefix with the escape target.
-      vi.mocked(fs.realpath).mockImplementation((p) => {
-        const s = String(p);
-        if (s === testBaseDir) return Promise.resolve(testBaseDir);
-        return Promise.resolve('/etc/cron.d/payload');
-      });
-      vi.mocked(fs.stat).mockResolvedValue({
-        isDirectory: () => true,
-      } as unknown as Awaited<ReturnType<typeof fs.stat>>);
-      vi.mocked(fs.access).mockResolvedValue(undefined);
-      vi.mocked(fs.readFile).mockResolvedValue(`---
-name: hijacked
-description: Should never load
----
-
-malicious body
-`);
-
-      const skills = await loadSkillsFromDir(testBaseDir);
-      expect(skills).toHaveLength(0);
-    });
-
-    it('should accept in-tree symlinks where the target lives in a subdirectory of baseDir', async () => {
-      // Regression for shared-helper realpath-base check on Windows-ish
-      // canonicalization differences: realpath(base) and realpath(target)
-      // must compose via path.relative, so any in-tree target sitting
-      // under a subdirectory must still pass containment. Asserts on
-      // count + body presence rather than name because the YAML parser
-      // here is mocked to a fixed default (name: test-skill).
-      vi.mocked(fs.readdir).mockResolvedValue([
-        {
-          name: 'nested-symlink',
-          isDirectory: () => false,
-          isFile: () => false,
-          isSymbolicLink: () => true,
-        },
-      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
-
-      vi.mocked(fs.realpath).mockImplementation((p) => {
-        const s = String(p);
-        if (s === testBaseDir) return Promise.resolve(testBaseDir);
-        return Promise.resolve(`${testBaseDir}/inner/dir/nested-skill`);
-      });
-      vi.mocked(fs.stat).mockResolvedValue({
-        isDirectory: () => true,
-      } as unknown as Awaited<ReturnType<typeof fs.stat>>);
-      vi.mocked(fs.access).mockResolvedValue(undefined);
-      vi.mocked(fs.readFile).mockResolvedValue(`---
-name: test-skill
-description: Nested in-tree symlink target
----
-
-body
-`);
-
-      const skills = await loadSkillsFromDir(testBaseDir);
-      expect(skills).toHaveLength(1);
     });
   });
 
@@ -507,6 +487,20 @@ body
       expect(result.isValid).toBe(true);
       expect(result.warnings).toContain('Skill body is empty');
     });
+
+    it('should return error for invalid priority', () => {
+      const config = {
+        name: 'test-skill',
+        description: 'A test skill',
+        body: 'Skill body',
+        priority: Number.NaN,
+      };
+
+      const result = validateConfig(config);
+
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain('"priority" must be a finite number');
+    });
   });
 
   describe('parseModelField', () => {
@@ -546,6 +540,28 @@ body
     it('should treat "inherit" case-sensitively', () => {
       expect(parseModelField({ model: 'Inherit' })).toBe('Inherit');
       expect(parseModelField({ model: 'INHERIT' })).toBe('INHERIT');
+    });
+  });
+
+  describe('parseUserInvocableField', () => {
+    it('returns undefined when user-invocable is omitted', () => {
+      expect(parseUserInvocableField({})).toBeUndefined();
+    });
+
+    it('parses boolean and string values', () => {
+      expect(parseUserInvocableField({ 'user-invocable': true })).toBe(true);
+      expect(parseUserInvocableField({ 'user-invocable': false })).toBe(false);
+      expect(parseUserInvocableField({ 'user-invocable': 'true' })).toBe(true);
+      expect(parseUserInvocableField({ 'user-invocable': 'false' })).toBe(
+        false,
+      );
+    });
+
+    it('ignores invalid values so the default remains user-invocable', () => {
+      expect(
+        parseUserInvocableField({ 'user-invocable': 'no' }),
+      ).toBeUndefined();
+      expect(parseUserInvocableField({ 'user-invocable': 0 })).toBeUndefined();
     });
   });
 
@@ -714,6 +730,19 @@ body
       expect(config.paths).toEqual(['src/**/*.ts']);
     });
 
+    it('extracts user-invocable', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'model-only-helper',
+        description: 'Model-only helper',
+        'user-invocable': false,
+      });
+      const config = parseSkillContent(
+        `---\nname: model-only-helper\ndescription: Model-only helper\nuser-invocable: false\n---\n\nBody.\n`,
+        '/test/extension/skills/model-only-helper/SKILL.md',
+      );
+      expect(config.userInvocable).toBe(false);
+    });
+
     it('extracts when_to_use', () => {
       mockParseYaml.mockReturnValueOnce({
         name: 'tsx-helper',
@@ -741,6 +770,19 @@ body
         '/test/extension/skills/tsx-helper/SKILL.md',
       );
       expect(config.skillRoot).toBe('/test/extension/skills/tsx-helper');
+    });
+
+    it('extracts priority', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'priority-helper',
+        description: 'Priority helper',
+        priority: 10,
+      });
+      const config = parseSkillContent(
+        `---\nname: priority-helper\ndescription: Priority helper\npriority: 10\n---\n\nBody.\n`,
+        '/test/extension/skills/priority-helper/SKILL.md',
+      );
+      expect(config.priority).toBe(10);
     });
   });
 
@@ -789,6 +831,94 @@ body
       );
 
       expect(config.model).toBeUndefined();
+    });
+  });
+
+  // Direct unit tests for the exported priority helpers. The behavior is
+  // also exercised end-to-end via parseSkillContent and listSkills, but
+  // those paths can't surface single-input regressions cleanly — e.g. a
+  // future change that accepts numeric strings, swallows Infinity, or
+  // mishandles -0 wouldn't necessarily fail the integration tests.
+  describe('parsePriorityField', () => {
+    const filePath = '/test/skill/SKILL.md';
+
+    it('returns undefined when the field is omitted', () => {
+      expect(parsePriorityField({}, filePath)).toBeUndefined();
+    });
+
+    it('returns undefined when the field is null or empty string', () => {
+      expect(parsePriorityField({ priority: null }, filePath)).toBeUndefined();
+      expect(parsePriorityField({ priority: '' }, filePath)).toBeUndefined();
+    });
+
+    it('accepts finite positive, zero, and negative numbers verbatim', () => {
+      expect(parsePriorityField({ priority: 0 }, filePath)).toBe(0);
+      expect(parsePriorityField({ priority: 42 }, filePath)).toBe(42);
+      expect(parsePriorityField({ priority: -5 }, filePath)).toBe(-5);
+      expect(parsePriorityField({ priority: 1.5 }, filePath)).toBe(1.5);
+    });
+
+    it('rejects booleans (regression guard for the old Number() coercion)', () => {
+      // Number(true) === 1, Number(false) === 0 — both pass isFinite, so a
+      // pre-fix implementation would have silently accepted these.
+      expect(parsePriorityField({ priority: true }, filePath)).toBeUndefined();
+      expect(parsePriorityField({ priority: false }, filePath)).toBeUndefined();
+    });
+
+    it('rejects strings, including numeric-looking strings', () => {
+      expect(
+        parsePriorityField({ priority: 'high' }, filePath),
+      ).toBeUndefined();
+      // Numeric-looking string: the YAML parser already produces a number
+      // for `priority: 5`, so we deliberately do not paper over the case
+      // where a string somehow reaches here.
+      expect(parsePriorityField({ priority: '5' }, filePath)).toBeUndefined();
+    });
+
+    it('rejects NaN and Infinity', () => {
+      expect(
+        parsePriorityField({ priority: Number.NaN }, filePath),
+      ).toBeUndefined();
+      expect(
+        parsePriorityField({ priority: Number.POSITIVE_INFINITY }, filePath),
+      ).toBeUndefined();
+      expect(
+        parsePriorityField({ priority: Number.NEGATIVE_INFINITY }, filePath),
+      ).toBeUndefined();
+    });
+
+    it('rejects objects and arrays', () => {
+      expect(
+        parsePriorityField({ priority: { level: 1 } }, filePath),
+      ).toBeUndefined();
+      expect(parsePriorityField({ priority: [1] }, filePath)).toBeUndefined();
+    });
+  });
+
+  describe('normalizeSkillPriority', () => {
+    it('returns finite numbers verbatim, including 0 and negatives', () => {
+      expect(normalizeSkillPriority(0)).toBe(0);
+      expect(normalizeSkillPriority(42)).toBe(42);
+      expect(normalizeSkillPriority(-5)).toBe(-5);
+      expect(normalizeSkillPriority(1.5)).toBe(1.5);
+    });
+
+    it('coerces undefined, null, and non-finite numbers to 0', () => {
+      expect(normalizeSkillPriority(undefined)).toBe(0);
+      expect(normalizeSkillPriority(null)).toBe(0);
+      expect(normalizeSkillPriority(Number.NaN)).toBe(0);
+      expect(normalizeSkillPriority(Number.POSITIVE_INFINITY)).toBe(0);
+      expect(normalizeSkillPriority(Number.NEGATIVE_INFINITY)).toBe(0);
+    });
+
+    it('coerces non-number types to 0 (defends the sort comparator)', () => {
+      // The sort comparator computes `b - a`. If any value here returned
+      // NaN, the comparator would return NaN and the result order would be
+      // implementation-defined.
+      expect(normalizeSkillPriority('high')).toBe(0);
+      expect(normalizeSkillPriority(true)).toBe(0);
+      expect(normalizeSkillPriority({})).toBe(0);
+      expect(normalizeSkillPriority([5])).toBe(0);
     });
   });
 });

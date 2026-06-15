@@ -6,26 +6,27 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { homedir } from 'node:os';
 import {
+  atomicWriteFileSync,
   FatalConfigError,
   getErrorMessage,
   isWithinRoot,
   ideContextStore,
+  Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
 import stripJsonComments from 'strip-json-comments';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
-export const SETTINGS_DIRECTORY_NAME = '.qwen';
-export const USER_SETTINGS_DIR = path.join(homedir(), SETTINGS_DIRECTORY_NAME);
 
 export function getTrustedFoldersPath(): string {
   if (process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']) {
     return process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
   }
-  return path.join(USER_SETTINGS_DIR, TRUSTED_FOLDERS_FILENAME);
+  // Resolve lazily on every call: see settings.ts:getUserSettingsPath for why
+  // a top-level const would be stale after `preResolveHomeEnvOverrides()`.
+  return path.join(Storage.getGlobalQwenDir(), TRUSTED_FOLDERS_FILENAME);
 }
 
 export enum TrustLevel {
@@ -179,10 +180,16 @@ export function saveTrustedFolders(
       fs.mkdirSync(dirPath, { recursive: true });
     }
 
-    fs.writeFileSync(
+    atomicWriteFileSync(
       trustedFoldersFile.path,
       JSON.stringify(trustedFoldersFile.config, null, 2),
-      { encoding: 'utf-8', mode: 0o600 },
+      // noFollow: refuse to follow any pre-placed symlink at the
+      // config path — a redirected write could either leak the
+      // trusted-folder list to an attacker target or leave the user's
+      // real config silently stale. Matches the credential write
+      // sites' security posture (sharedTokenManager, oauth-token-storage,
+      // file-token-storage all use noFollow:true).
+      { encoding: 'utf-8', mode: 0o600, forceMode: true, noFollow: true },
     );
   } catch (error) {
     writeStderrLine('Error saving trusted folders file.');

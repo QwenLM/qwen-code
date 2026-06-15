@@ -6,10 +6,51 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  BACKGROUND_AGENT_CONCURRENCY_ENV,
   BackgroundTaskRegistry,
+  DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS,
+  MAX_CONCURRENT_BACKGROUND_AGENTS,
+  MAX_RETAINED_TERMINAL_AGENTS,
+  resolveMaxConcurrentBackgroundAgents,
+  type AgentTaskRegistration,
+  type BackgroundApproval,
   type BackgroundTaskEntry,
 } from './background-tasks.js';
 import * as transcript from './agent-transcript.js';
+import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
+import { ToolConfirmationOutcome } from '../tools/tools.js';
+
+function makeApproval(
+  callId: string,
+  respond: BackgroundApproval['respond'] = vi.fn(async () => {}),
+): BackgroundApproval {
+  return {
+    callId,
+    name: 'Shell',
+    description: `run ${callId}`,
+    confirmationDetails: {
+      type: 'exec',
+    } as BackgroundApproval['confirmationDetails'],
+    respond,
+    at: Date.now(),
+  };
+}
+
+function makeRegistration(
+  agentId: string,
+  overrides: Partial<AgentTaskRegistration> = {},
+): AgentTaskRegistration {
+  return {
+    agentId,
+    description: agentId,
+    status: 'running',
+    startTime: Date.now(),
+    abortController: new AbortController(),
+    isBackgrounded: true,
+    outputFile: `/tmp/${agentId}.jsonl`,
+    ...overrides,
+  };
+}
 
 describe('BackgroundTaskRegistry', () => {
   let registry: BackgroundTaskRegistry;
@@ -25,6 +66,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running' as const,
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     };
 
     registry.register(entry);
@@ -41,6 +84,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.complete('test-1', 'The result text');
@@ -69,6 +114,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.fail('test-1', 'Something went wrong');
@@ -97,6 +144,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController,
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.cancel('test-1');
@@ -118,6 +167,8 @@ describe('BackgroundTaskRegistry', () => {
         startTime: Date.now(),
         abortController: new AbortController(),
         metaPath: '/tmp/test-1.meta.json',
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
 
       registry.cancel('test-1');
@@ -146,6 +197,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
 
       registry.cancel('test-1');
@@ -177,6 +230,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
 
       registry.cancel('test-1');
@@ -204,6 +259,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.cancel('test-1');
@@ -227,6 +284,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.cancel('test-1');
@@ -251,6 +310,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController,
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.complete('test-1', 'done');
@@ -270,6 +331,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.abandon('paused-1');
@@ -279,6 +342,30 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
+  it('abandons a paused agent and rejects parked approvals', () => {
+    const respond = vi.fn(async () => {});
+
+    registry.register({
+      agentId: 'paused-approval',
+      description: 'paused agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+    registry.addPendingApproval(
+      'paused-approval',
+      makeApproval('c1', respond),
+    );
+    registry.get('paused-approval')!.status = 'paused';
+
+    registry.abandon('paused-approval');
+
+    expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    expect(registry.getPendingApprovals('paused-approval')).toEqual([]);
+  });
+
   it('does not treat paused entries as unfinalized work', () => {
     registry.register({
       agentId: 'paused-1',
@@ -286,6 +373,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     expect(registry.hasUnfinalizedTasks()).toBe(false);
@@ -298,6 +387,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.register({
       agentId: 'b',
@@ -305,6 +396,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.complete('a', 'done');
@@ -312,6 +405,86 @@ describe('BackgroundTaskRegistry', () => {
     const running = registry.getAll().filter((e) => e.status === 'running');
     expect(running).toHaveLength(1);
     expect(running[0].agentId).toBe('b');
+  });
+
+  describe('background concurrency limit', () => {
+    it('resolves the default and env override for the background agent cap', () => {
+      expect(resolveMaxConcurrentBackgroundAgents({})).toBe(
+        DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS,
+      );
+      expect(
+        resolveMaxConcurrentBackgroundAgents({
+          [BACKGROUND_AGENT_CONCURRENCY_ENV]: '3',
+        }),
+      ).toBe(3);
+      expect(
+        resolveMaxConcurrentBackgroundAgents({
+          [BACKGROUND_AGENT_CONCURRENCY_ENV]: '0',
+        }),
+      ).toBe(DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS);
+      expect(MAX_CONCURRENT_BACKGROUND_AGENTS).toBeGreaterThanOrEqual(1);
+    });
+
+    it('rejects new running background agents once the cap is reached', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+
+      registry.register(makeRegistration('bg-1'));
+      registry.register(makeRegistration('bg-2'));
+
+      expect(() => registry.register(makeRegistration('bg-3'))).toThrow(
+        'Cannot start background agent: maximum concurrent background agents ' +
+          '(2) reached. Stop an existing agent first.',
+      );
+      expect(registry.get('bg-3')).toBeUndefined();
+    });
+
+    it('allows replacing the same running background agent at the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      registry.register(makeRegistration('bg-1'));
+
+      expect(() =>
+        registry.register(
+          makeRegistration('bg-1', {
+            prompt: 'resumed continuation',
+          }),
+        ),
+      ).not.toThrow();
+      expect(registry.get('bg-1')?.prompt).toBe('resumed continuation');
+    });
+
+    it('does not count foreground, paused, or terminal entries toward the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      registry.register(
+        makeRegistration('fg-1', {
+          isBackgrounded: false,
+        }),
+      );
+      registry.register(
+        makeRegistration('paused-1', {
+          status: 'paused',
+        }),
+      );
+
+      registry.register(makeRegistration('bg-1'));
+      expect(() => registry.register(makeRegistration('bg-2'))).toThrow(
+        'maximum concurrent background agents (1) reached',
+      );
+
+      registry.complete('bg-1', 'done');
+      registry.register(makeRegistration('bg-2'));
+
+      expect(registry.get('fg-1')).toBeDefined();
+      expect(registry.get('paused-1')).toBeDefined();
+      expect(registry.get('bg-2')?.status).toBe('running');
+    });
   });
 
   it('aborts all running agents and emits fallback notifications', () => {
@@ -327,6 +500,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: ac1,
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.register({
       agentId: 'b',
@@ -334,6 +509,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: ac2,
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.abortAll();
@@ -358,6 +535,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.abortAll({ notify: false });
@@ -386,6 +565,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
 
       registry.cancel('a');
@@ -410,6 +591,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     expect(registry.hasUnfinalizedTasks()).toBe(true);
 
@@ -428,6 +611,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.register({
       agentId: 'b',
@@ -435,6 +620,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     expect(registry.hasUnfinalizedTasks()).toBe(true);
@@ -459,6 +646,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.cancel('test-1');
@@ -484,6 +673,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.cancel('test-1');
@@ -508,6 +699,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.complete('test-1', 'first');
@@ -524,6 +717,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     // Should not throw
@@ -542,6 +737,8 @@ describe('BackgroundTaskRegistry', () => {
       startTime: Date.now(),
       abortController: new AbortController(),
       toolUseId: 'call-abc-123',
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.complete('test-1', 'done');
@@ -562,6 +759,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.complete('test-1', 'done');
@@ -578,6 +777,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.register({
       agentId: 'b',
@@ -585,6 +786,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.register({
       agentId: 'c',
@@ -592,6 +795,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.complete('a', 'done');
@@ -627,6 +832,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.register({
       agentId: 'b',
@@ -634,6 +841,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.complete('a', 'ok');
     registry.fail('b', 'err');
@@ -659,6 +868,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       }),
     ).not.toThrow();
     expect(registry.get('a')?.status).toBe('running');
@@ -675,6 +886,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     expect(cb).not.toHaveBeenCalled();
@@ -687,6 +900,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     for (let i = 0; i < 7; i++) {
@@ -714,6 +929,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.complete('a', 'done');
@@ -734,6 +951,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     statusCb.mockClear();
     activityCb.mockClear();
@@ -753,6 +972,8 @@ describe('BackgroundTaskRegistry', () => {
       startTime: Date.now(),
       abortController: new AbortController(),
       prompt: 'Run sleep 30 and report done.',
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     expect(registry.get('a')!.prompt).toBe('Run sleep 30 and report done.');
   });
@@ -767,6 +988,8 @@ describe('BackgroundTaskRegistry', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     registry.complete('test-1', 'here is <b>bold</b> & </task-notification>');
@@ -781,6 +1004,122 @@ describe('BackgroundTaskRegistry', () => {
     expect(modelText).toContain('&amp;');
   });
 
+  describe('terminal-entry retention cap', () => {
+    function makeRegisteredEntry(id: string, startTime: number) {
+      return {
+        agentId: id,
+        description: id,
+        status: 'running' as const,
+        startTime,
+        abortController: new AbortController(),
+        outputFile: `/tmp/${id}.jsonl`,
+        isBackgrounded: true,
+      };
+    }
+
+    it('retains only a bounded number of fully-finalized terminal entries', () => {
+      // Register and complete one more entry than the cap allows so
+      // the prune kicks in. Use strictly increasing startTimes so the
+      // synthetic endTimes (Date.now() inside complete) preserve a
+      // deterministic eviction order via the startTime tiebreaker.
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS + 2; i++) {
+        registry.register(makeRegisteredEntry(`a-${i}`, i * 1000));
+        registry.complete(`a-${i}`, 'done');
+      }
+      expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS);
+      // The two oldest (`a-0`, `a-1`) get pruned; the newest survives.
+      expect(registry.get('a-0')).toBeUndefined();
+      expect(registry.get('a-1')).toBeUndefined();
+      expect(
+        registry.get(`a-${MAX_RETAINED_TERMINAL_AGENTS + 1}`),
+      ).toBeDefined();
+    });
+
+    it('never evicts running entries even when terminal entries blow past the cap', () => {
+      // The user's only handle on a live subagent is its row in the
+      // dialog; a prune that drops a running entry would silently
+      // strand work in progress.
+      registry.register(makeRegisteredEntry('live', 1));
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS + 1; i++) {
+        registry.register(makeRegisteredEntry(`done-${i}`, 100 + i * 1000));
+        registry.complete(`done-${i}`, 'done');
+      }
+      // Cap-of-32 terminals + 1 running survivor = 33 entries kept.
+      expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS + 1);
+      expect(registry.get('live')?.status).toBe('running');
+      // The oldest terminal entry is the one evicted.
+      expect(registry.get('done-0')).toBeUndefined();
+    });
+
+    it('never evicts paused entries (recoverable, awaiting resume/abandon)', () => {
+      // Manually plant a paused entry — the registry exposes
+      // abandon/resume but no public "transition to paused" call;
+      // resume restoration on Config init writes paused entries
+      // directly via register().
+      registry.register({
+        agentId: 'paused-1',
+        description: 'paused',
+        status: 'paused',
+        startTime: 1,
+        abortController: new AbortController(),
+        outputFile: '/tmp/paused-1.jsonl',
+        isBackgrounded: true,
+      });
+      // Push terminal entries past the cap so prune is forced to choose
+      // an eviction set.
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS + 1; i++) {
+        registry.register(makeRegisteredEntry(`done-${i}`, 100 + i * 1000));
+        registry.complete(`done-${i}`, 'done');
+      }
+      expect(registry.get('paused-1')?.status).toBe('paused');
+    });
+
+    it('never evicts cancelled-but-not-yet-notified entries', () => {
+      // cancel() flips the entry to cancelled immediately but defers
+      // the terminal task-notification to the natural handler / grace
+      // timer. Pruning here would break the SDK contract that every
+      // register pairs with exactly one terminal task-notification.
+      registry.setNotificationCallback(() => {});
+      registry.register(makeRegisteredEntry('pending-cancel', 1));
+      registry.cancel('pending-cancel');
+      // Push terminal entries past the cap.
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS + 1; i++) {
+        registry.register(makeRegisteredEntry(`done-${i}`, 100 + i * 1000));
+        registry.complete(`done-${i}`, 'done');
+      }
+      // pending-cancel survives because it has notified=false; it's
+      // still owed a terminal notification.
+      expect(registry.get('pending-cancel')?.status).toBe('cancelled');
+      expect(registry.get('pending-cancel')?.notified).toBeFalsy();
+    });
+
+    it('prunes an abandoned (paused → cancelled) entry the same as any other terminal', () => {
+      // abandon() is the only path that flips notified=true on a
+      // previously-paused entry. Make sure the resulting terminal
+      // counts toward the cap so a session that abandons many
+      // paused agents doesn't bypass the retention bound.
+      registry.register({
+        agentId: 'paused-overflow',
+        description: 'paused',
+        status: 'paused',
+        startTime: 1,
+        abortController: new AbortController(),
+        outputFile: '/tmp/paused-overflow.jsonl',
+        isBackgrounded: true,
+      });
+      registry.abandon('paused-overflow');
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS; i++) {
+        registry.register(makeRegisteredEntry(`done-${i}`, 100 + i * 1000));
+        registry.complete(`done-${i}`, 'done');
+      }
+      // After the loop, terminal count = 1 (abandon) + 32 (complete) =
+      // 33, exceeds the cap → oldest evicted. The abandoned entry
+      // (startTime=1, endTime=earliest) is the one evicted.
+      expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS);
+      expect(registry.get('paused-overflow')).toBeUndefined();
+    });
+  });
+
   describe('queueMessage', () => {
     it('queues a message for a running agent', () => {
       registry.register({
@@ -789,6 +1128,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
 
       const result = registry.queueMessage('test-1', 'hello');
@@ -807,6 +1148,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
       registry.complete('test-1', 'done');
 
@@ -822,6 +1165,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
 
       registry.queueMessage('test-1', 'msg-1');
@@ -839,6 +1184,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
 
       expect(registry.drainMessages('test-1')).toEqual([]);
@@ -846,6 +1193,105 @@ describe('BackgroundTaskRegistry', () => {
 
     it('returns empty array for non-existent agent', () => {
       expect(registry.drainMessages('nope')).toEqual([]);
+    });
+  });
+
+  describe('waitForMessages', () => {
+    it('resolves with queued input when a running agent is notified', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
+      });
+
+      const waitPromise = registry.waitForMessages(
+        'test-1',
+        new AbortController().signal,
+      );
+
+      registry.queueExternalInput('test-1', {
+        kind: 'notification',
+        text: '<task-notification>event</task-notification>',
+      });
+
+      await expect(waitPromise).resolves.toEqual([
+        {
+          kind: 'notification',
+          text: '<task-notification>event</task-notification>',
+        },
+      ]);
+      expect(registry.drainMessages('test-1')).toEqual([]);
+    });
+
+    it('resolves empty when the wait signal is aborted', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
+      });
+      const waitAbort = new AbortController();
+      const waitPromise = registry.waitForMessages('test-1', waitAbort.signal);
+
+      waitAbort.abort();
+
+      await expect(waitPromise).resolves.toEqual([]);
+    });
+
+    it('resolves empty if the signal aborts immediately after listener registration', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
+      });
+      let aborted = false;
+      const signal = {
+        get aborted() {
+          return aborted;
+        },
+        addEventListener: vi.fn(() => {
+          aborted = true;
+        }),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+
+      await expect(registry.waitForMessages('test-1', signal)).resolves.toEqual(
+        [],
+      );
+      expect(signal.removeEventListener).toHaveBeenCalled();
+    });
+
+    it('wakes external input waiters without queueing input', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
+      });
+
+      const waitPromise = registry.waitForMessages(
+        'test-1',
+        new AbortController().signal,
+      );
+
+      registry.wakeExternalInputWaiters('test-1');
+
+      await expect(waitPromise).resolves.toEqual([]);
+      expect(registry.drainMessages('test-1')).toEqual([]);
     });
   });
 
@@ -857,6 +1303,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
       registry.register({
         agentId: 'test-2',
@@ -864,6 +1312,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'paused',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
 
       registry.reset();
@@ -884,6 +1334,7 @@ describe('BackgroundTaskRegistry', () => {
         startTime: Date.now(),
         abortController: new AbortController(),
         outputFile: '/tmp/agents/test-1.txt',
+        isBackgrounded: true,
       });
 
       registry.complete('test-1', 'done');
@@ -894,7 +1345,12 @@ describe('BackgroundTaskRegistry', () => {
       );
     });
 
-    it('omits output-file tag when outputFile is not set', () => {
+    it('omits output-file tag when outputFile is empty', () => {
+      // outputFile is mandatory on the contract but a caller may pass an
+      // empty string (e.g. an agent kind that explicitly opts out of disk
+      // persistence). In that case the notification XML should omit the
+      // `<output-file>` tag — model-side parsers shouldn't see a path to
+      // a file that doesn't exist.
       const callback = vi.fn();
       registry.setNotificationCallback(callback);
 
@@ -904,6 +1360,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '',
       });
 
       registry.complete('test-1', 'done');
@@ -921,10 +1379,11 @@ describe('BackgroundTaskRegistry', () => {
       registry.register({
         agentId: 'fg-1',
         description: 'sync agent',
-        flavor: 'foreground',
+        isBackgrounded: false,
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        outputFile: '/tmp/test.jsonl',
       });
 
       registry.complete('fg-1', 'result text');
@@ -945,10 +1404,11 @@ describe('BackgroundTaskRegistry', () => {
       registry.register({
         agentId: 'fg-2',
         description: 'sync agent',
-        flavor: 'foreground',
+        isBackgrounded: false,
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        outputFile: '/tmp/test.jsonl',
       });
 
       registry.fail('fg-2', 'oops');
@@ -960,10 +1420,11 @@ describe('BackgroundTaskRegistry', () => {
       registry.register({
         agentId: 'fg-3',
         description: 'sync agent',
-        flavor: 'foreground',
+        isBackgrounded: false,
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        outputFile: '/tmp/test.jsonl',
       });
 
       // A still-running foreground entry must NOT keep the headless
@@ -983,10 +1444,11 @@ describe('BackgroundTaskRegistry', () => {
         registry.register({
           agentId: 'fg-4',
           description: 'sync agent',
-          flavor: 'foreground',
+          isBackgrounded: false,
           status: 'running',
           startTime: Date.now(),
           abortController: new AbortController(),
+          outputFile: '/tmp/test.jsonl',
         });
 
         registry.cancel('fg-4');
@@ -1006,10 +1468,11 @@ describe('BackgroundTaskRegistry', () => {
       registry.register({
         agentId: 'fg-5',
         description: 'sync agent',
-        flavor: 'foreground',
+        isBackgrounded: false,
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        outputFile: '/tmp/test.jsonl',
       });
       onStatusChange.mockClear();
 
@@ -1026,10 +1489,11 @@ describe('BackgroundTaskRegistry', () => {
       registry.register({
         agentId: 'bg-1',
         description: 'async agent',
-        flavor: 'background',
+        isBackgrounded: true,
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        outputFile: '/tmp/test.jsonl',
       });
 
       expect(() => registry.unregisterForeground('bg-1')).toThrow(
@@ -1057,10 +1521,11 @@ describe('BackgroundTaskRegistry', () => {
       registry.register({
         agentId: 'fg-no-register-cb',
         description: 'sync agent',
-        flavor: 'foreground',
+        isBackgrounded: false,
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        outputFile: '/tmp/test.jsonl',
       });
 
       expect(onRegister).not.toHaveBeenCalled();
@@ -1069,59 +1534,382 @@ describe('BackgroundTaskRegistry', () => {
       registry.register({
         agentId: 'bg-fires-register-cb',
         description: 'async agent',
-        flavor: 'background',
+        isBackgrounded: true,
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        outputFile: '/tmp/test.jsonl',
       });
       expect(onRegister).toHaveBeenCalledTimes(1);
       expect(onRegister.mock.calls[0]![0].agentId).toBe('bg-fires-register-cb');
     });
 
-    it('unregisterForeground emits status change before removing the entry', () => {
-      // Mirrors the ordering used by complete/fail/cancel/finalize so a
-      // statusChange callback that re-reads `registry.get(agentId)` from
-      // inside the callback sees the entry across every terminal path.
+    it('unregisterForeground emits status change after removing the entry', () => {
+      // The entry is deleted from the Map before the status-change callback
+      // fires, so a callback that rebuilds its snapshot via getAll() no
+      // longer includes this entry. This ordering prevents the entry from
+      // lingering in React state with status='running' — the bug that
+      // caused "1 local agent" to stay visible after the foreground agent
+      // completed.
       registry.register({
         agentId: 'fg-unregister-order',
         description: 'sync agent',
-        flavor: 'foreground',
+        isBackgrounded: false,
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        outputFile: '/tmp/test.jsonl',
       });
 
       let observedFromCallback: BackgroundTaskEntry | undefined;
+      let snapshotDuringCallback: BackgroundTaskEntry[] = [];
       registry.setStatusChangeCallback((entry) => {
         if (entry?.agentId === 'fg-unregister-order') {
           observedFromCallback = registry.get(entry.agentId);
+          snapshotDuringCallback = registry.getAll();
         }
       });
 
       registry.unregisterForeground('fg-unregister-order');
 
-      expect(observedFromCallback).toBeDefined();
-      expect(observedFromCallback!.agentId).toBe('fg-unregister-order');
+      // The entry has been deleted before the callback fires, so
+      // registry.get() returns undefined and getAll() omits it.
+      expect(observedFromCallback).toBeUndefined();
+      expect(snapshotDuringCallback).toEqual([]);
       expect(registry.get('fg-unregister-order')).toBeUndefined();
     });
 
-    it('default flavor (absent) behaves as background for emitNotification', () => {
-      // Older callers omit the flavor field. Backwards compatibility:
-      // missing flavor is treated as background everywhere.
+    it('background entries fire a task-notification on complete', () => {
+      // Counterpart to the foreground "does not emit" cases above —
+      // background entries deliver their result through the XML envelope,
+      // so the notification callback must fire on complete.
       const callback = vi.fn();
       registry.setNotificationCallback(callback);
 
       registry.register({
-        agentId: 'legacy-1',
-        description: 'legacy agent',
+        agentId: 'bg-notify-1',
+        description: 'async agent',
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
 
-      registry.complete('legacy-1', 'done');
+      registry.complete('bg-notify-1', 'done');
 
       expect(callback).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('permission bubbling (pending approvals)', () => {
+    it('parks an approval and surfaces it on the entry', () => {
+      const onChange = vi.fn();
+      registry.setApprovalChangeCallback(onChange);
+      registry.register(makeRegistration('bg-appr-1'));
+
+      const ok = registry.addPendingApproval('bg-appr-1', makeApproval('c1'));
+
+      expect(ok).toBe(true);
+      expect(registry.getPendingApprovals('bg-appr-1')).toHaveLength(1);
+      expect(registry.get('bg-appr-1')?.pendingApprovals?.[0].callId).toBe(
+        'c1',
+      );
+      expect(onChange).toHaveBeenCalledOnce();
+    });
+
+    it('refuses to park for an unknown or terminal entry', () => {
+      registry.register(makeRegistration('bg-appr-2'));
+      registry.complete('bg-appr-2', 'done');
+
+      expect(registry.addPendingApproval('bg-appr-2', makeApproval('c1'))).toBe(
+        false,
+      );
+      expect(registry.addPendingApproval('missing', makeApproval('c1'))).toBe(
+        false,
+      );
+    });
+
+    it('ignores a duplicate callId', () => {
+      registry.register(makeRegistration('bg-appr-3'));
+      registry.addPendingApproval('bg-appr-3', makeApproval('c1'));
+
+      expect(registry.addPendingApproval('bg-appr-3', makeApproval('c1'))).toBe(
+        false,
+      );
+      expect(registry.getPendingApprovals('bg-appr-3')).toHaveLength(1);
+    });
+
+    it('resolves a parked approval via its respond callback and removes it', async () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-4'));
+      registry.addPendingApproval('bg-appr-4', makeApproval('c1', respond));
+
+      const resolved = await registry.resolvePendingApproval(
+        'bg-appr-4',
+        'c1',
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+
+      expect(resolved).toBe(true);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+      expect(registry.getPendingApprovals('bg-appr-4')).toHaveLength(0);
+    });
+
+    it.each([
+      ToolConfirmationOutcome.ProceedAlways,
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+      ToolConfirmationOutcome.ProceedAlwaysUser,
+      ToolConfirmationOutcome.ProceedAlwaysServer,
+      ToolConfirmationOutcome.ProceedAlwaysTool,
+    ])(
+      'downgrades persistent approval outcome %s to one-time approval',
+      async (outcome) => {
+        const respond = vi.fn(async () => {});
+        registry.register(makeRegistration(`bg-appr-${outcome}`));
+        registry.addPendingApproval(
+          `bg-appr-${outcome}`,
+          makeApproval('c1', respond),
+        );
+
+        const resolved = await registry.resolvePendingApproval(
+          `bg-appr-${outcome}`,
+          'c1',
+          outcome,
+        );
+
+        expect(resolved).toBe(true);
+        expect(respond).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+          undefined,
+        );
+      },
+    );
+
+    it('returns false when resolving a non-parked call', async () => {
+      registry.register(makeRegistration('bg-appr-5'));
+      expect(
+        await registry.resolvePendingApproval(
+          'bg-appr-5',
+          'nope',
+          ToolConfirmationOutcome.Cancel,
+        ),
+      ).toBe(false);
+    });
+
+    it('clears a parked approval without responding', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-6'));
+      registry.addPendingApproval('bg-appr-6', makeApproval('c1', respond));
+
+      registry.clearPendingApproval('bg-appr-6', 'c1');
+
+      expect(registry.getPendingApprovals('bg-appr-6')).toHaveLength(0);
+      expect(respond).not.toHaveBeenCalled();
+    });
+
+    it('auto-rejects parked approvals when the agent terminates', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-7'));
+      registry.addPendingApproval('bg-appr-7', makeApproval('c1', respond));
+
+      registry.complete('bg-appr-7', 'done');
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-7')).toHaveLength(0);
+    });
+
+    it('auto-rejects parked approvals when the agent fails', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-fail'));
+      registry.addPendingApproval('bg-appr-fail', makeApproval('c1', respond));
+
+      registry.fail('bg-appr-fail', 'boom');
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-fail')).toHaveLength(0);
+    });
+
+    it('auto-rejects parked approvals on finalizeCancelled', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-fc'));
+      registry.addPendingApproval('bg-appr-fc', makeApproval('c1', respond));
+
+      registry.finalizeCancelled('bg-appr-fc', 'partial');
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-fc')).toHaveLength(0);
+    });
+
+    it('rejects parked approvals on reset so a session switch never strands a respond()', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-reset'));
+      registry.addPendingApproval('bg-appr-reset', makeApproval('c1', respond));
+
+      registry.reset();
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.get('bg-appr-reset')).toBeUndefined();
+    });
+
+    it('fails the agent before aborting when a parked approval respond() rejects', async () => {
+      const respond = vi.fn(async () => {
+        throw new Error('frames torn down');
+      });
+      const onChange = vi.fn();
+      const onStatus = vi.fn();
+      const onNotify = vi.fn();
+      const abortController = new AbortController();
+      const order: string[] = [];
+      abortController.signal.addEventListener('abort', () => {
+        order.push('abort');
+      });
+      registry.register(makeRegistration('bg-appr-retry', { abortController }));
+      registry.addPendingApproval('bg-appr-retry', makeApproval('c1', respond));
+      registry.setApprovalChangeCallback(onChange);
+      registry.setStatusChangeCallback((entry) => {
+        if (entry?.agentId === 'bg-appr-retry') {
+          order.push(`status:${entry.status}`);
+        }
+        onStatus(entry);
+      });
+      registry.setNotificationCallback(onNotify);
+
+      const ok = await registry.resolvePendingApproval(
+        'bg-appr-retry',
+        'c1',
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+
+      expect(ok).toBe(false);
+      expect(registry.getPendingApprovals('bg-appr-retry')).toHaveLength(0);
+      expect(registry.get('bg-appr-retry')?.status).toBe('failed');
+      expect(registry.get('bg-appr-retry')?.error).toBe(
+        'Failed to resolve background approval: c1',
+      );
+      expect(abortController.signal.aborted).toBe(true);
+      expect(order).toEqual(['status:failed', 'abort']);
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onStatus).toHaveBeenCalledOnce();
+      expect(onNotify).toHaveBeenCalledOnce();
+    });
+
+    it('auto-rejects parked approvals on cancel', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-8'));
+      registry.addPendingApproval('bg-appr-8', makeApproval('c1', respond));
+
+      registry.cancel('bg-appr-8', { notify: false });
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-8')).toHaveLength(0);
+    });
+
+    it('cancel() rejects parked approvals before the abort-driven clear (production ordering)', () => {
+      // In production, abort() synchronously unwinds the agent's awaiting
+      // tool batch, which emits a synthetic TOOL_RESULT for the parked call;
+      // the bridge's onResult then clears the queue. cancel() must therefore
+      // reject BEFORE aborting, or respond(Cancel) never fires. This test
+      // wires the bridge AND simulates that abort→TOOL_RESULT chain so the
+      // ordering is exercised the way it happens live.
+      const emitter = new AgentEventEmitter();
+      const abortController = new AbortController();
+      registry.register(
+        makeRegistration('bg-appr-cancel', { abortController }),
+      );
+      registry.bridgeApprovalEvents('bg-appr-cancel', emitter);
+
+      const respond = vi.fn(async () => {});
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'bg-appr-cancel',
+        round: 1,
+        callId: 'c1',
+        name: 'Shell',
+        description: 'run c1',
+        args: {},
+        confirmationDetails: {
+          type: 'exec',
+        } as BackgroundApproval['confirmationDetails'],
+        respond,
+        timestamp: Date.now(),
+      });
+      abortController.signal.addEventListener('abort', () => {
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'bg-appr-cancel',
+          round: 1,
+          callId: 'c1',
+          success: false,
+        } as never);
+      });
+
+      registry.cancel('bg-appr-cancel', { notify: false });
+
+      expect(respond).toHaveBeenCalledTimes(1);
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-cancel')).toHaveLength(0);
+    });
+
+    it('bridges emitter approval events into the parked queue and clears on result', () => {
+      const emitter = new AgentEventEmitter();
+      registry.register(makeRegistration('bg-appr-9'));
+      const cleanup = registry.bridgeApprovalEvents('bg-appr-9', emitter);
+
+      const respond = vi.fn(async () => {});
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'bg-appr-9',
+        round: 1,
+        callId: 'c1',
+        name: 'Shell',
+        description: 'run c1',
+        args: {},
+        confirmationDetails: {
+          type: 'exec',
+        } as BackgroundApproval['confirmationDetails'],
+        respond,
+        timestamp: Date.now(),
+      });
+      expect(registry.getPendingApprovals('bg-appr-9')).toHaveLength(1);
+
+      // A tool result for the same call clears the stale prompt without
+      // double-answering.
+      emitter.emit(AgentEventType.TOOL_RESULT, {
+        subagentId: 'bg-appr-9',
+        round: 1,
+        callId: 'c1',
+        success: true,
+      } as never);
+      expect(registry.getPendingApprovals('bg-appr-9')).toHaveLength(0);
+      expect(respond).not.toHaveBeenCalled();
+
+      cleanup();
+    });
+
+    it('auto-rejects a bridged approval that arrives after termination', () => {
+      const emitter = new AgentEventEmitter();
+      registry.register(makeRegistration('bg-appr-10'));
+      registry.bridgeApprovalEvents('bg-appr-10', emitter);
+      registry.complete('bg-appr-10', 'done');
+
+      const respond = vi.fn(async () => {});
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'bg-appr-10',
+        round: 1,
+        callId: 'late',
+        name: 'Shell',
+        description: 'run late',
+        args: {},
+        confirmationDetails: {
+          type: 'exec',
+        } as BackgroundApproval['confirmationDetails'],
+        respond,
+        timestamp: Date.now(),
+      });
+
+      // Couldn't park (entry terminal) → rejected so the agent loop unblocks.
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
     });
   });
 });

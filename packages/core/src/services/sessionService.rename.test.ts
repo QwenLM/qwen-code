@@ -19,10 +19,12 @@ import { getProjectHash } from '../utils/paths.js';
 import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/jsonl-utils.js');
+vi.mock('../utils/runtimeStatus.js');
 
 describe('SessionService - rename and custom title', () => {
   let sessionService: SessionService;
@@ -323,12 +325,92 @@ describe('SessionService - rename and custom title', () => {
       expect(matches[0].sessionId).toBe(sessionIdA);
     });
 
+    it('omits messageCount and avoids createReadStream (perf contract)', async () => {
+      // findSessionsByTitle is the second user-facing call site that the
+      // perf work removed `messageCount` from. This test pins both
+      // contracts: matched items must have `messageCount === undefined`,
+      // and the per-match `fs.createReadStream` count pass must not run
+      // — re-introducing it would silently bring back the O(file-size)
+      // cost without any other test failing.
+      const titleContent =
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'my-feature' },
+        }) + '\n';
+
+      setupSessionFiles([
+        { id: sessionIdA, record: recordA1, mtime: now, titleContent },
+      ]);
+
+      readSyncSpy.mockImplementation(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (_fd: number, buffer: any) => {
+          const data = Buffer.from(titleContent);
+          data.copy(buffer);
+          return data.length;
+        },
+      );
+
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const matches = await sessionService.findSessionsByTitle('my-feature');
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0].messageCount).toBeUndefined();
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+
     it('should return empty array when no session matches', async () => {
       setupSessionFiles([{ id: sessionIdA, record: recordA1, mtime: now }]);
 
       const matches = await sessionService.findSessionsByTitle('nonexistent');
 
       expect(matches).toHaveLength(0);
+    });
+
+    it('should find a migrated session when runtime status matches this project', async () => {
+      const titleContent =
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'my-feature' },
+        }) + '\n';
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+
+      setupSessionFiles([
+        { id: sessionIdA, record: migratedRecord, mtime: now, titleContent },
+      ]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+      readSyncSpy.mockImplementation(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (_fd: number, buffer: any) => {
+          const data = Buffer.from(titleContent);
+          data.copy(buffer);
+          return data.length;
+        },
+      );
+
+      const matches = await sessionService.findSessionsByTitle('my-feature');
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0].sessionId).toBe(sessionIdA);
     });
 
     it('should not skip matches when multiple sessions share the same mtime (regression for PR #3093 review)', async () => {

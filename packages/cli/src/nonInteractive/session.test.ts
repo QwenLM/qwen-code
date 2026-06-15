@@ -77,6 +77,7 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     getApprovalMode: () => 'auto',
     getOutputFormat: () => 'stream-json',
     initialize: vi.fn(),
+    waitForMcpReady: vi.fn().mockResolvedValue(undefined),
     getMonitorRegistry: () => mockMonitorRegistry,
     getBackgroundShellRegistry: () => mockBackgroundShellRegistry,
     getBackgroundTaskRegistry: () => mockBackgroundTaskRegistry,

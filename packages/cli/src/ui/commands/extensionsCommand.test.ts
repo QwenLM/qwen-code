@@ -22,11 +22,14 @@ import {
   parseInstallSource,
 } from '@qwen-code/qwen-code-core';
 
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
+    openBrowserSecurely: mockOpenBrowserSecurely,
     parseInstallSource: vi.fn(),
   };
 });
@@ -46,6 +49,7 @@ describe('extensionsCommand', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockOpenBrowserSecurely.mockResolvedValue(undefined);
     mockExtensionManager = createMockExtensionManager();
     mockGetExtensions.mockReturnValue([]);
     mockGetLoadedExtensions.mockReturnValue([]);
@@ -61,6 +65,47 @@ describe('extensionsCommand', () => {
       ui: {
         dispatchExtensionStateUpdate: vi.fn(),
       },
+    });
+  });
+
+  describe('explore', () => {
+    const exploreAction = extensionsCommand.subCommands?.find(
+      (cmd) => cmd.name === 'explore',
+    )?.action;
+
+    if (!exploreAction) {
+      throw new Error('Explore action not found');
+    }
+
+    it('should open the selected extensions gallery through the shared browser helper', async () => {
+      vi.stubEnv('NODE_ENV', 'development');
+      await exploreAction(mockContext, 'Gemini');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Opening extensions page in your browser: https://geminicli.com/extensions/',
+        },
+        expect.any(Number),
+      );
+      expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+        'https://geminicli.com/extensions/',
+      );
+    });
+
+    it('should show the URL when browser launch fails', async () => {
+      vi.stubEnv('NODE_ENV', 'development');
+      mockOpenBrowserSecurely.mockRejectedValue(new Error('no browser'));
+
+      await exploreAction(mockContext, 'ClaudeCode');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'Failed to open browser. Check out the extensions gallery at https://claudemarketplaces.com/',
+        },
+        expect.any(Number),
+      );
     });
   });
 
@@ -194,6 +239,30 @@ describe('extensionsCommand', () => {
       expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
     });
 
+    it('should redact URL credentials in install progress messages', async () => {
+      mockParseInstallSource.mockResolvedValue({
+        type: 'git',
+        source: 'https://user:token@example.com/test/extension',
+      });
+      mockInstallExtension.mockResolvedValue({
+        name: 'test-extension',
+        version: '1.0.0',
+      });
+
+      await installAction(
+        mockContext,
+        'https://user:token@example.com/test/extension',
+      );
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Installing extension from "https://***REDACTED***@example.com/test/extension"...',
+        },
+        expect.any(Number),
+      );
+    });
+
     it('should handle install errors', async () => {
       mockParseInstallSource.mockRejectedValue(
         new Error('Install source not found.'),
@@ -205,6 +274,27 @@ describe('extensionsCommand', () => {
         {
           type: MessageType.ERROR,
           text: 'Failed to install extension from "/invalid/path": Install source not found.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('should redact URL credentials in install error messages and causes', async () => {
+      mockParseInstallSource.mockRejectedValue(
+        new Error(
+          'Install source not found: https://user:token@example.com/test/extension',
+        ),
+      );
+
+      await installAction(
+        mockContext,
+        'https://user:token@example.com/test/extension',
+      );
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'Failed to install extension from "https://***REDACTED***@example.com/test/extension": Install source not found: https://***REDACTED***@example.com/test/extension',
         },
         expect.any(Number),
       );

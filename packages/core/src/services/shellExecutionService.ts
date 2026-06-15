@@ -21,11 +21,15 @@ import {
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { formatMemoryUsage } from '../utils/formatters.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 const { Terminal } = pkg;
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
 
+const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024;
+const MAX_BUFFERED_OUTPUT_BYTES_CEILING = 256 * 1024 * 1024;
 const SIGKILL_TIMEOUT_MS = 200;
 /**
  * Bound on how long the background-promote drain waits for in-flight
@@ -123,7 +127,12 @@ export type ShellAbortReason =
 
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
-  /** The raw, unprocessed output buffer. */
+  /**
+   * Buffered raw output captured for callers that need bytes instead of the
+   * decoded display string. This buffer is bounded by maxBufferedOutputBytes,
+   * so it may contain only the retained prefix when the capture limit is
+   * exceeded.
+   */
   rawOutput: Buffer;
   /** The combined, decoded output as a string. */
   output: string;
@@ -141,6 +150,15 @@ export interface ShellExecutionResult {
    * alive and the caller has taken over its lifecycle. Callers receiving
    * `promoted: true` must NOT treat exitCode/signal as terminal — the
    * underlying process has not exited.
+   *
+   * Note on the result shape: when `promoted: true`, `aborted` is set to
+   * `false` even though the AbortSignal fired. The contract is that
+   * `aborted` answers "should the caller emit a cancel/timeout
+   * message?" — and a promoted shell is neither cancelled nor timed
+   * out (the child kept running, ownership simply transferred). This
+   * lets existing `if (result.aborted)` branches stay unchanged; new
+   * promote handling lives in a separate `if (result.promoted)` arm.
+   * Settled in #3831 design question 7 / @tanzhenxin's PR-1 review note.
    */
   promoted?: boolean;
   /** The process ID of the spawned shell. */
@@ -164,8 +182,108 @@ export interface ShellExecutionConfig {
   showColor?: boolean;
   defaultFg?: string;
   defaultBg?: string;
+  /**
+   * Upper bound for foreground output retained in memory for the final
+   * ShellExecutionResult. The process stream is still drained after this
+   * limit, but additional bytes are discarded instead of decoded into one
+   * giant JavaScript string.
+   */
+  maxBufferedOutputBytes?: number;
   // Used for testing
   disableDynamicLineTrimming?: boolean;
+}
+
+function getMaxBufferedOutputBytes(config: ShellExecutionConfig): number {
+  const configured = config.maxBufferedOutputBytes;
+  const floored =
+    typeof configured === 'number' && Number.isFinite(configured)
+      ? Math.floor(configured)
+      : 0;
+  return floored > 0
+    ? Math.min(floored, MAX_BUFFERED_OUTPUT_BYTES_CEILING)
+    : DEFAULT_MAX_BUFFERED_OUTPUT_BYTES;
+}
+
+function decodeBufferedOutput(finalBuffer: Buffer): string {
+  const fallbackEncoding = getCachedEncodingForBuffer(finalBuffer);
+  return new TextDecoder(fallbackEncoding).decode(finalBuffer);
+}
+
+function appendOutputCaptureLimitNotice(
+  output: string,
+  didExceedLimit: boolean,
+  totalBytesReceived: number,
+  maxBufferedOutputBytes: number,
+): string {
+  if (!didExceedLimit) {
+    return output;
+  }
+
+  const notice =
+    `[Output exceeded the maximum captured size of ` +
+    `${formatMemoryUsage(maxBufferedOutputBytes)}; captured the first ` +
+    `${formatMemoryUsage(maxBufferedOutputBytes)} of ` +
+    `${formatMemoryUsage(totalBytesReceived)} and discarded the rest to ` +
+    `avoid constructing an oversized JavaScript string.]`;
+
+  return output ? `${output}\n\n${notice}` : notice;
+}
+
+/**
+ * Optional caller-side handlers for the *post-promote* lifetime of a
+ * background-promoted child process. PR-2 (#3894) detached every
+ * service-side listener at promote time and froze `result.output` at
+ * the snapshot; without these hooks the still-running child's bytes
+ * are lost and the registry entry stays `'running'` until `task_stop`
+ * / session-end cleanup. PR-2.5 (#3831 follow-up) wires shell.ts to
+ * pass these so promoted shells behave like regular background shells:
+ * bytes append to `bg_xxx.output` and the entry transitions to
+ * `'completed'` / `'failed'` on natural child exit.
+ *
+ * Backwards compat: if `postPromote` is unset on the options bag the
+ * service falls back to the PR-2 detach-everything contract — no
+ * regressions for callers that don't opt in.
+ */
+export interface ShellPostPromoteHandlers {
+  /**
+   * Fired for each output chunk the still-running child produces
+   * AFTER `result.promoted` resolves. Same `ShellOutputEvent` shape
+   * the foreground stream uses so callers can reuse rendering logic;
+   * `binary_detected` / `binary_progress` are NOT re-emitted (those
+   * decisions were made pre-promote against the same byte stream).
+   */
+  onData?: (event: ShellOutputEvent) => void;
+  /**
+   * Fired exactly once when the post-promote child settles — natural
+   * exit (`exitCode` set, `signal: null`), signal kill (`exitCode:
+   * null`, `signal` set), or spawn-side error (`error` set). NOT
+   * fired for the promote-time resolve itself (that's the
+   * `result.promoted` Promise resolution). Callers wire this to the
+   * registry's `complete` / `fail` transitions.
+   */
+  onSettle?: (info: ShellPostPromoteSettleInfo) => void;
+}
+
+export interface ShellPostPromoteSettleInfo {
+  exitCode: number | null;
+  signal: number | NodeJS.Signals | null;
+  error?: Error;
+  /** `Date.now()` at the moment the service observed the exit/error. */
+  endTime: number;
+}
+
+/**
+ * Options bag for `ShellExecutionService.execute()`. Kept as an
+ * interface (rather than the prior inline shape) so future additions
+ * land without breaking signatures.
+ */
+export interface ShellExecuteOptions {
+  streamStdout?: boolean;
+  /**
+   * Post-promote callback hooks. See {@link ShellPostPromoteHandlers}.
+   * Optional; omit to preserve the PR-2 detach-everything contract.
+   */
+  postPromote?: ShellPostPromoteHandlers;
 }
 
 /**
@@ -421,7 +539,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
-    options: { streamStdout?: boolean } = {},
+    options: ShellExecuteOptions = {},
   ): Promise<ShellExecutionHandle> {
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
@@ -434,6 +552,7 @@ export class ShellExecutionService {
             abortSignal,
             shellExecutionConfig,
             ptyInfo,
+            options.postPromote,
           );
         } catch (_e) {
           // Fallback to child_process
@@ -447,6 +566,8 @@ export class ShellExecutionService {
       onOutputEvent,
       abortSignal,
       options.streamStdout ?? false,
+      getMaxBufferedOutputBytes(shellExecutionConfig),
+      options.postPromote,
     );
   }
 
@@ -456,6 +577,8 @@ export class ShellExecutionService {
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
     streamStdout: boolean,
+    maxBufferedOutputBytes: number,
+    postPromote?: ShellPostPromoteHandlers,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -481,6 +604,7 @@ export class ShellExecutionService {
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: 'cat',
+          ...getShellContextEnvVars(),
         },
       });
 
@@ -491,12 +615,54 @@ export class ShellExecutionService {
         let stdout = '';
         let stderr = '';
         const outputChunks: Buffer[] = [];
+        const sniffChunks: Buffer[] = [];
         let error: Error | null = null;
         let exited = false;
 
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
         let sniffedBytes = 0;
+        let capturedOutputBytes = 0;
+        let totalOutputBytes = 0;
+        let outputCaptureLimitExceeded = false;
+        let outputCaptureLimitWarningEmitted = false;
+
+        const markOutputCaptureLimitExceeded = () => {
+          outputCaptureLimitExceeded = true;
+          if (outputCaptureLimitWarningEmitted) {
+            return;
+          }
+          outputCaptureLimitWarningEmitted = true;
+          debugLogger.warn(
+            `Shell output capture exceeded maxBufferedOutputBytes ` +
+              `(${maxBufferedOutputBytes} bytes). Total bytes: ` +
+              `${totalOutputBytes}. Discarding excess.`,
+          );
+        };
+
+        const captureOutputData = (data: Buffer): Buffer | null => {
+          if (capturedOutputBytes >= maxBufferedOutputBytes) {
+            markOutputCaptureLimitExceeded();
+            return null;
+          }
+
+          const remainingBytes = maxBufferedOutputBytes - capturedOutputBytes;
+          const captured =
+            data.length > remainingBytes
+              ? data.subarray(0, remainingBytes)
+              : data;
+
+          if (captured.length > 0) {
+            outputChunks.push(captured);
+            capturedOutputBytes += captured.length;
+          }
+
+          if (captured.length < data.length) {
+            markOutputCaptureLimitExceeded();
+          }
+
+          return captured.length > 0 ? captured : null;
+        };
 
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
           if (!stdoutDecoder || !stderrDecoder) {
@@ -519,28 +685,33 @@ export class ShellExecutionService {
           // past the first 20 chunks' total and let the chunk array leak on
           // line-sized streams.
           if (isStreamingRawContent && sniffedBytes < MAX_SNIFF_SIZE) {
-            outputChunks.push(data);
-            sniffedBytes += data.length;
-            const sniffBuffer = Buffer.concat(outputChunks);
+            const sniffSlice = data.subarray(
+              0,
+              Math.min(data.length, MAX_SNIFF_SIZE - sniffedBytes),
+            );
+            if (sniffSlice.length > 0) {
+              sniffChunks.push(sniffSlice);
+              sniffedBytes += sniffSlice.length;
+            }
+            const sniffBuffer = Buffer.concat(sniffChunks);
             if (isBinary(sniffBuffer)) {
               isStreamingRawContent = false;
               if (streamStdout) {
                 // Tell the streaming consumer to stop writing text chunks;
                 // drop the sniff accumulator now so it can be GC'd.
                 onOutputEvent({ type: 'binary_detected' });
-                outputChunks.length = 0;
+                sniffChunks.length = 0;
               }
             } else if (streamStdout && sniffedBytes >= MAX_SNIFF_SIZE) {
               // Sniff passed in streaming mode — text confirmed, drop the
               // accumulator. Subsequent chunks fall through to the streaming
               // emit path below without ever touching outputChunks.
-              outputChunks.length = 0;
+              sniffChunks.length = 0;
             }
-          } else if (!streamStdout) {
-            // Buffered (foreground) mode past sniff: keep accumulating for
-            // the final emit at exit. Streaming mode does not accumulate.
-            outputChunks.push(data);
           }
+
+          totalOutputBytes += data.length;
+          const capturedData = captureOutputData(data);
 
           if (!isStreamingRawContent) {
             // Binary mode: drop further data. Foreground emits the
@@ -550,15 +721,20 @@ export class ShellExecutionService {
           }
 
           const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
-          const decodedChunk = decoder.decode(data, { stream: true });
-
           if (streamStdout) {
             // Streaming text mode: push through immediately, no string
             // accumulation. (Up to ~4KB may already have been emitted
             // before binary detection trips — bounded, acceptable.)
+            const decodedChunk = decoder.decode(data, { stream: true });
             onOutputEvent({ type: 'data', chunk: decodedChunk });
             return;
           }
+
+          if (!capturedData) {
+            return;
+          }
+
+          const decodedChunk = decoder.decode(capturedData, { stream: true });
 
           // Buffered text mode: accumulate for the final cleaned-blob emit.
           if (stream === 'stdout') {
@@ -579,12 +755,18 @@ export class ShellExecutionService {
             stdout + (stderr ? (stdout ? separator : '') + stderr : '');
 
           const finalStrippedOutput = stripAnsi(combinedOutput).trim();
+          const boundedOutput = appendOutputCaptureLimitNotice(
+            finalStrippedOutput,
+            outputCaptureLimitExceeded,
+            totalOutputBytes,
+            maxBufferedOutputBytes,
+          );
 
           if (isStreamingRawContent) {
             // In streaming mode chunks were already emitted as they arrived;
             // re-emitting the final blob would duplicate everything.
-            if (!streamStdout && finalStrippedOutput) {
-              onOutputEvent({ type: 'data', chunk: finalStrippedOutput });
+            if (!streamStdout && boundedOutput) {
+              onOutputEvent({ type: 'data', chunk: boundedOutput });
             }
           } else {
             onOutputEvent({ type: 'binary_detected' });
@@ -592,7 +774,7 @@ export class ShellExecutionService {
 
           resolve({
             rawOutput: finalBuffer,
-            output: finalStrippedOutput,
+            output: boundedOutput,
             exitCode: code,
             signal: signal ? os.constants.signals[signal] : null,
             error,
@@ -693,13 +875,254 @@ export class ShellExecutionService {
           const combined =
             snapStdout +
             (snapStderr ? (snapStdout ? separator : '') + snapStderr : '');
+          const boundedOutput = appendOutputCaptureLimitNotice(
+            stripAnsi(combined).trim(),
+            outputCaptureLimitExceeded,
+            totalOutputBytes,
+            maxBufferedOutputBytes,
+          );
+          // PR-2.5: re-attach post-promote listeners that forward to the
+          // caller's handlers. Attach AFTER `detachServiceListeners()`
+          // so we don't double-up on stdout/stderr 'data' events with
+          // the foreground listeners that just got removed; attach
+          // BEFORE `resolve()` so a sub-millisecond data burst right
+          // after promote still lands on the caller. The new listeners
+          // are direct stdout/stderr listeners (not service-managed) —
+          // ownership is the caller's from this point. We also attach
+          // a fresh exit listener (the foreground exitHandler is also
+          // detached by detachServiceListeners) so the caller can
+          // settle the registry entry on natural child exit. When
+          // postPromote is undefined we fall back to the PR-2 detach-
+          // everything contract: no listeners re-attach.
+          // PR-2.5 wave-4: preserve the detected encoding
+          // from the foreground decoders so a non-UTF-8 child (e.g.
+          // GBK on a Chinese Windows shell) doesn't snapshot correctly
+          // and then mojibake the post-promote tail. The foreground
+          // `stdoutDecoder` / `stderrDecoder` are initialized in
+          // `handleOutput` from `getCachedEncodingForBuffer(data)` on
+          // the first chunk; if they're still null at promote time
+          // (no bytes yet), fall back to `'utf-8'`. Capture the
+          // detected encoding rather than the decoder instance — the
+          // foreground decoder has already seen pre-promote bytes
+          // (its multibyte state machine is at an arbitrary midpoint)
+          // and may have accumulated continuation-byte state that the
+          // post-promote stream shouldn't inherit; new instances with
+          // the same `encoding` start fresh.
+          const detectedEncoding = stdoutDecoder?.encoding ?? 'utf-8';
+          // SEPARATE decoders for stdout and stderr. A single shared
+          // decoder corrupts interleaved multibyte UTF-8 (the streaming
+          // state machine assumes one byte source); independent
+          // decoders preserve each stream's continuation-byte context.
+          // Both decoders are flushed (with `stream: false`) once the
+          // child has fully closed so any trailing multibyte bytes
+          // surface instead of being silently dropped.
+          //
+          // PR-2.5 wave-4: allocate decoders whenever
+          // `onData` is set (not gated on close-handler installation),
+          // because the close handler now ALWAYS installs when any
+          // postPromote handler is present (T6 + T7) and needs to
+          // flush these decoders if onData is set, regardless of
+          // whether onSettle is set.
+          const safeDecoder = (encoding: string): TextDecoder => {
+            try {
+              return new TextDecoder(encoding, { fatal: false });
+            } catch {
+              // Defensive: if the detected encoding string is somehow
+              // not supported by Node's ICU (extremely rare on modern
+              // Node), fall back to utf-8 rather than throwing inside
+              // the promote handoff path.
+              return new TextDecoder('utf-8', { fatal: false });
+            }
+          };
+          const postPromoteStdoutDecoder = postPromote?.onData
+            ? safeDecoder(detectedEncoding)
+            : null;
+          const postPromoteStderrDecoder = postPromote?.onData
+            ? safeDecoder(detectedEncoding)
+            : null;
+          let postPromoteStdoutHandler: ((chunk: Buffer) => void) | null = null;
+          let postPromoteStderrHandler: ((chunk: Buffer) => void) | null = null;
+          if (postPromote?.onData) {
+            const onPostData = postPromote.onData;
+            const safeData = (decoder: TextDecoder) => (chunk: Buffer) => {
+              try {
+                onPostData({
+                  type: 'data',
+                  chunk: decoder.decode(chunk, { stream: true }),
+                });
+              } catch (cbErr) {
+                debugLogger.warn(
+                  `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                );
+              }
+            };
+            try {
+              if (postPromoteStdoutDecoder) {
+                postPromoteStdoutHandler = safeData(postPromoteStdoutDecoder);
+                child.stdout?.on('data', postPromoteStdoutHandler);
+              }
+              if (postPromoteStderrDecoder) {
+                postPromoteStderrHandler = safeData(postPromoteStderrDecoder);
+                child.stderr?.on('data', postPromoteStderrHandler);
+              }
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote data listeners threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          } else if (postPromote) {
+            // PR-2.5 wave-4: caller asked for `onSettle`
+            // (or any other future postPromote handler) without
+            // `onData`. The foreground stdout/stderr listeners were
+            // detached above; without ANY data listener the Readable
+            // streams stay paused (on Windows they may already be
+            // flowing — `resume()` is a no-op in that case), the OS
+            // pipe buffer fills (~64KB on Linux), and
+            // `child.stdout.write` in the child blocks —
+            // potentially forever. `'close'` then never fires and
+            // `onSettle` is never called. `.resume()` puts the stream
+            // back in flowing mode (data arrives + is dropped) so the
+            // child can drain its pipes and exit normally.
+            try {
+              child.stdout?.resume();
+              child.stderr?.resume();
+            } catch (e) {
+              debugLogger.warn(
+                `post-promote stdout/stderr resume() threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
+          // PR-2.5 wave-4: single-fire latch shared by
+          // 'close' and 'error' (both branches funnel through here).
+          // Without it the child_process path could fire onSettle
+          // twice — once from `error`, then again from the `close`
+          // that immediately follows — violating the exactly-once
+          // settle contract and racing the caller's `transitionRegistry`.
+          //
+          // PR-2.5 wave-4: the helper also performs the
+          // decoder flush so any caller with `onData` set gets the
+          // trailing multibyte bytes surfaced — independent of
+          // whether `onSettle` is also set.
+          let postPromoteSettleFired = false;
+          const flushPostPromoteDecoders = (): void => {
+            if (!postPromote?.onData) return;
+            try {
+              if (postPromoteStdoutDecoder) {
+                const trailing = postPromoteStdoutDecoder.decode();
+                if (trailing) {
+                  postPromote.onData({
+                    type: 'data',
+                    chunk: trailing,
+                  });
+                }
+              }
+              if (postPromoteStderrDecoder) {
+                const trailing = postPromoteStderrDecoder.decode();
+                if (trailing) {
+                  postPromote.onData({
+                    type: 'data',
+                    chunk: trailing,
+                  });
+                }
+              }
+            } catch (flushErr) {
+              debugLogger.warn(
+                `post-promote decoder flush threw: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+              );
+            }
+          };
+          const firePostSettle = (info: ShellPostPromoteSettleInfo): void => {
+            if (postPromoteSettleFired) return;
+            postPromoteSettleFired = true;
+            flushPostPromoteDecoders();
+            if (postPromoteStdoutHandler) {
+              child.stdout?.off('data', postPromoteStdoutHandler);
+              postPromoteStdoutHandler = null;
+            }
+            if (postPromoteStderrHandler) {
+              child.stderr?.off('data', postPromoteStderrHandler);
+              postPromoteStderrHandler = null;
+            }
+            if (!postPromote?.onSettle) return;
+            try {
+              postPromote.onSettle(info);
+            } catch (cbErr) {
+              debugLogger.warn(
+                `postPromote.onSettle threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+              );
+            }
+          };
+          // PR-2.5 wave-4: install 'close' and
+          // 'error' listeners whenever ANY postPromote handler is
+          // present, not just when `onSettle` is set. Two reasons:
+          //
+          //  1. T6: `onData`-only callers still had the foreground
+          //     `errorHandler` detached; without a replacement
+          //     listener a post-promote `'error'` would crash Node
+          //     via the unhandled-error default. Even with no
+          //     onSettle to route into, the listener prevents the
+          //     crash (and triggers decoder flush on close).
+          //
+          //  2. T3 / T7: `onData`-only callers need the close handler
+          //     to flush trailing decoder bytes; an `onSettle`-only
+          //     caller needs `'close'` to fire onSettle — both share
+          //     the same close hook now.
+          if (postPromote) {
+            try {
+              child.once(
+                'close',
+                (
+                  exitCode: number | null,
+                  signalCode: NodeJS.Signals | null,
+                ) => {
+                  // Listen on 'close' (all stdio fully drained) NOT
+                  // 'exit' (which can fire while stdout/stderr still
+                  // have buffered bytes pending). Without this, late
+                  // chunks emitted between 'exit' and 'close' land in
+                  // the caller's onData AFTER onSettle already closed
+                  // the output stream and transitioned the registry —
+                  // they'd be dropped silently and `/tasks` would
+                  // show a truncated log.
+                  firePostSettle({
+                    exitCode,
+                    signal: signalCode,
+                    endTime: Date.now(),
+                  });
+                },
+              );
+              child.once('error', (err: Error) => {
+                firePostSettle({
+                  exitCode: null,
+                  signal: null,
+                  error: err,
+                  endTime: Date.now(),
+                });
+              });
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote exit/error listeners threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
           resolve({
             rawOutput: finalBuffer,
-            output: stripAnsi(combined).trim(),
+            output: boundedOutput,
             exitCode: null,
             signal: null,
             error: null,
-            aborted: true,
+            // `aborted: false` (despite the abort signal having fired) is
+            // intentional — this is the result-shape decision settled in
+            // #3831 design question 7 (raised by @tanzhenxin in the PR-1
+            // review). The flag answers "should the caller emit cancel /
+            // timeout copy?" not "did the abort signal fire?" — and a
+            // promoted shell did NOT cancel (the child kept running), so
+            // existing `if (result.aborted)` branches in callers (e.g.
+            // `tools/shell.ts`) fall through naturally to the success-shape
+            // arm where we then check `result.promoted`. Without this,
+            // every consumer would have to remember to check `promoted`
+            // before `aborted` to avoid emitting "cancelled" copy for a
+            // process that's still running.
+            aborted: false,
             promoted: true,
             pid: child.pid,
             executionMethod: 'child_process',
@@ -810,6 +1233,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shellExecutionConfig: ShellExecutionConfig,
     ptyInfo: PtyImplementation,
+    postPromote?: ShellPostPromoteHandlers,
   ): ShellExecutionHandle {
     if (!ptyInfo) {
       // This should not happen, but as a safeguard...
@@ -847,6 +1271,7 @@ export class ShellExecutionService {
           TERM: 'xterm-256color',
           PAGER: shellExecutionConfig.pager ?? 'cat',
           GIT_PAGER: shellExecutionConfig.pager ?? 'cat',
+          ...getShellContextEnvVars(),
         },
         handleFlowControl: true,
       });
@@ -865,6 +1290,7 @@ export class ShellExecutionService {
         let decoder: TextDecoder | null = null;
         let outputComparison: AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
+        const sniffChunks: Buffer[] = [];
         const error: Error | null = null;
         let exited = false;
 
@@ -872,6 +1298,11 @@ export class ShellExecutionService {
         const MAX_SNIFF_SIZE = 4096;
         let sniffedBytes = 0;
         let totalBytesReceived = 0;
+        const maxBufferedOutputBytes =
+          getMaxBufferedOutputBytes(shellExecutionConfig);
+        let capturedOutputBytes = 0;
+        let outputCaptureLimitExceeded = false;
+        let outputCaptureLimitWarningEmitted = false;
         let isWriting = false;
         let hasStartedOutput = false;
         let renderTimeout: NodeJS.Timeout | null = null;
@@ -884,6 +1315,19 @@ export class ShellExecutionService {
         let listenersDetached = false;
 
         const RENDER_THROTTLE_MS = 100;
+
+        const markOutputCaptureLimitExceeded = () => {
+          outputCaptureLimitExceeded = true;
+          if (outputCaptureLimitWarningEmitted) {
+            return;
+          }
+          outputCaptureLimitWarningEmitted = true;
+          debugLogger.warn(
+            `Shell output capture exceeded maxBufferedOutputBytes ` +
+              `(${maxBufferedOutputBytes} bytes). Total bytes: ` +
+              `${totalBytesReceived}. Discarding excess.`,
+          );
+        };
 
         const renderFn = () => {
           if (!isStreamingRawContent || listenersDetached) {
@@ -989,21 +1433,50 @@ export class ShellExecutionService {
           }
         };
 
+        const captureOutputData = (data: Buffer): void => {
+          if (capturedOutputBytes >= maxBufferedOutputBytes) {
+            markOutputCaptureLimitExceeded();
+            return;
+          }
+
+          const remainingBytes = maxBufferedOutputBytes - capturedOutputBytes;
+          const captured =
+            data.length > remainingBytes
+              ? data.subarray(0, remainingBytes)
+              : data;
+
+          if (captured.length > 0) {
+            outputChunks.push(captured);
+            capturedOutputBytes += captured.length;
+          }
+
+          if (captured.length < data.length) {
+            markOutputCaptureLimitExceeded();
+          }
+        };
+
         const handleOutput = (data: Buffer) => {
           // Capture raw output immediately. Rendering the headless terminal is
           // slower than appending a Buffer, and rapid PTY output can otherwise
           // overrun the render queue before finalize() races on exit.
           ensureDecoder(data);
-          outputChunks.push(data);
           totalBytesReceived += data.length;
+          captureOutputData(data);
           const bytesReceived = totalBytesReceived;
 
           processingChain = processingChain.then(
             () =>
               new Promise<void>((resolve) => {
                 if (isStreamingRawContent && sniffedBytes < MAX_SNIFF_SIZE) {
-                  const sniffBuffer = Buffer.concat(outputChunks.slice(0, 20));
-                  sniffedBytes = sniffBuffer.length;
+                  const sniffSlice = data.subarray(
+                    0,
+                    Math.min(data.length, MAX_SNIFF_SIZE - sniffedBytes),
+                  );
+                  if (sniffSlice.length > 0) {
+                    sniffChunks.push(sniffSlice);
+                    sniffedBytes += sniffSlice.length;
+                  }
+                  const sniffBuffer = Buffer.concat(sniffChunks);
 
                   if (isBinary(sniffBuffer)) {
                     isStreamingRawContent = false;
@@ -1079,7 +1552,7 @@ export class ShellExecutionService {
 
               try {
                 if (isStreamingRawContent) {
-                  // Re-decode the full buffer with proper encoding detection.
+                  // Re-decode the captured buffer with proper encoding detection.
                   // The streaming decoder used the first-chunk heuristic which
                   // can misdetect when early output is ASCII-only but later
                   // output is in a different encoding (e.g. GBK).
@@ -1097,11 +1570,17 @@ export class ShellExecutionService {
                 }
               } catch {
                 try {
-                  fullOutput = serializeTerminalToText(headlessTerminal);
+                  fullOutput = decodeBufferedOutput(finalBuffer);
                 } catch {
                   // Ignore fallback rendering errors and resolve with empty text.
                 }
               }
+              fullOutput = appendOutputCaptureLimitNotice(
+                fullOutput,
+                outputCaptureLimitExceeded,
+                totalBytesReceived,
+                maxBufferedOutputBytes,
+              );
 
               resolve({
                 rawOutput: finalBuffer,
@@ -1155,11 +1634,11 @@ export class ShellExecutionService {
             );
             return;
           }
-          // Skip kill, dispose all our listeners on the live PTY (so
-          // post-promote data/exit/error don't leak into our foreground
-          // onOutputEvent or crash via the error handler's `throw err`),
-          // set the listenersDetached guard so any already-enqueued
-          // processingChain callback's onOutputEvent emits are
+          // Skip kill, dispose all our foreground listeners on the live
+          // PTY (so post-promote data/exit/error don't leak into our
+          // foreground onOutputEvent or crash via the error handler's
+          // `throw err`), set the listenersDetached guard so any already-
+          // enqueued processingChain callback's onOutputEvent emits are
           // suppressed (in-flight writes still LAND in headlessTerminal
           // so the snapshot below reflects them), drain pending chain
           // work, drop the PTY from the active set (so cleanup() won't
@@ -1167,6 +1646,15 @@ export class ShellExecutionService {
           // resolve immediately with `promoted: true` so the awaiting
           // caller unblocks. The caller has attached its own listeners
           // by this point and owns the PTY's lifecycle.
+          //
+          // PR-2.5: if `postPromote.onData` / `postPromote.onSettle` were
+          // provided, ATTACH NEW listeners after disposing the
+          // foreground ones — bytes from the still-running child route
+          // to the caller (typically shell.ts's append-to-bg_xxx.output
+          // path), and the eventual natural-exit transitions the
+          // registry entry to `'completed'` / `'failed'` instead of
+          // leaving it stuck on `'running'`. When postPromote is
+          // undefined the PR-2 detach-everything contract is preserved.
           exited = true;
           listenersDetached = true;
           abortSignal.removeEventListener('abort', abortHandler);
@@ -1207,6 +1695,154 @@ export class ShellExecutionService {
           }
           this.activePtys.delete(ptyProcess.pid);
 
+          // PR-2.5: re-attach minimal listeners that forward to the
+          // caller's post-promote handlers. Attach BEFORE the drain so
+          // late bytes the PTY emits during the drain window flow to
+          // the caller instead of falling on the floor — strictly an
+          // improvement; without this they'd be dropped on the way to
+          // the snapshot anyway.
+          //
+          // PR-2.5 wave-3: capture the IDisposable
+          // returned by `onData` / `onExit` and the listener function
+          // we register on `'error'`, then dispose them all when
+          // settle fires. node-pty's `ptyProcess` outlives the
+          // post-promote handlers (the child can sit dead for
+          // milliseconds before the caller's `cancelChild` finalizes
+          // it), and node's EventEmitter holds refs to listener
+          // closures (which in turn hold refs to `onPostData` /
+          // `onPostSettle` / `promoteArtifacts`). Disposing the
+          // listeners on settle releases those refs so they can be
+          // GC'd without waiting for the underlying PTY to be
+          // collected.
+          //
+          // Guard so `onSettle` fires AT MOST ONCE. Both `onExit` and
+          // the post-promote `error` listener below funnel through
+          // this latch — a PTY error during the read-exit race could
+          // otherwise fire onSettle twice (once for the error, once
+          // for the immediately-following exit) and the caller's
+          // `transitionRegistry` would race itself.
+          let postPromoteSettleFired = false;
+          let postPromoteDataDisposable: { dispose: () => void } | null = null;
+          let postPromoteExitDisposable: { dispose: () => void } | null = null;
+          let postPromoteErrorListener:
+            | ((err: NodeJS.ErrnoException) => void)
+            | null = null;
+          const disposePostPromoteListeners = () => {
+            if (postPromoteDataDisposable) {
+              try {
+                postPromoteDataDisposable.dispose();
+              } catch (e) {
+                debugLogger.warn(
+                  `disposing post-promote data listener threw: ${e instanceof Error ? e.message : String(e)}`,
+                );
+              }
+              postPromoteDataDisposable = null;
+            }
+            if (postPromoteExitDisposable) {
+              try {
+                postPromoteExitDisposable.dispose();
+              } catch (e) {
+                debugLogger.warn(
+                  `disposing post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
+                );
+              }
+              postPromoteExitDisposable = null;
+            }
+            if (postPromoteErrorListener) {
+              try {
+                ptyProcess.removeListener('error', postPromoteErrorListener);
+              } catch (e) {
+                debugLogger.warn(
+                  `removing post-promote error listener threw: ${e instanceof Error ? e.message : String(e)}`,
+                );
+              }
+              postPromoteErrorListener = null;
+            }
+          };
+          const firePostSettle = (info: ShellPostPromoteSettleInfo) => {
+            if (postPromoteSettleFired) return;
+            postPromoteSettleFired = true;
+            // Dispose BEFORE invoking the caller — even if the caller
+            // throws, the listeners are gone (and idempotent if we
+            // come back through the error path).
+            // Known limitation: node-pty may have queued onData
+            // callbacks not yet delivered when onExit fires; disposing
+            // the data listener here means those trailing bytes (<4KB)
+            // are lost. Bounded and low severity — a setImmediate
+            // delay could recover them but would complicate the
+            // single-fire latch.
+            disposePostPromoteListeners();
+            if (!postPromote?.onSettle) return;
+            try {
+              postPromote.onSettle(info);
+            } catch (cbErr) {
+              debugLogger.warn(
+                `postPromote.onSettle threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+              );
+            }
+          };
+          if (postPromote?.onData) {
+            const onPostData = postPromote.onData;
+            try {
+              postPromoteDataDisposable = ptyProcess.onData((data: string) => {
+                try {
+                  onPostData({ type: 'data', chunk: data });
+                } catch (cbErr) {
+                  // Caller's handler threw — don't let it crash the
+                  // child's data loop. Log + drop.
+                  debugLogger.warn(
+                    `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                  );
+                }
+              });
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote data listener threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
+          if (postPromote) {
+            try {
+              postPromoteExitDisposable = ptyProcess.onExit(
+                ({
+                  exitCode,
+                  signal,
+                }: {
+                  exitCode: number;
+                  signal?: number;
+                }) => {
+                  firePostSettle({
+                    exitCode,
+                    signal: signal ?? null,
+                    endTime: Date.now(),
+                  });
+                },
+              );
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+            try {
+              postPromoteErrorListener = (err: NodeJS.ErrnoException) => {
+                if (isExpectedPtyReadExitError(err)) {
+                  return;
+                }
+                firePostSettle({
+                  error: err,
+                  exitCode: null,
+                  signal: null,
+                  endTime: Date.now(),
+                });
+              };
+              ptyProcess.on('error', postPromoteErrorListener);
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote error listener threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
+
           // Drain in-flight chain work (already-enqueued
           // headlessTerminal.write callbacks) so the snapshot reflects
           // the last batch of bytes the PTY emitted before promote.
@@ -1238,8 +1874,8 @@ export class ShellExecutionService {
               `Background-promote drain hit the ${PROMOTE_DRAIN_TIMEOUT_MS}ms ` +
                 `timeout before processingChain settled. The output snapshot ` +
                 `may be missing the very last batch of bytes the PTY emitted ` +
-                `before promote (rawOutput in the result still has the full ` +
-                `buffer the caller can re-render).`,
+                `before promote (rawOutput in the result still has the ` +
+                `bounded captured buffer the caller can re-render).`,
             );
           }
 
@@ -1247,7 +1883,7 @@ export class ShellExecutionService {
           let snapshot = '';
           try {
             // Mirror the normal exit path's snapshot logic: re-decode
-            // the full buffer with the final encoding (the streaming
+            // the captured buffer with the final encoding (the streaming
             // decoder fed `headlessTerminal` from a first-chunk
             // heuristic, which can mis-detect when early output is
             // ASCII-only but later output is in a different encoding,
@@ -1271,25 +1907,34 @@ export class ShellExecutionService {
             // is acceptable since the caller has rawOutput, but log so
             // the failure leaves a diagnostic trail (otherwise an empty
             // `output` is indistinguishable from "command produced no
-            // output"). Try the simpler direct-serialize path as a
-            // last-ditch fallback before giving up.
+            // output"). Fall back to the bounded captured buffer so the
+            // snapshot cannot exceed maxBufferedOutputBytes.
             debugLogger.warn(
               `Background-promote snapshot replay failed: ${serErr instanceof Error ? serErr.message : String(serErr)}. ` +
-                `Falling back to direct headlessTerminal serialize; if that also fails, output stays empty.`,
+                `Falling back to bounded raw buffer decode; if that also fails, output stays empty.`,
             );
             try {
-              snapshot = serializeTerminalToText(headlessTerminal) ?? '';
+              snapshot = decodeBufferedOutput(finalBuffer);
             } catch {
               // Both paths failed — leave snapshot empty.
             }
           }
+          snapshot = appendOutputCaptureLimitNotice(
+            snapshot,
+            outputCaptureLimitExceeded,
+            totalBytesReceived,
+            maxBufferedOutputBytes,
+          );
           resolve({
             rawOutput: finalBuffer,
             output: snapshot,
             exitCode: null,
             signal: null,
             error,
-            aborted: true,
+            // See childProcessFallback for the full rationale — promoted
+            // results are NOT user-cancellations, so callers' `if
+            // (result.aborted)` branches must NOT trigger.
+            aborted: false,
             promoted: true,
             pid: ptyProcess.pid,
             executionMethod:

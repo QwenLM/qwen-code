@@ -12,6 +12,7 @@ import {
   FileDiscoveryService,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
+  type LoadServerHierarchicalMemoryOptions,
   type LoadServerHierarchicalMemoryResponse,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
@@ -30,13 +31,15 @@ import {
   NativeLspService,
   isBareMode,
   isToolEnabled,
+  SchemaValidator,
+  type ConfigParameters,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
-import type { Settings } from './settings.js';
+import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
+import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
-import { authCommand } from '../commands/auth.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -46,6 +49,7 @@ import { hideBin } from 'yargs/helpers';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import stripJsonComments from 'strip-json-comments';
 
 import { resolvePath } from '../utils/resolvePath.js';
@@ -54,7 +58,9 @@ import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
+import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
+import { serveCommand } from '../commands/serve.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -70,7 +76,14 @@ export function isValidSessionId(value: string): boolean {
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { assembleMcpServers } from './mcpServers.js';
+import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  parseDurationSeconds,
+  validateMaxToolCalls,
+  validateMaxWallTimeSetting,
+} from '../utils/runBudget.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -78,6 +91,7 @@ const VALID_APPROVAL_MODE_VALUES = [
   'plan',
   'default',
   'auto-edit',
+  'auto',
   'yolo',
 ] as const;
 
@@ -102,6 +116,8 @@ function parseApprovalModeValue(value: string): ApprovalMode {
     case 'autoedit':
     case 'auto-edit':
       return ApprovalMode.AUTO_EDIT;
+    case 'auto':
+      return ApprovalMode.AUTO;
     default:
       throw formatApprovalModeError(value);
   }
@@ -121,7 +137,6 @@ export interface CliArgs {
   bare: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
-  checkpointing: boolean | undefined;
   telemetryTarget: string | undefined;
   telemetryOtlpEndpoint: string | undefined;
   telemetryOtlpProtocol: string | undefined;
@@ -156,7 +171,27 @@ export interface CliArgs {
   resume: string | undefined;
   /** Specify a session ID without session resumption */
   sessionId: string | undefined;
+  /**
+   * Create a new forked session from the resumed session. Must be used with
+   * --resume or --continue.
+   */
+  forkSession?: boolean | undefined;
+  /** Internal: preserve the outer session ID when relaunching in a sandbox */
+  sandboxSessionId?: string | undefined;
+  /**
+   * Start the session inside a git worktree. Accepted forms:
+   * - bare `--worktree` (empty string from yargs) → auto-generated slug
+   * - `--worktree foo` / `--worktree=foo` → explicit slug
+   * - `--worktree=#123` / `--worktree https://github.com/o/r/pull/123` → PR ref
+   *
+   * Consumed by `setupStartupWorktree()` before `loadCliConfig()`. When set,
+   * the CLI chdirs into `<repoRoot>/.qwen/worktrees/<slug>/` and the entire
+   * session runs inside that worktree.
+   */
+  worktree?: string | undefined;
   maxSessionTurns: number | undefined;
+  maxWallTime: string | undefined;
+  maxToolCalls: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -164,7 +199,306 @@ export interface CliArgs {
   channel: string | undefined;
   jsonFd?: number | undefined;
   jsonFile?: string | undefined;
+  jsonSchema?: string | undefined;
   inputFile?: string | undefined;
+}
+
+/**
+ * Returns true if the root of the given schema can accept a JSON object.
+ *
+ * JSON Schema applies sibling keywords conjunctively, so `type`, `anyOf`,
+ * `oneOf`, and `allOf` at the same level must EACH allow an object — they
+ * can't rescue one another. For example, `{type:"object", anyOf:[{type:"string"}]}`
+ * is unsatisfiable for any value because `type` requires object while
+ * `anyOf` requires string. Walk all four rather than returning on the
+ * first hit.
+ *
+ * For `anyOf` / `oneOf`, at least one branch must admit object (a value
+ * only has to match one branch). For `allOf`, every branch must admit
+ * object (a value has to match all of them). Root `$ref` is rejected
+ * unconditionally — Ajv applies `$ref` conjunctively with sibling
+ * keywords, so even `{type:"object", $ref:"#/$defs/Foo"}` is
+ * unsatisfiable when `Foo` resolves to a non-object schema. We don't
+ * follow refs ourselves (local-only resolution would still need to
+ * handle remote / recursive refs) so users wanting composition should
+ * inline the schema at the root or use `allOf`.
+ *
+ * The `$ref` rejection is **root-only**. Sub-schemas inside `anyOf` /
+ * `oneOf` / `allOf` recurse with `isRoot=false`, where a `$ref` is
+ * treated as opaque (assume-object-compatible) and deferred to Ajv at
+ * runtime — otherwise common composition shapes like
+ * `{anyOf:[{$ref:"#/$defs/Foo"}, {type:"string"}]}` would be wrongly
+ * rejected at parse time even though Ajv can resolve them.
+ */
+function schemaRootAcceptsObject(
+  schema: Record<string, unknown>,
+  isRoot = true,
+): boolean {
+  if (isRoot && typeof schema['$ref'] === 'string') {
+    // Reject any root `$ref`. The previous "accept when sibling
+    // `type:"object"` is present" carve-out was unsound: Ajv applies
+    // both keywords, so `{type:"object", $ref:"#/$defs/Foo",
+    // $defs:{Foo:{type:"array"}}}` parses fine but no object argument
+    // can satisfy both at runtime — the model would loop forever on
+    // validation failures.
+    return false;
+  }
+
+  const rawType = schema['type'];
+  const typeIncludesObject =
+    rawType !== undefined &&
+    (Array.isArray(rawType) ? rawType : [rawType]).includes('object');
+
+  if (rawType !== undefined && !typeIncludesObject) {
+    return false;
+  }
+
+  // Root `const` / `enum` pin the value to specific literals. If those
+  // literals can never be a JSON object (e.g. `{const: 1}` or
+  // `{enum: ["a", "b"]}`), no object satisfies the schema — reject.
+  if ('const' in schema) {
+    const constVal = schema['const'];
+    if (
+      typeof constVal !== 'object' ||
+      constVal === null ||
+      Array.isArray(constVal)
+    ) {
+      return false;
+    }
+  }
+  const enumVal = schema['enum'];
+  if (Array.isArray(enumVal)) {
+    const anyObjectMember = enumVal.some(
+      (v) => typeof v === 'object' && v !== null && !Array.isArray(v),
+    );
+    if (!anyObjectMember) return false;
+  }
+
+  // JSON Schema (draft-06+) treats `true` and `false` as valid subschemas
+  // for any keyword that accepts a schema: `true` matches every value,
+  // `false` matches nothing. Honour those alongside object subschemas so
+  // shapes like `{anyOf:[true]}` or `{allOf:[true,{type:"object"}]}` pass
+  // and `{anyOf:[false]}` is rejected.
+  const variantAcceptsObject = (v: unknown): boolean => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      // isRoot=false: nested branches don't trigger the root-only `$ref`
+      // rejection — the parent's keyword scope already pins the
+      // sub-schema's role to "candidate value type", and Ajv will
+      // resolve the ref at runtime.
+      return schemaRootAcceptsObject(v as Record<string, unknown>, false);
+    }
+    return false;
+  };
+
+  for (const key of ['anyOf', 'oneOf'] as const) {
+    const variants = schema[key];
+    if (Array.isArray(variants)) {
+      // Empty anyOf/oneOf is unsatisfiable per JSON Schema — no value can
+      // match a member of an empty union. Reject rather than treating it
+      // as "no constraint".
+      if (variants.length === 0) return false;
+      if (!variants.some(variantAcceptsObject)) return false;
+    }
+  }
+
+  const allOf = schema['allOf'];
+  if (Array.isArray(allOf) && allOf.length > 0) {
+    // allOf is conjunctive — `false` in any branch makes the schema
+    // unsatisfiable, `true` is neutral.
+    if (!allOf.every(variantAcceptsObject)) return false;
+  }
+
+  // Best-effort `not` handling: when `not` directly forbids object via its
+  // own `type` keyword (e.g. `{not:{type:"object"}}` or
+  // `{not:{type:["object","null"]}}`), the schema can never be satisfied
+  // by an object — reject. We don't try to do full satisfiability analysis
+  // for arbitrary `not` schemas (e.g. `not:{const:"foo"}` is fine, but
+  // `not:{anyOf:[{type:"object"},…]}` would also reject objects); those
+  // fall through to Ajv at runtime.
+  const notSchema = schema['not'];
+  if (
+    typeof notSchema === 'object' &&
+    notSchema !== null &&
+    !Array.isArray(notSchema)
+  ) {
+    const notRecord = notSchema as Record<string, unknown>;
+    const notType = notRecord['type'];
+    if (notType !== undefined) {
+      const types = Array.isArray(notType) ? notType : [notType];
+      // If `not` is JUST `{type: "object"[…]}` (no additional keywords),
+      // every object value matches the `not` subschema and so gets
+      // excluded — schema is unsatisfiable for objects, reject.
+      //
+      // If `not` has additional constraints alongside `type` (e.g.
+      // `{not:{type:"object",required:["error"]}}`), those constraints
+      // NARROW what `not` excludes: only objects matching ALL of `not`'s
+      // keywords are rejected, so objects that fail any of the
+      // narrowing constraints survive. Example: `{}` satisfies
+      // `{not:{type:"object",required:["error"]}}` because the value
+      // lacks the `error` key. Rejecting at parse time would be a
+      // false positive — defer to Ajv at runtime.
+      if (types.includes('object') && Object.keys(notRecord).length === 1) {
+        return false;
+      }
+    }
+  }
+
+  // Best-effort `if/then/else` handling for the decidable cases. The
+  // semantics: if the value matches `if`, it must match `then`; otherwise
+  // it must match `else` (defaults to `true`). For root-acceptance we can
+  // only decide statically when `if` is itself a constant boolean
+  // subschema:
+  //   `if: true`  → every object matches `if`, so it MUST match `then`.
+  //   `if: false` → no value matches `if`, so it must match `else`.
+  // Other shapes for `if` (object schemas) depend on the candidate value
+  // and fall through to Ajv at runtime — we can't decide acceptance
+  // without seeing the value.
+  if ('if' in schema) {
+    const ifSchema = schema['if'];
+    if (ifSchema === true) {
+      // Object MUST match `then` (if absent, defaults to `true`, no
+      // constraint on root acceptance).
+      const thenSchema = schema['then'];
+      if (thenSchema !== undefined && !variantAcceptsObject(thenSchema)) {
+        return false;
+      }
+    } else if (ifSchema === false) {
+      // Object MUST match `else` (if absent, defaults to `true`).
+      const elseSchema = schema['else'];
+      if (elseSchema !== undefined && !variantAcceptsObject(elseSchema)) {
+        return false;
+      }
+    }
+    // ifSchema is an object schema — runtime Ajv decides; do nothing.
+  }
+
+  // No narrowing at the root — lenient default, treated as object-compatible.
+  return true;
+}
+
+/** 4 MiB — well above any real schema, well below an accidental
+ * gigabyte-sized file that would OOM `fs.readFileSync` + `JSON.parse`.
+ */
+const MAX_JSON_SCHEMA_FILE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Resolves the `--json-schema` argument into a parsed JSON Schema object.
+ *
+ * Accepts either a JSON literal or `@path/to/schema.json`. Fails fast with a
+ * FatalConfigError if the input can't be read/parsed/compiled — invalid
+ * schemas should not silently skip validation at runtime.
+ */
+export function resolveJsonSchemaArg(
+  raw: string | undefined,
+): Record<string, unknown> | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new FatalConfigError('--json-schema cannot be empty.');
+  }
+
+  let payload: string;
+  let payloadSource: 'inline' | 'file' = 'inline';
+  let payloadSourcePath: string | undefined;
+  if (trimmed.startsWith('@')) {
+    const resolvedPath = resolvePath(trimmed.slice(1));
+    payloadSource = 'file';
+    payloadSourcePath = resolvedPath;
+    try {
+      // Stat first so we can refuse non-regular files (directories,
+      // character devices like `/dev/zero`, FIFOs that would block
+      // synchronously) and cap by size before pulling bytes into memory.
+      // The cap (`MAX_JSON_SCHEMA_FILE_BYTES`) is set well above any real
+      // schema and well below an accidental gigabyte-sized file that
+      // would OOM `fs.readFileSync` + `JSON.parse`.
+      const stat = fs.statSync(resolvedPath);
+      if (!stat.isFile()) {
+        throw new FatalConfigError(
+          `--json-schema "@${resolvedPath}" must be a regular file.`,
+        );
+      }
+      if (stat.size > MAX_JSON_SCHEMA_FILE_BYTES) {
+        throw new FatalConfigError(
+          `--json-schema file "${resolvedPath}" is ${stat.size} bytes ` +
+            `(>${MAX_JSON_SCHEMA_FILE_BYTES}). Refusing to read; this is ` +
+            'almost certainly a wrong-path argument. Schemas should be ' +
+            'small enough to fit in a few KiB; decompose with `$ref` if ' +
+            'you need a large family of types.',
+        );
+      }
+      payload = fs.readFileSync(resolvedPath, 'utf8');
+    } catch (err) {
+      if (err instanceof FatalConfigError) throw err;
+      throw new FatalConfigError(
+        `--json-schema could not read "${resolvedPath}": ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  } else {
+    payload = trimmed;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch (err) {
+    // For inline JSON the user IS the source — echoing the SyntaxError
+    // (which on Node ≥18 embeds a 10-char input snippet) is fine. For
+    // @path, the error message would leak a prefix of the file's bytes
+    // through stderr to whatever wrapping process surfaces it; emit a
+    // generic message instead.
+    if (payloadSource === 'file') {
+      throw new FatalConfigError(
+        `--json-schema content of "${payloadSourcePath}" is not valid JSON.`,
+      );
+    }
+    throw new FatalConfigError(
+      `--json-schema is not valid JSON: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new FatalConfigError(
+      '--json-schema must be a JSON object describing a schema.',
+    );
+  }
+
+  // The schema will be installed as a TOOL PARAMETER schema. All function-
+  // calling APIs (Gemini/OpenAI/Anthropic) require tool arguments to be a
+  // JSON object, so a schema that cannot accept objects registers an
+  // unusable synthetic tool the model could never satisfy. `schemaRootAcceptsObject`
+  // walks `type`/`const`/`enum`/`anyOf`/`oneOf`/`allOf`/`not`/`if` (with
+  // best-effort decidable cases for the harder shapes); the strict Ajv
+  // compile below catches structural validity. The two together cover both
+  // "schema can be parsed" and "schema can be satisfied by an object value".
+  if (!schemaRootAcceptsObject(parsed as Record<string, unknown>)) {
+    throw new FatalConfigError(
+      '--json-schema root must accept object-typed values (tool parameters ' +
+        'are always JSON objects). At least one branch of a root anyOf/oneOf ' +
+        'must be satisfiable by an object, and a root `type` (when present) ' +
+        'must include "object".',
+    );
+  }
+
+  // Ajv compile-time validation. SchemaValidator.validate is deliberately
+  // lenient at runtime (falls back to no-op on compile failure to support
+  // exotic MCP schemas) — but `--json-schema` is explicit user intent, so
+  // surface a bad schema here rather than letting it silently no-op later.
+  const compileError = SchemaValidator.compileStrict(parsed);
+  if (compileError) {
+    throw new FatalConfigError(
+      `--json-schema is not a valid JSON Schema: ${compileError}`,
+    );
+  }
+
+  return parsed as Record<string, unknown>;
 }
 
 function normalizeOutputFormat(
@@ -331,14 +665,9 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('approval-mode', {
           type: 'string',
-          choices: ['plan', 'default', 'auto-edit', 'yolo'],
+          choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
           description:
-            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve all tools)',
-        })
-        .option('checkpointing', {
-          type: 'boolean',
-          description: 'Enables checkpointing of file edits',
-          default: false,
+            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
         })
         .option('acp', {
           type: 'boolean',
@@ -364,8 +693,8 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
+          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -470,6 +799,14 @@ export async function parseArguments(): Promise<CliArgs> {
             'File path for structured JSON event output (dual output mode). ' +
             'Can be a regular file, FIFO (named pipe), or /dev/fd/N.',
         })
+        .option('json-schema', {
+          type: 'string',
+          description:
+            "JSON Schema that the model's final output must conform to " +
+            '(headless mode only). Accepts a JSON literal or "@path/to/schema.json". ' +
+            'Registers a synthetic `structured_output` tool; the session ends on ' +
+            'the first valid call.',
+        })
         .option('input-file', {
           type: 'string',
           description:
@@ -493,9 +830,37 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'Specify a session ID for this run.',
         })
+        .option('fork-session', {
+          type: 'boolean',
+          description:
+            'Create a new forked session from the resumed session. Must be used with --resume or --continue.',
+          default: false,
+        })
+        .option('sandbox-session-id', {
+          type: 'string',
+          hidden: true,
+        })
+        .option('worktree', {
+          type: 'string',
+          description:
+            'Start the session inside a git worktree at <repoRoot>/.qwen/worktrees/<slug>/. ' +
+            'Pass a slug (`--worktree my-feature`), a PR reference (`--worktree=#123` or a full ' +
+            'GitHub pull-request URL), or use bare `--worktree` to auto-generate a slug. ' +
+            'On exit, the WorktreeExitDialog prompts to keep or remove the worktree.',
+        })
         .option('max-session-turns', {
           type: 'number',
           description: 'Maximum number of session turns',
+        })
+        .option('max-wall-time', {
+          type: 'string',
+          description:
+            'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`, `1.5h`). Minimum 1s — sub-second values (`500ms`, `0.5`) are rejected as typos; max ~24 days. Aborts the run with exit code 55 when exceeded.',
+        })
+        .option('max-tool-calls', {
+          type: 'number',
+          description:
+            'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
         })
         .option('core-tools', {
           type: 'array',
@@ -545,10 +910,6 @@ export async function parseArguments(): Promise<CliArgs> {
           'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
-          'checkpointing',
-          'Use the "general.checkpointing.enabled" setting in settings.json instead. This flag will be removed in a future version.',
-        )
-        .deprecateOption(
           'prompt',
           'Use the positional prompt instead. This flag will be removed in a future version.',
         )
@@ -590,8 +951,18 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['continue'] && argv['resume']) {
             return 'Cannot use both --continue and --resume together. Use --continue to resume the latest session, or --resume <sessionId> to resume a specific session.';
           }
-          if (argv['sessionId'] && (argv['continue'] || argv['resume'])) {
+          const hasResume = argv['resume'] !== undefined;
+          if (argv['sessionId'] && (argv['continue'] || hasResume)) {
             return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
+          }
+          if (argv['forkSession'] && !(argv['continue'] || hasResume)) {
+            return '--fork-session must be used with --resume or --continue.';
+          }
+          if (
+            argv['sandboxSessionId'] &&
+            (argv['sessionId'] || argv['continue'] || argv['resume'])
+          ) {
+            return 'Cannot use internal --sandbox-session-id with --session-id, --continue, or --resume.';
           }
           if (
             argv['sessionId'] &&
@@ -599,9 +970,55 @@ export async function parseArguments(): Promise<CliArgs> {
           ) {
             return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
+          if (
+            argv['sandboxSessionId'] &&
+            !isValidSessionId(argv['sandboxSessionId'] as string)
+          ) {
+            return `Invalid --sandbox-session-id: "${argv['sandboxSessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
+          }
           // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
             return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
+          }
+          if (argv['jsonSchema']) {
+            if (argv['promptInteractive']) {
+              return '--json-schema cannot be used with --prompt-interactive (-i); structured output only terminates the non-interactive flow.';
+            }
+            if (argv['inputFormat'] === 'stream-json') {
+              // The "first valid structured_output call ends the session"
+              // contract assumes a single one-shot prompt. Stream-json
+              // input keeps the process open waiting for more protocol
+              // messages, so terminating on the first call would silently
+              // drop subsequent prompts. Refuse the combination here
+              // rather than letting the run race to whichever message
+              // wins.
+              return '--json-schema cannot be used with --input-format stream-json; the "first structured_output call ends the session" contract is incompatible with the long-lived stream-json input protocol.';
+            }
+            if (argv['acp'] || argv['experimentalAcp']) {
+              // ACP runs an external IDE/Zed protocol on its own turn loop
+              // (runAcpAgent), which doesn't honour the synthetic
+              // structured_output contract. Without this check the tool
+              // would register but its "session ends now" llmContent would
+              // just be relayed back into the ACP chat, leaving the run
+              // open and silently ignoring --json-schema.
+              return '--json-schema cannot be used with --acp; structured output is only honoured by the headless non-interactive flow.';
+            }
+            const hasPrompt = !!argv['prompt'];
+            const query = argv['query'] as string | string[] | undefined;
+            const hasPositionalQuery = Array.isArray(query)
+              ? query.length > 0
+              : !!query;
+            // Allow stdin piping (`echo "..." | qwen --json-schema ...`):
+            // when stdin is not a TTY, the prompt is supplied via the pipe
+            // and headless mode runs normally. Only reject true interactive
+            // invocations with neither flag nor positional nor pipe — the
+            // synthetic tool's "session ends now" llmContent has no
+            // termination handler in the TUI loop, so silently launching
+            // the TUI would strand the run.
+            const stdinIsPiped = !process.stdin.isTTY;
+            if (!hasPrompt && !hasPositionalQuery && !stdinIsPiped) {
+              return '--json-schema only applies to non-interactive mode; pass a prompt via -p, as a positional argument, or piped via stdin.';
+            }
           }
           return true;
         }),
@@ -610,14 +1027,15 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(mcpCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
-    // Register Auth subcommands
     .command(authCommand)
     // Register Hooks subcommands
     .command(hooksCommand)
     // Register Channel subcommands
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand);
+    .command(reviewCommand)
+    // Register `qwen serve` (Stage 1 daemon)
+    .command(serveCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -638,11 +1056,15 @@ export async function parseArguments(): Promise<CliArgs> {
     result._.length > 0 &&
     (result._[0] === 'mcp' ||
       result._[0] === 'extensions' ||
+      result._[0] === 'auth' ||
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review')
   ) {
-    // MCP/Extensions/Hooks/Channel/Review commands handle their own
+    // Note: `serve` is intentionally NOT in this list. Its handler blocks
+    // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
+    // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
+    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
@@ -702,6 +1124,7 @@ export async function loadHierarchicalGeminiMemory(
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
   contextRuleExcludes: string[] = [],
+  options: LoadServerHierarchicalMemoryOptions = {},
 ): Promise<LoadServerHierarchicalMemoryResponse> {
   // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
   const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
@@ -721,15 +1144,78 @@ export async function loadHierarchicalGeminiMemory(
     folderTrust,
     memoryImportFormat,
     contextRuleExcludes,
+    options,
   );
 }
 
+/**
+ * Resolves the wall-clock budget for a run. Returns seconds (`-1` =
+ * unlimited). Order of precedence: `--max-wall-time` flag, then
+ * `model.maxWallTimeSeconds` from settings, else unlimited.
+ *
+ * The CLI flag is a duration string (`30s` / `5m` / `1h` / `90`); the
+ * settings entry is a plain number of seconds (parity with
+ * `model.maxSessionTurns`). Both layers reject `0` and out-of-range
+ * values up front — a typo in a CI guardrail should fail loud at startup,
+ * not silently disable the budget.
+ */
+function resolveMaxWallTimeSeconds(argv: CliArgs, settings: Settings): number {
+  if (argv.maxWallTime !== undefined && argv.maxWallTime !== null) {
+    try {
+      return parseDurationSeconds(String(argv.maxWallTime));
+    } catch (err) {
+      throw new Error(`--max-wall-time: ${(err as Error).message}`);
+    }
+  }
+  const fromSettings = settings.model?.maxWallTimeSeconds;
+  if (typeof fromSettings === 'number') {
+    try {
+      return validateMaxWallTimeSetting(fromSettings);
+    } catch (err) {
+      throw new Error(`settings.json: ${(err as Error).message}`);
+    }
+  }
+  return -1;
+}
+
+/**
+ * Resolves the tool-call budget for a run. Returns the validated count
+ * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
+ * `model.maxToolCalls` from settings, else unlimited.
+ *
+ * Symmetric with `resolveMaxWallTimeSeconds`: yargs accepts `NaN` from
+ * non-numeric flag values, and the enforcer's `>= 0` gate would silently
+ * disable the budget for `NaN` / negatives. Validate up front so a typo
+ * in a CI guardrail fails loudly.
+ */
+function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
+  if (argv.maxToolCalls !== undefined && argv.maxToolCalls !== null) {
+    try {
+      return validateMaxToolCalls(argv.maxToolCalls);
+    } catch (err) {
+      throw new Error(`--max-tool-calls: ${(err as Error).message}`);
+    }
+  }
+  const fromSettings = settings.model?.maxToolCalls;
+  if (typeof fromSettings === 'number') {
+    try {
+      return validateMaxToolCalls(fromSettings);
+    } catch (err) {
+      throw new Error(`settings.json: ${(err as Error).message}`);
+    }
+  }
+  return -1;
+}
+
 export function isDebugMode(argv: CliArgs): boolean {
+  if (argv.debug) return true;
+  const debugVal = process.env['DEBUG'];
+  const debugModeVal = process.env['DEBUG_MODE'];
   return (
-    argv.debug ||
-    [process.env['DEBUG'], process.env['DEBUG_MODE']].some(
-      (v) => v === 'true' || v === '1',
-    )
+    debugVal === 'true' ||
+    debugVal === '1' ||
+    debugModeVal === 'true' ||
+    debugModeVal === '1'
   );
 }
 
@@ -811,6 +1297,45 @@ function parseMcpConfig(
   }
 }
 
+/**
+ * Builds the live-read closure for `Config.getDisabledSkillNames()`.
+ *
+ * The returned function reads through `loadedSettings.merged` on every
+ * call, so `LoadedSettings.setValue('skills.disabled', ...)` invocations
+ * are reflected without rebuilding `Config`. The closure is over the
+ * `LoadedSettings` instance, NOT over its `.merged` snapshot — that
+ * distinction matters because `LoadedSettings.setValue` replaces the
+ * internal `_merged` object on every call. A closure over `.merged` would
+ * stay frozen at construction time.
+ *
+ * Use this from every `loadCliConfig` call site (interactive entry, ACP
+ * session start, etc.) so all surfaces — `<available_skills>` in the
+ * model description, `/skill-name` slash commands, `/skills` listing and
+ * completion — agree on which skills are currently disabled.
+ */
+export function buildDisabledSkillNamesProvider(
+  loadedSettings: LoadedSettings,
+): () => ReadonlySet<string> {
+  return () => {
+    // Defensive: settings.json is user-editable, so the `disabled` slot
+    // could be a non-array (e.g. `"disabled": "all"` or `"disabled": 42`)
+    // OR an array containing non-strings (e.g. `[42, null]`). The `??`
+    // fallback only catches `null`/`undefined`, so we MUST also guard
+    // against non-array values before `.filter()` — otherwise calling
+    // `"all".filter` throws `TypeError: list.filter is not a function`
+    // and bricks every skill invocation (validateToolParams + execute
+    // both call this provider without a try/catch).
+    const raw = loadedSettings.merged.skills?.disabled;
+    const list = Array.isArray(raw) ? raw : [];
+    return new Set(
+      list
+        .filter((n): n is string => typeof n === 'string')
+        .map((n) => n.trim().toLowerCase())
+        .filter(Boolean),
+    );
+  };
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -824,6 +1349,30 @@ export async function loadCliConfig(
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
   },
+  /**
+   * Live-read provider for the set of disabled skill names. Forwarded to
+   * `ConfigParameters` so that `Config.getDisabledSkillNames()` reflects
+   * `LoadedSettings.merged.skills?.disabled` even after `setValue`
+   * mutations within the same process.
+   *
+   * Callers MUST close over the live `LoadedSettings` instance, NOT over
+   * the `settings: Settings` snapshot passed as the first argument here —
+   * `LoadedSettings.setValue` replaces `_merged`, so any closure over a
+   * snapshot would only see cold data and the dialog/subcommand toggles
+   * would not take effect on the model side. Use
+   * `buildDisabledSkillNamesProvider(loadedSettings)` to construct it
+   * correctly.
+   */
+  disabledSkillNamesProvider?: () => ReadonlySet<string>,
+  /**
+   * MCP servers injected by the embedding session (e.g. ACP / IDE clients).
+   * Treated as a session-level source at the TOP of the precedence stack — above
+   * settings and `.mcp.json`, below `--mcp-config` — and never approval-gated:
+   * they are explicit, per-session, and not checked into the repo. Routing them
+   * here (rather than merging into `settings.mcpServers`) keeps them from being
+   * demoted below a project `.mcp.json` by `assembleMcpServers`. See issue #4615.
+   */
+  sessionMcpServers?: Record<string, MCPServerConfig>,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
@@ -1030,6 +1579,11 @@ export async function loadCliConfig(
     addDisabled(name);
   }
 
+  // Resolve the per-workspace tool denylist. De-duplicate while preserving
+  // original casing; shared helper since the MCP restart refresh path
+  // must agree byte-for-byte with this.
+  const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
+
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
   // to preserve the original behaviour where "ShellTool", "Shell", and
@@ -1069,6 +1623,17 @@ export async function loadCliConfig(
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
         // Deny all write/execute tools unless explicitly allowed.
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
+        denyUnlessAllowed(ToolNames.EDIT as ToolName);
+        denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
+        break;
+      case ApprovalMode.AUTO:
+        // AUTO uses an LLM classifier to gate Shell/Monitor/Edit/WriteFile at
+        // call time; but non-interactive mode has no UI for the classifier's
+        // fallback path, so apply the same denylist as DEFAULT to keep parity
+        // with the interactive AUTO safety guarantees (no zero-denial drift
+        // toward YOLO behavior).
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
         denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
@@ -1123,6 +1688,27 @@ export async function loadCliConfig(
 
   const { model: resolvedModel } = resolvedCliConfig;
 
+  // Disable ToolSearch when explicitly configured or for models that benefit
+  // from prefix-based KV caching. DeepSeek models (v3, v4, deepseek-chat)
+  // all use prefix-based disk KV caching with heavily discounted cached
+  // token pricing (up to 1/120 for v4). When tool_search is in the deny
+  // list, client.ts eagerly reveals all deferred tools so every MCP tool
+  // schema is in the initial declaration list, keeping the prompt prefix
+  // stable and maximizing cache hit rates.
+  // Note: no `^` anchor — model names may include a provider prefix
+  // (e.g. "openrouter/deepseek/deepseek-v4-flash").
+  const toolSearchExplicitlyEnabled = settings.tools?.toolSearch?.enabled;
+  const shouldDisableToolSearch =
+    toolSearchExplicitlyEnabled === false ||
+    (toolSearchExplicitlyEnabled === undefined &&
+      resolvedModel !== undefined &&
+      /deepseek-(v3|v4|chat)/i.test(resolvedModel));
+  if (shouldDisableToolSearch) {
+    if (!mergedDeny.includes('tool_search')) {
+      mergedDeny.push('tool_search');
+    }
+  }
+
   const sandboxConfig = await loadSandboxConfig(
     bareMode ? ({} as Settings) : settings,
     argv,
@@ -1141,6 +1727,11 @@ export async function loadCliConfig(
       sessionData = await sessionService.loadLastSession();
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
+      } else if (argv.forkSession) {
+        writeStderrLine(
+          'Cannot use --fork-session with --continue: no saved session found to fork.',
+        );
+        process.exit(1);
       }
     }
 
@@ -1156,6 +1747,31 @@ export async function loadCliConfig(
         process.exit(1);
       }
     }
+
+    if (argv.forkSession && sessionId) {
+      const sourceSessionId = sessionId;
+      const forkedSessionId = randomUUID();
+      try {
+        await sessionService.forkSession(sourceSessionId, forkedSessionId);
+      } catch (err) {
+        writeStderrLine(
+          `Failed to fork session ${sourceSessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        process.exit(1);
+      }
+      sessionId = forkedSessionId;
+      sessionData = await sessionService.loadSession(forkedSessionId);
+      if (!sessionData) {
+        writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
+        process.exit(1);
+      }
+    }
+  } else if (argv.sandboxSessionId) {
+    if (!process.env['SANDBOX']) {
+      writeStderrLine('--sandbox-session-id is for internal sandbox use only.');
+      process.exit(1);
+    }
+    sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
     // Check if session ID is already in use
@@ -1171,7 +1787,27 @@ export async function loadCliConfig(
 
   const modelProvidersConfig = settings.modelProviders;
 
-  const config = new Config({
+  // Assemble MCP servers across all sources in precedence order (user/default
+  // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
+  // and compute which gated (project/workspace) servers are still pending
+  // approval (#4615), so the discovery layer can skip them with no connection
+  // side effect. Loading `.mcp.json` is a pure read.
+  // Top tier = session-injected (ACP/IDE) servers plus `--mcp-config`; CLI wins
+  // over the session source on a name clash. Both sit above settings/`.mcp.json`
+  // and are never gated (#4615).
+  const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+  const topTierMcpServers =
+    sessionMcpServers || cliMcpServers
+      ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
+      : undefined;
+  const mcpServers = bareMode
+    ? {}
+    : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+  const pendingMcpServers = bareMode
+    ? undefined
+    : getPendingGatedMcpServers(mcpServers, cwd);
+
+  const configParams: ConfigParameters = {
     sessionId,
     sessionData,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -1196,11 +1832,14 @@ export async function loadCliConfig(
     excludeTools: mergedDeny,
     disabledSlashCommands:
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
+    disabledSkillNamesProvider,
+    disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
+      autoMode: settings.permissions?.autoMode,
     },
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
@@ -1221,13 +1860,8 @@ export async function loadCliConfig(
       : settings.tools?.discoveryCommand,
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
-    mcpServers: bareMode
-      ? {}
-      : (() => {
-          const base = settings.mcpServers || {};
-          const cliMcpServers = parseMcpConfig(argv.mcpConfig);
-          return cliMcpServers ? { ...base, ...cliMcpServers } : base;
-        })(),
+    mcpServers,
+    pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -1240,11 +1874,11 @@ export async function loadCliConfig(
       screenReader,
     },
     telemetry: telemetrySettings,
+    outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
-    checkpointing:
-      argv.checkpointing || settings.general?.checkpointing?.enabled,
+    plansDirectory: settings.plansDirectory,
     proxy:
       argv.proxy ||
       settings.proxy ||
@@ -1260,8 +1894,12 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
+    maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
+    maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
-    cronEnabled: settings.experimental?.cron ?? false,
+    cronEnabled: settings.experimental?.cron ?? true,
+    agentTeamEnabled: settings.experimental?.agentTeam ?? false,
+    computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
@@ -1287,11 +1925,13 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
+    toolOutputBatchBudget: settings.tools?.toolOutputBatchBudget,
     eventEmitter: appEvents,
     gitCoAuthor: settings.general?.gitCoAuthor,
     output: {
@@ -1300,7 +1940,12 @@ export async function loadCliConfig(
     enableManagedAutoMemory: bareMode
       ? false
       : (settings.memory?.enableManagedAutoMemory ?? true),
-    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    enableManagedAutoDream: bareMode
+      ? false
+      : (settings.memory?.enableManagedAutoDream ?? true),
+    enableAutoSkill: bareMode
+      ? false
+      : (settings.memory?.enableAutoSkill ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
@@ -1309,6 +1954,7 @@ export async function loadCliConfig(
     projectHooks: bareMode ? undefined : hooksConfig?.projectHooks,
     hooks: bareMode ? undefined : settings.hooks, // Keep for backward compatibility
     disableAllHooks: bareMode ? true : (settings.disableAllHooks ?? false),
+    stopHookBlockingCap: bareMode ? undefined : settings.stopHookBlockingCap,
     channel: argv.channel,
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and
@@ -1316,6 +1962,7 @@ export async function loadCliConfig(
     // absent.
     jsonFd: argv.jsonFd,
     jsonFile: argv.jsonFile ?? settings.dualOutput?.jsonFile,
+    jsonSchema: resolveJsonSchemaArg(argv.jsonSchema),
     inputFile: argv.inputFile ?? settings.dualOutput?.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
@@ -1338,7 +1985,14 @@ export async function loadCliConfig(
             : undefined,
         }
       : undefined,
-  });
+    worktree: settings.worktree
+      ? {
+          symlinkDirectories: settings.worktree.symlinkDirectories,
+        }
+      : undefined,
+  };
+
+  const config = new Config(configParams);
 
   if (lspEnabled) {
     try {
@@ -1354,10 +2008,36 @@ export async function loadCliConfig(
       );
 
       await lspService.discoverAndPrepare();
+      if (config.getDebugMode()) {
+        debugLogger.debug(
+          'Native LSP status after discovery:',
+          lspService.getStatusSnapshot(),
+        );
+      }
       await lspService.start();
+      if (config.getDebugMode()) {
+        debugLogger.debug(
+          'Native LSP status after startup:',
+          lspService.getStatusSnapshot(),
+        );
+      }
       lspClient = new NativeLspClient(lspService);
       config.setLspClient(lspClient);
+      try {
+        config.setLspInitializationError(undefined);
+      } catch {
+        debugLogger.warn(
+          'Failed to clear LSP initialization error after initialization',
+        );
+      }
     } catch (err) {
+      try {
+        config.setLspInitializationError(
+          err instanceof Error ? err : String(err),
+        );
+      } catch {
+        debugLogger.warn('LSP init error occurred after initialization:', err);
+      }
       debugLogger.warn('Failed to initialize native LSP service:', err);
     }
   }

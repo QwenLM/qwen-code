@@ -64,13 +64,6 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     const toolRegistry = config.getToolRegistry();
     const promptRegistry = config.getPromptRegistry();
 
-    // Get settings to determine the scope of each server
-    const settings = loadSettings();
-    const userSettings = settings.forScope(SettingScope.User).settings;
-    const workspaceSettings = settings.forScope(
-      SettingScope.Workspace,
-    ).settings;
-
     const serverInfos: MCPServerDisplayInfo[] = [];
 
     for (const [name, serverConfig] of Object.entries(mcpServers) as Array<
@@ -93,13 +86,15 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       );
 
       // Determine source type
-      let source: 'user' | 'project' | 'extension' = 'user';
+      let source: MCPServerDisplayInfo['source'] = 'user';
       if (serverConfig.extensionName) {
         source = 'extension';
-      } else if (workspaceSettings.mcpServers?.[name]) {
+      } else if (serverConfig.scope === 'project') {
         source = 'project';
-      } else if (userSettings.mcpServers?.[name]) {
-        source = 'user';
+      } else if (serverConfig.scope === 'workspace') {
+        source = 'workspace';
+      } else if (serverConfig.scope === 'system') {
+        source = 'system';
       }
 
       // Use config.isMcpServerDisabled() to check if server is disabled
@@ -214,7 +209,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       let invalidReason: string | undefined;
       if (!isValid) {
         const reasons = getToolInvalidReasons(tool.name, tool.description);
-        invalidReason = reasons.map((r) => t(r)).join(', ');
+        invalidReason = reasons.join(', ');
       }
 
       return {
@@ -522,16 +517,16 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
                 {selectedTool?.name || t('Tool Detail')}
               </Text>
               {selectedTool?.annotations?.destructiveHint && (
-                <Text color={theme.status.error}>{'[destructive]'}</Text>
+                <Text color={theme.status.error}>[{t('destructive')}]</Text>
               )}
               {selectedTool?.annotations?.idempotentHint && (
-                <Text color={theme.status.warning}>{'[idempotent]'}</Text>
+                <Text color={theme.status.warning}>[{t('idempotent')}]</Text>
               )}
               {selectedTool?.annotations?.readOnlyHint && (
-                <Text color={theme.status.success}>{'[read-only]'}</Text>
+                <Text color={theme.status.success}>[{t('read-only')}]</Text>
               )}
               {selectedTool?.annotations?.openWorldHint && (
-                <Text color={theme.text.primary}>{'[open-world]'}</Text>
+                <Text color={theme.text.primary}>[{t('open-world')}]</Text>
               )}
             </Box>
             <Text color={theme.text.secondary}>

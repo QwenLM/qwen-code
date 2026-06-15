@@ -15,7 +15,10 @@ import {
   getUrlOpenCommand,
   CodePage,
   findMidInputSlashCommand,
+  findSlashCommandTokens,
+  getBestSlashCommandMatch,
 } from './commandUtils.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 
 // Mock child_process
 vi.mock('child_process');
@@ -284,12 +287,18 @@ describe('commandUtils', () => {
         );
       });
 
-      it('should throw error when both xclip and xsel are not found', async () => {
+      it('should throw when xclip/xsel missing and OSC 52 fails (no TTY)', async () => {
         const testText = 'Hello, world!';
         let callCount = 0;
         const linuxOptions: SpawnOptions = {
           stdio: ['pipe', 'inherit', 'pipe'],
         };
+
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
 
         mockSpawn.mockImplementation(() => {
           const child = Object.assign(new EventEmitter(), {
@@ -319,8 +328,10 @@ describe('commandUtils', () => {
 
           return child as unknown as ReturnType<typeof spawn>;
         });
+
+        // No TTY available → OSC 52 fails → should throw
         await expect(copyToClipboard(testText)).rejects.toThrow(
-          'Please ensure xclip or xsel is installed and configured.',
+          'Clipboard unavailable',
         );
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);
@@ -336,9 +347,69 @@ describe('commandUtils', () => {
           ['--clipboard', '--input'],
           linuxOptions,
         );
+
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
       });
 
-      it('should emit error when xclip or xsel fail with stderr output (command installed)', async () => {
+      it('should fall back to OSC 52 when xclip/xsel missing and stdout is TTY', async () => {
+        const testText = 'Hello, world!';
+        let callCount = 0;
+
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: true,
+          configurable: true,
+        });
+        const writeSpy = vi
+          .spyOn(process.stdout, 'write')
+          .mockReturnValue(true);
+
+        mockSpawn.mockImplementation(() => {
+          const child = Object.assign(new EventEmitter(), {
+            stdin: Object.assign(new EventEmitter(), {
+              write: vi.fn(),
+              end: vi.fn(),
+            }),
+            stderr: new EventEmitter(),
+          }) as MockChildProcess;
+
+          setTimeout(() => {
+            if (callCount === 0) {
+              const error = new Error('spawn xclip ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+              child.emit('close', 1);
+              callCount++;
+            } else {
+              const error = new Error('spawn xsel ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+              child.emit('close', 1);
+            }
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        // TTY available → OSC 52 succeeds → should not throw
+        await copyToClipboard(testText);
+
+        expect(writeSpy).toHaveBeenCalled();
+        const written = writeSpy.mock.calls[0]?.[0] as string;
+        expect(written).toContain('\x1b]52;c;');
+        expect(written).toContain('\x07');
+
+        writeSpy.mockRestore();
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
+      });
+
+      it('should try OSC 52 when xclip/xsel fail but no TTY is available', async () => {
         const testText = 'Hello, world!';
         let callCount = 0;
         const linuxOptions: SpawnOptions = {
@@ -371,11 +442,18 @@ describe('commandUtils', () => {
           return child as unknown as ReturnType<typeof spawn>;
         });
 
+        // No TTY available — OSC 52 will fail
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+
         const xclipErrorMsg = `'xclip' exited with code ${exitCode}${errorMsg ? `: ${errorMsg}` : ''}`;
         const xselErrorMsg = `'xsel' exited with code ${exitCode}${errorMsg ? `: ${errorMsg}` : ''}`;
 
         await expect(copyToClipboard(testText)).rejects.toThrow(
-          `All copy commands failed. "${xclipErrorMsg}", "${xselErrorMsg}". `,
+          `Clipboard unavailable: xclip/xsel failed ("${xclipErrorMsg}", "${xselErrorMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
         );
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);
@@ -391,6 +469,69 @@ describe('commandUtils', () => {
           ['--clipboard', '--input'],
           linuxOptions,
         );
+
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
+      });
+
+      it('should succeed with OSC 52 when xclip/xsel fail but TTY is available', async () => {
+        const testText = 'Hello, world!';
+        let callCount = 0;
+        const errorMsg = "Error: Can't open display:";
+        const exitCode = 1;
+
+        mockSpawn.mockImplementation(() => {
+          const child = Object.assign(new EventEmitter(), {
+            stdin: Object.assign(new EventEmitter(), {
+              write: vi.fn(),
+              end: vi.fn(),
+            }),
+            stderr: new EventEmitter(),
+          }) as MockChildProcess;
+
+          setTimeout(() => {
+            // e.g., cannot connect to X server
+            if (callCount === 0) {
+              child.stderr.emit('data', errorMsg);
+              child.emit('close', exitCode);
+              callCount++;
+            } else {
+              child.stderr.emit('data', errorMsg);
+              child.emit('close', exitCode);
+            }
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        // TTY available — OSC 52 should succeed
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: true,
+          configurable: true,
+        });
+        const writeSpy = vi
+          .spyOn(process.stdout, 'write')
+          .mockReturnValue(true);
+
+        // Should not throw — OSC 52 succeeds
+        await copyToClipboard(testText);
+
+        expect(writeSpy).toHaveBeenCalled();
+        const written = writeSpy.mock.calls[0]?.[0] as string;
+        expect(written).toContain('\x1b]52;c;');
+        expect(written).toContain(
+          Buffer.from(testText, 'utf-8').toString('base64'),
+        );
+        expect(written).toContain('\x07');
+
+        writeSpy.mockRestore();
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
       });
     });
 
@@ -543,5 +684,229 @@ describe('findMidInputSlashCommand', () => {
   it('returns null when / is not preceded by whitespace', () => {
     // "hello/review", no space before slash
     expect(findMidInputSlashCommand('hello/review', 12)).toBeNull();
+  });
+});
+
+describe('findSlashCommandTokens', () => {
+  const mockCommands = [
+    {
+      name: 'review',
+      description: 'Review code',
+      kind: 'built-in' as const,
+      modelInvocable: true,
+      userInvocable: true,
+      hidden: false,
+    },
+    {
+      name: 'clear',
+      description: 'Clear conversation',
+      kind: 'built-in' as const,
+      modelInvocable: false,
+      userInvocable: true,
+      hidden: false,
+    },
+    {
+      name: 'hidden-cmd',
+      description: 'Hidden',
+      kind: 'built-in' as const,
+      modelInvocable: true,
+      userInvocable: true,
+      hidden: true,
+    },
+    {
+      name: 'model-only',
+      description: 'Model-only command',
+      kind: 'built-in' as const,
+      modelInvocable: true,
+      userInvocable: false,
+      hidden: false,
+    },
+  ] as Parameters<typeof findSlashCommandTokens>[1];
+
+  it('returns empty array for empty text', () => {
+    expect(findSlashCommandTokens('', mockCommands)).toEqual([]);
+  });
+
+  it('marks line-start known command as valid', () => {
+    const tokens = findSlashCommandTokens('/clear some args', mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: true });
+  });
+
+  it('marks line-start hidden command as invalid', () => {
+    const tokens = findSlashCommandTokens('/hidden-cmd', mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'hidden-cmd',
+      valid: false,
+    });
+  });
+
+  it('marks line-start non-user-invocable command as invalid', () => {
+    const tokens = findSlashCommandTokens('/model-only', mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'model-only',
+      valid: false,
+    });
+  });
+
+  it('marks mid-input modelInvocable command as valid', () => {
+    const tokens = findSlashCommandTokens(
+      'please /review this code',
+      mockCommands,
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'review', valid: true });
+  });
+
+  it('marks mid-input model-only command as valid', () => {
+    const tokens = findSlashCommandTokens(
+      'please /model-only this code',
+      mockCommands,
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'model-only',
+      valid: true,
+    });
+  });
+
+  it('marks mid-input non-modelInvocable command as invalid', () => {
+    const tokens = findSlashCommandTokens(
+      'please /clear everything',
+      mockCommands,
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: false });
+  });
+
+  it('marks unknown token as invalid', () => {
+    const tokens = findSlashCommandTokens('/usr/bin/something', mockCommands);
+    // /usr matches nothing, so invalid
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'usr', valid: false });
+  });
+
+  it('returns correct start and end positions', () => {
+    const text = 'run /review now';
+    const tokens = findSlashCommandTokens(text, mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0].start).toBe(4);
+    expect(tokens[0].end).toBe(11); // '/review' is 7 chars, starts at 4
+  });
+
+  it('marks altName token as valid (line-start)', () => {
+    const commandsWithAlt = [
+      ...mockCommands,
+      {
+        name: 'stats',
+        description: 'Show stats',
+        kind: 'built-in' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+        altNames: ['usage'],
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens('/usage', commandsWithAlt);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'usage', valid: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getBestSlashCommandMatch
+// ---------------------------------------------------------------------------
+describe('getBestSlashCommandMatch', () => {
+  const makeCommand = (
+    name: string,
+    opts: {
+      modelInvocable?: boolean;
+      completionPriority?: number;
+      argumentHint?: string;
+      altNames?: string[];
+    } = {},
+  ) =>
+    ({
+      name,
+      description: `${name} desc`,
+      kind: 'built-in',
+      modelInvocable: opts.modelInvocable ?? true,
+      completionPriority: opts.completionPriority ?? 0,
+      argumentHint: opts.argumentHint,
+      altNames: opts.altNames,
+      userInvocable: true,
+      hidden: false,
+    }) as Parameters<typeof getBestSlashCommandMatch>[1][number];
+
+  const cmds = [
+    makeCommand('review', { completionPriority: 5 }),
+    makeCommand('refactor', { completionPriority: 3 }),
+    makeCommand('run', { completionPriority: 1 }),
+  ];
+
+  it('returns null for empty partialCommand', () => {
+    expect(getBestSlashCommandMatch('', cmds)).toBeNull();
+  });
+
+  it('returns null when no commands match', () => {
+    expect(getBestSlashCommandMatch('xyz', cmds)).toBeNull();
+  });
+
+  it('returns null for non-modelInvocable commands', () => {
+    const nonInvocable = [makeCommand('reset', { modelInvocable: false })];
+    expect(getBestSlashCommandMatch('re', nonInvocable)).toBeNull();
+  });
+
+  it('returns the best prefix match by completionPriority', () => {
+    // 'r' matches review(5), refactor(3), run(1) — highest priority wins
+    const result = getBestSlashCommandMatch('r', cmds);
+    expect(result).not.toBeNull();
+    expect(result!.fullCommand).toBe('review');
+    expect(result!.suffix).toBe('eview');
+  });
+
+  it('returns argumentHint when command has one', () => {
+    const withHint = [makeCommand('ask', { argumentHint: '<query>' })];
+    const result = getBestSlashCommandMatch('as', withHint);
+    expect(result!.argumentHint).toBe('<query>');
+  });
+
+  it('respects recentCommands ordering (recent overrides lower priority)', () => {
+    // 'r' matches review(5), refactor(3), run(1)
+    // Make 'run' recently used — but completionPriority takes precedence
+    const recentCommands: RecentSlashCommands = new Map([
+      ['run', { name: 'run', usedAt: Date.now(), count: 10 }],
+    ]);
+    const result = getBestSlashCommandMatch('r', cmds, recentCommands);
+    // completionPriority is checked first, so review (priority=5) still wins
+    expect(result!.fullCommand).toBe('review');
+  });
+
+  it('uses recentCommands to break a tie in completionPriority', () => {
+    const tied = [
+      makeCommand('alpha', { completionPriority: 5 }),
+      makeCommand('albet', { completionPriority: 5 }),
+    ];
+    const recentCommands: RecentSlashCommands = new Map([
+      ['albet', { name: 'albet', usedAt: Date.now(), count: 1 }],
+    ]);
+    const result = getBestSlashCommandMatch('al', tied, recentCommands);
+    expect(result!.fullCommand).toBe('albet');
+  });
+
+  it('excludes exact-match commands without argumentHint', () => {
+    // 'review' exactly matches 'review' with no argumentHint → excluded
+    const result = getBestSlashCommandMatch('review', cmds);
+    expect(result).toBeNull();
+  });
+
+  it('includes exact-match command when it has argumentHint', () => {
+    const withHint = [makeCommand('review', { argumentHint: '<file>' })];
+    const result = getBestSlashCommandMatch('review', withHint);
+    expect(result).not.toBeNull();
+    expect(result!.suffix).toBe('');
   });
 });

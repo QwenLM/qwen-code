@@ -8,15 +8,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
-  getSubagentSystemReminder,
   getPlanModeSystemReminder,
   resolvePathFromEnv,
+  getCompressionPrompt,
 } from './prompts.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { QWEN_CONFIG_DIR } from '../memory/const.js';
+import { QWEN_DIR } from '../config/storage.js';
 
 // Mock tool names if they are dynamically generated or complex
 vi.mock('../tools/ls', () => ({ LSTool: { Name: 'list_directory' } }));
@@ -52,6 +52,19 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('You are Qwen Code, an interactive CLI agent'); // Check for core content
     expect(prompt).toContain('# Executing actions with care');
     expect(prompt).toMatchSnapshot(); // Use snapshot for base prompt structure
+  });
+
+  it('instructs the model not to bypass denied tool calls through equivalent paths', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    // Forbid equivalent paths for the denied action while allowing unrelated
+    // safer alternatives.
+    expect(prompt).toContain('denied action through another tool');
+    expect(prompt).toContain(
+      'genuinely safer alternative that does not accomplish the denied action',
+    );
+    expect(prompt).toContain('stop and ask the user for explicit approval');
   });
 
   it('should return the base prompt when userMemory is empty string', () => {
@@ -178,7 +191,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
 
     it('should read from default path when QWEN_SYSTEM_MD is "true"', () => {
-      const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
+      const defaultPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
       vi.stubEnv('QWEN_SYSTEM_MD', 'true');
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
@@ -189,7 +202,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
 
     it('should read from default path when QWEN_SYSTEM_MD is "1"', () => {
-      const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
+      const defaultPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
       vi.stubEnv('QWEN_SYSTEM_MD', '1');
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
@@ -242,7 +255,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
 
     it('should write to default path when QWEN_WRITE_SYSTEM_MD is "true"', () => {
-      const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
+      const defaultPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', 'true');
       getCoreSystemPrompt();
       expect(fs.writeFileSync).toHaveBeenCalledWith(
@@ -252,7 +265,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
 
     it('should write to default path when QWEN_WRITE_SYSTEM_MD is "1"', () => {
-      const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
+      const defaultPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', '1');
       getCoreSystemPrompt();
       expect(fs.writeFileSync).toHaveBeenCalledWith(
@@ -453,31 +466,6 @@ describe('getCustomSystemPrompt', () => {
   });
 });
 
-describe('getSubagentSystemReminder', () => {
-  it('should format single agent type correctly', () => {
-    const result = getSubagentSystemReminder(['python']);
-
-    expect(result).toMatch(/^<system-reminder>.*<\/system-reminder>$/);
-    expect(result).toContain('available agent types are: python');
-    expect(result).toContain('PROACTIVELY use the');
-  });
-
-  it('should join multiple agent types with commas', () => {
-    const result = getSubagentSystemReminder(['python', 'web', 'analysis']);
-
-    expect(result).toContain(
-      'available agent types are: python, web, analysis',
-    );
-  });
-
-  it('should handle empty array', () => {
-    const result = getSubagentSystemReminder([]);
-
-    expect(result).toContain('available agent types are: ');
-    expect(result).toContain('<system-reminder>');
-  });
-});
-
 describe('getPlanModeSystemReminder', () => {
   it('should return plan mode system reminder with proper structure', () => {
     const result = getPlanModeSystemReminder();
@@ -490,8 +478,8 @@ describe('getPlanModeSystemReminder', () => {
   it('should include workflow instructions', () => {
     const result = getPlanModeSystemReminder();
 
-    expect(result).toContain("1. Answer the user's query comprehensively");
-    expect(result).toContain("2. When you're done researching");
+    expect(result).toContain('Iterative Planning Workflow');
+    expect(result).toContain('### The Loop');
     expect(result).toContain('exit_plan_mode tool');
   });
 
@@ -643,5 +631,72 @@ describe('resolvePathFromEnv helper function', () => {
         isDisabled: false,
       });
     });
+  });
+});
+
+describe('New Applications workflow deferred to skill', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('SANDBOX', undefined);
+  });
+
+  it('system prompt does not contain the full New Applications workflow', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).not.toContain(
+      'Autonomously implement and deliver a visually appealing',
+    );
+    expect(prompt).not.toContain('Websites (Frontend):');
+    expect(prompt).not.toContain('npx create-react-app');
+  });
+
+  it('system prompt references the new-app skill', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).toContain('new-app');
+    expect(prompt).toContain('## New Applications');
+  });
+});
+
+describe('getCompressionPrompt', () => {
+  it('uses the <state_snapshot> XML envelope with all 9 required section tags', () => {
+    const prompt = getCompressionPrompt();
+    expect(prompt).toContain('<state_snapshot>');
+    expect(prompt).toContain('</state_snapshot>');
+    expect(prompt).toContain('<primary_request_and_intent>');
+    expect(prompt).toContain('<key_technical_concepts>');
+    expect(prompt).toContain('<files_and_code_sections>');
+    expect(prompt).toContain('<errors_and_fixes>');
+    expect(prompt).toContain('<problem_solving>');
+    expect(prompt).toContain('<all_user_messages>');
+    expect(prompt).toContain('<pending_tasks>');
+    expect(prompt).toContain('<current_work>');
+    expect(prompt).toContain('<next_step>');
+  });
+
+  it('instructs the model to wrap reasoning in an <analysis> block', () => {
+    const prompt = getCompressionPrompt();
+    expect(prompt).toContain('<analysis>');
+    // Must signal that <analysis> is stripped (so the model knows it is a
+    // drafting scratchpad, not part of the final summary).
+    expect(prompt).toMatch(/<analysis>.*stripped|stripped.*<analysis>/is);
+  });
+
+  it('asks for the <all_user_messages> section to be chronological and inclusive', () => {
+    const prompt = getCompressionPrompt();
+    // The actual mandate text — verbatim-but-not-VERBATIM-policed.
+    expect(prompt).toMatch(/all user messages.*chronological/i);
+    expect(prompt).toContain('"ok"');
+    expect(prompt).toContain('"continue"');
+  });
+
+  it('does NOT include the resume trailer in the prompt body', () => {
+    // The trailer lives in postCompactAttachments.postProcessSummary, not in
+    // the prompt. Keeping it out of the prompt saves output tokens per
+    // compaction and prevents wording drift.
+    const prompt = getCompressionPrompt();
+    expect(prompt).not.toMatch(
+      /resume.*directly|continue the conversation from where it left off/i,
+    );
   });
 });

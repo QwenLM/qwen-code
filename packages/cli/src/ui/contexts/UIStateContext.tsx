@@ -18,11 +18,11 @@ import type {
   PluginChoiceRequest,
 } from '../types.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-import type { ExternalAuthState, QwenAuthState } from '../hooks/useQwenAuth.js';
+import type { AuthUiState } from '../auth/useAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import type {
-  AuthType,
   IdeContext,
   ApprovalMode,
   IdeInfo,
@@ -30,36 +30,35 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import type { ExtensionUpdateState } from '../state/extensions.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
+import { type HelpTab } from './UIActionsContext.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
-import { type CodingPlanUpdateRequest } from '../hooks/useCodingPlanUpdates.js';
+import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 
 export interface UIState {
   history: HistoryItem[];
   historyManager: UseHistoryManagerReturn;
   isThemeDialogOpen: boolean;
   themeError: string | null;
-  isAuthenticating: boolean;
+  auth: AuthUiState;
   isConfigInitialized: boolean;
-  authError: string | null;
-  isAuthDialogOpen: boolean;
-  pendingAuthType: AuthType | undefined;
-  externalAuthState: ExternalAuthState | null;
-  // Qwen OAuth state
-  qwenAuthState: QwenAuthState;
   editorError: string | null;
   isEditorDialogOpen: boolean;
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
+  isStatusLineDialogOpen: boolean;
+  statusLineSettingsVersion?: number;
+  statusLineConfigOverride?: StatusLinePresetConfig;
   isMemoryDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
-  isManageModelsDialogOpen: boolean;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
@@ -67,13 +66,16 @@ export interface UIState {
   isResumeDialogOpen: boolean;
   resumeMatchedSessions: SessionListItem[] | undefined;
   isDeleteDialogOpen: boolean;
+  isHelpDialogOpen: boolean;
+  activeHelpTab: HelpTab;
   slashCommands: readonly SlashCommand[];
+  recentSlashCommands: RecentSlashCommands;
   pendingSlashCommandHistoryItems: HistoryItemWithoutId[];
   commandContext: CommandContext;
   shellConfirmationRequest: ShellConfirmationRequest | null;
   confirmationRequest: ConfirmationRequest | null;
   confirmUpdateExtensionRequests: ConfirmationRequest[];
-  codingPlanUpdateRequest: CodingPlanUpdateRequest | undefined;
+  providerUpdateRequest: ProviderUpdateRequest | undefined;
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
@@ -92,6 +94,10 @@ export interface UIState {
   shouldShowCommandMigrationNudge: boolean;
   commandMigrationTomlFiles: string[];
   isFolderTrustDialogOpen: boolean;
+  isMcpApprovalDialogOpen: boolean;
+  currentMcpApproval: PendingMcpServer | undefined;
+  pendingMcpApprovals: PendingMcpServer[];
+  mcpApprovalRemaining: number;
   isTrustedFolder: boolean | undefined;
   constrainHeight: boolean;
   ideContextState: IdeContext | undefined;
@@ -108,6 +114,7 @@ export interface UIState {
   currentModel: string;
   contextFileNames: string[];
   availableTerminalHeight: number | undefined;
+  useTerminalBuffer: boolean;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;
   staticExtraHeight: number;
@@ -119,6 +126,22 @@ export interface UIState {
   cancelBtw: () => void;
   nightly: boolean;
   branchName: string | undefined;
+  /**
+   * Active worktree session (from the `<sessionId>.worktree.json` sidecar).
+   * Set when `enter_worktree` has been called, cleared when `exit_worktree`
+   * removes the sidecar. Used by the Footer to display the worktree
+   * indicator and by WorktreeExitDialog to know what to operate on.
+   */
+  activeWorktree: {
+    slug: string;
+    branch: string;
+    path: string;
+    originalCwd: string;
+    originalBranch: string;
+    originalHeadCommit: string;
+  } | null;
+  /** Visibility of WorktreeExitDialog (only shown when activeWorktree != null). */
+  showWorktreeExitDialog: boolean;
   sessionStats: SessionStatsState;
   terminalWidth: number;
   terminalHeight: number;
@@ -141,12 +164,15 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Skills manager dialog (`/skills`)
+  isSkillsManagerDialogOpen: boolean;
   // Extensions manager dialog
   isExtensionsManagerDialogOpen: boolean;
   // MCP dialog
   isMcpDialogOpen: boolean;
   // Hooks dialog
   isHooksDialogOpen: boolean;
+  isStatsDialogOpen: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
@@ -165,6 +191,8 @@ export interface UIState {
   // Rewind selector
   isRewindSelectorOpen: boolean;
   rewindEscPending: boolean;
+  // Diff dialog
+  isDiffDialogOpen: boolean;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

@@ -47,6 +47,24 @@ describe('TerminalMathRenderer', () => {
     ).toEqual(['⎛ a  b ⎞', '⎝ c  d ⎠']);
   });
 
+  it('keeps nested same-name environments together', () => {
+    expect(
+      renderTerminalMathBlock(
+        [
+          '\\begin{pmatrix}',
+          '\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix} & e',
+          '\\end{pmatrix}',
+        ].join(' '),
+      ),
+    ).toEqual(['⎛ ⎛ a  b ⎞    ⎞', '⎝ ⎝ c  d ⎠  e ⎠']);
+  });
+
+  it('keeps empty matrix cells from adding extra rows', () => {
+    expect(
+      renderTerminalMathBlock('\\begin{pmatrix} a & \\\\ c & d \\end{pmatrix}'),
+    ).toEqual(['⎛ a    ⎞', '⎝ c  d ⎠']);
+  });
+
   it('renders cases environments with a left brace', () => {
     expect(
       renderTerminalMathBlock(
@@ -55,13 +73,33 @@ describe('TerminalMathRenderer', () => {
     ).toEqual(['⎧ x²  x ≥ 0', '⎩ -x  x < 0']);
   });
 
+  it('renders underlines and scaled left/right delimiters', () => {
+    expect(renderTerminalMathInline('\\underline{x}')).toBe('x̲');
+    expect(renderTerminalMathBlock('\\left(\\frac{a}{b}\\right)')).toEqual([
+      '⎛ a ⎞',
+      '⎜ ─ ⎟',
+      '⎝ b ⎠',
+    ]);
+  });
+
   it('splits inline math while leaving prices and shell variables alone', () => {
     expect(renderInlineMathInText('Energy $E = mc^2$')).toBe('Energy E = mc²');
+    expect(renderInlineMathInText('Function $f(x)$ and spaced $ x $')).toBe(
+      'Function f(x) and spaced x',
+    );
     expect(renderInlineMathInText('Price is $20 and $30')).toBe(
       'Price is $20 and $30',
     );
     expect(splitInlineMathSegments('Use $PATH as-is')).toEqual([
       { type: 'text', text: 'Use $PATH as-is' },
     ]);
+  });
+
+  it('throws a controlled error for deeply nested groups', () => {
+    const nested = '{'.repeat(160) + 'x' + '}'.repeat(160);
+
+    expect(() => renderTerminalMathInline(nested)).toThrow(
+      'Maximum TeX parse depth exceeded',
+    );
   });
 });

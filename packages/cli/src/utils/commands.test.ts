@@ -118,6 +118,13 @@ describe('parseSlashCommand', () => {
     expect(result.canonicalPath).toEqual(['config', 'set']);
   });
 
+  it('should preserve whitespace inside command arguments', () => {
+    const result = parseSlashCommand('/commit foo  bar', mockCommands);
+    expect(result.commandToExecute?.name).toBe('commit');
+    expect(result.args).toBe('foo  bar');
+    expect(result.canonicalPath).toEqual(['commit']);
+  });
+
   it('should return undefined if query does not start with a slash', () => {
     const result = parseSlashCommand('help', mockCommands);
     expect(result.commandToExecute).toBeUndefined();

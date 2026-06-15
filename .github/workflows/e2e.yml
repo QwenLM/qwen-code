@@ -7,6 +7,12 @@ on:
       - 'feat/e2e/**'
   merge_group:
 
+concurrency:
+  group: |-
+    ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}
+  cancel-in-progress: |-
+    ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
 jobs:
   e2e-test-linux:
     name: 'E2E Test (Linux) - ${{ matrix.sandbox }}'
@@ -17,13 +23,13 @@ jobs:
           - 'sandbox:none'
           - 'sandbox:docker'
         node-version:
-          - '20.x'
+          - '22.x'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
 
       - name: 'Set up Node.js ${{ matrix.node-version }}'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
         with:
           node-version: '${{ matrix.node-version }}'
           cache: 'npm'
@@ -52,7 +58,7 @@ jobs:
       - name: 'Set up Docker'
         if: |-
           ${{ matrix.sandbox == 'sandbox:docker' }}
-        uses: 'docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435' # ratchet:docker/setup-buildx-action@v3
+        uses: 'docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd' # ratchet:docker/setup-buildx-action@v4
 
       - name: 'Set up Podman'
         if: |-
@@ -82,10 +88,10 @@ jobs:
     runs-on: 'macos-latest'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
 
       - name: 'Set up Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'

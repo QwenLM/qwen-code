@@ -8,6 +8,9 @@ import {
   renderTerminalMathBlock,
   renderTerminalMathInline,
 } from './TerminalMathRenderer.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('LATEX_RENDERER');
 
 const COMMAND_REPLACEMENTS: Record<string, string> = {
   '\\alpha': 'α',
@@ -201,7 +204,11 @@ function replaceBraceCommand(
 export function renderInlineLatex(input: string): string {
   try {
     return renderTerminalMathInline(input);
-  } catch {
+  } catch (error) {
+    debugLogger.error(
+      'Terminal inline math render failed; falling back.',
+      error,
+    );
     return renderInlineLatexFallback(input);
   }
 }
@@ -209,7 +216,11 @@ export function renderInlineLatex(input: string): string {
 export function renderBlockLatex(input: string): string[] {
   try {
     return renderTerminalMathBlock(input);
-  } catch {
+  } catch (error) {
+    debugLogger.error(
+      'Terminal block math render failed; falling back.',
+      error,
+    );
     return [renderInlineLatexFallback(input)];
   }
 }

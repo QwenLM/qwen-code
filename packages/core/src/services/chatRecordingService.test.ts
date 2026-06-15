@@ -18,6 +18,11 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
+import {
+  deserializeSnapshots,
+  serializeSnapshot,
+  type FileHistorySnapshot,
+} from './fileHistoryService.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -136,6 +141,31 @@ describe('ChatRecordingService', () => {
       expect(user2.uuid).toBe('00000000-0000-0000-0000-000000000003');
       expect(user2.parentUuid).toBe('00000000-0000-0000-0000-000000000002');
     });
+
+    it('should record mid-turn user messages with a mergeable subtype', async () => {
+      const modelFacingParts: Part[] = [
+        {
+          text: '\n[User message received during tool execution]: save logs',
+        },
+      ];
+
+      chatRecordingService.recordMidTurnUserMessage(
+        modelFacingParts,
+        'save logs',
+      );
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+
+      expect(record.type).toBe('user');
+      expect(record.subtype).toBe('mid_turn_user_message');
+      expect(record.message).toEqual({
+        role: 'user',
+        parts: modelFacingParts,
+      });
+      expect(record.systemPayload).toEqual({ displayText: 'save logs' });
+    });
   });
 
   describe('recordAtCommand', () => {
@@ -163,6 +193,250 @@ describe('ChatRecordingService', () => {
       expect(systemRecord.subtype).toBe('at_command');
       expect(systemRecord.systemPayload).toEqual(payload);
       expect(systemRecord.parentUuid).toBe(userRecord.uuid);
+    });
+  });
+
+  describe('recordFileHistorySnapshot', () => {
+    const oldSnapshot: FileHistorySnapshot = {
+      promptId: 'p1',
+      timestamp: new Date('2026-06-13T00:00:00.000Z'),
+      trackedFileBackups: {
+        'a.txt': {
+          backupFileName: 'backup-a-v1',
+          version: 1,
+          backupTime: new Date('2026-06-13T00:00:01.000Z'),
+        },
+      },
+    };
+    const updatedSnapshot: FileHistorySnapshot = {
+      promptId: 'p1',
+      timestamp: new Date('2026-06-13T00:01:00.000Z'),
+      trackedFileBackups: {
+        'a.txt': {
+          backupFileName: 'backup-a-v2',
+          version: 2,
+          backupTime: new Date('2026-06-13T00:01:01.000Z'),
+        },
+        'b.txt': {
+          backupFileName: null,
+          version: 1,
+          backupTime: new Date('2026-06-13T00:01:02.000Z'),
+        },
+      },
+    };
+    const failedSnapshot: FileHistorySnapshot = {
+      promptId: 'p2',
+      timestamp: new Date('2026-06-13T00:02:00.000Z'),
+      trackedFileBackups: {
+        'failed.txt': {
+          backupFileName: 'backup-failed-v1',
+          version: 1,
+          backupTime: new Date('2026-06-13T00:02:01.000Z'),
+          failed: true,
+        },
+        'deleted.txt': {
+          backupFileName: null,
+          version: 2,
+          backupTime: new Date('2026-06-13T00:02:02.000Z'),
+        },
+      },
+    };
+
+    it('writes a system record with the serialized snapshot payload', async () => {
+      chatRecordingService.recordFileHistorySnapshot(oldSnapshot);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('file_history_snapshot');
+      expect(JSON.parse(JSON.stringify(record.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('writes a batch of serialized snapshots in order', async () => {
+      chatRecordingService.recordFileHistorySnapshotBatch([
+        oldSnapshot,
+        updatedSnapshot,
+      ]);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('file_history_snapshot');
+      expect(JSON.parse(JSON.stringify(record.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:01:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v2',
+                version: 2,
+                backupTime: '2026-06-13T00:01:01.000Z',
+              },
+              'b.txt': {
+                backupFileName: null,
+                version: 1,
+                backupTime: '2026-06-13T00:01:02.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('appends single-snapshot updates in order so resume can last-win', async () => {
+      chatRecordingService.recordFileHistorySnapshot(oldSnapshot);
+      chatRecordingService.recordFileHistorySnapshot(updatedSnapshot);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      const first = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
+      expect(JSON.parse(JSON.stringify(first.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+        ],
+      });
+      expect(JSON.parse(JSON.stringify(second.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:01:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v2',
+                version: 2,
+                backupTime: '2026-06-13T00:01:01.000Z',
+              },
+              'b.txt': {
+                backupFileName: null,
+                version: 1,
+                backupTime: '2026-06-13T00:01:02.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('retains distinct prompt ids in one batch', async () => {
+      chatRecordingService.recordFileHistorySnapshotBatch([
+        oldSnapshot,
+        failedSnapshot,
+      ]);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(JSON.parse(JSON.stringify(record.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+          {
+            promptId: 'p2',
+            timestamp: '2026-06-13T00:02:00.000Z',
+            trackedFileBackups: {
+              'failed.txt': {
+                backupFileName: 'backup-failed-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:02:01.000Z',
+                failed: true,
+              },
+              'deleted.txt': {
+                backupFileName: null,
+                version: 2,
+                backupTime: '2026-06-13T00:02:02.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('round-trips serialized snapshots through JSON and deserialization', () => {
+      expect(
+        deserializeSnapshots([
+          JSON.parse(JSON.stringify(serializeSnapshot(failedSnapshot))),
+        ]),
+      ).toEqual([failedSnapshot]);
+    });
+
+    it('re-records surviving snapshots after rewind on the active branch', async () => {
+      chatRecordingService.recordFileHistorySnapshot(updatedSnapshot);
+      chatRecordingService.rewindRecording(0, { truncatedCount: 1 }, [
+        oldSnapshot,
+      ]);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+      const staleSnapshot = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      const rewind = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
+      const snapshots = vi.mocked(jsonl.writeLine).mock
+        .calls[2][1] as ChatRecord;
+      expect(staleSnapshot.subtype).toBe('file_history_snapshot');
+      expect(rewind.subtype).toBe('rewind');
+      expect(JSON.parse(JSON.stringify(snapshots.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+        ],
+      });
     });
   });
 
@@ -591,6 +865,159 @@ describe('ChatRecordingService', () => {
       await chatRecordingService.flush();
 
       expect(mkdirSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('recordAttributionSnapshot', () => {
+    const baseSnapshot = {
+      type: 'attribution-snapshot' as const,
+      version: 1,
+      surface: 'cli',
+      fileStates: {},
+      promptCount: 0,
+      promptCountAtLastCommit: 0,
+    };
+
+    it('should write each distinct snapshot', async () => {
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      chatRecordingService.recordAttributionSnapshot({
+        ...baseSnapshot,
+        promptCount: 1,
+      });
+      chatRecordingService.recordAttributionSnapshot({
+        ...baseSnapshot,
+        promptCount: 2,
+      });
+      await chatRecordingService.flush();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+    });
+
+    it('refreshes the cached git branch at the attribution turn boundary', async () => {
+      vi.mocked(execSync)
+        .mockReturnValueOnce('main\n')
+        .mockReturnValueOnce('feature\n');
+
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.flush();
+      chatRecordingService.recordAttributionSnapshot({
+        ...baseSnapshot,
+        promptCount: 1,
+      });
+      await chatRecordingService.flush();
+
+      const userRecord = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      const attributionRecord = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      expect(userRecord.gitBranch).toBe('main');
+      expect(attributionRecord.gitBranch).toBe('feature');
+    });
+
+    // Sessions that touch many files emit a non-retry turn snapshot
+    // every prompt cycle. Without dedup, repeated identical snapshots
+    // (no edits, no prompt-counter change) would re-serialize the entire
+    // attribution state into the JSONL on every turn, inflating session
+    // size and slowing /resume.
+    it('should skip a snapshot identical to the previous write', async () => {
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
+    // After rewindRecording, the previous attribution snapshot lives on
+    // the abandoned branch, so the dedup key has to clear — otherwise
+    // the post-rewind identical snapshot would be silently skipped and
+    // /resume on the rewound session would lose all attribution state.
+    it('should re-write an identical snapshot after rewindRecording', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'turn 1' }]);
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      const beforeRewind = vi.mocked(jsonl.writeLine).mock.calls.length;
+
+      chatRecordingService.rewindRecording(0, { truncatedCount: 0 });
+      // Same snapshot bytes — without the rewind reset this would dedup.
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      // 1 rewind record + 1 fresh snapshot = 2 more writes after rewind.
+      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
+        beforeRewind + 2,
+      );
+    });
+
+    // A transient write failure must NOT permanently suppress future
+    // identical snapshots: if the dedup key were committed before the
+    // write, the next identical snapshot would dedup and the session
+    // would have no attribution snapshot at all.
+    it('should retry an identical snapshot after a write failure', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      // Wait for the queued (failing) write to settle so the rollback runs.
+      await chatRecordingService.flush();
+      const afterFailure = vi.mocked(jsonl.writeLine).mock.calls.length;
+
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      // Retry should fire, so we get a new write call.
+      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
+        afterFailure + 1,
+      );
+    });
+
+    // appendRecord is fire-and-forget for non-snapshot callers
+    // (recordUserMessage / recordAssistantTurn / recordAtCommand /
+    // ...). When jsonl.writeLine rejects, the rejection MUST be
+    // swallowed inside the service — otherwise it surfaces as an
+    // unhandled-promise-rejection in production (and as a flaky
+    // failure under vitest's --reporter=default).
+    it('should swallow async writeLine rejection for fire-and-forget callers', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      // Track unhandled rejections during this test.
+      const unhandled: unknown[] = [];
+      const handler = (err: unknown) => unhandled.push(err);
+      process.on('unhandledRejection', handler);
+      try {
+        chatRecordingService.recordUserMessage([{ text: 'hi' }]);
+        await chatRecordingService.flush();
+        // Microtask drain to give any unhandled rejections a chance
+        // to surface before we assert.
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', handler);
+      }
+    });
+
+    // appendRecord can throw SYNCHRONOUSLY before returning a promise
+    // (e.g. ensureConversationFile fails because the conversation
+    // file can't be created). Without rollback in the outer catch,
+    // the dedup key stays set on a write that never happened, so
+    // all future identical snapshots get suppressed.
+    it('should retry an identical snapshot after a synchronous failure', async () => {
+      // First call: force writeFileSync (used by ensureConversationFile
+      // to wx-create the JSONL file) to throw a non-EEXIST error.
+      // ensureConversationFile rethrows that, which propagates through
+      // appendRecord SYNCHRONOUSLY before any promise is returned.
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        const e = new Error(
+          'EACCES: permission denied',
+        ) as NodeJS.ErrnoException;
+        e.code = 'EACCES';
+        throw e;
+      });
+
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      // Sync failure: writeLine never reached.
+      expect(vi.mocked(jsonl.writeLine)).not.toHaveBeenCalled();
+
+      // Identical snapshot on retry: dedup key should have been
+      // rolled back so this fires a fresh write.
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      expect(vi.mocked(jsonl.writeLine)).toHaveBeenCalledTimes(1);
     });
   });
 

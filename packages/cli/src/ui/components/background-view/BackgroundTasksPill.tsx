@@ -14,6 +14,7 @@ import {
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
+import { t } from '../../../i18n/index.js';
 
 const KIND_NAMES = {
   agent: { singular: 'local agent', plural: 'local agents' },
@@ -21,6 +22,17 @@ const KIND_NAMES = {
   monitor: { singular: 'monitor', plural: 'monitors' },
   dream: { singular: 'dream', plural: 'dreams' },
 } as const;
+
+/**
+ * True if any background agent has a tool call parked awaiting user
+ * approval (permission bubbling). Drives the pill's "needs approval"
+ * marker so the user is nudged to open the dialog and answer.
+ */
+export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
+  return entries.some(
+    (e) => e.kind === 'agent' && (e.pendingApprovals?.length ?? 0) > 0,
+  );
+}
 
 /**
  * Pill label: prefer live running counts, then paused resumable agent counts;
@@ -74,9 +86,26 @@ export const BackgroundTasksPill: React.FC = () => {
 
   const onKeypress = useCallback(
     (key: Key) => {
-      if (key.name === 'return') {
+      // `return`, down, and the readline-style Ctrl+N all open the dialog.
+      // This is focus-chain handling rather than selection-list handling
+      // (see keyBindings.ts SELECTION_DOWN), so keep the matcher inline.
+      // Down completes the focus chain Composer ↓ → AgentTabBar ↓ → Pill ↓ → Dialog,
+      // so users can `↓ ↓ (↓)` their way from an empty composer
+      // straight into the roster without having to remember the
+      // Enter shortcut. The LiveAgentPanel's overflow callout
+      // (`↓ to view all`) relies on this; without a Down handler
+      // the chain dead-ends at the highlighted pill.
+      if (
+        key.name === 'return' ||
+        key.name === 'down' ||
+        (key.ctrl && key.name === 'n')
+      ) {
         openDialog();
-      } else if (key.name === 'up' || key.name === 'escape') {
+      } else if (
+        key.name === 'up' ||
+        (key.ctrl && key.name === 'p') ||
+        key.name === 'escape'
+      ) {
         setPillFocused(false);
       } else if (
         key.sequence &&
@@ -95,11 +124,15 @@ export const BackgroundTasksPill: React.FC = () => {
   if (entries.length === 0) return null;
 
   const label = getPillLabel(entries);
+  const needsApproval = hasPendingApproval(entries);
 
   return (
     <>
       <Text color={theme.text.secondary}> · </Text>
       <Text inverse={pillFocused}>{label}</Text>
+      {needsApproval && (
+        <Text color={theme.status.warning}>{` ⚠ ${t('needs approval')}`}</Text>
+      )}
     </>
   );
 };

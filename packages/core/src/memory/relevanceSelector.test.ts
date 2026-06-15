@@ -6,6 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runSideQuery } from '../utils/sideQuery.js';
+import type { Config } from '../config/config.js';
 import type { ScannedAutoMemoryDocument } from './scan.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 
@@ -37,27 +38,29 @@ const docs: ScannedAutoMemoryDocument[] = [
 ];
 
 describe('selectRelevantAutoMemoryDocumentsByModel', () => {
-  const mockConfig = {} as Parameters<
-    typeof selectRelevantAutoMemoryDocumentsByModel
-  >[0];
+  const mockConfig = {
+    getFastModel: vi.fn().mockReturnValue(undefined),
+  } as unknown as Config;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it('returns documents chosen by the side-query selector', async () => {
     vi.mocked(runSideQuery).mockResolvedValue({
-      selected_memories: ['reference.md'],
+      selected_memories: ['/tmp/user.md'],
     });
 
-    const selected = await selectRelevantAutoMemoryDocumentsByModel(
+    const result = await selectRelevantAutoMemoryDocumentsByModel(
       mockConfig,
-      'check the latency dashboard',
+      'check preferences',
       docs,
       2,
+      [],
     );
 
-    expect(selected).toEqual([docs[1]]);
+    expect(result).toEqual([docs[0]]);
+
     expect(runSideQuery).toHaveBeenCalledWith(
       mockConfig,
       expect.objectContaining({
@@ -126,10 +129,85 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     );
   });
 
-  it('throws when selector returns unknown relative paths', async () => {
+  it('tells the selector not to recall active tool schemas or failed calls', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: [],
+    });
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'read the ATA article',
+      docs,
+      2,
+      ['mcp__ata__article-list-query'],
+    );
+
+    const options = vi.mocked(runSideQuery).mock.calls[0]![1];
+    expect(options.systemInstruction).toContain(
+      'parameter schemas, field mappings, guessed call formats, or failed-call transcripts',
+    );
+    expect(options.systemInstruction).toContain(
+      'known gotchas, warnings, or confirmed workarounds',
+    );
+    expect(JSON.stringify(options.contents)).toContain(
+      'Recently used tools: mcp__ata__article-list-query',
+    );
+  });
+
+  it('lets runSideQuery choose the default side-query model when fast model is configured', async () => {
+    vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-flash-model');
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: ['reference.md'],
+    });
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'check the latency dashboard',
+      docs,
+      2,
+    );
+
+    expect(runSideQuery).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({
+        purpose: 'auto-memory-recall',
+        config: { temperature: 0 },
+      }),
+    );
+    expect(
+      'model' in (vi.mocked(runSideQuery).mock.calls[0]![1] as object),
+    ).toBe(false);
+  });
+
+  it('lets runSideQuery fall back to its default when no fast model is configured', async () => {
+    vi.mocked(mockConfig.getFastModel).mockReturnValue(undefined);
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: ['reference.md'],
+    });
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'check the latency dashboard',
+      docs,
+      2,
+    );
+
+    expect(runSideQuery).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({
+        purpose: 'auto-memory-recall',
+        config: { temperature: 0 },
+      }),
+    );
+    expect(
+      'model' in (vi.mocked(runSideQuery).mock.calls[0]![1] as object),
+    ).toBe(false);
+  });
+
+  it('throws when selector returns unknown file paths', async () => {
     vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
       const error = options.validate?.({
-        selected_memories: ['unknown.md'],
+        selected_memories: ['/tmp/unknown.md'],
       });
       if (error) {
         throw new Error(error);
@@ -144,6 +222,54 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
         docs,
         2,
       ),
-    ).rejects.toThrow('Recall selector returned unknown relative path');
+    ).rejects.toThrow('Recall selector returned unknown file path');
+  });
+
+  it('distinguishes docs with identical relativePath across scopes', async () => {
+    // Regression for the dual-scope dedupe bug — same `user/role.md` exists in
+    // both project-level and user-level memory dirs. Keying by relativePath
+    // collapsed them; keying by filePath (absolute, unique) must surface both.
+    const dualScopeDocs: ScannedAutoMemoryDocument[] = [
+      {
+        type: 'user',
+        filePath: '/qwen/projects/proj/memory/user/role.md',
+        relativePath: 'user/role.md',
+        filename: 'role.md',
+        title: 'Project User',
+        description: 'Project-scoped user note',
+        body: '- Project-specific.',
+        mtimeMs: 1,
+      },
+      {
+        type: 'user',
+        filePath: '/qwen/memories/user/role.md',
+        relativePath: 'user/role.md',
+        filename: 'role.md',
+        title: 'Cross-Project User',
+        description: 'User-scoped cross-project note',
+        body: '- Applies everywhere.',
+        mtimeMs: 2,
+      },
+    ];
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: [
+        '/qwen/projects/proj/memory/user/role.md',
+        '/qwen/memories/user/role.md',
+      ],
+    });
+
+    const result = await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'who is the user',
+      dualScopeDocs,
+      5,
+      [],
+    );
+
+    expect(result).toHaveLength(2);
+    expect(result.map((d) => d.filePath)).toEqual([
+      '/qwen/projects/proj/memory/user/role.md',
+      '/qwen/memories/user/role.md',
+    ]);
   });
 });

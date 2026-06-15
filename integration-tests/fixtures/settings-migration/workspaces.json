@@ -184,5 +184,15 @@
     "experimentalFlag": {
       "enabled": true
     }
+  },
+  "v3GitCoAuthorBooleanSettings": {
+    "$version": 3,
+    "general": {
+      "gitCoAuthor": false,
+      "disableAutoUpdate": true
+    },
+    "custom": {
+      "note": "preserve me through v3->v4"
+    }
   }
 }

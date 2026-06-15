@@ -6,7 +6,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
+import { Storage } from '@qwen-code/qwen-code-core';
 
 export interface ServiceInfo {
   pid: number;
@@ -15,7 +15,7 @@ export interface ServiceInfo {
 }
 
 function pidFilePath(): string {
-  return path.join(os.homedir(), '.qwen', 'channels', 'service.pid');
+  return path.join(Storage.getGlobalQwenDir(), 'channels', 'service.pid');
 }
 
 /** Check if a process is alive. */

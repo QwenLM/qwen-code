@@ -39,6 +39,7 @@ const renderWithMockedStats = (
     string,
     { inputPerMillionTokens?: number; outputPerMillionTokens?: number }
   >,
+  width?: number,
 ) => {
   useSessionStatsMock.mockReturnValue({
     stats: {
@@ -60,7 +61,7 @@ const renderWithMockedStats = (
 
   return render(
     <SettingsContext.Provider value={mockSettings}>
-      <ModelStatsDisplay />
+      <ModelStatsDisplay width={width} />
     </SettingsContext.Provider>,
   );
 };
@@ -273,6 +274,88 @@ describe('<ModelStatsDisplay />', () => {
     expect(output).toContain('gemini-2.5-pro');
     expect(output).not.toContain('gemini-2.5-flash');
     expect(output).toMatchSnapshot();
+  });
+
+  it('keeps a long single model name on the metric header line when space is available', () => {
+    const modelName = 'ggml-org/gemma-4-E4B-it-GGUF';
+    const { lastFrame } = renderWithMockedStats(
+      {
+        models: {
+          [modelName]: mainOnly({
+            api: { totalRequests: 2, totalErrors: 1, totalLatencyMs: 220000 },
+            tokens: {
+              prompt: 17953,
+              candidates: 225,
+              total: 18178,
+              cached: 0,
+              thoughts: 0,
+            },
+          }),
+        },
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+          byName: {},
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      },
+      undefined,
+      100,
+    );
+
+    expect(lastFrame()).toContain(`Metric                      ${modelName}`);
+  });
+
+  it('keeps fixed model column widths for multiple models even when space is available', () => {
+    const { lastFrame } = renderWithMockedStats(
+      {
+        models: {
+          'model-a': mainOnly({
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+            tokens: {
+              prompt: 10,
+              candidates: 20,
+              total: 30,
+              cached: 0,
+              thoughts: 0,
+            },
+          }),
+          'model-b': mainOnly({
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+            tokens: {
+              prompt: 10,
+              candidates: 20,
+              total: 30,
+              cached: 0,
+              thoughts: 0,
+            },
+          }),
+        },
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+          byName: {},
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      },
+      undefined,
+      120,
+    );
+
+    const headerLine = lastFrame()
+      ?.split('\n')
+      .find((line) => line.includes('Metric') && line.includes('model-a'));
+
+    expect(headerLine).toBeDefined();
+    expect(
+      headerLine!.indexOf('model-b') - headerLine!.indexOf('model-a'),
+    ).toBe(24);
   });
 
   describe('Subagent source attribution', () => {

@@ -16,11 +16,11 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { homedir } from 'node:os';
 import picomatch from 'picomatch';
 import { parse as parseYaml } from './yaml-parser.js';
 import { normalizeContent } from './textUtils.js';
 import { QWEN_DIR } from './paths.js';
+import { Storage } from '../config/storage.js';
 import { createDebugLogger } from './debugLogger.js';
 import { resolveProjectRelativePath } from './projectPath.js';
 
@@ -320,8 +320,8 @@ export async function loadRules(
 
   const allRules: RuleFile[] = [];
 
-  // 1. Global rules: ~/.qwen/rules/
-  const globalRulesDir = path.join(homedir(), QWEN_DIR, 'rules');
+  // 1. Global rules: <QWEN_HOME or ~/.qwen>/rules/
+  const globalRulesDir = path.join(Storage.getGlobalQwenDir(), 'rules');
   const globalRules = await loadRulesFromDir(globalRulesDir, excludes);
   allRules.push(...globalRules);
   logger.debug(`Loaded ${globalRules.length} global rule(s)`);

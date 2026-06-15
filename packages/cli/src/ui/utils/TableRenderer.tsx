@@ -11,6 +11,18 @@ import stripAnsi from 'strip-ansi';
 import { getCachedStringWidth } from './textUtils.js';
 import { theme } from '../semantic-colors.js';
 import { renderInlineLatex } from './latexRenderer.js';
+import {
+  MD_LINK_CAPTURE,
+  MD_LINK_PATTERN,
+  isSafeOscScheme,
+  labelMayDeceive,
+  osc8Close,
+  osc8Open,
+  sanitizeForOsc,
+  shouldWrapMarkdownLink,
+  supportsHyperlinks,
+  trimTrailingUrlPunctuation,
+} from './osc8.js';
 
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
@@ -18,16 +30,26 @@ const MIN_COLUMN_WIDTH = 3;
 /** Maximum number of lines per row before switching to vertical format */
 const MAX_ROW_LINES = 4;
 
+/**
+ * Below this width the column-aware budget (see `minHorizontalTableWidth`
+ * below) is bypassed and we always switch to vertical: even a 1-column
+ * table is barely readable horizontally under ~24 cols of content.
+ */
+const ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH = 24;
+
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
 
 const INLINE_MATH_MAX_CHARS = 1024;
 
 const INLINE_MATH_PATTERN = String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`;
-const INLINE_MARKDOWN_REGEX =
-  /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+const INLINE_MARKDOWN_REGEX = new RegExp(
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
+  'g',
+);
 const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|` +
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
     String.raw`\`+.+?\`+|${INLINE_MATH_PATTERN}|<u>.*?<\/u>|https?:\/\/\S+)`,
   'g',
 );
@@ -66,6 +88,7 @@ const INK_COLOR_TO_ANSI: Record<string, number> = {
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+const ESC = '\x1b';
 
 /** Get raw ANSI foreground color escape (without reset) for re-application */
 function getColorCode(color: string): string {
@@ -107,6 +130,98 @@ function recolorAfterResets(text: string, colorCode: string): string {
     .join(fullReset + colorCode);
 }
 
+function updateActiveForeground(
+  activeForeground: string,
+  paramsText: string,
+): string {
+  const params =
+    paramsText.length > 0
+      ? paramsText.split(';').map((param) => Number(param))
+      : [0];
+  let foreground = activeForeground;
+
+  for (let index = 0; index < params.length; index++) {
+    const code = params[index];
+    if (!Number.isFinite(code)) {
+      continue;
+    }
+
+    if (code === 0 || code === 39) {
+      foreground = '';
+    } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+      foreground = `\x1b[${code}m`;
+    } else if (code === 38) {
+      const mode = params[index + 1];
+      if (mode === 5 && Number.isFinite(params[index + 2])) {
+        foreground = `\x1b[38;5;${params[index + 2]}m`;
+        index += 2;
+      } else if (
+        mode === 2 &&
+        Number.isFinite(params[index + 2]) &&
+        Number.isFinite(params[index + 3]) &&
+        Number.isFinite(params[index + 4])
+      ) {
+        foreground = `\x1b[38;2;${params[index + 2]};${params[index + 3]};${params[index + 4]}m`;
+        index += 4;
+      }
+    }
+  }
+
+  return foreground;
+}
+
+function readSgrSequence(
+  text: string,
+  index: number,
+): { sequence: string; paramsText: string; endIndex: number } | null {
+  if (text[index] !== ESC || text[index + 1] !== '[') {
+    return null;
+  }
+  const endIndex = text.indexOf('m', index + 2);
+  if (endIndex === -1) {
+    return null;
+  }
+  const paramsText = text.slice(index + 2, endIndex);
+  if (!/^[0-9;]*$/.test(paramsText)) {
+    return null;
+  }
+  return {
+    sequence: text.slice(index, endIndex + 1),
+    paramsText,
+    endIndex,
+  };
+}
+
+function preserveForegroundAcrossLineBreaks(text: string): string {
+  let activeForeground = '';
+  let result = '';
+  let lastIndex = 0;
+  let index = 0;
+
+  while (index < text.length) {
+    const sgr = readSgrSequence(text, index);
+    if (!sgr) {
+      index += 1;
+      continue;
+    }
+
+    const segment = text.slice(lastIndex, index);
+    result += activeForeground
+      ? segment.replace(/\n/g, `\x1b[39m\n${activeForeground}`)
+      : segment;
+    result += sgr.sequence;
+    activeForeground = updateActiveForeground(activeForeground, sgr.paramsText);
+    index = sgr.endIndex + 1;
+    lastIndex = index;
+  }
+
+  const segment = text.slice(lastIndex);
+  result += activeForeground
+    ? segment.replace(/\n/g, `\x1b[39m\n${activeForeground}`)
+    : segment;
+  return result;
+}
+
 /** ANSI text formatting helpers (always produce escape codes, unlike chalk) */
 const ansiFmt = {
   bold: (t: string) => `\x1b[1m${t}\x1b[22m`,
@@ -124,6 +239,10 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
     ? INLINE_MARKDOWN_WITH_MATH_REGEX
     : INLINE_MARKDOWN_REGEX;
   inlineRegex.lastIndex = 0;
+
+  // Capability is stable for the duration of one cell render — read it once
+  // here instead of per matched token.
+  const canHyperlink = supportsHyperlinks();
 
   let result = '';
   let lastIndex = 0;
@@ -174,9 +293,38 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
       fullMatch.includes('](') &&
       fullMatch.endsWith(')')
     ) {
-      const linkMatch = fullMatch.match(/\[(.*?)\]\((.*?)\)/);
+      const linkMatch = fullMatch.match(MD_LINK_CAPTURE);
       if (linkMatch) {
-        rendered = `${linkMatch[1]} ${applyColor(`(${linkMatch[2]})`, theme.text.link)}`;
+        const labelText = linkMatch[1] ?? '';
+        const url = linkMatch[2] ?? '';
+        // When OSC 8 wraps, show only the label — long URLs in narrow
+        // table cells were the worst offender for layout cluttering, so
+        // this matters especially here. Fall back to the legacy
+        // `label (url)` rendering when wrapping is off so the cell is
+        // byte-identical to today on unsupported terminals / unsafe
+        // schemes / whitespace URLs.
+        if (shouldWrapMarkdownLink(url, canHyperlink)) {
+          // Strip bidi / C0 / C1 from BOTH the visible label and any URL
+          // bytes that end up as visible text (empty-label fallback,
+          // deceptive-label `(url)` suffix). The OSC target inside
+          // `osc8Open` is already sanitized, but raw `url` reaching the
+          // visible region would let U+202E etc. spoof the rendered text.
+          const safeLabel = sanitizeForOsc(labelText);
+          const safeUrl = sanitizeForOsc(url);
+          const visibleLabel = applyColor(
+            safeLabel || safeUrl,
+            theme.text.link,
+          );
+          const envelope = `${osc8Open(url)}${visibleLabel}${osc8Close()}`;
+          // When the label looks like a (mismatched) URL, keep the `(url)`
+          // suffix so the user can see where the click actually goes — same
+          // mitigation as the React renderer.
+          rendered = labelMayDeceive(safeLabel, safeUrl)
+            ? `${envelope} ${applyColor(`(${safeUrl})`, theme.text.link)}`
+            : envelope;
+        } else {
+          rendered = `${labelText} ${applyColor(`(${url})`, theme.text.link)}`;
+        }
       }
     } else if (
       enableInlineMath &&
@@ -195,7 +343,15 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
     ) {
       rendered = ansiFmt.underline(fullMatch.slice(3, -4));
     } else if (/^https?:\/\//.test(fullMatch)) {
-      rendered = applyColor(fullMatch, theme.text.link);
+      const visible = applyColor(fullMatch, theme.text.link);
+      if (canHyperlink) {
+        const trimmedUrl = trimTrailingUrlPunctuation(fullMatch);
+        rendered = isSafeOscScheme(trimmedUrl)
+          ? `${osc8Open(trimmedUrl)}${visible}${osc8Close()}`
+          : visible;
+      } else {
+        rendered = visible;
+      }
     }
 
     result += rendered ?? fullMatch;
@@ -245,7 +401,7 @@ function wrapText(
     trim: false,
     wordWrap: true,
   });
-  const lines = wrapped.split('\n');
+  const lines = preserveForegroundAcrossLineBreaks(wrapped).split('\n');
   // Trim trailing empty lines (wrap-ansi artifacts) but preserve internal ones
   while (lines.length > 1 && lines[lines.length - 1]!.length === 0) {
     lines.pop();
@@ -324,7 +480,10 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   });
 
   // ── Step 2: Calculate available space ──
-  // Border overhead: │ content │ content │ = 1 + (width + 3) per column
+  // Border overhead: │ content │ content │ = 1 + (width + 3) per column.
+  // NOTE: this value is reused below in the horizontal-vs-vertical threshold
+  // (`minHorizontalTableWidth`). Any change to this formula will silently
+  // shift the layout threshold — adjust both call sites together.
   const borderOverhead = 1 + colCount * 3;
   const availableWidth = Math.max(
     contentWidth - borderOverhead - SAFETY_MARGIN,
@@ -392,7 +551,18 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   const maxRowLines = calculateMaxRowLines();
-  const useVerticalFormat = maxRowLines > MAX_ROW_LINES;
+  // Column-aware horizontal-vs-vertical decision: a horizontal table needs
+  // at least `MIN_COLUMN_WIDTH` per column plus the border overhead computed
+  // above, with a safety margin. This avoids the prior fixed 60-col floor
+  // that forced vertical mode for a 2-col table on a 50-col terminal even
+  // when content fit comfortably. The downstream `maxLineWidth` safety
+  // check still catches content that would actually overflow.
+  const minHorizontalTableWidth = Math.max(
+    ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
+    colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
+  );
+  const useVerticalFormat =
+    contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES;
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>

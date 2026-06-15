@@ -30,7 +30,10 @@ We favor small, atomic PRs that address a single issue or add a single, self-con
 - **Do:** Create a PR that fixes one specific bug or adds one specific feature.
 - **Don't:** Bundle multiple unrelated changes (e.g., a bug fix, a new feature, and a refactor) into a single PR.
 
-Large changes should be broken down into a series of smaller, logical PRs that can be reviewed and merged independently.
+As a rule of thumb, start splitting a PR once it exceeds about 1,200 changed
+lines. PRs above about 2,000 changed lines should either be split into a series
+of smaller, logical PRs that can be reviewed and merged independently, or
+explain in the PR description why the change needs to land together.
 
 #### 3. Use Draft PRs for Work in Progress
 
@@ -72,8 +75,8 @@ This section guides contributors on how to build, modify, and understand the dev
 **Prerequisites:**
 
 1.  **Node.js**:
-    - **Development:** Please use Node.js `~20.19.0`. This specific version is required due to an upstream development dependency issue. You can use a tool like [nvm](https://github.com/nvm-sh/nvm) to manage Node.js versions.
-    - **Production:** For running the CLI in a production environment, any version of Node.js `>=20` is acceptable.
+    - **Development:** Please use Node.js `>=22`. Ink 7 (used by the TUI) requires Node 22, and `react@^19.2.0` is the matching peer. You can use a tool like [nvm](https://github.com/nvm-sh/nvm) to manage Node.js versions.
+    - **Production:** For running the CLI in a production environment, any version of Node.js `>=22` is acceptable.
 2.  **Git**
 
 ### Build Process
@@ -210,7 +213,7 @@ This section describes how to develop and preview the documentation locally.
 
 ### Prerequisites
 
-1. Ensure you have Node.js (version 18+) installed
+1. Ensure you have Node.js (version 22+) installed
 2. Have npm or yarn available
 
 ### Setup Documentation Site Locally

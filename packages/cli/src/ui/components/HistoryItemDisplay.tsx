@@ -54,6 +54,8 @@ import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
+import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
+import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 
 interface HistoryItemDisplayProps {
@@ -85,6 +87,38 @@ interface HistoryItemDisplayProps {
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
+function getHistoryItemMarginTop(item: HistoryItem): number {
+  switch (item.type) {
+    case 'gemini':
+      return 1;
+    case 'gemini_content':
+    case 'gemini_thought':
+    case 'gemini_thought_content':
+    case 'info':
+    case 'success':
+    case 'warning':
+    case 'error':
+    case 'retry_countdown':
+    case 'memory_saved':
+    case 'tool_group':
+    case 'tool_use_summary':
+    case 'notification':
+    case 'compression':
+    case 'summary':
+    case 'insight_progress':
+    case 'btw':
+    case 'away_recap':
+    case 'user':
+    case 'user_prompt_submit_blocked':
+    case 'stop_hook_loop':
+    case 'stop_hook_system_message':
+    case 'goal_status':
+      return 0;
+    default:
+      return 1;
+  }
+}
+
 const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   item,
   availableTerminalHeight,
@@ -100,10 +134,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   summaryAbsorbed = false,
   sourceCopyIndexOffsets,
 }) => {
-  const marginTop =
-    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
-      ? 0
-      : 1;
+  const marginTop = getHistoryItemMarginTop(item);
 
   const { compactMode } = useCompactMode();
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
@@ -120,7 +151,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     >
       {/* Render standard message types */}
       {itemForDisplay.type === 'user' && (
-        <UserMessage text={itemForDisplay.text} />
+        <UserMessage text={itemForDisplay.text} width={contentWidth} />
       )}
       {itemForDisplay.type === 'notification' && (
         <InfoMessage text={itemForDisplay.text} />
@@ -152,7 +183,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {!compactMode && itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
-          text={itemForDisplay.text}
+          text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
@@ -162,7 +193,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
-          text={itemForDisplay.text}
+          text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
@@ -197,6 +228,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'stats' && (
         <StatsDisplay duration={itemForDisplay.duration} width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'diff_stats' && (
+        <DiffStatsDisplay model={itemForDisplay.model} />
       )}
       {itemForDisplay.type === 'model_stats' && (
         <ModelStatsDisplay width={boxWidth} />
@@ -338,6 +372,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'away_recap' && (
         <AwayRecapMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'goal_status' && (
+        <GoalStatusMessage
+          kind={itemForDisplay.kind}
+          condition={itemForDisplay.condition}
+          iterations={itemForDisplay.iterations}
+          durationMs={itemForDisplay.durationMs}
+          lastReason={itemForDisplay.lastReason}
+        />
       )}
     </Box>
   );

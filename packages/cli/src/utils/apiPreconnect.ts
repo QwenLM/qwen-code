@@ -18,10 +18,11 @@
 import {
   createDebugLogger,
   detectRuntime,
+  getAllProviderBaseUrls,
   getOrCreateSharedDispatcher,
+  redactProxyCredentials,
 } from '@qwen-code/qwen-code-core';
-
-import { ALIBABA_STANDARD_API_KEY_ENDPOINTS } from '../constants/alibabaStandardApiKey.js';
+import { fetch as undiciFetch } from 'undici';
 
 const debugLogger = createDebugLogger('PRECONNECT');
 
@@ -29,8 +30,6 @@ let preconnectFired = false;
 
 /**
  * Default API base URLs by AuthType.
- * DashScope regional endpoints are derived from ALIBABA_STANDARD_API_KEY_ENDPOINTS
- * so preconnect covers all supported regions (cn-beijing, sg-singapore, us-virginia, cn-hongkong).
  */
 const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: 'https://api.openai.com',
@@ -40,12 +39,12 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 };
 
 /**
- * All known default base URLs, including DashScope regional endpoints.
+ * All known default base URLs, including all registered provider endpoints.
  * Used by isDefaultBaseUrl() to accept any supported default endpoint.
  */
 const ALL_DEFAULT_URLS: string[] = [
   ...Object.values(DEFAULT_BASE_URLS),
-  ...Object.values(ALIBABA_STANDARD_API_KEY_ENDPOINTS),
+  ...getAllProviderBaseUrls(),
 ];
 
 /**
@@ -168,6 +167,16 @@ export function preconnectApi(
     return;
   }
 
+  // Skip dispatcher creation when no proxy configured - SDK uses built-in fetch
+  // with its own connection pool, so warming undici dispatcher provides no benefit.
+  // This mirrors the logic in buildFetchOptionsWithDispatcher() which also skips
+  // custom dispatcher creation when no proxy is set, ensuring consistent behavior.
+  if (!options.proxy) {
+    debugLogger.debug('Skipping preconnect dispatcher: no proxy configured');
+    return;
+  }
+  const proxy = options.proxy;
+
   const targetUrl = getPreconnectTargetUrl(authType, options.resolvedBaseUrl);
 
   if (!targetUrl) {
@@ -175,32 +184,40 @@ export function preconnectApi(
     return;
   }
 
+  // Mark as fired before async operation — prevents duplicate fires.
+  // If the request fails, we don't retry (fire-and-forget semantics).
   preconnectFired = true;
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 
   try {
     // Use the same shared undici dispatcher that SDK clients will use,
     // so the warmed TCP+TLS connection is reused by subsequent API calls.
-    const dispatcher = getOrCreateSharedDispatcher(options.proxy);
+    const dispatcher = getOrCreateSharedDispatcher(proxy);
 
-    // Fire HEAD request to warm connection (fire-and-forget)
-    fetch(targetUrl, {
+    // Fire HEAD request to warm connection (fire-and-forget).
+    // Use undici's own fetch (not Node's built-in fetch) so the dispatcher
+    // and fetch come from the same undici version — Node's bundled undici
+    // may differ in major version from the bundled one (e.g. v8 vs v6),
+    // causing handler-interface mismatches like `invalid onError method`.
+    undiciFetch(targetUrl, {
       method: 'HEAD',
       signal: AbortSignal.timeout(5_000),
       headers: {
         'User-Agent': 'QwenCode-Preconnect/1.0',
       },
       dispatcher,
-    } as RequestInit)
+    })
       .then(() => {
         debugLogger.debug('Preconnect completed');
       })
       .catch((error) => {
-        debugLogger.debug(`Preconnect failed (ignored): ${error}`);
+        const redactedError = redactProxyCredentials(String(error));
+        debugLogger.debug(`Preconnect failed (ignored): ${redactedError}`);
       });
   } catch (error) {
     // Preconnect failure doesn't affect main flow
-    debugLogger.debug(`Preconnect failed (ignored): ${error}`);
+    const redactedError = redactProxyCredentials(String(error));
+    debugLogger.debug(`Preconnect failed (ignored): ${redactedError}`);
   }
 }
 

@@ -63,6 +63,30 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('emits scope:"global" on the system text when useGlobalCacheScope is set', () => {
+      // Anthropic-native + caching enabled → generator passes
+      // `useGlobalCacheScope: true` and the system prefix participates in
+      // cross-session caching under the `prompt-caching-scope-2026-01-05`
+      // beta. Non-Anthropic backends pass false (or omit) so they see the
+      // standard per-session shape verified by the test above.
+      const { system } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: 'hi',
+          config: { systemInstruction: 'sys' },
+        },
+        { useGlobalCacheScope: true },
+      );
+
+      expect(system).toEqual([
+        {
+          type: 'text',
+          text: 'sys',
+          cache_control: { type: 'ephemeral', scope: 'global' },
+        },
+      ]);
+    });
+
     it('converts a plain string content into a user message', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -102,6 +126,35 @@ describe('AnthropicContentConverter', () => {
             {
               type: 'text',
               text: 'World',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('preserves ordered multi-part startup reminder user content', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: '<system-reminder>\ndeferred tools' },
+              { text: '<system-reminder>\nstartup context' },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>\ndeferred tools' },
+            {
+              type: 'text',
+              text: '<system-reminder>\nstartup context',
               cache_control: { type: 'ephemeral' },
             },
           ],
@@ -197,6 +250,7 @@ describe('AnthropicContentConverter', () => {
               type: 'tool_result',
               tool_use_id: 'call-1',
               content: 'ok',
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -229,6 +283,7 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: 'boom',
+            cache_control: { type: 'ephemeral' },
           },
         ],
       });
@@ -262,6 +317,7 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: '',
+            cache_control: { type: 'ephemeral' },
           },
         ],
       });
@@ -312,6 +368,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -410,6 +467,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -461,6 +519,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -512,6 +571,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -641,6 +701,7 @@ describe('AnthropicContentConverter', () => {
                 },
               },
             ],
+            cache_control: { type: 'ephemeral' },
           },
         ],
       });
@@ -1118,6 +1179,29 @@ describe('AnthropicContentConverter', () => {
       expect(vi.mocked(convertSchema)).toHaveBeenCalledTimes(1);
     });
 
+    it('emits scope:"global" on the last tool when useGlobalCacheScope is set', async () => {
+      // Mirror of the system-block scope test: cross-session caching for
+      // tools (the largest, slowest-changing prefix) only fires for
+      // Anthropic-native baseURLs. The generator latches the predicate
+      // once per request and forwards the same value here.
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'get_weather', description: 'Get weather' },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToAnthropic(tools, {
+        useGlobalCacheScope: true,
+      });
+
+      expect(result[0].cache_control).toEqual({
+        type: 'ephemeral',
+        scope: 'global',
+      });
+    });
+
     it('resolves CallableTool.tool() and converts its functionDeclarations', async () => {
       const callable = [
         {
@@ -1259,6 +1343,7 @@ describe('AnthropicContentConverter', () => {
         promptTokenCount: 3,
         candidatesTokenCount: 5,
         totalTokenCount: 8,
+        cachedContentTokenCount: 0,
       });
 
       const parts = response.candidates?.[0]?.content?.parts || [];
@@ -1284,6 +1369,35 @@ describe('AnthropicContentConverter', () => {
       expect(parts).toEqual([
         { functionCall: { id: 't1', name: 'tool', args: { x: 1 } } },
       ]);
+    });
+
+    it('forwards cache_read_input_tokens and cache_creation_input_tokens through to usageMetadata', () => {
+      // A real Anthropic mid-conversation response carries all three prompt
+      // buckets simultaneously: `input_tokens` (the non-cached tail),
+      // `cache_read_input_tokens` (the warm prefix served from cache), and
+      // `cache_creation_input_tokens` (the new region being written). The
+      // converter must forward both cache fields so the normalizer can sum
+      // them — dropping either silently undercounts the Footer reading by
+      // the size of the dropped bucket.
+      const response = converter.convertAnthropicResponseToGemini({
+        id: 'msg-1',
+        model: 'claude-test',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+        usage: {
+          input_tokens: 2_500,
+          cache_read_input_tokens: 32_088,
+          cache_creation_input_tokens: 8_700,
+          output_tokens: 400,
+        },
+      } as unknown as Anthropic.Message);
+
+      expect(response.usageMetadata).toEqual({
+        promptTokenCount: 43_288,
+        candidatesTokenCount: 400,
+        totalTokenCount: 43_688,
+        cachedContentTokenCount: 32_088,
+      });
     });
   });
 
@@ -1341,6 +1455,47 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('marks the last user message with cache_control when its last block is tool_result', () => {
+      // Regression: in agentic loops the last user message is typically a
+      // tool_result, not a text block. An earlier guard required the last
+      // block to be text, which silently dropped the per-turn cache
+      // breakpoint from turn 2 onward and collapsed the cacheable region
+      // back to system+tools. Anthropic docs explicitly list tool_result
+      // as a cacheable block type in messages.content.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'do the thing' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'c1', name: 't', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 't',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const lastUser = messages[messages.length - 1];
+      expect(lastUser.role).toBe('user');
+      const content = Array.isArray(lastUser.content) ? lastUser.content : [];
+      const lastBlock = content[content.length - 1] as {
+        type: string;
+        cache_control?: { type: string };
+      };
+      expect(lastBlock.type).toBe('tool_result');
+      expect(lastBlock.cache_control).toEqual({ type: 'ephemeral' });
+    });
+
     it('does not add cache_control to tools when disabled', async () => {
       const noCacheConverter = new AnthropicContentConverter(
         'test-model',
@@ -1377,6 +1532,135 @@ describe('AnthropicContentConverter', () => {
         },
       });
       expect(result[0]).not.toHaveProperty('cache_control');
+    });
+
+    describe('per-call options override constructor default', () => {
+      // The generator latches `contentGeneratorConfig.enableCacheControl`
+      // per request and forwards the live value to the converter, so a
+      // `Config.setModel()` flip is reflected without rebuilding the
+      // converter. These tests exercise the override directly so the
+      // contract is pinned at the converter level too.
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'get_weather', description: 'Get weather' },
+          ],
+        },
+      ] as Tool[];
+
+      it('overrides constructor false → true for system + messages + tools', async () => {
+        const constructedWithCacheOff = new AnthropicContentConverter(
+          'test-model',
+          'auto',
+          false,
+        );
+
+        const { system, messages } =
+          constructedWithCacheOff.convertGeminiRequestToAnthropic(
+            {
+              model: 'models/test',
+              contents: 'Hello',
+              config: { systemInstruction: 'sys' },
+            },
+            { enableCacheControl: true, useGlobalCacheScope: true },
+          );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+        ]);
+        // Last user-text block gets per-session cache_control (no scope).
+        expect(messages).toEqual([
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: 'Hello',
+                cache_control: { type: 'ephemeral' },
+              },
+            ],
+          },
+        ]);
+
+        const result =
+          await constructedWithCacheOff.convertGeminiToolsToAnthropic(tools, {
+            enableCacheControl: true,
+            useGlobalCacheScope: true,
+          });
+        expect(result[0].cache_control).toEqual({
+          type: 'ephemeral',
+          scope: 'global',
+        });
+      });
+
+      it('overrides constructor true → false (cache fully off)', async () => {
+        // Default ctor: enableCacheControl true. Per-call override flips to
+        // false, mirroring a runtime `setModel()` that switches into a
+        // cache-disabled provider config.
+        const constructedWithCacheOn = new AnthropicContentConverter(
+          'test-model',
+          'auto',
+          true,
+        );
+
+        const { system, messages } =
+          constructedWithCacheOn.convertGeminiRequestToAnthropic(
+            {
+              model: 'models/test',
+              contents: 'Hello',
+              config: { systemInstruction: 'sys' },
+            },
+            { enableCacheControl: false },
+          );
+
+        expect(system).toBe('sys');
+        expect(messages).toEqual([
+          { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+        ]);
+
+        const result =
+          await constructedWithCacheOn.convertGeminiToolsToAnthropic(tools, {
+            enableCacheControl: false,
+          });
+        expect(result[0]).not.toHaveProperty('cache_control');
+      });
+
+      it('honors useGlobalCacheScope independently of enableCacheControl source', async () => {
+        // Cache on (per-call), scope off (per-call default). Verify the
+        // emitted shape is per-session even though cache_control IS
+        // attached — non-Anthropic baseURL behavior in one call.
+        const converterDefault = new AnthropicContentConverter(
+          'test-model',
+          'auto',
+        );
+        const { system } = converterDefault.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'Hello',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            enableCacheControl: true /* useGlobalCacheScope omitted → false */,
+          },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral' },
+          },
+        ]);
+
+        const result = await converterDefault.convertGeminiToolsToAnthropic(
+          tools,
+          { enableCacheControl: true },
+        );
+        expect(result[0].cache_control).toEqual({ type: 'ephemeral' });
+      });
     });
   });
 });

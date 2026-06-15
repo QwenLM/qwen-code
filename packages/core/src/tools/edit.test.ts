@@ -30,6 +30,7 @@ import { ApprovalMode } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 describe('EditTool', () => {
   let tool: EditTool;
@@ -39,6 +40,8 @@ describe('EditTool', () => {
   let geminiClient: any;
   let baseLlmClient: any;
   let fileReadCache: FileReadCache;
+  let mockFileHistoryService: { trackEdit: ReturnType<typeof vi.fn> };
+  let fsService: StandardFileSystemService;
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -46,6 +49,8 @@ describe('EditTool', () => {
     rootDir = path.join(tempDir, 'root');
     fs.mkdirSync(rootDir);
     fileReadCache = new FileReadCache();
+    mockFileHistoryService = { trackEdit: vi.fn() };
+    fsService = new StandardFileSystemService();
 
     geminiClient = {
       generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
@@ -62,7 +67,7 @@ describe('EditTool', () => {
       getApprovalMode: vi.fn(),
       setApprovalMode: vi.fn(),
       getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
-      getFileSystemService: () => new StandardFileSystemService(),
+      getFileSystemService: () => fsService,
       getIdeMode: () => false,
       getApiKey: () => 'test-api-key',
       getModel: () => 'test-model',
@@ -83,6 +88,7 @@ describe('EditTool', () => {
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
+      getFileHistoryService: () => mockFileHistoryService,
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -494,10 +500,150 @@ describe('EditTool', () => {
         /Showing lines \d+-\d+ of \d+ from the edited file:/,
       );
       expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+    });
+
+    // trackEdit is best-effort: a FileHistoryService failure (disk full,
+    // permissions, corrupted state) must never break the edit tool.
+    it('completes the edit even when trackEdit throws', async () => {
+      const initialContent = 'This is some old text.';
+      const newContent = 'This is some new text.';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
+      mockFileHistoryService.trackEdit.mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(result.llmContent).toMatch(
+        /Showing lines \d+-\d+ of \d+ from the edited file:/,
+      );
+    });
+
+    // Pin the upstream-aligned ordering: trackEdit MUST run before the
+    // pre-write checkPriorRead. The upstream `claude-code/src/tools/
+    // FileEditTool` comment on the equivalent block says:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // Without this ordering the multi-hundred-ms `trackEdit` sat
+    // between checkPriorRead and writeTextFile, widening the
+    // already-acknowledged stat-then-write race window from microseconds
+    // to seconds.
+    //
+    // Test strategy: install a `trackEdit` mock that mutates the file
+    // on disk (bumps mtime) before returning. The mutation has to be
+    // detected by the pre-write `checkPriorRead`. That only happens if
+    // `trackEdit` runs BEFORE the pre-write check — the broken
+    // ordering would run the pre-write check first (passing on the
+    // pre-mutation stats), then trackEdit (which mutates), then write
+    // (which clobbers the external mutation silently).
+    //
+    // Asserting on `result.error` directly tests the behavioral
+    // invariant rather than the call-ordering proxy, so it survives
+    // future refactors that preserve the invariant even if they shift
+    // the number of `cache.check` calls.
+    it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
+      const initialContent = 'This is some old text.';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
+
+      mockFileHistoryService.trackEdit.mockImplementation(async () => {
+        // Simulate an external write that lands while trackEdit is
+        // copying the file to the backup directory. Bumping mtime by
+        // 5 s makes the change reliably "newer" under the cache's
+        // ~1 s comparison granularity on macOS.
+        const newTime = new Date(Date.now() + 5000);
+        fs.utimesSync(filePath, newTime, newTime);
+      });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+
+      const result = await tool
+        .build(params)
+        .execute(new AbortController().signal);
+
+      // trackEdit must have actually fired.
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      // The pre-write check must have caught the in-trackEdit mutation
+      // and rejected, proving trackEdit ran BEFORE the pre-write check.
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      // The file on disk is unchanged (rejected, not overwritten).
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
+    });
+
+    // The Edit tool feeds the commit-attribution singleton on success so
+    // commit notes can later report per-file AI/human ratios. Service-
+    // level tests for `recordEdit` already exist; these guard against
+    // the wiring at the tool boundary regressing (e.g. someone moves
+    // the call out of the success path).
+    describe('commit-attribution wiring', () => {
+      beforeEach(() => {
+        CommitAttributionService.resetInstance();
+      });
+
+      it('records AI-originated edits in the attribution service', async () => {
+        const initial = 'old line';
+        const updated = 'new line';
+        fs.writeFileSync(filePath, initial, 'utf8');
+        // Prior-read enforcement (origin/main #3774) requires the file
+        // to have been Read before Edit can mutate it.
+        seedPriorRead(filePath);
+        const invocation = tool.build({
+          file_path: filePath,
+          old_string: 'old',
+          new_string: 'new',
+        });
+
+        await invocation.execute(new AbortController().signal);
+
+        const attribution =
+          CommitAttributionService.getInstance().getFileAttribution(filePath);
+        expect(attribution).toBeDefined();
+        // The actual char count is implementation detail of
+        // computeCharContribution; we only assert the entry exists
+        // with a positive contribution.
+        expect(attribution!.aiContribution).toBeGreaterThan(0);
+        // Length sanity: contribution is bounded by the new content.
+        expect(attribution!.aiContribution).toBeLessThanOrEqual(updated.length);
+      });
+
+      it('skips attribution when the edit is modified_by_user', async () => {
+        fs.writeFileSync(filePath, 'old line', 'utf8');
+        seedPriorRead(filePath);
+        const invocation = tool.build({
+          file_path: filePath,
+          old_string: 'old',
+          new_string: 'new',
+          modified_by_user: true,
+        });
+
+        await invocation.execute(new AbortController().signal);
+
+        expect(
+          CommitAttributionService.getInstance().getFileAttribution(filePath),
+        ).toBeUndefined();
+      });
     });
 
     it('should create a new file if old_string is empty and file does not exist, and return created message', async () => {
@@ -863,24 +1009,23 @@ describe('EditTool', () => {
       expect(() => tool.build(params)).toThrow();
     });
 
-    it.skipIf(process.getuid && process.getuid() === 0)(
-      'should return FILE_WRITE_FAILURE on write error',
-      async () => {
-        fs.writeFileSync(filePath, 'content', 'utf8');
-        seedPriorRead(filePath);
-        // Make file readonly to trigger a write error
-        fs.chmodSync(filePath, '444');
+    it('should return FILE_WRITE_FAILURE on write error', async () => {
+      fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
 
-        const params: EditToolParams = {
-          file_path: filePath,
-          old_string: 'content',
-          new_string: 'new content',
-        };
-        const invocation = tool.build(params);
-        const result = await invocation.execute(new AbortController().signal);
-        expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
-      },
-    );
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce(
+        new Error('Simulated write error'),
+      );
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+    });
   });
 
   describe('getDescription', () => {
@@ -1013,31 +1158,35 @@ describe('EditTool', () => {
 
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
       expect(result.error?.message).toMatch(
-        /has not been fully read in this session/,
+        /has not been read in this session/,
       );
       // File must remain untouched.
       expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
     });
 
-    it('rejects an edit when the previous read was ranged (offset/limit)', async () => {
-      // A model that only Read part of a file has not seen the bytes
-      // a free-form old_string would touch. Treat this the same as
-      // "no prior read".
+    it('allows an edit after a ranged (offset/limit) read', async () => {
+      // A partial read still counts as a prior read: requiring the
+      // model to re-read multi-thousand-line files just to change one
+      // line is wasteful, and the existing `0 occurrences` failure
+      // mode catches the case the full-read requirement was meant to
+      // defend against (a fabricated old_string that misses the
+      // actual bytes). This matches Claude Code's `readFileState`
+      // contract, which also accepts partial reads.
       fs.writeFileSync(filePath, 'line a\nline b\nline c\n', 'utf8');
       const stats = fs.statSync(filePath);
-      // Record as a ranged read: lastReadWasFull = false.
       fileReadCache.recordRead(filePath, stats, {
         full: false,
         cacheable: true,
       });
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
 
       const result = await tool
         .build({ file_path: filePath, old_string: 'line a', new_string: 'X' })
         .execute(abortSignal);
-      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
-      expect(fs.readFileSync(filePath, 'utf8')).toBe(
-        'line a\nline b\nline c\n',
-      );
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('X\nline b\nline c\n');
     });
 
     it('rejects an edit when the previous read was non-cacheable (binary / pdf / image)', async () => {
@@ -1067,6 +1216,7 @@ describe('EditTool', () => {
       expect(result.error?.message).toMatch(
         /binary \/ image \/ audio \/ video \/ PDF \/ notebook payload/,
       );
+      expect(result.error?.message).toContain('notebook_edit');
       expect(result.error?.message).not.toMatch(/Use the read_file tool first/);
       // EditTool's verb is "edit", not "overwrite" — using the
       // wrong one here would be confusing for in-place edits.
@@ -1161,7 +1311,7 @@ describe('EditTool', () => {
       });
       await expect(
         invocation.getConfirmationDetails(abortSignal),
-      ).rejects.toThrow(/has not been fully read in this session/);
+      ).rejects.toThrow(/has not been read in this session/);
     });
 
     it('rejects an edit when the file has been modified since the last read', async () => {
@@ -1239,13 +1389,15 @@ describe('EditTool', () => {
       expect(fs.readFileSync(newPath, 'utf8')).toBe('second content\n');
     });
 
-    it('allows Edit after Write→partial-Read (sticky-on-true preserves write-author rights)', async () => {
-      // Reproduction for the maintainer-review regression: pre-fix,
-      // a partial read recorded `lastReadWasFull = false` and
-      // clobbered the `true` that recordWrite had stamped at
-      // create time, so this Edit would then be rejected with
-      // EDIT_REQUIRES_PRIOR_READ even though the model had
-      // authored the file's full content.
+    it('allows Edit after Write→partial-Read', async () => {
+      // The Write authors the bytes (recordWrite seeds the cache), and
+      // a follow-up partial Read at the same fingerprint must not
+      // disqualify the next Edit. After dropping the `lastReadWasFull`
+      // requirement from prior-read enforcement, this is just the
+      // generic "partial read counts" path; pre-fix it failed for a
+      // different reason (the partial read overwrote the full-read
+      // flag recordWrite had stamped, and enforcement still required
+      // that flag).
       const newPath = path.join(rootDir, 'write-then-partial-read.txt');
       (mockConfig.getApprovalMode as Mock).mockReturnValue(
         ApprovalMode.AUTO_EDIT,

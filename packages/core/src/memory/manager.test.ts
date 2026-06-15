@@ -27,8 +27,13 @@ vi.mock('./dream.js', () => ({
   runManagedAutoMemoryDream: vi.fn(),
 }));
 
+vi.mock('./skillReviewAgentPlanner.js', () => ({
+  runSkillReviewByAgent: vi.fn(),
+}));
+
 import { runAutoMemoryExtract } from './extract.js';
 import { runManagedAutoMemoryDream } from './dream.js';
+import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -222,6 +227,127 @@ describe('MemoryManager', () => {
     });
   });
 
+  // ─── Skill review ─────────────────────────────────────────────────────────
+
+  describe('scheduleSkillReview()', () => {
+    beforeEach(() => {
+      vi.resetAllMocks();
+      vi.mocked(runSkillReviewByAgent).mockResolvedValue({
+        touchedSkillFiles: ['/project/.qwen/skills/test/SKILL.md'],
+      });
+    });
+
+    it('skips below threshold', () => {
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [],
+        toolCallCount: 1,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+      });
+
+      expect(result).toEqual({
+        status: 'skipped',
+        skippedReason: 'below_threshold',
+      });
+      expect(runSkillReviewByAgent).not.toHaveBeenCalled();
+    });
+
+    it('skips when skills were modified in session', () => {
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 20,
+        threshold: 2,
+        skillsModified: true,
+        config: makeMockConfig(),
+      });
+
+      expect(result).toEqual({
+        status: 'skipped',
+        skippedReason: 'skills_modified_in_session',
+      });
+      expect(runSkillReviewByAgent).not.toHaveBeenCalled();
+    });
+
+    it('skips second call while first is still in-flight (already_running)', async () => {
+      let resolveReview!: (v: { touchedSkillFiles: string[] }) => void;
+      vi.mocked(runSkillReviewByAgent).mockReturnValueOnce(
+        new Promise<{ touchedSkillFiles: string[] }>((resolve) => {
+          resolveReview = resolve;
+        }),
+      );
+
+      const mgr = new MemoryManager();
+      const baseParams = {
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user' as const, parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+      };
+
+      const first = mgr.scheduleSkillReview(baseParams);
+      expect(first.status).toBe('scheduled');
+
+      // Second call while first is still running
+      const second = mgr.scheduleSkillReview({
+        ...baseParams,
+        sessionId: 'sess-2',
+      });
+      expect(second.status).toBe('skipped');
+      expect(second.skippedReason).toBe('already_running');
+      // Returns the existing task id so callers can observe it
+      expect(second.taskId).toBe(first.taskId);
+
+      // After first completes, a new call is allowed
+      resolveReview({ touchedSkillFiles: [] });
+      await first.promise;
+
+      vi.mocked(runSkillReviewByAgent).mockResolvedValueOnce({
+        touchedSkillFiles: [],
+      });
+      const third = mgr.scheduleSkillReview(baseParams);
+      expect(third.status).toBe('scheduled');
+      expect(third.taskId).not.toBe(first.taskId);
+    });
+
+    it('schedules skill review at threshold', async () => {
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 2,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        maxTurns: 3,
+        timeoutMs: 30_000,
+      });
+
+      expect(result.status).toBe('scheduled');
+      await result.promise;
+      expect(runSkillReviewByAgent).toHaveBeenCalledWith({
+        config: expect.any(Object),
+        projectRoot: '/project',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        maxTurns: 3,
+        timeoutMs: 30_000,
+      });
+      expect(mgr.listTasksByType('skill-review', '/project')[0]?.status).toBe(
+        'completed',
+      );
+    });
+  });
+
   // ─── listTasksByType() ────────────────────────────────────────────────────
 
   describe('listTasksByType()', () => {
@@ -229,6 +355,7 @@ describe('MemoryManager', () => {
       const mgr = new MemoryManager();
       expect(mgr.listTasksByType('extract')).toEqual([]);
       expect(mgr.listTasksByType('dream')).toEqual([]);
+      expect(mgr.listTasksByType('skill-review')).toEqual([]);
     });
 
     it('filters by projectRoot when provided', async () => {
@@ -517,6 +644,70 @@ describe('MemoryManager', () => {
       ) as { lastDreamSessionId?: string; lastDreamAt?: string };
       expect(meta.lastDreamSessionId).toBe('sess-x');
       expect(meta.lastDreamAt).toBe('2026-04-01T10:00:00.000Z');
+    });
+  });
+
+  // ─── scheduleSkillReview: concurrent extract ──────────────────────────────
+
+  describe('scheduleSkillReview(): concurrent extract (checklist 6)', () => {
+    it('schedules skill review independently even when extract is already running', async () => {
+      // arrange: extract never resolves so it stays "running"
+      vi.mocked(runAutoMemoryExtract).mockReturnValue(new Promise(() => {}));
+      vi.mocked(runSkillReviewByAgent).mockResolvedValue({
+        touchedSkillFiles: [],
+      });
+
+      const mgr = new MemoryManager();
+      const projectRoot = '/test-project-concurrent';
+      const config = makeMockConfig();
+
+      // Start extract (will stay in-flight)
+      void mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-extract',
+        history: [{ role: 'user', parts: [{ text: 'do some work' }] }],
+        config,
+      });
+
+      // Skill review must be scheduled independently, not silently dropped
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess-extract',
+        history: [{ role: 'user', parts: [{ text: 'do some work' }] }],
+        toolCallCount: 25,
+        threshold: 20,
+        enabled: true,
+        skillsModified: false,
+        config,
+      });
+
+      expect(result.status).toBe('scheduled');
+      expect(result.taskId).toBeDefined();
+    });
+
+    it('schedules skill review independently when no extract is running', () => {
+      const mgr = new MemoryManager();
+      const projectRoot = '/test-project-independent';
+      const config = makeMockConfig();
+
+      vi.mocked(runSkillReviewByAgent).mockResolvedValue({
+        touchedSkillFiles: [],
+      });
+
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [{ role: 'user', parts: [{ text: 'work' }] }],
+        toolCallCount: 25,
+        threshold: 20,
+        enabled: true,
+        skillsModified: false,
+        config,
+      });
+
+      expect(result.status).toBe('scheduled');
+      expect(result.skippedReason).toBeUndefined();
+      expect(result.taskId).toBeDefined();
     });
   });
 

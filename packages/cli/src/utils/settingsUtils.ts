@@ -295,7 +295,8 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   'ui.enableWelcomeBack',
 
   // Git Behavior
-  'general.gitCoAuthor',
+  'general.gitCoAuthor.commit',
+  'general.gitCoAuthor.pr',
 
   // File Filtering
   'context.fileFiltering.respectGitIgnore',
@@ -389,12 +390,34 @@ export function settingExistsInScope(
   return value !== undefined;
 }
 
+/**
+ * True if any dotted-path segment would let a write climb into the prototype
+ * chain. Defense in depth at the utility level: callers like
+ * migrateProviderMetadata feed `field` names straight from Object.entries on
+ * user-editable settings.json, and JSON.parse preserves `__proto__` as an own
+ * property — a crafted file could otherwise pollute Object.prototype here.
+ * Inline literal === comparisons (not Set.has) so CodeQL recognises this as a
+ * prototype-pollution sanitiser.
+ */
+function pathHasUnsafeSegment(keys: string[]): boolean {
+  for (const key of keys) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function setNestedPropertyForce(
   obj: Record<string, unknown>,
   path: string,
   value: unknown,
 ): void {
   const keys = path.split('.');
+  // Refuse prototype-chain segments (see pathHasUnsafeSegment). Silent skip
+  // rather than throw: callers iterate user data and a poisoned key should
+  // be ignored, not crash the operation.
+  if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
   if (!lastKey) return;
 
@@ -415,6 +438,8 @@ export function setNestedPropertySafe(
   value: unknown,
 ): void {
   const keys = path.split('.');
+  // Refuse prototype-chain segments (see pathHasUnsafeSegment).
+  if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
   if (!lastKey) return;
 
@@ -624,7 +649,7 @@ export function getEffectiveDisplayValue(
 
 /**
  * Backup a settings file before modification.
- * Creates a backup with `.orig` suffix if the file exists and backup doesn't already exist.
+ * Always creates a fresh backup with `.orig` suffix (overwrites any stale backup).
  * @param filePath - Path to the settings file to backup
  * @returns boolean indicating whether a backup was created
  */
@@ -632,15 +657,55 @@ export function backupSettingsFile(filePath: string): boolean {
   try {
     if (fs.existsSync(filePath)) {
       const backupPath = `${filePath}.orig`;
-      if (!fs.existsSync(backupPath)) {
-        fs.renameSync(filePath, backupPath);
-        return true;
-      }
+      fs.copyFileSync(filePath, backupPath);
+      return true;
     }
   } catch (_e) {
     // Ignore backup errors, proceed without backup
   }
   return false;
+}
+
+/**
+ * Restore a settings file from its `.orig` backup created by {@link backupSettingsFile}.
+ * Removes the backup file after a successful restore.
+ * @param filePath - Path to the settings file to restore
+ * @returns boolean indicating whether the restore succeeded
+ */
+export function restoreSettingsFromBackup(filePath: string): boolean {
+  try {
+    const backupPath = `${filePath}.orig`;
+    if (fs.existsSync(backupPath)) {
+      fs.copyFileSync(backupPath, filePath);
+      fs.unlinkSync(backupPath);
+      return true;
+    }
+  } catch (err) {
+    // Caller handles the boolean failure, but log the underlying cause so
+    // EACCES / disk full / file-locked don't all look identical from
+    // upstream — the adapter's own warning then has something to point at.
+    // eslint-disable-next-line no-console -- best-effort rollback path
+    console.error(
+      `[settingsUtils] restoreSettingsFromBackup(${filePath}) failed:`,
+      err,
+    );
+  }
+  return false;
+}
+
+/**
+ * Remove the `.orig` backup after a successful operation.
+ * @param filePath - Path to the settings file whose backup should be removed
+ */
+export function cleanupSettingsBackup(filePath: string): void {
+  try {
+    const backupPath = `${filePath}.orig`;
+    if (fs.existsSync(backupPath)) {
+      fs.unlinkSync(backupPath);
+    }
+  } catch (_e) {
+    // Ignore cleanup errors — non-critical
+  }
 }
 
 export const TEST_ONLY = { clearFlattenedSchema };

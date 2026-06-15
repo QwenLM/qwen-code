@@ -32,7 +32,12 @@ import {
   isControlCancel,
 } from './types.js';
 import { createMinimalSettings } from '../config/settings.js';
+import type { LoadedSettings } from '../config/settings.js';
 import { runNonInteractive } from '../nonInteractiveCli.js';
+import {
+  finalizeStartupProfile,
+  profileCheckpoint,
+} from '../utils/startupProfiler.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
@@ -73,6 +78,7 @@ class Session {
   private configInitialized: boolean = false;
   private monitorNotificationsRegistered: boolean = false;
   private monitorRegistrationsRegistered: boolean = false;
+  private settings: LoadedSettings;
 
   // Single initialization promise that resolves when session is ready for user messages.
   // Created lazily once initialization actually starts.
@@ -80,8 +86,13 @@ class Session {
   private initializationResolve: (() => void) | null = null;
   private initializationReject: ((error: Error) => void) | null = null;
 
-  constructor(config: Config, initialPrompt?: CLIUserMessage) {
+  constructor(
+    config: Config,
+    initialPrompt?: CLIUserMessage,
+    settings: LoadedSettings = createMinimalSettings(),
+  ) {
     this.config = config;
+    this.settings = settings;
     this.sessionId = config.getSessionId();
     this.abortController = new AbortController();
     this.initialPrompt = initialPrompt ?? null;
@@ -128,7 +139,46 @@ class Session {
     debugLogger.debug('[Session] Initializing config');
 
     try {
+      // Bracket `config.initialize()` with the same profiler checkpoints
+      // the non-stream-json branch in `gemini.tsx` uses so the
+      // `config_initialize_dur` derived phase shows up in stream-json
+      // startup profiles. `profileCheckpoint` is a no-op when
+      // `QWEN_CODE_PROFILE_STARTUP` is unset, so this adds zero overhead
+      // off the profiling path. Without these, stream-json profiles read
+      // as missing the initialize phase entirely, which made the MCP
+      // discovery timings look like they happened "before init".
+      profileCheckpoint('config_initialize_start');
       await this.config.initialize(options);
+      profileCheckpoint('config_initialize_end');
+      // Stream-json sessions feed prompts straight to the model after init.
+      // Under progressive MCP availability `initialize()` returns before
+      // MCP servers settle, so we must explicitly await discovery here —
+      // otherwise the first prompt would see only built-in tools.
+      await this.config.waitForMcpReady();
+      // Surface MCP failures on stderr — same rationale as gemini.tsx's
+      // non-interactive branch: per-server errors are caught inside
+      // `discoverAllMcpToolsIncremental` and never reach a TTY otherwise,
+      // so a script using stream-json with broken MCP config would
+      // silently run with only built-in tools.
+      // Defensive against tests that pass a stubbed Config without
+      // `getFailedMcpServerNames`.
+      const failedMcpServers =
+        typeof this.config.getFailedMcpServerNames === 'function'
+          ? this.config.getFailedMcpServerNames()
+          : [];
+      if (failedMcpServers.length > 0) {
+        process.stderr.write(
+          `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+            `Continuing with built-in tools and any servers that did connect.\n`,
+        );
+      }
+      // Finalize the startup profile here so `config_initialize_*` and the
+      // MCP discovery events captured during init/discovery make it into
+      // the on-disk profile. gemini.tsx's stream-json branch deliberately
+      // skips finalize because the profiler's `finalized` guard would
+      // otherwise suppress every event emitted during the
+      // `Session.ensureConfigInitialized` flow above.
+      finalizeStartupProfile(this.config.getSessionId());
       this.configInitialized = true;
       this.registerMonitorRegistrations();
       this.registerMonitorNotifications();
@@ -223,6 +273,7 @@ class Session {
       streamJson: this.outputAdapter,
       sessionId: this.sessionId,
       abortSignal: this.abortController.signal,
+      settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
       onInterrupt: () => this.handleInterrupt(),
     });
@@ -394,19 +445,13 @@ class Session {
     const promptId = this.getNextPromptId();
 
     try {
-      await runNonInteractive(
-        this.config,
-        createMinimalSettings(),
-        input,
-        promptId,
-        {
-          abortController: this.abortController,
-          adapter: this.outputAdapter,
-          controlService: this.controlService ?? undefined,
-          captureMonitorNotifications: false,
-          captureMonitorRegistrations: false,
-        },
-      );
+      await runNonInteractive(this.config, this.settings, input, promptId, {
+        abortController: this.abortController,
+        adapter: this.outputAdapter,
+        controlService: this.controlService ?? undefined,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+      });
     } catch (error) {
       debugLogger.error('[Session] Query execution error:', error);
     }
@@ -426,7 +471,7 @@ class Session {
     const promptId = this.getNextPromptId();
     await runNonInteractive(
       this.config,
-      createMinimalSettings(),
+      this.settings,
       notification.modelText,
       promptId,
       {
@@ -781,6 +826,7 @@ function extractUserMessageText(message: CLIUserMessage): string | null {
 export async function runNonInteractiveStreamJson(
   config: Config,
   input: string,
+  settings: LoadedSettings = createMinimalSettings(),
 ): Promise<void> {
   let initialPrompt: CLIUserMessage | undefined = undefined;
   if (input && input.trim().length > 0) {
@@ -796,6 +842,6 @@ export async function runNonInteractiveStreamJson(
     };
   }
 
-  const manager = new Session(config, initialPrompt);
+  const manager = new Session(config, initialPrompt, settings);
   await manager.run();
 }

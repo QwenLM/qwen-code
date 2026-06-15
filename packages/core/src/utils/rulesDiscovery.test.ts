@@ -325,6 +325,35 @@ Use hooks.`,
         `--- Rule from: ${QWEN_DIR}/rules/test.md ---`,
       );
     });
+
+    it('reads global rules from QWEN_HOME when set', async () => {
+      const customQwenHome = path.join(testRootDir, 'custom-qwen-home');
+      const originalQwenHome = process.env['QWEN_HOME'];
+      process.env['QWEN_HOME'] = customQwenHome;
+      try {
+        await createTestFile(
+          path.join(customQwenHome, 'rules', 'fromCustomHome.md'),
+          'CustomHome rule.',
+        );
+        // A stale rule in the legacy ~/.qwen/rules location should NOT be
+        // loaded once QWEN_HOME points elsewhere.
+        await createTestFile(
+          path.join(homedir, QWEN_DIR, 'rules', 'fromLegacyHome.md'),
+          'LegacyHome rule.',
+        );
+
+        const result = await loadRules(projectRoot, true);
+
+        expect(result.content).toContain('CustomHome rule.');
+        expect(result.content).not.toContain('LegacyHome rule.');
+      } finally {
+        if (originalQwenHome === undefined) {
+          delete process.env['QWEN_HOME'];
+        } else {
+          process.env['QWEN_HOME'] = originalQwenHome;
+        }
+      }
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────

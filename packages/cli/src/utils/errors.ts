@@ -11,9 +11,11 @@ import {
   parseAndFormatApiError,
   FatalTurnLimitedError,
   FatalCancellationError,
+  FatalBudgetExceededError,
   ToolErrorType,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+import type { BudgetExceeded } from './runBudget.js';
 import { runExitCleanup } from './cleanup.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -246,13 +248,24 @@ export async function handleCancellationError(config: Config): Promise<never> {
 
 /**
  * Handles max session turns exceeded consistently.
+ *
+ * When `--json-schema` is active the error gets an extra hint pointing at the
+ * common reasons a structured-output run never terminated: the model never
+ * called `structured_output`, the tool was denied by `permissions.deny` /
+ * `--exclude-tools`, or the schema is unsatisfiable. Without this, all three
+ * failure modes surface as the same generic "increase maxSessionTurns" line
+ * even though the fix is a permissions / schema change, not a turns bump.
  */
 export async function handleMaxTurnsExceededError(
   config: Config,
 ): Promise<never> {
-  const maxTurnsError = new FatalTurnLimitedError(
-    'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.',
-  );
+  const baseMessage =
+    'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
+  const jsonSchemaActive = config.getJsonSchema?.() !== undefined;
+  const message = jsonSchemaActive
+    ? `${baseMessage}\nNote: --json-schema is active. If the model never called structured_output, verify it isn't denied by permissions.deny / --exclude-tools and that the schema is satisfiable.`
+    : baseMessage;
+  const maxTurnsError = new FatalTurnLimitedError(message);
 
   if (config.getOutputFormat() === OutputFormat.JSON) {
     const formatter = new JsonFormatter();
@@ -266,4 +279,32 @@ export async function handleMaxTurnsExceededError(
     writeStderrLine(maxTurnsError.message);
   }
   return exitAfterCleanup(maxTurnsError.exitCode);
+}
+
+/**
+ * Emits the structured "run aborted by budget" error and exits. Used by
+ * the non-interactive run loop when `--max-wall-time` or `--max-tool-calls`
+ * fires (see `RunBudgetEnforcer`). Exit code is 55, distinct from the
+ * turn-cap exit code 53 and SIGINT's 130 so CI scripts can branch on the
+ * reason.
+ *
+ * The output shape intentionally mirrors `handleMaxTurnsExceededError` /
+ * `handleCancellationError`: structured JSON only on `OutputFormat.JSON`
+ * and plain stderr for everything else (incl. STREAM_JSON). Emitting a
+ * structured envelope on STREAM_JSON too is a real gap, but it's a
+ * codebase-wide convention question that affects cancel / max-turns
+ * equally, not a budget-specific decision.
+ */
+export async function handleBudgetExceededError(
+  config: Config,
+  exceeded: BudgetExceeded,
+): Promise<never> {
+  const fatal = new FatalBudgetExceededError(exceeded.message);
+  if (config.getOutputFormat() === OutputFormat.JSON) {
+    const formatter = new JsonFormatter();
+    writeStderrLine(formatter.formatError(fatal, fatal.exitCode));
+  } else {
+    writeStderrLine(fatal.message);
+  }
+  return exitAfterCleanup(fatal.exitCode);
 }

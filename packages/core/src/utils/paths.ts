@@ -44,7 +44,7 @@ export function _resetValidatePathCacheForTest(): void {
  * Includes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
  */
-export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~]/;
+export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~,]/;
 
 // Single shared list of path-argument keys used across file tools.
 // file_path (Edit, ReadFile, WriteFile), path (Glob, Grep, Ls, RipGrep),
@@ -73,6 +73,24 @@ export function tildeifyPath(path: string): string {
     return path.replace(homeDir, '~');
   }
   return path;
+}
+
+/**
+ * Expands tilde (~) and Windows-style %userprofile% to the full home directory path.
+ * @param p - The path to expand.
+ * @returns The expanded path.
+ */
+export function expandHomeDir(p: string): string {
+  if (!p) {
+    return '';
+  }
+  let expandedPath = p;
+  if (p.toLowerCase().startsWith('%userprofile%')) {
+    expandedPath = os.homedir() + p.substring('%userprofile%'.length);
+  } else if (p === '~' || p.startsWith('~/')) {
+    expandedPath = os.homedir() + p.substring(1);
+  }
+  return path.normalize(expandedPath);
 }
 
 /**

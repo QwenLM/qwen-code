@@ -8,6 +8,7 @@ import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { TextBuffer } from './shared/text-buffer.js';
@@ -19,12 +20,12 @@ import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.
 import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
 import { useExportCompletion } from '../hooks/useExportCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
-import type { Config } from '@qwen-code/qwen-code-core';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import {
   ApprovalMode,
+  type Config,
   Storage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -52,9 +53,11 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from '../contexts/BackgroundTaskViewContext.js';
+import { isLiveAgentPanelVisibleEntry } from './background-view/liveAgentPanelVisibility.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
+import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
 
 /**
  * Represents an attachment (e.g., pasted image) displayed above the input prompt
@@ -75,6 +78,7 @@ export interface InputPromptProps {
   config: Config;
   slashCommands: readonly SlashCommand[];
   commandContext: CommandContext;
+  recentSlashCommands?: RecentSlashCommands;
   placeholder?: string;
   focus?: boolean;
   inputWidth: number;
@@ -85,7 +89,22 @@ export interface InputPromptProps {
   onEscapePromptChange?: (showPrompt: boolean) => void;
   onToggleShortcuts?: () => void;
   showShortcuts?: boolean;
+  /**
+   * Reports autocomplete-dropdown visibility specifically. Composer uses
+   * this to hide the Footer / KeyboardShortcuts when the dropdown would
+   * overlap their vertical space. Must stay narrow — followup suggestions
+   * and mid-input ghost text don't take Footer's space and shouldn't hide
+   * it. See #4171 / #4308 review.
+   */
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
+  /**
+   * Reports whether any input-area handler will consume a Tab keystroke
+   * (autocomplete dropdown, followup prompt suggestion, or mid-input ghost
+   * text). AppContainer feeds this into useAutoAcceptIndicator's
+   * `shouldBlockTab` to suppress the Windows-only "bare Tab cycles approval
+   * mode" fallback. See #4171.
+   */
+  onTabConsumerChange?: (active: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
   isEmbeddedShellFocused?: boolean;
   /** Prompt suggestion text to display after response completes */
@@ -109,6 +128,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   config,
   slashCommands,
   commandContext,
+  recentSlashCommands,
   placeholder,
   focus = true,
   suggestionsWidth,
@@ -119,6 +139,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   onToggleShortcuts,
   showShortcuts,
   onSuggestionsVisibilityChange,
+  onTabConsumerChange,
   vimHandleInput,
   isEmbeddedShellFocused,
   promptSuggestion,
@@ -134,13 +155,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     entries: bgEntries,
     dialogOpen: bgDialogOpen,
     pillFocused: bgPillFocused,
+    livePanelFocused,
+    livePanelSelectedIndex,
   } = useBackgroundTaskViewState();
-  const { setPillFocused: setBgPillFocused } = useBackgroundTaskViewActions();
+  const {
+    setLivePanelFocused,
+    setLivePanelSelectedIndex,
+    enterDetailFromPanel: enterBgDetailFromPanel,
+    setSelectedIndex: setBgSelectedIndex,
+  } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
-  // Includes terminal entries — the pill stays open so users can reopen
-  // the dialog to inspect final state after the last agent finishes.
-  const hasBgAgents = bgEntries.length > 0;
-  const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
+  const getVisibleBgAgents = useCallback(
+    () => bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
+    [bgEntries],
+  );
+  const hasActiveToolConfirmation = useMemo(
+    () =>
+      Boolean(uiState.confirmationRequest) ||
+      (uiState.pendingGeminiHistoryItems ?? []).some(
+        (item) =>
+          item.type === 'tool_group' &&
+          item.tools.some((tool) => tool.confirmationDetails),
+      ),
+    [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
+  );
+  const [historyRestoredText, setHistoryRestoredText] = useState<string | null>(
+    null,
+  );
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -194,6 +235,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const exportCompletion = useExportCompletion(buffer, slashCommands);
   const shellHistory = useShellHistory(config.getProjectRoot());
   const shellHistoryData = shellHistory.history;
+  const isHistoryRestoredText =
+    historyRestoredText !== null && buffer.text === historyRestoredText;
 
   const completion = useCommandCompletion(
     buffer,
@@ -202,9 +245,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     commandContext,
     reverseSearchActive,
     config,
-    // Suppress completion when history navigation just occurred
-    !justNavigatedHistory,
+    // Suppress completion for history-restored text until the user edits it.
+    !isHistoryRestoredText,
+    recentSlashCommands,
   );
+  const showCompletionSuggestions =
+    completion.showSuggestions && !isHistoryRestoredText;
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
   const midInputGhostTextRef = useRef<{
@@ -374,9 +420,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
       buffer.setText(newText);
-      setJustNavigatedHistory(true);
+      setHistoryRestoredText(newText);
     },
-    [buffer, setJustNavigatedHistory],
+    [buffer],
   );
 
   const inputHistory = useInputHistory({
@@ -402,20 +448,27 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     prevHasAgentsRef.current = hasAgents;
   }, [hasAgents, inputHistory]);
 
-  // Effect to reset completion if history navigation just occurred and set the text
+  // History-restored input should not immediately open completion menus and
+  // steal Up/Down from continued history navigation. Editing the text clears
+  // this marker and lets completions appear again.
   useEffect(() => {
-    if (justNavigatedHistory) {
+    if (historyRestoredText === null) {
+      return;
+    }
+
+    if (buffer.text === historyRestoredText) {
       resetCompletionState();
       resetReverseSearchCompletionState();
       resetCommandSearchCompletionState();
       setExpandedSuggestionIndex(-1);
-      setJustNavigatedHistory(false);
+      return;
     }
+
+    setHistoryRestoredText(null);
   }, [
-    justNavigatedHistory,
+    historyRestoredText,
     buffer.text,
     resetCompletionState,
-    setJustNavigatedHistory,
     resetReverseSearchCompletionState,
     resetCommandSearchCompletionState,
   ]);
@@ -461,6 +514,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     });
   }, []);
 
+  // Down from an empty composer (bottom edge, history exhausted), in visual
+  // top→bottom order: live agent panel (if bg sub-agents) → tab bar (if
+  // Arena) → stay put. Always consumes the key.
+  const descendFromComposer = useCallback((): boolean => {
+    if (getVisibleBgAgents().length > 0) {
+      setLivePanelFocused(true);
+    } else if (hasAgents) {
+      setAgentTabBarFocused(true);
+    }
+    return true;
+  }, [
+    getVisibleBgAgents,
+    hasAgents,
+    setLivePanelFocused,
+    setAgentTabBarFocused,
+  ]);
+
   const handleInput = useCallback(
     (key: Key): boolean => {
       // When the Arena tab bar or background pill has focus, block
@@ -468,6 +538,82 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Printable characters fall through to BaseTextInput's default
       // handler so the first keystroke appears in the input immediately
       // (each surface's own handler releases focus on the same event).
+      // LiveAgentPanel keyboard navigation: ↓/↑ move selection,
+      // Enter opens dialog for selected agent, Esc/↑-at-top returns
+      // focus to composer. Printable chars type through (auto-unfocus).
+      if (livePanelFocused) {
+        const visibleBgAgents = getVisibleBgAgents();
+        if (visibleBgAgents.length === 0) {
+          setLivePanelFocused(false);
+          if (
+            key.sequence &&
+            key.sequence.length === 1 &&
+            !key.ctrl &&
+            !key.meta
+          ) {
+            return false;
+          }
+          return descendFromComposer();
+        }
+        if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
+          const maxIdx = visibleBgAgents.length; // 0=main, 1..N=agents
+          if (livePanelSelectedIndex < maxIdx) {
+            setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
+          } else if (hasAgents) {
+            // Bottom of the panel → descend to the tab bar below it
+            // (only rendered when Arena agents exist).
+            setLivePanelFocused(false);
+            setAgentTabBarFocused(true);
+          } else {
+            // No tab bar below → release focus back to the composer instead
+            // of silently consuming the key.
+            setLivePanelFocused(false);
+          }
+          return true;
+        }
+        if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
+          if (livePanelSelectedIndex <= 0) {
+            setLivePanelFocused(false);
+          } else {
+            setLivePanelSelectedIndex(livePanelSelectedIndex - 1);
+          }
+          return true;
+        }
+        if (key.name === 'return') {
+          if (livePanelSelectedIndex === 0) {
+            setLivePanelFocused(false);
+          } else {
+            const agentIdx = livePanelSelectedIndex - 1;
+            const entry = visibleBgAgents[agentIdx];
+            const entryIdx = entry
+              ? bgEntries.findIndex(
+                  (e) => e.kind === 'agent' && e.agentId === entry.agentId,
+                )
+              : -1;
+            if (entryIdx >= 0) {
+              setBgSelectedIndex(entryIdx);
+              enterBgDetailFromPanel();
+            }
+            setLivePanelFocused(false);
+          }
+          return true;
+        }
+        if (key.name === 'escape') {
+          setLivePanelFocused(false);
+          return true;
+        }
+        if (
+          key.sequence &&
+          key.sequence.length === 1 &&
+          !key.ctrl &&
+          !key.meta
+        ) {
+          setLivePanelFocused(false);
+          return false;
+        }
+        return true;
+      }
+
       if (agentTabBarFocused || bgPillFocused) {
         if (
           key.sequence &&
@@ -592,7 +738,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (
         key.sequence === '!' &&
         buffer.text === '' &&
-        !completion.showSuggestions
+        !showCompletionSuggestions
       ) {
         // Hide shortcuts when toggling shell mode
         if (showShortcuts && onToggleShortcuts) {
@@ -607,7 +753,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (
         key.sequence === '?' &&
         buffer.text === '' &&
-        !completion.showSuggestions &&
+        !showCompletionSuggestions &&
         onToggleShortcuts
       ) {
         onToggleShortcuts();
@@ -658,7 +804,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
-        if (completion.showSuggestions) {
+        if (showCompletionSuggestions) {
           completion.resetCompletionState();
           setExpandedSuggestionIndex(-1);
           resetEscapeState();
@@ -780,14 +926,19 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Prevent up/down from falling through to regular history navigation
         if (
           keyMatchers[Command.NAVIGATION_UP](key) ||
-          keyMatchers[Command.NAVIGATION_DOWN](key)
+          keyMatchers[Command.NAVIGATION_DOWN](key) ||
+          keyMatchers[Command.HISTORY_UP](key) ||
+          keyMatchers[Command.HISTORY_DOWN](key)
         ) {
           return true;
         }
       }
 
       // Export-specific arrow/Tab/Enter handling (Phase 1 + Phase 2).
-      if (exportCompletion.handleExportInput(key, completion)) {
+      if (
+        !isHistoryRestoredText &&
+        exportCompletion.handleExportInput(key, completion)
+      ) {
         return true;
       }
 
@@ -813,7 +964,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // If the command is a perfect match, pressing enter should execute it.
       if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
         if (
-          completion.showSuggestions &&
+          showCompletionSuggestions &&
           exportCompletion.navigatedRef.current &&
           exportCompletion.navigatedTextRef.current === buffer.text &&
           acceptActiveCompletionSuggestion()
@@ -833,7 +984,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.paste &&
         !key.shift &&
         buffer.text.length === 0 &&
-        !completion.showSuggestions &&
+        !showCompletionSuggestions &&
         !reverseSearchActive &&
         !commandSearchActive &&
         followup.state.isVisible &&
@@ -856,7 +1007,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      if (completion.showSuggestions) {
+      if (showCompletionSuggestions) {
         if (completion.suggestions.length > 1) {
           const isCompletionUpKey = keyMatchers[Command.COMPLETION_UP](key);
           const isCompletionDownKey = keyMatchers[Command.COMPLETION_DOWN](key);
@@ -877,7 +1028,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
+          // Capture the suggestion BEFORE acceptActiveCompletionSuggestion
+          // mutates the buffer/index. When the suggestion's command opted
+          // into `submitOnAccept` (a leaf command whose bare action takes
+          // no further arg, e.g. `/skills`), submit `/<value>` directly
+          // instead of just filling the buffer and waiting for a second
+          // Enter. This makes `/skil<Enter>` land in the dialog in one
+          // keystroke.
+          const targetIndex =
+            completion.activeSuggestionIndex === -1
+              ? 0
+              : completion.activeSuggestionIndex;
+          const accepted =
+            targetIndex >= 0 && targetIndex < completion.suggestions.length
+              ? completion.suggestions[targetIndex]
+              : undefined;
           acceptActiveCompletionSuggestion();
+          // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`
+          // matches BOTH Tab and Enter (see keyBindings.ts and the
+          // identical caveat at lines 861-862). Without the
+          // `key.name === 'return'` gate, `/skil<Tab>` would auto-submit
+          // and open the dialog, breaking the standard shell convention
+          // where Tab means "complete without executing." The implicit
+          // contract `submitOnAccept` was designed for is "press Enter on
+          // the highlighted suggestion, no second Enter needed."
+          if (accepted?.submitOnAccept && key.name === 'return') {
+            handleSubmitAndClear(`/${accepted.value}`);
+          }
           return true;
         }
       }
@@ -887,7 +1064,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         key.name === 'tab' &&
         !key.paste &&
         !key.shift &&
-        !completion.showSuggestions &&
+        !showCompletionSuggestions &&
         midInputGhostTextRef.current?.acceptText
       ) {
         buffer.insert(midInputGhostTextRef.current.acceptText);
@@ -951,6 +1128,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
+        if (
+          hasActiveToolConfirmation &&
+          (keyMatchers[Command.HISTORY_UP](key) ||
+            keyMatchers[Command.HISTORY_DOWN](key) ||
+            keyMatchers[Command.NAVIGATION_UP](key) ||
+            keyMatchers[Command.NAVIGATION_DOWN](key))
+        ) {
+          return true;
+        }
+
         // Pop all queued messages into input when pressing Up arrow at top of input
         if (
           !isAttachmentMode &&
@@ -964,12 +1151,45 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.HISTORY_UP](key)) {
-          inputHistory.navigateUp();
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on first visual row → move cursor up one row
+          // 2. Else if cursor not at col 0 → snap to col 0 (no history change)
+          // 3. Else → navigate to older history; cursor lands at offset 0
+          const onFirstRow =
+            buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0;
+          if (!onFirstRow) {
+            buffer.move('up');
+            return true;
+          }
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (keyMatchers[Command.HISTORY_DOWN](key)) {
-          inputHistory.navigateDown();
-          return true;
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on last visual row → move cursor down one row
+          // 2. Else if cursor not at end of line → snap to end (no history change)
+          // 3. Else → navigate to newer history; cursor lands at end (setText default)
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const onLastRow = buffer.visualCursor[0] === lastRowIdx;
+          if (!onLastRow) {
+            buffer.move('down');
+            return true;
+          }
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
+          if (inputHistory.navigateDown()) {
+            return true;
+          }
+          return descendFromComposer();
         }
         // Handle arrow-up/down for history on single-line or at edges
         if (
@@ -977,7 +1197,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
-          inputHistory.navigateUp();
+          // Two-step edge transition: snap cursor to col 0 before triggering history
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (
@@ -985,24 +1212,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             buffer.visualCursor[0] === buffer.allVisualLines.length - 1)
         ) {
+          // Two-step edge transition: snap cursor to end of line before triggering history
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
           if (inputHistory.navigateDown()) {
             return true;
           }
-          // Focus order on Down from an empty composer:
-          // team tab bar (if any Arena agents) → Background tasks pill
-          // (if any bg agents) → otherwise stay put. The pill itself
-          // opens the dialog on Enter; the tab bar re-routes Down into
-          // the pill once it has focus, so both surfaces remain reachable
-          // in sequence.
-          if (hasAgents) {
-            setAgentTabBarFocused(true);
-            return true;
-          }
-          if (hasBgAgents) {
-            setBgPillFocused(true);
-            return true;
-          }
-          return true;
+          return descendFromComposer();
         }
       } else {
         // Shell History Navigation
@@ -1193,12 +1413,22 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgDialogOpen,
       bgPillFocused,
       hasAgents,
-      hasBgAgents,
+      hasActiveToolConfirmation,
       setAgentTabBarFocused,
-      setBgPillFocused,
+      setLivePanelFocused,
+      setLivePanelSelectedIndex,
+      livePanelFocused,
+      livePanelSelectedIndex,
+      bgEntries,
+      getVisibleBgAgents,
+      descendFromComposer,
+      enterBgDetailFromPanel,
+      setBgSelectedIndex,
       followup,
       onPromptSuggestionDismiss,
       exportCompletion,
+      isHistoryRestoredText,
+      showCompletionSuggestions,
     ],
   );
 
@@ -1215,7 +1445,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       const mapEntry = buf.visualToLogicalMap[absoluteVisualIndex];
       const [logicalLineIdx, logicalStartCol] = mapEntry;
       const logicalLine = buf.lines[logicalLineIdx] || '';
-      const tokens = parseInputForHighlighting(logicalLine, logicalLineIdx);
+      const tokens = parseInputForHighlighting(
+        logicalLine,
+        logicalLineIdx,
+        slashCommands,
+      );
 
       const visualStart = logicalStartCol;
       const visualEnd = logicalStartCol + cpLen(lineText);
@@ -1307,7 +1541,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       return <Text>{renderedLine}</Text>;
     },
-    [],
+    [slashCommands],
   );
 
   const getActiveCompletion = () => {
@@ -1318,7 +1552,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const activeCompletion = getActiveCompletion();
   const shouldUseExportSuggestions =
-    !commandSearchActive && !reverseSearchActive;
+    !commandSearchActive && !reverseSearchActive && !isHistoryRestoredText;
   const suggestionDisplayProps =
     shouldUseExportSuggestions && exportCompletion.suggestionDisplayProps
       ? exportCompletion.suggestionDisplayProps
@@ -1330,14 +1564,41 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         };
   const shouldShowSuggestions =
     (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
-    activeCompletion.showSuggestions;
+    (!isHistoryRestoredText || commandSearchActive || reverseSearchActive
+      ? activeCompletion.showSuggestions
+      : false);
 
-  // Notify parent about suggestions visibility changes
+  // Whether any input-side handler would consume a Tab keystroke. AppContainer
+  // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
+  // Windows-only "bare Tab cycles approval mode" fallback doesn't double-fire
+  // alongside an input-area Tab handler. See issue #4171.
+  //
+  // Note on reverse/command-search: when those overlays have matches, their
+  // `showSuggestions` flag flows into `shouldShowSuggestions` above and Tab IS
+  // consumed (ACCEPT_SUGGESTION_REVERSE_SEARCH). When they are active with no
+  // matches, Tab is not consumed — so the bare `reverseSearchActive` /
+  // `commandSearchActive` flags are intentionally NOT included here.
+  const hasTabConsumer =
+    shouldShowSuggestions ||
+    (followup.state.isVisible && Boolean(followup.state.suggestion)) ||
+    Boolean(completion.midInputGhostText?.acceptText);
+
+  // Narrow signal — autocomplete dropdown only. Composer hides Footer /
+  // KeyboardShortcuts when this is true because the dropdown competes for
+  // the same vertical space. Followup / ghost text are inline within the
+  // input box and must NOT hide the Footer (#4308 review).
   useEffect(() => {
-    if (onSuggestionsVisibilityChange) {
-      onSuggestionsVisibilityChange(shouldShowSuggestions);
-    }
+    onSuggestionsVisibilityChange?.(shouldShowSuggestions);
   }, [shouldShowSuggestions, onSuggestionsVisibilityChange]);
+
+  // Broad signal — any Tab consumer. Reset to false on unmount (e.g. when
+  // InputPrompt unmounts during streaming) so AppContainer's stale
+  // `hasTabConsumer` doesn't keep blocking Windows Tab approval-mode cycling
+  // while there is no input area to consume the keystroke.
+  useEffect(() => {
+    onTabConsumerChange?.(hasTabConsumer);
+    return () => onTabConsumerChange?.(false);
+  }, [hasTabConsumer, onTabConsumerChange]);
 
   // Trigger prompt suggestion when prop changes
   useEffect(() => {
@@ -1345,22 +1606,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only trigger on prop change
   }, [promptSuggestion]);
 
-  const showAutoAcceptStyling =
-    !shellModeActive && approvalMode === ApprovalMode.AUTO_EDIT;
-  const showYoloStyling =
-    !shellModeActive && approvalMode === ApprovalMode.YOLO;
+  const approvalModePromptStyle = !shellModeActive
+    ? getApprovalModePromptStyle(approvalMode)
+    : undefined;
 
   let statusColor: string | undefined;
   let statusText = '';
   if (shellModeActive) {
     statusColor = theme.ui.symbol;
     statusText = t('Shell mode');
-  } else if (showYoloStyling) {
-    statusColor = theme.status.errorDim;
-    statusText = t('YOLO mode');
-  } else if (showAutoAcceptStyling) {
-    statusColor = theme.status.warningDim;
-    statusText = t('Accepting edits');
+  } else if (approvalModePromptStyle?.color) {
+    statusColor = approvalModePromptStyle.color;
+    if (approvalMode === ApprovalMode.YOLO) {
+      statusText = t('YOLO mode');
+    } else if (approvalMode === ApprovalMode.AUTO_EDIT) {
+      statusText = t('Accepting edits');
+    } else if (approvalMode === ApprovalMode.AUTO) {
+      statusText = t('Auto mode');
+    }
   }
 
   const borderColor =
@@ -1383,8 +1646,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         )
       ) : commandSearchActive ? (
         <Text color={theme.text.accent}>(r:) </Text>
-      ) : showYoloStyling ? (
-        '*'
+      ) : approvalModePromptStyle ? (
+        approvalModePromptStyle.prefix
       ) : (
         '>'
       )}{' '}

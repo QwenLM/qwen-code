@@ -15,6 +15,28 @@ import type { OpenAIResponseParsingOptions } from './responseParsingOptions.js';
 import type { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { TaggedThinkingParser } from './taggedThinkingParser.js';
 
+export interface StreamingTextDeltaState {
+  /**
+   * Rolling baseline used for prefix/exact-repeat detection. Once the stream
+   * has been classified as incremental and the buffer reaches
+   * CUMULATIVE_DETECTION_WINDOW_BYTES bytes it is frozen at the cap to bound
+   * memory; the true emitted total is tracked separately in `emittedLength`.
+   * In cumulative mode this always reflects the full accumulated text.
+   */
+  emittedText: string;
+  /**
+   * Monotonic count of user-visible bytes already emitted on this channel.
+   * Diverges from `emittedText.length` only on long incremental streams where
+   * `emittedText` is capped at CUMULATIVE_DETECTION_WINDOW_BYTES. Used to slice
+   * the correct suffix when an incremental-then-cumulative hybrid stream
+   * transitions into cumulative mode after the cap (otherwise the suffix would
+   * re-include bytes between the cap and the true emitted length, producing
+   * visible duplication).
+   */
+  emittedLength: number;
+  cumulativeMode: boolean;
+}
+
 export interface RequestContext {
   model: string;
   modalities: InputModalities;
@@ -26,6 +48,18 @@ export interface RequestContext {
   // user message for strict OpenAI-compat servers. See ContentGeneratorConfig
   // for details.
   splitToolMedia?: boolean;
+  /**
+   * Per-stream mutable state for cumulative-delta normalization on the visible
+   * content channel. Initialised lazily on first use. Must NOT be shared or
+   * reused across requests — stale state will silently corrupt text output.
+   */
+  textDeltaState?: StreamingTextDeltaState;
+  /**
+   * Same as textDeltaState but for the reasoning/thinking content channel.
+   * The two channels are tracked independently so interleaved chunks on each
+   * channel are deduplicated correctly.
+   */
+  reasoningDeltaState?: StreamingTextDeltaState;
 }
 
 export interface ErrorHandler {

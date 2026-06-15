@@ -56,14 +56,16 @@ describe('SkillManager', () => {
   let mockConfig: Config;
 
   beforeEach(() => {
+    // Mock os.homedir before makeFakeConfig, since Config constructor
+    // calls Storage.getGlobalQwenDir() which needs os.homedir()
+    vi.mocked(os.homedir).mockReturnValue('/home/user');
+    vi.mocked(os.tmpdir).mockReturnValue('/tmp');
+
     // Create mock Config object using test utility
     mockConfig = makeFakeConfig({});
 
     // Mock the project root method
     vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValue('/test/project');
-
-    // Mock os.homedir
-    vi.mocked(os.homedir).mockReturnValue('/home/user');
 
     // Reset and setup mocks
     vi.clearAllMocks();
@@ -88,6 +90,9 @@ describe('SkillManager', () => {
           description: 'A test skill',
           'argument-hint': '[topic]',
         };
+      }
+      if (/^priority:/m.test(yamlString)) {
+        return yaml.parse(yamlString);
       }
       // Match a frontmatter-level `paths:` field, not any incidental
       // occurrence of "paths:" in the body. Multiline + start-anchor matches
@@ -311,6 +316,69 @@ Skill body.
       expect(config.argumentHint).toBe('[topic]');
     });
 
+    it('should parse numeric priority from frontmatter', () => {
+      const markdownWithPriority = `---
+name: test-skill
+description: A test skill
+priority: 25
+---
+
+Skill body.
+`;
+
+      const config = manager.parseSkillContent(
+        markdownWithPriority,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.priority).toBe(25);
+    });
+
+    it('should ignore invalid priority values without dropping the skill', () => {
+      const markdownWithInvalidPriority = `---
+name: test-skill
+description: A test skill
+priority: true
+---
+
+Skill body.
+`;
+
+      const config = manager.parseSkillContent(
+        markdownWithInvalidPriority,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.priority).toBeUndefined();
+    });
+
+    it('should parse user-invocable from frontmatter', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-skill',
+        description: 'A test skill',
+        'user-invocable': false,
+      });
+
+      const markdown = `---
+name: test-skill
+description: A test skill
+user-invocable: false
+---
+
+Skill body.
+`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.userInvocable).toBe(false);
+    });
+
     it('should parse content with paths (conditional skill)', () => {
       const markdown = `---
 name: tsx-helper
@@ -489,6 +557,16 @@ You are a helpful assistant.
 
       expect(result.isValid).toBe(true); // Still valid
       expect(result.warnings).toContain('Skill body is empty');
+    });
+
+    it('should report error for invalid priority', () => {
+      const result = manager.validateConfig({
+        ...validSkillConfig,
+        priority: 'high' as unknown as number,
+      });
+
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain('"priority" must be a finite number');
     });
   });
 
@@ -682,6 +760,106 @@ Skill 3 content`);
       expect(projectSkills.every((s) => s.level === 'project')).toBe(true);
     });
 
+    it('should return a stable alphabetical order regardless of priority (priority only affects the /skills display layer)', async () => {
+      vi.mocked(fs.readdir).mockReset();
+      mockParseYaml.mockImplementation((yamlString: string) =>
+        yaml.parse(yamlString),
+      );
+      const projectQwenSkillsDir = path.join(
+        '/test/project',
+        '.qwen',
+        'skills',
+      );
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        if (String(dirPath) === projectQwenSkillsDir) {
+          return Promise.resolve(
+            ['high', 'unset-beta', 'unset-alpha', 'negative'].map((name) => ({
+              name,
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            })) as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+          );
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const name = path.basename(path.dirname(String(filePath)));
+        const priorityLine =
+          name === 'high'
+            ? 'priority: 100\n'
+            : name === 'negative'
+              ? 'priority: -1\n'
+              : '';
+        return Promise.resolve(`---
+name: ${name}
+description: ${name} skill
+${priorityLine}---
+Body`);
+      });
+
+      const skills = await manager.listSkills({
+        level: 'project',
+        force: true,
+      });
+
+      expect(skills.map((skill) => skill.name)).toEqual([
+        'high',
+        'negative',
+        'unset-alpha',
+        'unset-beta',
+      ]);
+    });
+
+    it('should normalize non-number extension priorities and stay alphabetical', async () => {
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'test-extension',
+          name: 'test-extension',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extension',
+          config: { name: 'test-extension', version: '1.0.0' },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'bad-priority',
+              description: 'Bad priority',
+              body: 'Body',
+              filePath: '/extension/bad/SKILL.md',
+              level: 'extension',
+              priority: 'high' as unknown as number,
+            },
+            {
+              name: 'high-priority',
+              description: 'High priority',
+              body: 'Body',
+              filePath: '/extension/high/SKILL.md',
+              level: 'extension',
+              priority: 10,
+            },
+          ],
+        },
+      ]);
+
+      const skills = await manager.listSkills({
+        level: 'extension',
+        force: true,
+      });
+
+      expect(skills.map((skill) => skill.name)).toEqual([
+        'bad-priority',
+        'high-priority',
+      ]);
+      // The non-number priority should still be normalized on the skill
+      // itself so downstream consumers (the /skills display sort) see a
+      // clean value.
+      const badSkill = skills.find((s) => s.name === 'bad-priority');
+      expect(badSkill?.priority).toBe(0);
+    });
+
     it('should deduplicate same-name skills across provider dirs within a level', async () => {
       // Override readdir to return the same skill name from both .qwen and .agents dirs
       vi.mocked(fs.readdir).mockReset();
@@ -809,21 +987,33 @@ Skill 3 content`);
       isSymbolicLink: () => false,
     };
 
+    const simplifyDirEntry = {
+      name: 'simplify',
+      isDirectory: () => true,
+      isFile: () => false,
+      isSymbolicLink: () => false,
+    };
+
     const emptyDir = [] as unknown as Awaited<ReturnType<typeof fs.readdir>>;
 
     function mockReaddirForLevels(levels: Set<string>) {
       vi.mocked(fs.readdir).mockImplementation((dirPath) => {
         const pathStr = String(dirPath);
-        const isBundled =
-          pathStr.endsWith(bundledDirSegment) && !pathStr.includes('.qwen');
+        const isBundled = pathStr.endsWith(bundledDirSegment);
         const isProject =
           pathStr.includes(projectDirSegment) &&
           pathStr.startsWith(projectPrefix);
         const isUser =
           pathStr.includes(userDirSegment) && pathStr.startsWith(userPrefix);
 
+        if (levels.has('bundled') && isBundled) {
+          return Promise.resolve([
+            reviewDirEntry,
+            simplifyDirEntry,
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+
         if (
-          (levels.has('bundled') && isBundled) ||
           (levels.has('project') && isProject) ||
           (levels.has('user') && isUser)
         ) {
@@ -831,21 +1021,42 @@ Skill 3 content`);
             ReturnType<typeof fs.readdir>
           >);
         }
+
         return Promise.resolve(emptyDir);
       });
     }
 
     function setupReviewSkillMocks() {
       vi.mocked(fs.access).mockResolvedValue(undefined);
-      vi.mocked(fs.readFile).mockResolvedValue(`---
+      vi.mocked(fs.readFile).mockImplementation(async (filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.includes(`${path.sep}simplify${path.sep}`)) {
+          return `---
+name: simplify
+description: Simplify recent changes
+---
+Simplify content`;
+        }
+
+        return `---
 name: review
 description: Review code changes
 ---
-Review content`);
+Review content`;
+      });
 
-      mockParseYaml.mockReturnValue({
-        name: 'review',
-        description: 'Review code changes',
+      mockParseYaml.mockImplementation((yamlString: string) => {
+        if (yamlString.includes('name: simplify')) {
+          return {
+            name: 'simplify',
+            description: 'Simplify recent changes',
+          };
+        }
+
+        return {
+          name: 'review',
+          description: 'Review code changes',
+        };
       });
     }
 
@@ -856,8 +1067,11 @@ Review content`);
       const skills = await manager.listSkills({ force: true });
 
       expect(skills.some((s) => s.name === 'review')).toBe(true);
+      expect(skills.some((s) => s.name === 'simplify')).toBe(true);
       const reviewSkill = skills.find((s) => s.name === 'review');
+      const simplifySkill = skills.find((s) => s.name === 'simplify');
       expect(reviewSkill!.level).toBe('bundled');
+      expect(simplifySkill!.level).toBe('bundled');
     });
 
     it('should prioritize project-level over bundled skills with same name', async () => {
@@ -869,6 +1083,8 @@ Review content`);
       const reviewSkills = skills.filter((s) => s.name === 'review');
       expect(reviewSkills).toHaveLength(1);
       expect(reviewSkills[0].level).toBe('project');
+      // simplify has no name conflict, so it must still survive alongside the deduped review skill
+      expect(skills.some((s) => s.name === 'simplify')).toBe(true);
     });
 
     it('should prioritize user-level over bundled skills with same name', async () => {
@@ -880,6 +1096,8 @@ Review content`);
       const reviewSkills = skills.filter((s) => s.name === 'review');
       expect(reviewSkills).toHaveLength(1);
       expect(reviewSkills[0].level).toBe('user');
+      // simplify has no name conflict, so it must still survive alongside the deduped review skill
+      expect(skills.some((s) => s.name === 'simplify')).toBe(true);
     });
 
     it('should skip all skills in bare mode', async () => {
@@ -1364,11 +1582,11 @@ Body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // realpath stays within baseDir (in-tree symlink)
-      vi.mocked(fs.realpath).mockImplementation((p) =>
-        Promise.resolve(String(p)),
+      // Symlink target can point anywhere on disk — out-of-tree
+      // targets are the supported user workflow.
+      vi.mocked(fs.realpath).mockResolvedValue(
+        '/elsewhere/skills-repo/symlink-skill',
       );
-      // Mock fs.stat to return directory stats for the symlink target
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
       } as Awaited<ReturnType<typeof fs.stat>>);
@@ -1397,8 +1615,8 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      vi.mocked(fs.realpath).mockImplementation((p) =>
-        Promise.resolve(String(p)),
+      vi.mocked(fs.realpath).mockResolvedValue(
+        '/elsewhere/skills-repo/some-file',
       );
       // Mock fs.stat to return file stats (not a directory)
       vi.mocked(fs.stat).mockResolvedValue({
@@ -1420,61 +1638,14 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // realpath(baseDir) succeeds (the directory itself is fine);
-      // realpath(target) throws because the link is broken. Without
-      // discriminating, the new realpath-base step in loadSkillsFromDir
-      // would also throw and bail the whole directory before reaching
-      // the per-symlink check we want to test.
-      vi.mocked(fs.realpath).mockImplementation((p) => {
-        const s = String(p);
-        if (s.endsWith('broken-symlink')) {
-          return Promise.reject(new Error('ENOENT: no such file or directory'));
-        }
-        return Promise.resolve(s);
-      });
+      // realpath on the dangling link throws ENOENT; the entry is
+      // skipped with an `invalid` reason.
+      vi.mocked(fs.realpath).mockRejectedValue(
+        new Error('ENOENT: no such file or directory'),
+      );
 
       const skills = await manager.listSkills({ force: true });
 
-      expect(skills).toHaveLength(0);
-    });
-
-    it('should skip symlinks that escape baseDir (prevents arbitrary-skill-load attack)', async () => {
-      // Regression: a symlink whose target falls outside the skills
-      // tree (e.g. attacker pointing at /etc/cron.d) must be dropped
-      // — skills can ship hooks that execute shell commands, so
-      // arbitrary-load is a code-execution vector. realpath + scope
-      // check guards this.
-      vi.mocked(fs.readdir).mockResolvedValue([
-        {
-          name: 'escape-symlink',
-          isDirectory: () => false,
-          isSymbolicLink: () => true,
-          isFile: () => false,
-        },
-      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
-
-      // realpath(baseDir) returns the base canonical form; only the
-      // symlink target escapes. A bare `mockResolvedValue` would map
-      // both calls to the same value and accidentally let the attack
-      // through (path.relative(x, x) === '' which is in-scope).
-      vi.mocked(fs.realpath).mockImplementation((p) => {
-        const s = String(p);
-        if (s.endsWith('escape-symlink')) {
-          return Promise.resolve('/etc/cron.d/payload');
-        }
-        return Promise.resolve(s);
-      });
-      vi.mocked(fs.stat).mockResolvedValue({
-        isDirectory: () => true,
-      } as Awaited<ReturnType<typeof fs.stat>>);
-      vi.mocked(fs.access).mockResolvedValue(undefined);
-      vi.mocked(fs.readFile).mockResolvedValue(`---
-name: hijacked
-description: Should never load
----
-malicious body`);
-
-      const skills = await manager.listSkills({ force: true });
       expect(skills).toHaveLength(0);
     });
 

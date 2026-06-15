@@ -61,8 +61,8 @@ describe('telemetry/config helpers', () => {
         otlpEndpoint: 'http://localhost:4317',
         otlpProtocol: 'grpc' as const,
         logPrompts: false,
+        includeSensitiveSpanAttributes: true,
         outfile: 'settings.log',
-        useCollector: false,
       };
       const resolved = await resolveTelemetrySettings({ settings });
       expect(resolved).toEqual({
@@ -70,6 +70,8 @@ describe('telemetry/config helpers', () => {
         otlpTracesEndpoint: undefined,
         otlpLogsEndpoint: undefined,
         otlpMetricsEndpoint: undefined,
+        resourceAttributes: undefined,
+        metrics: { includeSessionId: false },
       });
     });
 
@@ -80,8 +82,8 @@ describe('telemetry/config helpers', () => {
         otlpEndpoint: 'http://settings:4317',
         otlpProtocol: 'grpc' as const,
         logPrompts: false,
+        includeSensitiveSpanAttributes: false,
         outfile: 'settings.log',
-        useCollector: false,
       };
       const env = {
         QWEN_TELEMETRY_ENABLED: '1',
@@ -89,8 +91,8 @@ describe('telemetry/config helpers', () => {
         QWEN_TELEMETRY_OTLP_ENDPOINT: 'http://env:4317',
         QWEN_TELEMETRY_OTLP_PROTOCOL: 'http',
         QWEN_TELEMETRY_LOG_PROMPTS: 'true',
+        QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: 'true',
         QWEN_TELEMETRY_OUTFILE: 'env.log',
-        QWEN_TELEMETRY_USE_COLLECTOR: 'true',
       } as Record<string, string>;
       const argv = {
         telemetry: false,
@@ -111,8 +113,10 @@ describe('telemetry/config helpers', () => {
         otlpLogsEndpoint: undefined,
         otlpMetricsEndpoint: undefined,
         logPrompts: true,
+        includeSensitiveSpanAttributes: true,
         outfile: 'env.log',
-        useCollector: true,
+        resourceAttributes: undefined,
+        metrics: { includeSessionId: false },
       });
 
       const resolvedArgv = await resolveTelemetrySettings({
@@ -129,9 +133,40 @@ describe('telemetry/config helpers', () => {
         otlpLogsEndpoint: undefined,
         otlpMetricsEndpoint: undefined,
         logPrompts: false,
+        includeSensitiveSpanAttributes: true,
         outfile: 'argv.log',
-        useCollector: true, // from env as no argv option
+        resourceAttributes: undefined,
+        metrics: { includeSessionId: false },
       });
+    });
+
+    it('defaults includeSensitiveSpanAttributes to false', async () => {
+      const resolved = await resolveTelemetrySettings({});
+
+      expect(resolved.includeSensitiveSpanAttributes).toBe(false);
+    });
+
+    it('parses includeSensitiveSpanAttributes from settings and env', async () => {
+      const resolvedFromSettings = await resolveTelemetrySettings({
+        settings: { includeSensitiveSpanAttributes: true },
+      });
+      expect(resolvedFromSettings.includeSensitiveSpanAttributes).toBe(true);
+
+      const resolvedEnvTrue = await resolveTelemetrySettings({
+        env: {
+          QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: '1',
+        },
+        settings: { includeSensitiveSpanAttributes: false },
+      });
+      expect(resolvedEnvTrue.includeSensitiveSpanAttributes).toBe(true);
+
+      const resolvedEnvFalse = await resolveTelemetrySettings({
+        env: {
+          QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: 'false',
+        },
+        settings: { includeSensitiveSpanAttributes: true },
+      });
+      expect(resolvedEnvFalse.includeSensitiveSpanAttributes).toBe(false);
     });
 
     it('falls back to OTEL_EXPORTER_OTLP_ENDPOINT when GEMINI var is missing', async () => {
@@ -202,6 +237,184 @@ describe('telemetry/config helpers', () => {
       expect(resolved.otlpMetricsEndpoint).toBe(
         'http://metrics-settings:4318/v1/metrics',
       );
+    });
+  });
+
+  describe('resolveTelemetrySettings — resource attributes', () => {
+    it('returns undefined resourceAttributes when nothing set', async () => {
+      const resolved = await resolveTelemetrySettings({});
+      expect(resolved.resourceAttributes).toBeUndefined();
+    });
+
+    it('parses OTEL_RESOURCE_ATTRIBUTES from env', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_RESOURCE_ATTRIBUTES: 'team=platform,env=prod' },
+      });
+      expect(resolved.resourceAttributes).toEqual({
+        team: 'platform',
+        env: 'prod',
+      });
+    });
+
+    it('merges settings on top of env (settings wins)', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_RESOURCE_ATTRIBUTES: 'team=x,env=prod' },
+        settings: { resourceAttributes: { team: 'y' } },
+      });
+      expect(resolved.resourceAttributes).toEqual({
+        team: 'y',
+        env: 'prod',
+      });
+    });
+
+    it('reads service.name from OTEL_SERVICE_NAME alone', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_SERVICE_NAME: 'A' },
+      });
+      expect(resolved.resourceAttributes).toEqual({ 'service.name': 'A' });
+    });
+
+    it('reads service.name from OTEL_RESOURCE_ATTRIBUTES alone', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_RESOURCE_ATTRIBUTES: 'service.name=B' },
+      });
+      expect(resolved.resourceAttributes).toEqual({ 'service.name': 'B' });
+    });
+
+    it('drops user-provided session.id from env with warning', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_RESOURCE_ATTRIBUTES: 'session.id=spoofed,team=x' },
+      });
+      expect(resolved.resourceAttributes).toEqual({ team: 'x' });
+    });
+
+    it('drops user-provided session.id from settings with warning', async () => {
+      const resolved = await resolveTelemetrySettings({
+        settings: {
+          resourceAttributes: { 'session.id': 'spoofed', team: 'x' },
+        },
+      });
+      expect(resolved.resourceAttributes).toEqual({ team: 'x' });
+    });
+
+    it('trims whitespace-only OTEL_SERVICE_NAME (treats as unset)', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_SERVICE_NAME: '   ' },
+      });
+      // No user attrs → resourceAttributes stays undefined.
+      expect(resolved.resourceAttributes).toBeUndefined();
+    });
+
+    it('exposes resourceAttributeWarnings when input has issues', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: {
+          OTEL_RESOURCE_ATTRIBUTES: 'bogus,service.version=1,team=ok',
+        },
+        settings: {
+          resourceAttributes: {
+            '': 'empty-key',
+            // @ts-expect-error — runtime defensive path against bad JSON.
+            count: 42,
+          },
+        },
+      });
+      expect(resolved.resourceAttributeWarnings).toBeDefined();
+      // Expect at least: malformed pair, reserved service.version, empty key, non-string value.
+      expect(resolved.resourceAttributeWarnings!.length).toBeGreaterThanOrEqual(
+        4,
+      );
+    });
+
+    it('leaves resourceAttributeWarnings undefined when input is clean', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_RESOURCE_ATTRIBUTES: 'team=platform,env=prod' },
+      });
+      expect(resolved.resourceAttributeWarnings).toBeUndefined();
+    });
+
+    it('drops non-string settings values', async () => {
+      const resolved = await resolveTelemetrySettings({
+        settings: {
+          resourceAttributes: {
+            team: 'platform',
+            // @ts-expect-error — runtime defensive path against bad JSON.
+            count: 42,
+          },
+        },
+      });
+      expect(resolved.resourceAttributes).toEqual({ team: 'platform' });
+    });
+
+    it('OTEL_SERVICE_NAME wins over OTEL_RESOURCE_ATTRIBUTES.service.name', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: {
+          OTEL_SERVICE_NAME: 'A',
+          OTEL_RESOURCE_ATTRIBUTES: 'service.name=B',
+        },
+      });
+      expect(resolved.resourceAttributes?.['service.name']).toBe('A');
+    });
+
+    it('OTEL_SERVICE_NAME wins over settings.resourceAttributes.service.name', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_SERVICE_NAME: 'A' },
+        settings: { resourceAttributes: { 'service.name': 'C' } },
+      });
+      expect(resolved.resourceAttributes?.['service.name']).toBe('A');
+    });
+
+    it('settings.service.name wins over env.OTEL_RESOURCE_ATTRIBUTES.service.name when no OTEL_SERVICE_NAME', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_RESOURCE_ATTRIBUTES: 'service.name=B' },
+        settings: { resourceAttributes: { 'service.name': 'C' } },
+      });
+      expect(resolved.resourceAttributes?.['service.name']).toBe('C');
+    });
+
+    it('strips service.version from env source', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_RESOURCE_ATTRIBUTES: 'service.version=fake,team=x' },
+      });
+      expect(resolved.resourceAttributes).toEqual({ team: 'x' });
+    });
+
+    it('strips service.version from settings source', async () => {
+      const resolved = await resolveTelemetrySettings({
+        settings: {
+          resourceAttributes: { 'service.version': 'fake', team: 'x' },
+        },
+      });
+      expect(resolved.resourceAttributes).toEqual({ team: 'x' });
+    });
+  });
+
+  describe('resolveTelemetrySettings — metrics.includeSessionId', () => {
+    it('defaults to false', async () => {
+      const resolved = await resolveTelemetrySettings({});
+      expect(resolved.metrics?.includeSessionId).toBe(false);
+    });
+
+    it('reads from settings', async () => {
+      const resolved = await resolveTelemetrySettings({
+        settings: { metrics: { includeSessionId: true } },
+      });
+      expect(resolved.metrics?.includeSessionId).toBe(true);
+    });
+
+    it('reads from env (override settings)', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID: 'true' },
+        settings: { metrics: { includeSessionId: false } },
+      });
+      expect(resolved.metrics?.includeSessionId).toBe(true);
+    });
+
+    it('explicit env=false overrides settings=true', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID: 'false' },
+        settings: { metrics: { includeSessionId: true } },
+      });
+      expect(resolved.metrics?.includeSessionId).toBe(false);
     });
   });
 });

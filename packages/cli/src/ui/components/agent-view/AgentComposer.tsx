@@ -43,7 +43,9 @@ import { QueuedMessageDisplay } from '../QueuedMessageDisplay.js';
 import { AgentFooter } from './AgentFooter.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { theme } from '../../semantic-colors.js';
+import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { t } from '../../../i18n/index.js';
+import { getApprovalModePromptStyle } from '../approvalModeVisuals.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -65,6 +67,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   const interactiveAgent = agent?.interactiveAgent;
 
   const config = useConfig();
+  const preferredEditor = usePreferredEditor();
   const { columns: terminalWidth } = useTerminalSize();
   const { inputWidth } = calculatePromptWidths(terminalWidth);
   const { stdin, setRawMode } = useStdin();
@@ -127,6 +130,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     stdin,
     setRawMode,
     isValidPath,
+    preferredEditor,
   });
 
   // Sync agent buffer text to context so AgentTabBar can guard tab switching
@@ -240,14 +244,8 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
 
   // ── Approval-mode styling (mirrors main InputPrompt) ──
 
-  const isYolo = agentApprovalMode === ApprovalMode.YOLO;
-  const isAutoAccept = agentApprovalMode !== ApprovalMode.DEFAULT;
-
-  const statusColor = isYolo
-    ? theme.status.errorDim
-    : isAutoAccept
-      ? theme.status.warningDim
-      : undefined;
+  const approvalModePromptStyle = getApprovalModePromptStyle(agentApprovalMode);
+  const statusColor = approvalModePromptStyle.color;
 
   const inputBorderColor =
     !isInputActive || agentTabBarFocused
@@ -255,7 +253,9 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       : (statusColor ?? theme.border.focused);
 
   const prefixNode = (
-    <Text color={statusColor ?? theme.text.accent}>{isYolo ? '*' : '>'} </Text>
+    <Text color={statusColor ?? theme.text.accent}>
+      {approvalModePromptStyle.prefix}{' '}
+    </Text>
   );
 
   return (

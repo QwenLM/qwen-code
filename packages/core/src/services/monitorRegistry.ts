@@ -15,8 +15,12 @@
  * so the two can be unified into a single registry when #3488 lands.
  */
 
+import * as path from 'node:path';
+import { sanitizeFilenameComponent } from '../agents/agent-transcript.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
+import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 
 const debugLogger = createDebugLogger('MONITOR_REGISTRY');
 
@@ -25,40 +29,49 @@ const MAX_DESCRIPTION_LENGTH = 80;
 export const MAX_CONCURRENT_MONITORS = 16;
 export const MAX_RETAINED_TERMINAL_MONITORS = 128;
 
-/**
- * Strip C0 control characters (except tab) and C1 control characters from a
- * string destined for terminal/UI display. The Monitor tool pre-sanitizes
- * stdout lines before calling `emitEvent`, but we apply the same strip here
- * as defense-in-depth so that any direct caller of the registry cannot leak
- * terminal escape sequences or NUL bytes into the `displayText` surface.
- */
-function stripDisplayControlChars(text: string): string {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code === 0x09) {
-      out += text[i];
-      continue;
-    }
-    if (code < 0x20) continue; // C0 (NUL, BEL, ESC, \n, \r, ...)
-    if (code >= 0x80 && code <= 0x9f) continue; // C1
-    out += text[i];
-  }
-  return out;
-}
-
 export type MonitorStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
-export interface MonitorEntry {
+/**
+ * Resolves a per-monitor reserved output path.
+ *
+ * Today no writer is attached at this path — monitors deliver their
+ * events through the parent's chat record via the notification callback.
+ * The path is reserved on every `MonitorTask` so the `TaskBase` contract
+ * ("every task has a path it would write to if it produces a primary
+ * stream") holds, and so a future per-monitor file writer can land
+ * without changing the type signature.
+ */
+export function getMonitorOutputPath(
+  projectDir: string,
+  sessionId: string,
+  monitorId: string,
+): string {
+  return path.join(
+    projectDir,
+    'monitors',
+    sanitizeFilenameComponent(sessionId),
+    `monitor-${sanitizeFilenameComponent(monitorId)}.log`,
+  );
+}
+
+/**
+ * Monitor kind of `TaskState`. Tracks one long-running monitor process
+ * whose stdout lines are pushed to the parent agent as event
+ * notifications. `outputFile` is reserved on registration but no writer
+ * is attached today — events stream into the parent's chat record.
+ */
+export interface MonitorTask extends TaskBase {
+  kind: 'monitor';
+  /**
+   * @deprecated Read `id` instead; kept as a synonym during the back-compat
+   * window. Always equals `id`.
+   */
   monitorId: string;
   command: string;
-  description: string;
   status: MonitorStatus;
   pid?: number;
-  startTime: number;
-  endTime?: number;
-  abortController: AbortController;
   toolUseId?: string;
+  ownerAgentId?: string;
   eventCount: number;
   lastEventTime: number;
   maxEvents: number;
@@ -69,7 +82,7 @@ export interface MonitorEntry {
   exitCode?: number;
   /**
    * Reason for terminal status, when one exists. Mirrors
-   * `BackgroundShellEntry.error`. Populated for:
+   * `ShellTask.error`. Populated for:
    *   - `failed` — spawn error (passed to `fail(monitorId, error)`).
    *   - `completed` via auto-stop — currently `'Max events reached'`
    *     from `emitEvent` and `'Idle timeout'` from the idle timer; any
@@ -83,11 +96,28 @@ export interface MonitorEntry {
   error?: string;
 }
 
+/**
+ * @deprecated Renamed to `MonitorTask`. Kept as a one-release type alias
+ * for external SDK consumers; will be removed in the release after PR 2
+ * lands.
+ */
+export type MonitorEntry = MonitorTask;
+
+/**
+ * Shape callers pass to {@link MonitorRegistry.register}; the registry
+ * derives the shared `TaskBase` envelope (`id`, `kind`, `outputOffset`,
+ * `notified`) from these. Callers are responsible for computing
+ * `outputFile` via {@link getMonitorOutputPath} so the registry stays
+ * decoupled from the project/session paths owned by `Config`.
+ */
+export type MonitorTaskRegistration = TaskRegistration<MonitorTask>;
+
 export interface MonitorNotificationMeta {
   monitorId: string;
   status: MonitorStatus;
   eventCount: number;
   toolUseId?: string;
+  ownerAgentId?: string;
 }
 
 export type MonitorNotificationCallback = (
@@ -96,7 +126,9 @@ export type MonitorNotificationCallback = (
   meta: MonitorNotificationMeta,
 ) => void;
 
-export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
+export type MonitorOwnerLifecycleCallback = () => void;
+
+export type MonitorRegisterCallback = (entry: MonitorTask) => void;
 
 /**
  * Fires on any change to the registry's contents that a snapshot
@@ -115,29 +147,48 @@ export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
  * `BackgroundShellRegistry.setStatusChangeCallback` so the same UI hook
  * can subscribe to all three registries.
  */
-export type MonitorStatusChangeCallback = (entry?: MonitorEntry) => void;
+export type MonitorStatusChangeCallback = (entry?: MonitorTask) => void;
 
 interface MonitorCancelOptions {
   notify?: boolean;
 }
 
 export class MonitorRegistry {
-  private readonly monitors = new Map<string, MonitorEntry>();
+  private readonly monitors = new Map<string, MonitorTask>();
+  private readonly agentNotificationCallbacks = new Map<
+    string,
+    MonitorNotificationCallback
+  >();
+  private readonly agentLifecycleCallbacks = new Map<
+    string,
+    MonitorOwnerLifecycleCallback
+  >();
   private notificationCallback?: MonitorNotificationCallback;
   private registerCallback?: MonitorRegisterCallback;
   private statusChangeCallback?: MonitorStatusChangeCallback;
 
-  register(entry: MonitorEntry): void {
+  register(registration: MonitorTaskRegistration): MonitorTask {
     if (this.getRunning().length >= MAX_CONCURRENT_MONITORS) {
       throw new Error(
         `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`,
       );
     }
+    // Mutate the registration in place to graduate it to a `MonitorTask`.
+    // Returning the same reference lets the caller continue using the
+    // variable for the post-register mutations (`status`, `droppedLines`,
+    // …) the existing monitor.ts flow relies on; the registry stores this
+    // exact reference, so external mutations remain observable through
+    // `get()` / `getAll()`.
+    const entry = registration as MonitorTask;
+    entry.id = registration.monitorId;
+    entry.kind = 'monitor';
+    entry.outputOffset = 0;
+    entry.notified = false;
     this.monitors.set(entry.monitorId, entry);
     debugLogger.info(`Registered monitor: ${entry.monitorId}`);
     this.resetIdleTimer(entry);
 
-    if (this.registerCallback) {
+    if (!entry.ownerAgentId && this.registerCallback) {
       try {
         this.registerCallback(entry);
       } catch (error) {
@@ -149,6 +200,7 @@ export class MonitorRegistry {
     // care about "what's in the registry now" can subscribe to a single
     // callback and see new entries the same way they see status changes.
     this.fireStatusChange(entry);
+    return entry;
   }
 
   /**
@@ -221,36 +273,92 @@ export class MonitorRegistry {
     this.emitTerminalNotification(entry, error);
   }
 
-  // No-op if not 'running' — guards against race with concurrent cancellation.
+  /**
+   * Cancel a running monitor. No-op if not 'running' — guards against a race
+   * with concurrent cancellation.
+   *
+   * The two branches order `settle()` and `abort()` differently on purpose:
+   *
+   * - `notify: false` (silent cancel, e.g. owner-agent teardown): settle to
+   *   `'cancelled'` *first*, then abort. The status transition is locked in
+   *   before any abort-listener can run, so an abort-triggered `fail()` or
+   *   `complete()` can't race in and overwrite the terminal status. The
+   *   owner is woken via `dispatchOwnerLifecycleWake()` instead of the
+   *   notification channel.
+   *
+   * - Default (user-visible cancel): abort *first*, then re-check `status`.
+   *   This lets a naturally-completing operation settle itself through its
+   *   own terminal path (so the user sees `completed`/`failed` rather than
+   *   a forced `cancelled` when the abort arrives at the finish line). Only
+   *   if `status` is still `'running'` after abort do we force `'cancelled'`
+   *   and emit the terminal notification.
+   */
   cancel(monitorId: string, options: MonitorCancelOptions = {}): void {
     const entry = this.monitors.get(monitorId);
     if (!entry || entry.status !== 'running') return;
+
+    if (options.notify === false) {
+      this.settle(entry, 'cancelled');
+      debugLogger.info(`Monitor cancelled: ${monitorId}`);
+      entry.abortController.abort();
+      this.dispatchOwnerLifecycleWake(entry);
+      return;
+    }
 
     entry.abortController.abort();
     if (entry.status !== 'running') return;
     this.settle(entry, 'cancelled');
     debugLogger.info(`Monitor cancelled: ${monitorId}`);
-    if (options.notify !== false) {
-      this.emitTerminalNotification(entry);
-    }
+    this.emitTerminalNotification(entry);
   }
 
-  get(monitorId: string): MonitorEntry | undefined {
+  get(monitorId: string): MonitorTask | undefined {
     return this.monitors.get(monitorId);
   }
 
-  getAll(): MonitorEntry[] {
+  getAll(): MonitorTask[] {
     return Array.from(this.monitors.values());
   }
 
-  getRunning(): MonitorEntry[] {
+  getRunning(): MonitorTask[] {
     return Array.from(this.monitors.values()).filter(
       (e) => e.status === 'running',
     );
   }
 
+  hasRunningForOwner(ownerAgentId: string): boolean {
+    for (const entry of this.monitors.values()) {
+      if (entry.ownerAgentId === ownerAgentId && entry.status === 'running') {
+        return true;
+      }
+    }
+    return false;
+  }
+
   setNotificationCallback(cb: MonitorNotificationCallback | undefined): void {
     this.notificationCallback = cb;
+  }
+
+  setAgentNotificationCallback(
+    agentId: string,
+    cb: MonitorNotificationCallback | undefined,
+  ): void {
+    if (cb) {
+      this.agentNotificationCallbacks.set(agentId, cb);
+    } else {
+      this.agentNotificationCallbacks.delete(agentId);
+    }
+  }
+
+  setAgentLifecycleCallback(
+    agentId: string,
+    cb: MonitorOwnerLifecycleCallback | undefined,
+  ): void {
+    if (cb) {
+      this.agentLifecycleCallbacks.set(agentId, cb);
+    } else {
+      this.agentLifecycleCallbacks.delete(agentId);
+    }
   }
 
   setRegisterCallback(cb: MonitorRegisterCallback | undefined): void {
@@ -274,7 +382,25 @@ export class MonitorRegistry {
     debugLogger.info('Aborted all monitors');
   }
 
+  cancelRunningForOwner(
+    ownerAgentId: string,
+    options: MonitorCancelOptions = {},
+  ): void {
+    const monitorIds: string[] = [];
+    for (const entry of this.monitors.values()) {
+      if (entry.ownerAgentId === ownerAgentId && entry.status === 'running') {
+        monitorIds.push(entry.monitorId);
+      }
+    }
+
+    for (const monitorId of monitorIds) {
+      this.cancel(monitorId, options);
+    }
+  }
+
   reset(): void {
+    this.agentNotificationCallbacks.clear();
+    this.agentLifecycleCallbacks.clear();
     if (this.monitors.size === 0) return;
     for (const entry of this.monitors.values()) {
       this.clearIdleTimer(entry);
@@ -294,7 +420,7 @@ export class MonitorRegistry {
   // --- Internal helpers ---
 
   private settle(
-    entry: MonitorEntry,
+    entry: MonitorTask,
     status: 'completed' | 'failed' | 'cancelled',
   ): void {
     entry.status = status;
@@ -304,12 +430,23 @@ export class MonitorRegistry {
     this.fireStatusChange(entry);
   }
 
-  private fireStatusChange(entry?: MonitorEntry): void {
+  private fireStatusChange(entry?: MonitorTask): void {
     if (!this.statusChangeCallback) return;
     try {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('statusChange callback failed:', error);
+    }
+  }
+
+  private dispatchOwnerLifecycleWake(entry: MonitorTask): void {
+    if (!entry.ownerAgentId) return;
+    const callback = this.agentLifecycleCallbacks.get(entry.ownerAgentId);
+    if (!callback) return;
+    try {
+      callback();
+    } catch (error) {
+      debugLogger.error('owner lifecycle callback failed:', error);
     }
   }
 
@@ -330,7 +467,7 @@ export class MonitorRegistry {
     }
   }
 
-  private resetIdleTimer(entry: MonitorEntry): void {
+  private resetIdleTimer(entry: MonitorTask): void {
     this.clearIdleTimer(entry);
     entry.idleTimer = setTimeout(() => {
       if (entry.status === 'running') {
@@ -349,7 +486,7 @@ export class MonitorRegistry {
     entry.idleTimer.unref?.();
   }
 
-  private clearIdleTimer(entry: MonitorEntry): void {
+  private clearIdleTimer(entry: MonitorTask): void {
     if (entry.idleTimer !== undefined) {
       clearTimeout(entry.idleTimer);
       entry.idleTimer = undefined;
@@ -357,9 +494,7 @@ export class MonitorRegistry {
   }
 
   /** Emit a streaming event notification (status=running, includes stdout line). */
-  private emitNotification(entry: MonitorEntry, eventLine: string): void {
-    if (!this.notificationCallback) return;
-
+  private emitNotification(entry: MonitorTask, eventLine: string): void {
     const desc = stripDisplayControlChars(
       this.truncateDescription(entry.description),
     );
@@ -387,19 +522,14 @@ export class MonitorRegistry {
       status: 'running',
       eventCount: entry.eventCount,
       toolUseId: entry.toolUseId,
+      ownerAgentId: entry.ownerAgentId,
     };
 
-    try {
-      this.notificationCallback(displayLine, xmlParts.join('\n'), meta);
-    } catch (error) {
-      debugLogger.error('Failed to emit monitor event notification:', error);
-    }
+    this.dispatchNotification(entry, displayLine, xmlParts.join('\n'), meta);
   }
 
   /** Emit a terminal notification (completed/failed/cancelled). */
-  private emitTerminalNotification(entry: MonitorEntry, detail?: string): void {
-    if (!this.notificationCallback) return;
-
+  private emitTerminalNotification(entry: MonitorTask, detail?: string): void {
     const statusText =
       entry.status === 'completed'
         ? 'completed'
@@ -441,12 +571,34 @@ export class MonitorRegistry {
       status: entry.status,
       eventCount: entry.eventCount,
       toolUseId: entry.toolUseId,
+      ownerAgentId: entry.ownerAgentId,
     };
 
+    this.dispatchNotification(entry, displayLine, xmlParts.join('\n'), meta);
+  }
+
+  private dispatchNotification(
+    entry: MonitorTask,
+    displayLine: string,
+    modelText: string,
+    meta: MonitorNotificationMeta,
+  ): void {
+    const callback = entry.ownerAgentId
+      ? this.agentNotificationCallbacks.get(entry.ownerAgentId)
+      : this.notificationCallback;
+    if (!callback) {
+      if (entry.ownerAgentId) {
+        debugLogger.warn(
+          `Dropping monitor notification for ${entry.monitorId}: owner agent ${entry.ownerAgentId} has no notification callback`,
+        );
+      }
+      return;
+    }
+
     try {
-      this.notificationCallback(displayLine, xmlParts.join('\n'), meta);
+      callback(displayLine, modelText, meta);
     } catch (error) {
-      debugLogger.error('Failed to emit monitor terminal notification:', error);
+      debugLogger.error('Failed to emit monitor notification:', error);
     }
   }
 

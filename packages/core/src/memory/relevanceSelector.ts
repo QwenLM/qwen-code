@@ -17,7 +17,7 @@ const SELECT_MEMORIES_SYSTEM_PROMPT = `You are selecting memories that will be u
 Return a list of filenames for the memories that will clearly be useful to the assistant as it processes the user's query (up to 5). Only include memories that you are certain will be helpful based on their name and description.
 - If you are unsure if a memory will be useful in processing the user's query, then do not include it in your list. Be selective and discerning.
 - If there are no memories in the list that would clearly be useful, feel free to return an empty list.
-- If a list of recently-used tools is provided, do not select memories that are usage reference or API documentation for those tools (the assistant is already exercising them). DO still select memories containing warnings, gotchas, or known issues about those tools — active use is exactly when those matter.`;
+- If a list of recently-used tools is provided, do not select memories that are usage reference, API documentation, parameter schemas, field mappings, guessed call formats, or failed-call transcripts for those tools. Live tool definitions are the source of truth. Do still select durable operational context that cannot be obtained from the live schema, such as credentials location, ownership, external escalation paths, known gotchas, warnings, or confirmed workarounds.`;
 
 const RESPONSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -37,8 +37,17 @@ interface RecallSelectorResponse {
 
 /**
  * Format memory headers as a text manifest: one line per file with
- * [type] relativePath (ISO-timestamp): description.
- * Selector sees only the header (type, path, age, description), not the body content.
+ * [type] filePath (ISO-timestamp): description.
+ *
+ * Uses the absolute filePath (never relativePath) so docs from the two
+ * memory scopes — per-project under `~/.qwen/projects/<hash>/memory/`
+ * and user-level under `~/.qwen/memories/` — that happen to share the
+ * same relativePath (e.g. `user/role.md` in both) remain individually
+ * addressable. Keying by relativePath caused the selector's Map dedupe
+ * to silently drop one scope.
+ *
+ * Selector sees only the header (type, path, age, description), not the
+ * body content.
  */
 function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): string {
   return docs
@@ -46,8 +55,8 @@ function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): string {
       const tag = `[${doc.type}] `;
       const ts = new Date(doc.mtimeMs).toISOString();
       return doc.description
-        ? `- ${tag}${doc.relativePath} (${ts}): ${doc.description}`
-        : `- ${tag}${doc.relativePath} (${ts})`;
+        ? `- ${tag}${doc.filePath} (${ts}): ${doc.description}`
+        : `- ${tag}${doc.filePath} (${ts})`;
     })
     .join('\n');
 }
@@ -84,16 +93,27 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     },
   ];
 
-  const validRelativePaths = new Set(docs.map((doc) => doc.relativePath));
-  const byRelativePath = new Map(docs.map((doc) => [doc.relativePath, doc]));
+  const validFilePaths = new Set(docs.map((doc) => doc.filePath));
+  const byFilePath = new Map(docs.map((doc) => [doc.filePath, doc]));
 
   const response = await runSideQuery<RecallSelectorResponse>(config, {
     purpose: 'auto-memory-recall',
     contents,
     schema: RESPONSE_SCHEMA,
+    // Caller (`GeminiClient.MemoryPrefetchHandle`) owns lifecycle and aborts
+    // via its controller on cleanup paths. The 30 s ceiling is a generous
+    // safety net that only fires if the model API hangs (network partition,
+    // server stall, runaway retry) AND the caller never aborts. Normal
+    // recalls take ~1 s; 30 s is far above the long tail so this doesn't
+    // re-introduce the 1 s timeout regression that motivated this redesign.
+    // Without this ceiling, a callerless invocation would use an
+    // unsignalled AbortController and run indefinitely.
     abortSignal: callerAbortSignal
-      ? AbortSignal.any([AbortSignal.timeout(2_000), callerAbortSignal])
-      : AbortSignal.timeout(2_000),
+      ? AbortSignal.any([AbortSignal.timeout(30_000), callerAbortSignal])
+      : AbortSignal.timeout(30_000),
+
+    // Uses runSideQuery's default side-query model policy: fast model first,
+    // then main session model when no fast model is configured.
     systemInstruction: SELECT_MEMORIES_SYSTEM_PROMPT,
     config: {
       temperature: 0,
@@ -107,17 +127,17 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
       }
       if (
         value.selected_memories.some(
-          (relativePath) => !validRelativePaths.has(relativePath),
+          (filePath) => !validFilePaths.has(filePath),
         )
       ) {
-        return 'Recall selector returned unknown relative path';
+        return 'Recall selector returned unknown file path';
       }
       return null;
     },
   });
 
   return response.selected_memories
-    .map((relativePath) => byRelativePath.get(relativePath))
+    .map((filePath) => byFilePath.get(filePath))
     .filter((doc): doc is ScannedAutoMemoryDocument => doc !== undefined)
     .slice(0, limit);
 }

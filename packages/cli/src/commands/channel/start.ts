@@ -1,8 +1,7 @@
 import * as path from 'node:path';
-import * as os from 'node:os';
 import type { CommandModule } from 'yargs';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
-import { normalizeProxyUrl } from '@qwen-code/qwen-code-core';
+import { normalizeProxyUrl, Storage } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
@@ -54,7 +53,7 @@ export function resolveProxy(
 }
 
 function sessionsPath(): string {
-  return path.join(os.homedir(), '.qwen', 'channels', 'sessions.json');
+  return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
 }
 
 function loadChannelsConfig(): Record<string, unknown> {

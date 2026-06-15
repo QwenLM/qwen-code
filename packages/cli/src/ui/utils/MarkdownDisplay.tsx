@@ -173,7 +173,12 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   if (!text) return <></>;
 
   const renderVisualBlocks = renderMode === 'render';
-  const lines = text.split(/\r?\n/);
+  // Some models stream long runs of trailing newlines after useful content.
+  // Trim them from the live preview so blank rows do not push stable streaming
+  // text into scrollback on every repaint. The committed transcript still
+  // renders the full message via MarkdownDisplay with isPending=false.
+  const displayText = isPending ? text.trimEnd() : text;
+  const lines = displayText.split(/\r?\n/);
   const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;

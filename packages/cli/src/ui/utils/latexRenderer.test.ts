@@ -47,4 +47,11 @@ describe('latexRenderer', () => {
     expect(() => renderInlineLatex(nested)).not.toThrow();
     expect(renderInlineLatex(nested)).toContain('x');
   });
+
+  it('falls back instead of throwing when terminal parsing is too deep', () => {
+    const nested = '{'.repeat(160) + 'x' + '}'.repeat(160);
+
+    expect(() => renderInlineLatex(nested)).not.toThrow();
+    expect(renderInlineLatex(nested)).toContain('x');
+  });
 });

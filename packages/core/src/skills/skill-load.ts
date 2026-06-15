@@ -1,11 +1,13 @@
 import {
   type SkillConfig,
   type SkillValidationResult,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
+  parseUserInvocableField,
   validateSkillName,
 } from './types.js';
-import { validateSymlinkScope } from './symlinkScope.js';
+import { validateSymlinkTarget } from './symlinkScope.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
@@ -25,24 +27,6 @@ export async function loadSkillsFromDir(
     const skills: SkillConfig[] = [];
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
-    // Resolve baseDir once outside the loop. Symlink scope validation
-    // (in `validateSymlinkScope`) needs the canonical form to compare
-    // against; doing it per-entry would burn a syscall per directory
-    // entry for the same answer. `fs.readdir` succeeded just above so
-    // the directory exists — realpath should not throw here, but if it
-    // does we treat the whole directory as unreadable.
-    let baseRealPath: string;
-    try {
-      baseRealPath = await fs.realpath(baseDir);
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : 'Unknown error';
-      debugLogger.debug(
-        `Cannot realpath skills baseDir ${baseDir}: ${errorMessage}`,
-      );
-      return [];
-    }
-
     for (const entry of entries) {
       // Process directories and symlinks that resolve to directories.
       // Plain files are silently skipped (each skill must be a directory).
@@ -56,18 +40,14 @@ export async function loadSkillsFromDir(
 
       const skillDir = path.join(baseDir, entry.name);
 
-      // For symlinks, verify the target (a) resolves, (b) is a directory,
-      // and (c) stays within `baseDir`. Shared with `skill-manager.ts`
-      // so the two parsers can't drift on this code-execution-vector
-      // gate (skills can ship hooks that run shell commands).
+      // For symlinks, verify the target (a) resolves and (b) is a
+      // directory. Shared with `skill-manager.ts` so the two parsers
+      // stay in sync. Targets pointing outside `baseDir` are allowed
+      // — see `symlinkScope.ts` for the rationale.
       if (isSymlink) {
-        const check = await validateSymlinkScope(skillDir, baseRealPath);
+        const check = await validateSymlinkTarget(skillDir);
         if (!check.ok) {
-          if (check.reason === 'escapes') {
-            debugLogger.warn(
-              `Skipping symlink ${entry.name} that escapes ${baseDir}`,
-            );
-          } else if (check.reason === 'not-directory') {
+          if (check.reason === 'not-directory') {
             debugLogger.warn(
               `Skipping symlink ${entry.name} that does not point to a directory`,
             );
@@ -154,16 +134,7 @@ export function parseSkillContent(
   const description = String(descriptionRaw);
 
   // Extract optional fields
-  const allowedToolsRaw = frontmatter['allowedTools'] as unknown[] | undefined;
-  let allowedTools: string[] | undefined;
-
-  if (allowedToolsRaw !== undefined) {
-    if (Array.isArray(allowedToolsRaw)) {
-      allowedTools = allowedToolsRaw.map(String);
-    } else {
-      throw new Error('"allowedTools" must be an array');
-    }
-  }
+  const allowedTools = parseAllowedToolsField(frontmatter);
 
   // Extract optional model field
   const model = parseModelField(frontmatter);
@@ -187,10 +158,12 @@ export function parseSkillContent(
     disableModelInvocationRaw === true || disableModelInvocationRaw === 'true'
       ? true
       : undefined;
+  const userInvocable = parseUserInvocableField(frontmatter);
 
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
   const paths = parsePathsField(frontmatter);
+  const priority = parsePriorityField(frontmatter, filePath);
 
   const config: SkillConfig = {
     name,
@@ -218,7 +191,9 @@ export function parseSkillContent(
     level: 'extension',
     whenToUse,
     disableModelInvocation,
+    userInvocable,
     paths,
+    priority,
   };
 
   // Validate the parsed configuration
@@ -264,6 +239,13 @@ export function validateConfig(
     }
   }
 
+  if (
+    config.priority !== undefined &&
+    (typeof config.priority !== 'number' || !Number.isFinite(config.priority))
+  ) {
+    errors.push('"priority" must be a finite number');
+  }
+
   // Warn if body is empty
   if (!config.body || config.body.trim() === '') {
     warnings.push('Skill body is empty');
@@ -274,4 +256,67 @@ export function validateConfig(
     errors,
     warnings,
   };
+}
+
+/**
+ * Parse the optional `priority` frontmatter field for a skill.
+ *
+ * NOTE for adding new optional frontmatter fields: the SKILL.md parsing
+ * logic exists in **two** places — `parseSkillContent` here (used for
+ * extension skills) and `SkillManager.parseSkillContent` in
+ * `skill-manager.ts` (used for project / user / bundled skills). Any new
+ * field must be wired into both, or extension SKILL.md authors will see
+ * the field silently dropped — the same regression that previously hit
+ * `whenToUse`, `disable-model-invocation`, `paths`, and `priority`. Prefer
+ * extracting the field's parsing into a shared helper (like this one)
+ * rather than inlining `frontmatter['key']` twice.
+ *
+ * Strict typecheck: `priority` must be a finite JS number. The custom
+ * YAML parser returns `true`/`false` as JS booleans and `null` as `null`,
+ * all of which `Number()` would silently coerce to 1/0/0. Anything that
+ * isn't already `typeof === 'number'` is rejected before checking
+ * finiteness. Empty string is treated as omission for ergonomics
+ * (matches `paths:` lenient handling).
+ *
+ * Returns `undefined` (and warns) for invalid values rather than
+ * throwing — `priority` is a cosmetic ordering hint, not a load-blocking
+ * field, so a typo in this single key shouldn't make a previously-working
+ * skill silently disappear from the listing.
+ */
+export function parsePriorityField(
+  frontmatter: Record<string, unknown>,
+  filePath: string,
+  // Optional logger so the caller's namespace tags the warning. Without
+  // this, a warning for a project/user/bundled SKILL.md emitted from
+  // SkillManager.parseSkillContent would be tagged `[SKILL_LOAD]` —
+  // misleading for log filtering. Defaults to skill-load's own logger
+  // for the original (extension) call site.
+  warn: (message: string) => void = (message) => debugLogger.warn(message),
+): number | undefined {
+  const raw = frontmatter['priority'];
+  if (raw === undefined || raw === null || raw === '') {
+    return undefined;
+  }
+
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    warn(
+      `Ignoring invalid priority value in ${filePath}: expected a finite number.`,
+    );
+    return undefined;
+  }
+
+  return raw;
+}
+
+/**
+ * Normalize a skill priority to a finite number for sort comparisons.
+ * Used in the `listSkills()` sort comparator so extension-provided skills
+ * (which bypass the frontmatter parser and validateConfig) can't poison
+ * ordering with `NaN` or non-number values that `(a ?? 0) - (b ?? 0)`
+ * would otherwise propagate as `NaN`.
+ */
+export function normalizeSkillPriority(priority: unknown): number {
+  return typeof priority === 'number' && Number.isFinite(priority)
+    ? priority
+    : 0;
 }

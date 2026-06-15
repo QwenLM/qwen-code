@@ -17,6 +17,7 @@ import type { Config, MCPServerConfig } from '@qwen-code/qwen-code-core';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { StreamJsonOutputAdapter } from '../io/StreamJsonOutputAdapter.js';
 import type { PermissionMode } from '../types.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 /**
  * Control Context interface
@@ -31,8 +32,10 @@ export interface IControlContext {
   readonly sessionId: string;
   readonly abortSignal: AbortSignal;
   readonly debugMode: boolean;
+  readonly settings: LoadedSettings;
 
   permissionMode: PermissionMode;
+  sdkCanUseToolTimeoutMs?: number;
   sdkMcpServers: Set<string>;
   mcpClients: Map<string, { client: Client; config: MCPServerConfig }>;
   inputClosed: boolean;
@@ -49,8 +52,10 @@ export class ControlContext implements IControlContext {
   readonly sessionId: string;
   readonly abortSignal: AbortSignal;
   readonly debugMode: boolean;
+  readonly settings: LoadedSettings;
 
   permissionMode: PermissionMode;
+  sdkCanUseToolTimeoutMs?: number;
   sdkMcpServers: Set<string>;
   mcpClients: Map<string, { client: Client; config: MCPServerConfig }>;
   inputClosed: boolean;
@@ -62,6 +67,7 @@ export class ControlContext implements IControlContext {
     streamJson: StreamJsonOutputAdapter;
     sessionId: string;
     abortSignal: AbortSignal;
+    settings: LoadedSettings;
     permissionMode?: PermissionMode;
     onInterrupt?: () => void;
   }) {
@@ -70,6 +76,7 @@ export class ControlContext implements IControlContext {
     this.sessionId = options.sessionId;
     this.abortSignal = options.abortSignal;
     this.debugMode = options.config.getDebugMode();
+    this.settings = options.settings;
     this.permissionMode = options.permissionMode || 'default';
     this.sdkMcpServers = new Set();
     this.mcpClients = new Map();

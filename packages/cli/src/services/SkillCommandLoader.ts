@@ -8,7 +8,10 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   createDebugLogger,
   appendToLastTextPart,
+  buildSkillLlmContent,
+  applySkillAllowedTools,
 } from '@qwen-code/qwen-code-core';
+import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
 import type {
   SlashCommand,
@@ -16,6 +19,7 @@ import type {
   CommandSource,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
+import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('SKILL_COMMAND_LOADER');
 
@@ -53,11 +57,25 @@ export class SkillCommandLoader implements ICommandLoader {
 
       const allSkills = [...userSkills, ...projectSkills, ...extensionSkills];
 
+      // Apply user-controlled `skills.disabled` filter HERE (inside the
+      // skill loader) rather than via `CommandService`'s global denylist —
+      // a global filter would also hide a same-named built-in command or
+      // MCP prompt. See `Config.getDisabledSkillNames` for why this is a
+      // live-read provider rather than a frozen field.
+      const disabled =
+        this.config?.getDisabledSkillNames() ?? new Set<string>();
+      const visibleSkills = allSkills.filter(
+        (skill) => !disabled.has(skill.name.toLowerCase()),
+      );
+      const nonUserInvocableCount = visibleSkills.filter(
+        (skill) => skill.userInvocable === false,
+      ).length;
+
       debugLogger.debug(
-        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands`,
+        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled; ${nonUserInvocableCount} marked non-user-invocable`,
       );
 
-      return allSkills.map((skill) => {
+      return visibleSkills.map((skill) => {
         const isExtension = skill.level === 'extension';
 
         // Extension skills need explicit description or whenToUse to be
@@ -70,24 +88,46 @@ export class SkillCommandLoader implements ICommandLoader {
             : true;
 
         const sourceLabel = isExtension
-          ? `Extension: ${skill.extensionName ?? 'unknown'}`
+          ? `${t('Extension:')} ${skill.extensionName ?? 'unknown'}`
           : skill.level === 'project'
-            ? 'Project'
-            : 'User';
+            ? t('Project')
+            : t('User');
 
         return {
           name: skill.name,
           description: skill.description,
+          modelDescription: skill.description,
           kind: CommandKind.SKILL,
           source: (isExtension
             ? 'plugin-command'
             : 'skill-dir-command') as CommandSource,
           sourceLabel,
+          sourceDetail: isExtension
+            ? 'extension'
+            : skill.level === 'project'
+              ? 'project'
+              : 'user',
+          userInvocable: skill.userInvocable ?? true,
           modelInvocable,
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
+          skillDetail: {
+            name: skill.name,
+            description: skill.description,
+            body: skill.body,
+            level: skill.level,
+          },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
-            const body = skill.body;
+            // Auto-approve the skill's declared allowedTools before its body is submitted.
+            applySkillAllowedTools(
+              this.config?.getPermissionManager(),
+              skill.allowedTools,
+            );
+
+            const body = buildSkillLlmContent(
+              dirname(skill.filePath),
+              skill.body,
+            );
 
             const content = context.invocation?.args
               ? appendToLastTextPart([{ text: body }], context.invocation.raw)

@@ -15,7 +15,7 @@ export {
   type RuntimeModelSnapshot,
 } from './types.js';
 
-export { ModelRegistry } from './modelRegistry.js';
+export { ModelRegistry, modelRegistryKey } from './modelRegistry.js';
 
 export {
   ModelsConfig,

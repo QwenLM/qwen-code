@@ -10,9 +10,9 @@ Use `modelProviders` to declare curated model lists per auth type that the `/mod
 >
 > Only the `/model` command exposes non-default auth types. Anthropic, Gemini, etc., must be defined via `modelProviders`. The `/auth` command lists Qwen OAuth, Alibaba Cloud Coding Plan, and API Key as the built-in authentication options.
 
-> [!warning]
+> [!note]
 >
-> **Duplicate model IDs within the same authType:** Defining multiple models with the same `id` under a single `authType` (e.g., two entries with `"id": "gpt-4o"` in `openai`) is currently not supported. If duplicates exist, **the first occurrence wins** and subsequent duplicates are skipped with a warning. Note that the `id` field is used both as the configuration identifier and as the actual model name sent to the API, so using unique IDs (e.g., `gpt-4o-creative`, `gpt-4o-balanced`) is not a viable workaround. This is a known limitation that we plan to address in a future release.
+> **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
 
 ## Configuration Examples by Auth Type
 
@@ -299,11 +299,18 @@ Alibaba Cloud Coding Plan provides a pre-configured set of Qwen models optimized
 
 When you authenticate with an Alibaba Cloud Coding Plan API key using the `/auth` command, Qwen Code automatically configures the following models:
 
-| Model ID               | Name                 | Description                            |
-| ---------------------- | -------------------- | -------------------------------------- |
-| `qwen3.5-plus`         | qwen3.5-plus         | Advanced model with thinking enabled   |
-| `qwen3-coder-plus`     | qwen3-coder-plus     | Optimized for coding tasks             |
-| `qwen3-max-2026-01-23` | qwen3-max-2026-01-23 | Latest max model with thinking enabled |
+| Model ID               | Name                 | Description                                               |
+| ---------------------- | -------------------- | --------------------------------------------------------- |
+| `qwen3.5-plus`         | qwen3.5-plus         | Advanced model with thinking enabled                      |
+| `qwen3.6-plus`         | qwen3.6-plus         | Latest model with thinking enabled (Pro subscribers only) |
+| `qwen3.7-plus`         | qwen3.7-plus         | Advanced model with thinking enabled                      |
+| `qwen3-coder-plus`     | qwen3-coder-plus     | Optimized for coding tasks                                |
+| `qwen3-coder-next`     | qwen3-coder-next     | Experimental coding model                                 |
+| `qwen3-max-2026-01-23` | qwen3-max-2026-01-23 | Latest max model with thinking enabled                    |
+| `glm-5`                | glm-5                | GLM model with thinking enabled                           |
+| `glm-4.7`              | glm-4.7              | GLM model with thinking enabled                           |
+| `kimi-k2.5`            | kimi-k2.5            | Kimi model with thinking and vision/video support         |
+| `MiniMax-M2.5`         | MiniMax-M2.5         | MiniMax model with thinking enabled                       |
 
 ### Setup
 

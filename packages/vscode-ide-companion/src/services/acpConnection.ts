@@ -68,7 +68,7 @@ export class AcpConnection {
     () => {};
   onSlashCommandNotification: (data: SlashCommandNotification) => void =
     () => {};
-  onEndTurn: (reason?: string) => void = () => {};
+  onEndTurn: (reason?: string, source?: string) => void = () => {};
   /** Invoked when the child process exits (expected or unexpected). */
   onDisconnected: (code: number | null, signal: string | null) => void =
     () => {};
@@ -338,23 +338,7 @@ export class AcpConnection {
         extNotification: async (
           method: string,
           params: Record<string, unknown>,
-        ): Promise<void> => {
-          if (method === 'authenticate/update') {
-            console.log(
-              '[ACP] >>> Processing authenticate_update:',
-              JSON.stringify(params).substring(0, 300),
-            );
-            this.onAuthenticateUpdate(
-              params as unknown as AuthenticateUpdateNotification,
-            );
-          } else if (method === '_qwencode/slash_command') {
-            this.onSlashCommandNotification(
-              params as unknown as SlashCommandNotification,
-            );
-          } else {
-            console.warn(`[ACP] Unhandled extension notification: ${method}`);
-          }
-        },
+        ): Promise<void> => this.handleExtNotification(method, params),
       }),
       stream,
     );
@@ -381,6 +365,30 @@ export class AcpConnection {
       this.onInitialized(initResponse);
     } catch (err) {
       console.warn('[ACP] onInitialized callback error:', err);
+    }
+  }
+
+  handleExtNotification(method: string, params: Record<string, unknown>): void {
+    if (method === 'authenticate/update') {
+      console.log(
+        '[ACP] >>> Processing authenticate_update:',
+        JSON.stringify(params).substring(0, 300),
+      );
+      this.onAuthenticateUpdate(
+        params as unknown as AuthenticateUpdateNotification,
+      );
+    } else if (method === '_qwencode/slash_command') {
+      this.onSlashCommandNotification(
+        params as unknown as SlashCommandNotification,
+      );
+    } else if (method === '_qwencode/end_turn') {
+      const reason =
+        typeof params['reason'] === 'string' ? params['reason'] : undefined;
+      const source =
+        typeof params['source'] === 'string' ? params['source'] : undefined;
+      this.onEndTurn(reason, source);
+    } else {
+      console.warn(`[ACP] Unhandled extension notification: ${method}`);
     }
   }
 
@@ -481,6 +489,34 @@ export class AcpConnection {
       this.onEndTurn();
     }
     return response;
+  }
+
+  async rewindSession(
+    targetTurnIndex: number,
+  ): Promise<{ historyBeforeRewind?: unknown[] }> {
+    const conn = this.ensureConnection();
+    if (!this.sessionId) {
+      throw new Error('No active ACP session');
+    }
+
+    return (await conn.extMethod('rewindSession', {
+      sessionId: this.sessionId,
+      targetTurnIndex,
+      cwd: this.workingDir,
+    })) as { historyBeforeRewind?: unknown[] };
+  }
+
+  async restoreSessionHistory(history: unknown[]): Promise<void> {
+    const conn = this.ensureConnection();
+    if (!this.sessionId) {
+      throw new Error('No active ACP session');
+    }
+
+    await conn.extMethod('restoreSessionHistory', {
+      sessionId: this.sessionId,
+      history,
+      cwd: this.workingDir,
+    });
   }
 
   async loadSession(

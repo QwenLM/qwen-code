@@ -78,6 +78,23 @@ export function SessionPreview(props: SessionPreviewProps) {
     return buildResumedHistoryItems(data, null);
   }, [data]);
 
+  // `listSessions` omits `messageCount` for perf, so the prop is usually
+  // undefined in practice. Compute the count from the loaded conversation
+  // using the same unique-user/assistant-uuid semantics as
+  // `SessionService.countSessionMessages` — the data is already in memory,
+  // so this is free and avoids an extra disk read.
+  const computedMessageCount = useMemo(() => {
+    if (!data) return undefined;
+    const seen = new Set<string>();
+    for (const msg of data.conversation.messages) {
+      if (msg.type === 'user' || msg.type === 'assistant') {
+        seen.add(msg.uuid);
+      }
+    }
+    return seen.size;
+  }, [data]);
+  const displayMessageCount = messageCount ?? computedMessageCount;
+
   useKeypress(
     (key) => {
       const { name, ctrl } = key;
@@ -98,8 +115,8 @@ export function SessionPreview(props: SessionPreviewProps) {
   const separatorWidth = Math.max(0, boxWidth - 2);
 
   const metaParts: string[] = [];
-  if (typeof messageCount === 'number') {
-    metaParts.push(formatMessageCount(messageCount));
+  if (typeof displayMessageCount === 'number') {
+    metaParts.push(formatMessageCount(displayMessageCount));
   }
   if (typeof mtime === 'number') {
     metaParts.push(formatRelativeTime(mtime));

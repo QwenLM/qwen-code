@@ -22,15 +22,12 @@ describe('cron-tools', () => {
     if (rig) {
       await rig.cleanup();
     }
-    // Clean up env vars
-    delete process.env['QWEN_CODE_ENABLE_CRON'];
+    delete process.env['QWEN_CODE_DISABLE_CRON'];
   });
 
-  it('should have cron tools registered when enabled via settings', async () => {
+  it('should have cron tools registered by default', async () => {
     rig = new TestRig();
-    await rig.setup('cron-tools-registered', {
-      settings: { experimental: { cron: true } },
-    });
+    await rig.setup('cron-tools-registered');
 
     const result = await rig.run(
       'Do you have access to tools called cron_create, cron_list, and cron_delete? Reply with just "yes" or "no".',
@@ -43,39 +40,47 @@ describe('cron-tools', () => {
   // Env vars set in the test process are not forwarded into Docker containers,
   // so this test cannot pass in sandbox mode.
   (IS_SANDBOX ? it.skip : it)(
-    'should have cron tools registered when enabled via env var',
+    'should NOT have cron tools when disabled via env var',
     async () => {
       rig = new TestRig();
-      await rig.setup('cron-tools-env-var');
+      await rig.setup('cron-tools-disabled-env-var');
 
-      process.env['QWEN_CODE_ENABLE_CRON'] = '1';
+      process.env['QWEN_CODE_DISABLE_CRON'] = '1';
 
       const result = await rig.run(
-        'Do you have access to tools called cron_create, cron_list, and cron_delete? Reply with just "yes" or "no".',
+        'Try to create a cron job with cron_create using cron "*/5 * * * *", prompt "disabled test", and recurring true. If you cannot call that tool, say so briefly.',
       );
 
-      validateModelOutput(result, null, 'cron tools via env var');
-      expect(result.toLowerCase()).toContain('yes');
+      validateModelOutput(result, null, 'cron disabled via env var');
+      const toolLogs = rig.readToolLogs();
+      expect(
+        toolLogs.some((log) => log.toolRequest.name === 'cron_create'),
+        'cron_create should not be callable when cron is disabled',
+      ).toBe(false);
     },
   );
 
-  it('should NOT have cron tools by default', async () => {
+  it('should NOT have cron tools when disabled via settings', async () => {
     rig = new TestRig();
-    await rig.setup('cron-tools-disabled-by-default');
+    await rig.setup('cron-tools-disabled-via-settings', {
+      settings: { experimental: { cron: false } },
+    });
 
     const result = await rig.run(
-      'Do you have access to a tool called cron_create? Reply with just "yes" or "no".',
+      'Try to create a cron job with cron_create using cron "*/5 * * * *", prompt "disabled test", and recurring true. If you cannot call that tool, say so briefly.',
     );
 
-    validateModelOutput(result, null, 'cron disabled by default');
-    expect(result.toLowerCase()).toContain('no');
+    validateModelOutput(result, null, 'cron disabled via settings');
+    const toolLogs = rig.readToolLogs();
+    expect(
+      toolLogs.some((log) => log.toolRequest.name === 'cron_create'),
+      'cron_create should not be callable when cron is disabled',
+    ).toBe(false);
   });
 
   it('should create, list, and delete a cron job in a single turn', async () => {
     rig = new TestRig();
-    await rig.setup('cron-create-list-delete', {
-      settings: { experimental: { cron: true } },
-    });
+    await rig.setup('cron-create-list-delete');
 
     const result = await rig.run(
       'Call cron_create with cron "*/5 * * * *", prompt "test ping", recurring true. Then call cron_list. Then delete that job using cron_delete. Then call cron_list again. How many jobs remain? Reply with just the number.',
@@ -102,9 +107,7 @@ describe('cron-tools', () => {
 
   it('should create a one-shot (non-recurring) job', async () => {
     rig = new TestRig();
-    await rig.setup('cron-one-shot', {
-      settings: { experimental: { cron: true } },
-    });
+    await rig.setup('cron-one-shot');
 
     const result = await rig.run(
       'Do these steps: (1) Call cron_create with cron "*/5 * * * *", prompt "one-shot test", recurring false. (2) Call cron_list. Is the job marked as recurring or one-shot? Remember the answer. (3) Delete all cron jobs. Reply with just "recurring" or "one-shot".',
@@ -128,9 +131,7 @@ describe('cron-tools', () => {
 
   it('should exit normally in -p mode when no cron jobs are created', async () => {
     rig = new TestRig();
-    await rig.setup('cron-no-jobs-exit', {
-      settings: { experimental: { cron: true } },
-    });
+    await rig.setup('cron-no-jobs-exit');
 
     // A normal -p call without cron should still exit quickly
     const result = await rig.run('What is 2+2? Reply with just the number.');

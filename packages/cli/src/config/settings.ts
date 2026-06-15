@@ -15,6 +15,11 @@ import {
   getErrorMessage,
   Storage,
   createDebugLogger,
+  stripRuntimeSnapshotPrefix,
+} from '@qwen-code/qwen-code-core';
+import type {
+  MCPServerConfig,
+  McpServerScope,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
@@ -38,7 +43,6 @@ import {
   V1_TO_V2_MIGRATION_MAP,
   V2_CONTAINER_KEYS,
 } from './migration/versions/v1-to-v2-shared.js';
-import { writeWithBackupSync } from '../utils/writeWithBackup.js';
 
 const debugLogger = createDebugLogger('SETTINGS');
 
@@ -59,13 +63,67 @@ function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
 
 export type { Settings, MemoryImportFormat };
 
-export const SETTINGS_DIRECTORY_NAME = '.qwen';
-export const USER_SETTINGS_PATH = Storage.getGlobalSettingsPath();
-export const USER_SETTINGS_DIR = path.dirname(USER_SETTINGS_PATH);
+export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
+
+// Lazy getters: must NOT be top-level consts. `QWEN_HOME` may be resolved
+// from `~/.env` or `~/.qwen/.env` by `preResolveHomeEnvOverrides()` in
+// `loadSettings()`, which runs after this module is imported. A const
+// captured here would freeze the pre-bootstrap value and split state across
+// callers.
+export function getUserSettingsPath(): string {
+  return Storage.getGlobalSettingsPath();
+}
+export function getUserSettingsDir(): string {
+  return path.dirname(getUserSettingsPath());
+}
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
+// Env var names used for inter-process communication of corruption state.
+// Defined as constants to avoid duplicated string literals.
+export const ENV_CORRUPTED_PATH = 'QWEN_CODE_SETTINGS_CORRUPTED_PATH';
+export const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
+
+// QWEN_HOME and QWEN_RUNTIME_DIR control where global state (settings, OAuth
+// credentials, installation IDs, etc.) is written. A project `.env` must never
+// redirect these — that would split global state between the real home and a
+// project-controlled directory. Always excluded from project .env files,
+// regardless of user-configurable `advanced.excludedEnvVars`.
+const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
+  'QWEN_HOME',
+  'QWEN_RUNTIME_DIR',
+  'QWEN_CODE_MCP_APPROVALS_PATH',
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
+];
+
+const RELOAD_EXCLUDED_KEYS = new Set([
+  ...PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  'QWEN_SERVER_TOKEN',
+  'QWEN_CLI_ENTRY',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
+  'LD_PRELOAD',
+  'LD_AUDIT',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'BASH_ENV',
+  'ENV',
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+]);
+
+const dotEnvSourcedKeys = new Set<string>();
+const settingsEnvSourcedKeys = new Set<string>();
+const lastReloadSnapshot = new Map<string, string>();
+let lastReloadSnapshotSeeded = false;
+
 // Settings version to track migration state
-export const SETTINGS_VERSION = 3;
+export const SETTINGS_VERSION = 4;
 export const SETTINGS_VERSION_KEY = '$version';
 
 /**
@@ -346,6 +404,30 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   return [...warningSet];
 }
 
+/**
+ * Stamp every MCP server in a scope's settings with its provenance `scope`
+ * BEFORE the merge, so the winning entry of the shallow `mcpServers` merge
+ * carries the scope it actually came from. This drives both the approval gate
+ * (`'workspace'` is gated) and precedence (`'workspace'`/`'system'` outrank a
+ * `.mcp.json` server). User/default scopes are left unstamped (trusted, lower
+ * precedence than `.mcp.json`). Returns a shallow copy — never mutates input.
+ * See issue #4615.
+ */
+function tagMcpServerScope(
+  settings: Settings,
+  scope: McpServerScope,
+): Settings {
+  const servers = settings.mcpServers;
+  if (!servers || Object.keys(servers).length === 0) {
+    return settings;
+  }
+  const tagged: Record<string, MCPServerConfig> = {};
+  for (const [name, config] of Object.entries(servers)) {
+    tagged[name] = { ...config, scope };
+  }
+  return { ...settings, mcpServers: tagged };
+}
+
 function mergeSettings(
   system: Settings,
   systemDefaults: Settings,
@@ -353,7 +435,9 @@ function mergeSettings(
   workspace: Settings,
   isTrusted: boolean,
 ): Settings {
-  const safeWorkspace = isTrusted ? workspace : ({} as Settings);
+  const safeWorkspace = isTrusted
+    ? tagMcpServerScope(workspace, 'workspace')
+    : ({} as Settings);
 
   // Settings are merged with the following precedence (last one wins for
   // single values):
@@ -367,7 +451,7 @@ function mergeSettings(
     systemDefaults,
     user,
     safeWorkspace,
-    system,
+    tagMcpServerScope(system, 'system'),
   ) as Settings;
 }
 
@@ -380,6 +464,8 @@ export class LoadedSettings {
     isTrusted: boolean,
     migratedInMemorScopes: Set<SettingScope>,
     migrationWarnings: string[] = [],
+    corruptedPath: string | undefined = undefined,
+    wasRecovered: boolean = false,
   ) {
     this.system = system;
     this.systemDefaults = systemDefaults;
@@ -388,6 +474,8 @@ export class LoadedSettings {
     this.isTrusted = isTrusted;
     this.migratedInMemorScopes = migratedInMemorScopes;
     this.migrationWarnings = migrationWarnings;
+    this.corruptedPath = corruptedPath;
+    this.wasRecovered = wasRecovered;
     this._merged = this.computeMergedSettings();
   }
 
@@ -398,6 +486,9 @@ export class LoadedSettings {
   readonly isTrusted: boolean;
   readonly migratedInMemorScopes: Set<SettingScope>;
   readonly migrationWarnings: string[];
+  readonly corruptedPath: string | undefined;
+  readonly wasRecovered: boolean;
+  corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
 
@@ -431,11 +522,50 @@ export class LoadedSettings {
   }
 
   setValue(scope: SettingScope, key: string, value: unknown): void {
+    // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
+    if (key === 'model.name' && typeof value === 'string') {
+      value = stripRuntimeSnapshotPrefix(value);
+    }
     const settingsFile = this.forScope(scope);
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    saveSettings(settingsFile, createSettingsUpdate(key, value));
+    const replacePath = key === 'mcpServers' ? key.split('.') : [];
+    saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
+  }
+
+  recomputeMerged(): void {
+    this._merged = this.computeMergedSettings();
+  }
+
+  reloadScopeFromDisk(scope: SettingScope): void {
+    const file = this.forScope(scope);
+    try {
+      if (!fs.existsSync(file.path)) {
+        file.settings = {};
+        file.originalSettings = {};
+        file.rawJson = undefined;
+        this._merged = this.computeMergedSettings();
+        return;
+      }
+
+      const content = fs.readFileSync(file.path, 'utf-8');
+      const parsed = JSON.parse(stripJsonComments(content));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const resolved = resolveEnvVarsInObject(
+          parsed as Settings,
+          getHomeEnvFallbackVars(),
+        );
+        file.settings = resolved;
+        file.originalSettings = structuredClone(parsed) as Settings;
+        file.rawJson = content;
+      }
+    } catch (err) {
+      debugLogger.warn(
+        `reloadScopeFromDisk(${scope}): ${getErrorMessage(err)}`,
+      );
+    }
+    this._merged = this.computeMergedSettings();
   }
 
   /**
@@ -478,6 +608,189 @@ export function createMinimalSettings(): LoadedSettings {
     false,
     new Set(),
     [],
+    undefined,
+    false,
+  );
+}
+
+/**
+ * Returns the set of normalized .env file paths that count as user-level.
+ *
+ * User-level paths cover the home `.env` and the global Qwen config dir
+ * `.env` (which respects `QWEN_HOME`). When `QWEN_HOME` redirects elsewhere,
+ * the legacy `<homedir>/.qwen/.env` is also included so credentials users
+ * left there continue to load (and the trust check in untrusted workspaces
+ * still allows reading it).
+ */
+function getUserLevelEnvPaths(): Set<string> {
+  const homeDir = homedir();
+  const globalQwenDir = Storage.getGlobalQwenDir();
+  const paths = new Set([
+    path.normalize(path.join(homeDir, '.env')),
+    path.normalize(path.join(globalQwenDir, '.env')),
+  ]);
+  const legacyQwenEnv = path.normalize(path.join(homeDir, QWEN_DIR, '.env'));
+  paths.add(legacyQwenEnv);
+  return paths;
+}
+
+/**
+ * Pre-resolves QWEN_HOME and QWEN_RUNTIME_DIR from user-level `.env` files
+ * before any settings or storage paths are read. Required because
+ * module-load `Storage.getGlobalQwenDir()` would otherwise snapshot legacy
+ * paths for settings.json, OAuth tokens, installation_id, etc., while the
+ * regular `.env` load (inside `loadSettings`) only runs later — splitting
+ * global state between `~/.qwen/...` and `<QWEN_HOME>/...`.
+ *
+ * Only home-scoped paths are consulted; project `.env` files are barred from
+ * changing these vars by `PROJECT_ENV_HARDCODED_EXCLUSIONS`.
+ *
+ * Exported so `main()` can run it before yargs subcommand handlers (e.g.
+ * `channel status`/`stop`) — those `process.exit` before `loadSettings()`
+ * gets a chance to bootstrap.
+ */
+let homeEnvBootstrapped = false;
+export function preResolveHomeEnvOverrides(): void {
+  if (homeEnvBootstrapped) {
+    return;
+  }
+  homeEnvBootstrapped = true;
+
+  if (process.env['QWEN_HOME'] && process.env['QWEN_RUNTIME_DIR']) {
+    return;
+  }
+
+  // Storage.getGlobalQwenDir() shares the same homedir resolution as the
+  // rest of the storage layer; when QWEN_HOME is unset it equals
+  // `<homedir>/.qwen`, so path.dirname() recovers `<homedir>`.
+  const initialQwenHome = process.env['QWEN_HOME'];
+  const initialQwenDir = Storage.getGlobalQwenDir();
+  const candidates: string[] = [path.join(initialQwenDir, '.env')];
+  if (!initialQwenHome) {
+    candidates.push(path.join(path.dirname(initialQwenDir), '.env'));
+  }
+
+  for (const candidate of candidates) {
+    readHomeEnvInto(candidate);
+  }
+
+  // If QWEN_HOME was just discovered, also read <new QWEN_HOME>/.env so
+  // QWEN_RUNTIME_DIR can be sourced from there (mirrors the VS Code
+  // companion's bootstrapHomeEnvOverrides — without this third pass the
+  // CLI and companion would diverge on the runtime dir).
+  const discoveredQwenHome = process.env['QWEN_HOME'];
+  if (discoveredQwenHome && discoveredQwenHome !== initialQwenHome) {
+    const discoveredDir = Storage.getGlobalQwenDir();
+    if (discoveredDir !== initialQwenDir) {
+      readHomeEnvInto(path.join(discoveredDir, '.env'));
+    }
+  }
+}
+
+function readHomeEnvInto(file: string): void {
+  if (!fs.existsSync(file)) {
+    return;
+  }
+  try {
+    const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
+    for (const key of PROJECT_ENV_HARDCODED_EXCLUSIONS) {
+      if (parsed[key] && !Object.hasOwn(process.env, key)) {
+        process.env[key] = parsed[key];
+      }
+    }
+  } catch (_e) {
+    // Match the dotenv quiet-mode behavior used by loadEnvironment below.
+  }
+}
+
+/** Test-only: reset the home-env bootstrap latch. */
+export function resetHomeEnvBootstrapForTesting(): void {
+  homeEnvBootstrapped = false;
+}
+
+/**
+ * Collects environment variables from user-level `.env` files and returns
+ * them as a plain dictionary **without** mutating `process.env`.
+ *
+ * Candidates are iterated most-specific-first (`~/.qwen/.env` before
+ * `~/.env`).  `??=` ensures the first file to define a key wins, matching
+ * dotenv's first-occurrence-wins semantics used elsewhere.
+ *
+ * Note: this dict intentionally does NOT filter PROJECT_ENV_HARDCODED_EXCLUSIONS
+ * or advanced.excludedEnvVars — substitution scope is narrower than process.env
+ * population handled by preResolveHomeEnvOverrides / readHomeEnvInto.
+ */
+function getHomeEnvFallbackVars(): Record<string, string> {
+  const globalQwenDir = Storage.getGlobalQwenDir();
+  const candidates = [path.join(globalQwenDir, '.env')];
+  // When QWEN_HOME is set, skip ~/.env to avoid surprise cross-contamination
+  // from a shared home .env. getUserLevelEnvPaths() always includes ~/.env
+  // because loadEnvironment() populates process.env independently — the two
+  // scopes are intentionally different.
+  if (!process.env['QWEN_HOME']) {
+    candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
+  }
+
+  const result: Record<string, string> = {};
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+    try {
+      const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
+      for (const key in parsed) {
+        if (Object.hasOwn(parsed, key) && !Object.hasOwn(process.env, key)) {
+          result[key] ??= parsed[key]!;
+        }
+      }
+    } catch (e) {
+      debugLogger.warn(
+        `Failed to read home .env candidate ${candidate}: ${getErrorMessage(e)}`,
+      );
+    }
+  }
+  return result;
+}
+
+/**
+ * Surfaces a one-shot warning when QWEN_HOME has been redirected but the
+ * user hasn't migrated their existing global state. Auto-copying OAuth
+ * tokens / settings / memory is intentionally skipped, but silently starting
+ * fresh is a footgun. Returns null when there's nothing to warn about.
+ */
+function detectQwenHomeRedirectWithoutMigration(
+  activeUserSettingsPath: string,
+): string | null {
+  if (!process.env['QWEN_HOME']) {
+    return null;
+  }
+  // Compute the legacy path by briefly unsetting QWEN_HOME so Storage uses
+  // its homedir-based default — same homedir resolution as the rest of the
+  // storage layer. try/finally restores the env on any throw.
+  const activeQwenDir = Storage.getGlobalQwenDir();
+  const savedQwenHome = process.env['QWEN_HOME'];
+  delete process.env['QWEN_HOME'];
+  let legacyQwenDir: string;
+  try {
+    legacyQwenDir = Storage.getGlobalQwenDir();
+  } finally {
+    process.env['QWEN_HOME'] = savedQwenHome;
+  }
+  if (path.resolve(activeQwenDir) === path.resolve(legacyQwenDir)) {
+    return null;
+  }
+  if (fs.existsSync(activeUserSettingsPath)) {
+    return null;
+  }
+  const legacyUserSettings = path.join(legacyQwenDir, 'settings.json');
+  if (!fs.existsSync(legacyUserSettings)) {
+    return null;
+  }
+  return (
+    `QWEN_HOME points to "${activeQwenDir}" but no settings.json was found there. ` +
+    `Existing config remains at "${legacyQwenDir}" — OAuth tokens, settings, memory, ` +
+    `extensions, and skills are not auto-migrated. Copy them manually if you want them ` +
+    `to apply at the new location.`
   );
 }
 
@@ -487,46 +800,64 @@ export function createMinimalSettings(): LoadedSettings {
  * When workspace is untrusted, only allow user-level .env files at:
  * - ~/.qwen/.env
  * - ~/.env
+ * - <QWEN_HOME>/.env (when set)
  */
-function findEnvFile(settings: Settings, startDir: string): string | null {
+function findEnvFile(
+  settings: Settings,
+  startDir: string,
+  userLevelPaths: Set<string> = getUserLevelEnvPaths(),
+): string | null {
   const homeDir = homedir();
   const isTrusted = isWorkspaceTrusted(settings).isTrusted;
 
-  // Pre-compute user-level .env paths for fast comparison
-  const userLevelPaths = new Set([
-    path.normalize(path.join(homeDir, '.env')),
-    path.normalize(path.join(homeDir, QWEN_DIR, '.env')),
-  ]);
+  const globalQwenDir = Storage.getGlobalQwenDir();
+  const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
+  const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
 
-  // Determine if we can use this .env file based on trust settings
   const canUseEnvFile = (filePath: string): boolean =>
     isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
 
-  let currentDir = path.resolve(startDir);
-  while (true) {
-    // Prefer gemini-specific .env under QWEN_DIR
-    const geminiEnvPath = path.join(currentDir, QWEN_DIR, '.env');
-    if (fs.existsSync(geminiEnvPath) && canUseEnvFile(geminiEnvPath)) {
-      return geminiEnvPath;
+  // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
+  // ~/.qwen/.env (only when QWEN_HOME redirects), then ~/.env.
+  // Users who add `QWEN_HOME=` to an existing global env file shouldn't lose
+  // credentials still in the legacy file; routing vars inside it are already
+  // pinned by `preResolveHomeEnvOverrides` (no-override).
+  const findHomeCandidate = (): string | null => {
+    const candidates = [path.join(globalQwenDir, '.env')];
+    if (hasCustomConfigDir) {
+      candidates.push(path.join(legacyQwenDir, '.env'));
     }
+    candidates.push(path.join(homeDir, '.env'));
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate) && canUseEnvFile(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  };
 
-    const envPath = path.join(currentDir, '.env');
-    if (fs.existsSync(envPath) && canUseEnvFile(envPath)) {
-      return envPath;
+  let currentDir = path.resolve(startDir);
+  let visitedHomeDir = false;
+  while (true) {
+    if (currentDir === homeDir) {
+      visitedHomeDir = true;
+      const found = findHomeCandidate();
+      if (found) return found;
+    } else {
+      // Workspace step: prefer .qwen/.env, then plain .env.
+      const geminiEnvPath = path.join(currentDir, QWEN_DIR, '.env');
+      if (fs.existsSync(geminiEnvPath) && canUseEnvFile(geminiEnvPath)) {
+        return geminiEnvPath;
+      }
+      const envPath = path.join(currentDir, '.env');
+      if (fs.existsSync(envPath) && canUseEnvFile(envPath)) {
+        return envPath;
+      }
     }
 
     const parentDir = path.dirname(currentDir);
     if (parentDir === currentDir || !parentDir) {
-      // At home directory - check fallback .env files
-      const homeGeminiEnvPath = path.join(homeDir, QWEN_DIR, '.env');
-      if (fs.existsSync(homeGeminiEnvPath)) {
-        return homeGeminiEnvPath;
-      }
-      const homeEnvPath = path.join(homeDir, '.env');
-      if (fs.existsSync(homeEnvPath)) {
-        return homeEnvPath;
-      }
-      return null;
+      return visitedHomeDir ? null : findHomeCandidate();
     }
     currentDir = parentDir;
   }
@@ -564,7 +895,8 @@ export function setUpCloudShellEnvironment(envFilePath: string | null): void {
  * 5. defaults
  */
 export function loadEnvironment(settings: Settings): void {
-  const envFilePath = findEnvFile(settings, process.cwd());
+  const userLevelPaths = getUserLevelEnvPaths();
+  const envFilePath = findEnvFile(settings, process.cwd(), userLevelPaths);
 
   // Cloud Shell environment variable handling
   if (process.env['CLOUD_SHELL'] === 'true') {
@@ -580,18 +912,36 @@ export function loadEnvironment(settings: Settings): void {
 
       const excludedVars =
         settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
-      const isProjectEnvFile = !envFilePath.includes(QWEN_DIR);
+      const normalizedEnvFilePath = path.normalize(envFilePath);
+      // homeScoped: `.env` lives under the user's home Qwen dir or `~/.env` —
+      //   only these may set QWEN_HOME / QWEN_RUNTIME_DIR.
+      // qwenScoped: any `.env` whose immediate parent is `.qwen` (including
+      //   `<repo>/.qwen/.env`) — exempt from the user `excludedEnvVars` list.
+      const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
+      const isQwenScopedEnvFile =
+        isHomeScopedEnvFile ||
+        path.basename(path.dirname(normalizedEnvFilePath)) === QWEN_DIR;
 
       for (const key in parsedEnv) {
         if (Object.hasOwn(parsedEnv, key)) {
-          // If it's a project .env file, skip loading excluded variables.
-          if (isProjectEnvFile && excludedVars.includes(key)) {
+          if (
+            !isHomeScopedEnvFile &&
+            PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
+          ) {
+            continue;
+          }
+          if (!isQwenScopedEnvFile && excludedVars.includes(key)) {
             continue;
           }
 
-          // Only set if not already present in process.env (no-override)
           if (!Object.hasOwn(process.env, key)) {
             process.env[key] = parsedEnv[key];
+            dotEnvSourcedKeys.add(key);
+          }
+          // Seed snapshot with ALL parsed keys (not just written ones)
+          // so child processes can detect deletions on first reload.
+          if (!lastReloadSnapshotSeeded) {
+            lastReloadSnapshot.set(key, parsedEnv[key]!);
           }
         }
       }
@@ -600,24 +950,198 @@ export function loadEnvironment(settings: Settings): void {
     }
   }
 
-  // Step 2: Load environment variables from settings.env as fallback (lowest priority)
-  // Only set if not already present (no-override, after .env is loaded)
+  // Step 2: settings.env fallback (lowest priority, no-override).
+  // Storage-routing vars must never come from settings.json — a workspace
+  // settings.json could otherwise redirect global state after path bootstrap.
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
+      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) {
+        continue;
+      }
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
+        settingsEnvSourcedKeys.add(key);
+      }
+      if (
+        !lastReloadSnapshotSeeded &&
+        typeof value === 'string' &&
+        !lastReloadSnapshot.has(key)
+      ) {
+        lastReloadSnapshot.set(key, value);
       }
     }
   }
+  lastReloadSnapshotSeeded = true;
+}
+
+export interface EnvReloadResult {
+  updatedKeys: string[];
+  removedKeys: string[];
 }
 
 /**
- * Loads settings from user and workspace directories.
- * Project settings override user settings.
+ * Only keys previously set by loadEnvironment() are overwritten;
+ * shell-exported variables are never touched.
+ * Fully synchronous — no TOCTOU window between delete and re-add.
  */
+export function reloadEnvironment(
+  settings: Settings,
+  workspaceCwd: string,
+): EnvReloadResult {
+  const userLevelPaths = getUserLevelEnvPaths();
+  const envFilePath = findEnvFile(settings, workspaceCwd, userLevelPaths);
+
+  if (process.env['CLOUD_SHELL'] === 'true') {
+    setUpCloudShellEnvironment(envFilePath);
+  }
+
+  // Build the set of new keys from .env (higher priority) + settings.env
+  let dotEnvReadFailed = false;
+  const newDotEnvKeys = new Map<string, string>();
+  const newSettingsEnvKeys = new Map<string, string>();
+
+  if (envFilePath) {
+    try {
+      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
+      const parsedEnv = dotenv.parse(envFileContent);
+      const excludedVars =
+        settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
+      const normalizedEnvFilePath = path.normalize(envFilePath);
+      const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
+      const isQwenScopedEnvFile =
+        isHomeScopedEnvFile ||
+        path.basename(path.dirname(normalizedEnvFilePath)) === QWEN_DIR;
+
+      for (const key in parsedEnv) {
+        if (!Object.hasOwn(parsedEnv, key)) continue;
+        if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
+        if (
+          !isHomeScopedEnvFile &&
+          PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
+        ) {
+          continue;
+        }
+        if (!isQwenScopedEnvFile && excludedVars.includes(key)) continue;
+        newDotEnvKeys.set(key, parsedEnv[key]!);
+      }
+    } catch {
+      dotEnvReadFailed = true;
+    }
+  }
+
+  if (settings.env) {
+    for (const [key, value] of Object.entries(settings.env)) {
+      if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
+      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
+      if (typeof value !== 'string') continue;
+      if (newDotEnvKeys.has(key)) continue;
+      // When .env read failed, use the snapshot as the shadow set so
+      // settings.env keys that were previously shadowed by .env don't
+      // accidentally overwrite the still-live .env values in process.env.
+      if (dotEnvReadFailed && lastReloadSnapshot.has(key)) continue;
+      newSettingsEnvKeys.set(key, value);
+    }
+  }
+
+  // Union of all new keys
+  const allNewKeys = new Set([
+    ...newDotEnvKeys.keys(),
+    ...newSettingsEnvKeys.keys(),
+  ]);
+
+  const updatedKeys: string[] = [];
+  const removedKeys: string[] = [];
+
+  // Delete keys previously known (from tracking Sets OR the boot snapshot)
+  // that are no longer in any source file. The snapshot covers keys that
+  // ACP children inherited from the daemon without tracking.
+  // Skip deletion entirely if the .env file became unreadable — treat as
+  // transient I/O failure rather than intentional key removal.
+  if (!dotEnvReadFailed) {
+    const previouslyKnown = new Set([
+      ...lastReloadSnapshot.keys(),
+      ...dotEnvSourcedKeys,
+      ...settingsEnvSourcedKeys,
+    ]);
+    for (const key of previouslyKnown) {
+      if (!allNewKeys.has(key) && !RELOAD_EXCLUDED_KEYS.has(key)) {
+        delete process.env[key];
+        removedKeys.push(key);
+      }
+    }
+  }
+
+  // Force-write all source keys. RELOAD_EXCLUDED_KEYS are already filtered
+  // at parse time so dangerous keys (PATH, HOME, etc.) never reach here.
+  // This unconditional write is necessary because ACP children inherit
+  // daemon env without tracking, so the tracking-based guard would miss them.
+  for (const [key, value] of newDotEnvKeys) {
+    if (process.env[key] !== value) {
+      updatedKeys.push(key);
+    }
+    process.env[key] = value;
+  }
+  for (const [key, value] of newSettingsEnvKeys) {
+    if (process.env[key] !== value) {
+      updatedKeys.push(key);
+    }
+    process.env[key] = value;
+  }
+
+  // Update tracking sets and snapshot only when the .env file was readable.
+  // A transient read failure must not wipe provenance — the stale tracking
+  // state is needed so the next successful reload can still detect deletions.
+  if (!dotEnvReadFailed) {
+    dotEnvSourcedKeys.clear();
+    for (const key of newDotEnvKeys.keys()) {
+      dotEnvSourcedKeys.add(key);
+    }
+    lastReloadSnapshot.clear();
+    for (const [key, value] of newDotEnvKeys) {
+      lastReloadSnapshot.set(key, value);
+    }
+    for (const [key, value] of newSettingsEnvKeys) {
+      lastReloadSnapshot.set(key, value);
+    }
+  }
+  // settings.env is always readable (from settings.json, not a file),
+  // so its tracking set is always updated.
+  settingsEnvSourcedKeys.clear();
+  for (const key of newSettingsEnvKeys.keys()) {
+    settingsEnvSourcedKeys.add(key);
+  }
+
+  return { updatedKeys, removedKeys };
+}
+
+export const CORRUPTED_SUFFIX = '.corrupted';
+
+/**
+ * Load and merge settings from all scopes:
+ * System Defaults → User (~/.qwen/settings.json) → Workspace → System.
+ */
+export interface LoadSettingsOptions {
+  consumeCorruptionEnvVars?: boolean;
+  skipLoadEnvironment?: boolean;
+}
+
 export function loadSettings(
   workspaceDir: string = process.cwd(),
+  consumeCorruptionEnvVars: boolean | LoadSettingsOptions = true,
 ): LoadedSettings {
+  const opts: LoadSettingsOptions =
+    typeof consumeCorruptionEnvVars === 'object'
+      ? consumeCorruptionEnvVars
+      : { consumeCorruptionEnvVars };
+  // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
+  // BEFORE any code reads a path derived from them. After this call, the
+  // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
+  // return the post-bootstrap value.
+  preResolveHomeEnvOverrides();
+  const userSettingsPath = getUserSettingsPath();
+  const qwenHomeRedirectWarning =
+    detectQwenHomeRedirectWithoutMigration(userSettingsPath);
+
   let systemSettings: Settings = {};
   let systemDefaultSettings: Settings = {};
   let userSettings: Settings = {};
@@ -649,17 +1173,48 @@ export function loadSettings(
   const loadAndMigrate = (
     filePath: string,
     scope: SettingScope,
-  ): { settings: Settings; rawJson?: string; migrationWarnings?: string[] } => {
+  ): {
+    settings: Settings;
+    rawJson?: string;
+    migrationWarnings?: string[];
+    corruptedPath?: string;
+    wasRecovered?: boolean;
+  } => {
     try {
       if (fs.existsSync(filePath)) {
         let content = fs.readFileSync(filePath, 'utf-8');
         let rawSettings: unknown;
-        let recoveryWarning: string | undefined;
+        // Carry corruption state through to the final return so it
+        // can be attached after the migration pipeline runs.
+        const corruptedPath = `${filePath}${CORRUPTED_SUFFIX}`;
+        let corruptedSaved = false;
+        let recoveredFromBackup = false;
+        let recoveredFromEnvVar: boolean | null = null;
 
         try {
           rawSettings = JSON.parse(stripJsonComments(content));
         } catch (parseError: unknown) {
-          // JSON parse failed — try to recover from .orig backup
+          // ===== JSON parse failed — enter corruption recovery =====
+          // Strategy: save corrupted file as .corrupted → recover from .orig →
+          // show dialog in UI. Never crash due to a corrupted settings file.
+
+          // Step 1: copy corrupted file to .corrupted for reference
+          // MUST guarantee .corrupted exists so onExit can restore it.
+          // Use copy (not rename) — the file must stay on disk so that
+          // child processes spawned by relaunchAppInChildProcess() can
+          // enter the existsSync block where env-var propagation is
+          // checked.  Step 2 will overwrite it with .orig if available.
+
+          try {
+            fs.copyFileSync(filePath, corruptedPath);
+            corruptedSaved = true;
+          } catch (copyError) {
+            debugLogger.warn(
+              `Failed to copy corrupted file: ${getErrorMessage(copyError)}`,
+            );
+          }
+
+          // Step 2: try recovering from .orig backup (created on each write)
           const backupPath = `${filePath}.orig`;
           if (fs.existsSync(backupPath)) {
             debugLogger.warn(
@@ -670,43 +1225,63 @@ export function loadSettings(
               const backupSettings = JSON.parse(
                 stripJsonComments(backupContent),
               );
-              // Backup is valid — restore it
+              // Backup valid — overwrite with backup to restore last good state
               fs.writeFileSync(filePath, backupContent, 'utf-8');
               content = backupContent;
               rawSettings = backupSettings;
               const recoveryMsg = `Settings file ${filePath} had invalid JSON and was recovered from backup ${backupPath}. Some recent settings changes may have been lost.`;
               debugLogger.warn(recoveryMsg);
-              // Surface warning to user so they know settings were rolled back
-              recoveryWarning = recoveryMsg;
+              recoveredFromBackup = true;
             } catch (backupError) {
-              // Could be invalid JSON, read error, or write-back failure
+              // Backup also corrupted — give up recovery
               debugLogger.warn(
                 `Failed to recover from backup ${backupPath}: ${getErrorMessage(backupError)}. Falling back to empty settings.`,
               );
             }
           }
 
-          // No valid backup available — rename the corrupted file so the app
-          // can start with empty settings rather than crashing.
+          // Step 3: no backup available — start with empty settings
           if (!rawSettings) {
-            const corruptedPath = `${filePath}.corrupted.${Date.now()}`;
-            let warningMsg: string;
-            try {
-              fs.renameSync(filePath, corruptedPath);
-              warningMsg = `Settings file ${filePath} has invalid JSON and was renamed to ${corruptedPath}. Your settings have been reset. To recover, fix the JSON in ${corruptedPath} and rename it back.`;
-            } catch (renameError) {
-              // If rename fails, still proceed with empty settings
-              debugLogger.error(
-                `Failed to rename corrupted settings file: ${getErrorMessage(renameError)}`,
-              );
-              warningMsg = `Settings file ${filePath} has invalid JSON. Your settings have been reset. Please fix the JSON in ${filePath} manually.`;
-            }
+            const warningMsg = `Settings file ${filePath} has invalid JSON. Your settings have been reset.`;
             debugLogger.warn(warningMsg);
+            if (corruptedSaved) {
+              // Clear the original file so the settings UI shows empty settings
+              // instead of the corrupted content.
+              try {
+                fs.writeFileSync(filePath, '{}', 'utf-8');
+              } catch {
+                /* ignore — settings are already empty in memory */
+              }
+            }
             return {
               settings: {},
-              migrationWarnings: [warningMsg],
+              migrationWarnings: [],
+              corruptedPath: corruptedSaved ? corruptedPath : undefined,
+              wasRecovered: false,
             };
           }
+          // Fall through to migration pipeline — .orig backup may be in
+          // an older schema and needs to go through runMigrations.
+        }
+
+        // Propagate corruption state from parent process via env vars.
+        // relaunchAppInChildProcess() spawns a child that re-reads
+        // settings.json (already valid after parent recovered it). The
+        // env vars preserve the corruption marker across the boundary.
+        // Only apply to user scope since that's where corruption is detected.
+        // Clear env vars after reading so subsequent loadSettings calls
+        // don't re-trigger this path.
+        const envCorruptedPath = process.env[ENV_CORRUPTED_PATH];
+        if (
+          (opts.consumeCorruptionEnvVars ?? true) &&
+          envCorruptedPath &&
+          envCorruptedPath === corruptedPath &&
+          scope === SettingScope.User
+        ) {
+          corruptedSaved = true;
+          recoveredFromEnvVar = process.env[ENV_WAS_RECOVERED] === '1';
+          delete process.env[ENV_CORRUPTED_PATH];
+          delete process.env[ENV_WAS_RECOVERED];
         }
 
         if (
@@ -732,15 +1307,29 @@ export function loadSettings(
 
         const persistSettingsObject = (warningPrefix: string) => {
           try {
-            writeWithBackupSync(
+            // Use sync mode to remove deprecated keys (zombie key prevention)
+            // while preserving comments and formatting from the original file.
+            // updateSettingsFilePreservingFormat handles atomicity internally
+            // via temp-file + rename writes.
+            const written = updateSettingsFilePreservingFormat(
               filePath,
-              JSON.stringify(settingsObject, null, 2),
+              settingsObject,
+              true,
             );
+            if (!written) {
+              debugLogger.error(
+                `${warningPrefix}: updateSettingsFilePreservingFormat returned false for ${filePath}`,
+              );
+            }
           } catch (e) {
             debugLogger.error(`${warningPrefix}: ${getErrorMessage(e)}`);
           }
         };
 
+        // Execute migrations even on recovered settings — the migrated data
+        // must persist. The disk-write branches below (version normalization)
+        // are guarded by !corruptedSaved to avoid creating .orig backups
+        // of freshly-reset settings.
         if (needsMigration(settingsObject)) {
           const migrationResult = runMigrations(settingsObject, scope);
           if (migrationResult.executedMigrations.length > 0) {
@@ -750,7 +1339,10 @@ export function loadSettings(
             >;
             migrationWarnings = migrationResult.warnings;
             persistSettingsObject('Error migrating settings file on disk');
-          } else if (hasLegacyNumericVersion || hasInvalidVersion) {
+          } else if (
+            (hasLegacyNumericVersion || hasInvalidVersion) &&
+            !corruptedSaved
+          ) {
             // Migration was deemed needed but nothing executed. Normalize version metadata
             // to avoid repeated no-op checks on startup.
             settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
@@ -760,28 +1352,30 @@ export function loadSettings(
             persistSettingsObject('Error normalizing settings version on disk');
           }
         } else if (
-          !hasVersionKey ||
-          hasInvalidVersion ||
-          hasLegacyNumericVersion
+          (!hasVersionKey || hasInvalidVersion || hasLegacyNumericVersion) &&
+          !corruptedSaved
         ) {
           // No migration needed/executable, but version metadata is missing or invalid.
           // Normalize it to current version to avoid repeated startup work.
+          // Skip if we just recovered from corruption — the next startup will
+          // handle normalization, avoiding an unnecessary writeWithBackupSync
+          // that would create a .orig file from the freshly reset settings.
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
         }
 
-        // Prepend recovery warning if settings were restored from backup
-        const allWarnings = [
-          ...(recoveryWarning ? [recoveryWarning] : []),
-          ...(migrationWarnings ?? []),
-        ];
-
-        return {
+        // Attach corruption state if settings were recovered from backup
+        const result: ReturnType<typeof loadAndMigrate> = {
           settings: settingsObject as Settings,
           rawJson: content,
-          migrationWarnings:
-            allWarnings.length > 0 ? allWarnings : migrationWarnings,
+          migrationWarnings: migrationWarnings ?? [],
         };
+        if (corruptedSaved) {
+          result.corruptedPath = corruptedPath;
+          result.wasRecovered =
+            recoveredFromBackup || (recoveredFromEnvVar ?? false);
+        }
+        return result;
       }
     } catch (error: unknown) {
       settingsErrors.push({
@@ -797,7 +1391,7 @@ export function loadSettings(
     systemDefaultsPath,
     SettingScope.SystemDefaults,
   );
-  const userResult = loadAndMigrate(USER_SETTINGS_PATH, SettingScope.User);
+  const userResult = loadAndMigrate(userSettingsPath, SettingScope.User);
 
   let workspaceResult: {
     settings: Settings;
@@ -821,11 +1415,25 @@ export function loadSettings(
   const userOriginalSettings = structuredClone(userResult.settings);
   const workspaceOriginalSettings = structuredClone(workspaceResult.settings);
 
-  // Environment variables for runtime use
-  systemSettings = resolveEnvVarsInObject(systemResult.settings);
-  systemDefaultSettings = resolveEnvVarsInObject(systemDefaultsResult.settings);
-  userSettings = resolveEnvVarsInObject(userResult.settings);
-  workspaceSettings = resolveEnvVarsInObject(workspaceResult.settings);
+  // Resolve ${VAR} placeholders in settings using home .env as fallback.
+  // getHomeEnvFallbackVars() excludes keys already in process.env, so
+  // effective precedence is: process.env > home .env > unresolved placeholder.
+  // The resolver checks customEnv before process.env, but since customEnv
+  // never contains a process.env key, process.env always wins.
+  const homeEnvFallback = getHomeEnvFallbackVars();
+  systemSettings = resolveEnvVarsInObject(
+    systemResult.settings,
+    homeEnvFallback,
+  );
+  systemDefaultSettings = resolveEnvVarsInObject(
+    systemDefaultsResult.settings,
+    homeEnvFallback,
+  );
+  userSettings = resolveEnvVarsInObject(userResult.settings, homeEnvFallback);
+  workspaceSettings = resolveEnvVarsInObject(
+    workspaceResult.settings,
+    homeEnvFallback,
+  );
 
   // Support legacy theme names
   if (userSettings.ui?.theme === 'VS') {
@@ -860,7 +1468,9 @@ export function loadSettings(
 
   // loadEnviroment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
-  loadEnvironment(tempMergedSettings);
+  if (!opts.skipLoadEnvironment) {
+    loadEnvironment(tempMergedSettings);
+  }
 
   // Create LoadedSettings first
 
@@ -875,6 +1485,7 @@ export function loadSettings(
 
   // Collect all migration warnings from all scopes
   const allMigrationWarnings: string[] = [
+    ...(qwenHomeRedirectWarning ? [qwenHomeRedirectWarning] : []),
     ...(systemResult.migrationWarnings ?? []),
     ...(systemDefaultsResult.migrationWarnings ?? []),
     ...(userResult.migrationWarnings ?? []),
@@ -895,7 +1506,7 @@ export function loadSettings(
       rawJson: systemDefaultsResult.rawJson,
     },
     {
-      path: USER_SETTINGS_PATH,
+      path: userSettingsPath,
       settings: userSettings,
       originalSettings: userOriginalSettings,
       rawJson: userResult.rawJson,
@@ -909,6 +1520,8 @@ export function loadSettings(
     isTrusted,
     migratedInMemorScopes,
     allMigrationWarnings,
+    userResult.corruptedPath,
+    userResult.wasRecovered ?? false,
   );
 }
 
@@ -927,6 +1540,7 @@ export function saveSettings(
     string,
     unknown
   >,
+  replacePath: readonly string[] = [],
 ): void {
   try {
     // Ensure the directory exists
@@ -936,7 +1550,17 @@ export function saveSettings(
     }
 
     // Use the format-preserving update function
-    updateSettingsFilePreservingFormat(settingsFile.path, updates);
+    const written = updateSettingsFilePreservingFormat(
+      settingsFile.path,
+      updates,
+      false,
+      replacePath,
+    );
+    if (!written) {
+      debugLogger.error(
+        `saveSettings: updateSettingsFilePreservingFormat returned false for ${settingsFile.path}`,
+      );
+    }
   } catch (error) {
     debugLogger.error('Error saving user settings file.');
     debugLogger.error(error instanceof Error ? error.message : String(error));

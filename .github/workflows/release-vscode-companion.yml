@@ -49,7 +49,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -73,7 +73,7 @@ jobs:
           echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -185,13 +185,13 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
       - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -249,7 +249,7 @@ jobs:
         shell: 'bash'
 
       - name: 'Upload VSIX Artifact'
-        uses: 'actions/upload-artifact@v4'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'  # v7.0.1
         with:
           name: "vsix-${{ matrix.target || 'universal' }}"
           path: 'qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-*.vsix'
@@ -270,12 +270,12 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
 
       - name: 'Download all VSIX artifacts'
-        uses: 'actions/download-artifact@v4'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c'  # v8.0.1
         with:
           pattern: 'vsix-*'
           path: 'vsix-artifacts'
@@ -319,7 +319,7 @@ jobs:
 
       - name: 'Upload all VSIXes as release artifacts (dry run)'
         if: "${{ needs.prepare.outputs.is_dry_run == 'true' }}"
-        uses: 'actions/upload-artifact@v4'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'  # v7.0.1
         with:
           name: 'all-vsix-packages-${{ needs.prepare.outputs.release_version }}'
           path: 'vsix-artifacts/*.vsix'

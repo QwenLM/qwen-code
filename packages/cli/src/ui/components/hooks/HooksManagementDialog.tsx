@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../keyMatchers.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
 import {
@@ -24,28 +25,27 @@ import type {
   HookEventDisplayInfo,
 } from './types.js';
 import { HOOKS_MANAGEMENT_STEPS } from './types.js';
+import { addConfigToMatcherGroup, getAllConfigs } from './matcherGrouping.js';
 import { HooksListStep } from './HooksListStep.js';
 import { HookDetailStep } from './HookDetailStep.js';
+import { HookMatcherDetailStep } from './HookMatcherDetailStep.js';
 import { HookConfigDetailStep } from './HookConfigDetailStep.js';
 import { HooksDisabledStep } from './HooksDisabledStep.js';
 import {
   DISPLAY_HOOK_EVENTS,
   getTranslatedSourceDisplayMap,
   createEmptyHookEventInfo,
+  supportsMatchers,
 } from './constants.js';
 import { t } from '../../../i18n/index.js';
 
 const debugLogger = createDebugLogger('HOOKS_DIALOG');
 
-/**
- * Type guard to check if a value is a valid HookConfig
- */
 function isValidHookConfig(config: unknown): config is HookConfig {
   if (typeof config !== 'object' || config === null || !('type' in config)) {
     return false;
   }
   const obj = config as Record<string, unknown>;
-  // Check based on type
   if (obj['type'] === 'command') {
     return 'command' in obj && typeof obj['command'] === 'string';
   }
@@ -55,63 +55,70 @@ function isValidHookConfig(config: unknown): config is HookConfig {
   if (obj['type'] === 'function') {
     return 'callback' in obj && typeof obj['callback'] === 'function';
   }
+  if (obj['type'] === 'prompt') {
+    return 'prompt' in obj && typeof obj['prompt'] === 'string';
+  }
   return false;
 }
 
-/**
- * Type guard to check if a value is a valid HookDefinition
- */
 function isValidHookDefinition(def: unknown): def is HookDefinition {
   if (typeof def !== 'object' || def === null) {
     return false;
   }
   const obj = def as Record<string, unknown>;
-  // hooks array is required
   if (!('hooks' in obj) || !Array.isArray(obj['hooks'])) {
     return false;
   }
-  // Validate each hook config in the array
   for (const hook of obj['hooks']) {
     if (!isValidHookConfig(hook)) {
       return false;
     }
   }
-  // matcher is optional but must be a string if present
   if ('matcher' in obj && typeof obj['matcher'] !== 'string') {
     return false;
   }
-  // sequential is optional but must be a boolean if present
   if ('sequential' in obj && typeof obj['sequential'] !== 'boolean') {
     return false;
   }
   return true;
 }
 
-/**
- * Type guard to check if a value is a valid hooks record
- */
-function isValidHooksRecord(
-  hooks: unknown,
-): hooks is Record<string, HookDefinition[]> {
+function isValidHooksRecord(hooks: unknown): hooks is Record<string, unknown> {
   if (typeof hooks !== 'object' || hooks === null) {
     return false;
   }
   const record = hooks as Record<string, unknown>;
   for (const [key, value] of Object.entries(record)) {
-    // Skip non-event configuration fields
     if (HOOKS_CONFIG_FIELDS.includes(key)) {
       continue;
     }
     if (!Array.isArray(value)) {
       return false;
     }
-    for (const def of value) {
-      if (!isValidHookDefinition(def)) {
-        return false;
-      }
-    }
   }
   return true;
+}
+
+function getValidHookDefinitions(
+  hooksRecord: Record<string, unknown>,
+  eventName: string,
+): HookDefinition[] {
+  const value = hooksRecord[eventName];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const result: HookDefinition[] = [];
+  for (const def of value) {
+    if (isValidHookDefinition(def)) {
+      result.push(def);
+    } else {
+      debugLogger.warn(
+        `Skipping invalid hook definition for ${eventName}:`,
+        def,
+      );
+    }
+  }
+  return result;
 }
 
 export function HooksManagementDialog({
@@ -121,11 +128,6 @@ export function HooksManagementDialog({
   const { columns: width } = useTerminalSize();
   const boxWidth = width - 4;
 
-  // Check if hooks are disabled
-  // Note: This value is captured at dialog open time. If disableAllHooks
-  // changes while the dialog is open (e.g., via settings.json edit),
-  // the dialog will not react to the change until it's closed and reopened.
-  // This is intentional - the dialog represents a snapshot of the current state.
   const disableAllHooks = config?.getDisableAllHooks() ?? false;
 
   const [navigationStack, setNavigationStack] = useState<string[]>([
@@ -134,20 +136,19 @@ export function HooksManagementDialog({
       : HOOKS_MANAGEMENT_STEPS.HOOKS_LIST,
   ]);
   const [selectedHookIndex, setSelectedHookIndex] = useState<number>(-1);
+  const [selectedMatcherIndex, setSelectedMatcherIndex] = useState<number>(-1);
   const [selectedConfigIndex, setSelectedConfigIndex] = useState<number>(-1);
-  // Track selected index within each step for keyboard navigation
   const [listSelectedIndex, setListSelectedIndex] = useState<number>(0);
   const [detailSelectedIndex, setDetailSelectedIndex] = useState<number>(0);
+  const [matcherSelectedIndex, setMatcherSelectedIndex] = useState<number>(0);
   const [hooks, setHooks] = useState<HookEventDisplayInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Current step
   const currentStep =
     navigationStack[navigationStack.length - 1] ||
     HOOKS_MANAGEMENT_STEPS.HOOKS_LIST;
 
-  // Selected hook event
   const selectedHook = useMemo(() => {
     if (selectedHookIndex >= 0 && selectedHookIndex < hooks.length) {
       return hooks[selectedHookIndex];
@@ -155,11 +156,20 @@ export function HooksManagementDialog({
     return null;
   }, [hooks, selectedHookIndex]);
 
-  // Centralized keyboard handler
+  const selectedMatcher = useMemo(() => {
+    if (
+      selectedHook &&
+      selectedMatcherIndex >= 0 &&
+      selectedMatcherIndex < selectedHook.matcherGroups.length
+    ) {
+      return selectedHook.matcherGroups[selectedMatcherIndex];
+    }
+    return null;
+  }, [selectedHook, selectedMatcherIndex]);
+
   useKeypress(
     (key) => {
       if (isLoading || loadError) {
-        // Allow Escape to close even during loading/error states
         if (key.name === 'escape') {
           onClose();
         }
@@ -174,17 +184,19 @@ export function HooksManagementDialog({
           break;
 
         case HOOKS_MANAGEMENT_STEPS.HOOKS_LIST:
-          if (key.name === 'up') {
+          if (keyMatchers[Command.SELECTION_UP](key)) {
             setListSelectedIndex((prev) => Math.max(0, prev - 1));
-          } else if (key.name === 'down') {
+          } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
             setListSelectedIndex((prev) =>
               Math.min(hooks.length - 1, prev + 1),
             );
           } else if (key.name === 'return') {
             if (hooks.length > 0 && listSelectedIndex >= 0) {
               setSelectedHookIndex(listSelectedIndex);
+              setSelectedMatcherIndex(-1);
               setSelectedConfigIndex(-1);
               setDetailSelectedIndex(0);
+              setMatcherSelectedIndex(0);
               setNavigationStack((prev) => [
                 ...prev,
                 HOOKS_MANAGEMENT_STEPS.HOOK_DETAIL,
@@ -198,15 +210,62 @@ export function HooksManagementDialog({
         case HOOKS_MANAGEMENT_STEPS.HOOK_DETAIL:
           if (key.name === 'escape') {
             handleNavigateBack();
-          } else if (selectedHook && selectedHook.configs.length > 0) {
-            if (key.name === 'up') {
-              setDetailSelectedIndex((prev) => Math.max(0, prev - 1));
-            } else if (key.name === 'down') {
-              setDetailSelectedIndex((prev) =>
-                Math.min(selectedHook.configs.length - 1, prev + 1),
+          } else if (selectedHook) {
+            const matcherMode = supportsMatchers(selectedHook.event);
+            if (matcherMode) {
+              if (selectedHook.matcherGroups.length === 0) {
+                break;
+              }
+              if (keyMatchers[Command.SELECTION_UP](key)) {
+                setDetailSelectedIndex((prev) => Math.max(0, prev - 1));
+              } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
+                setDetailSelectedIndex((prev) =>
+                  Math.min(selectedHook.matcherGroups.length - 1, prev + 1),
+                );
+              } else if (key.name === 'return') {
+                setSelectedMatcherIndex(detailSelectedIndex);
+                setMatcherSelectedIndex(0);
+                setSelectedConfigIndex(-1);
+                setNavigationStack((prev) => [
+                  ...prev,
+                  HOOKS_MANAGEMENT_STEPS.HOOK_MATCHER_DETAIL,
+                ]);
+              }
+            } else {
+              const flatConfigs = getAllConfigs(selectedHook);
+              if (flatConfigs.length === 0) {
+                break;
+              }
+              if (keyMatchers[Command.SELECTION_UP](key)) {
+                setDetailSelectedIndex((prev) => Math.max(0, prev - 1));
+              } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
+                setDetailSelectedIndex((prev) =>
+                  Math.min(flatConfigs.length - 1, prev + 1),
+                );
+              } else if (key.name === 'return') {
+                setSelectedMatcherIndex(-1);
+                setSelectedConfigIndex(detailSelectedIndex);
+                setNavigationStack((prev) => [
+                  ...prev,
+                  HOOKS_MANAGEMENT_STEPS.HOOK_CONFIG_DETAIL,
+                ]);
+              }
+            }
+          }
+          break;
+
+        case HOOKS_MANAGEMENT_STEPS.HOOK_MATCHER_DETAIL:
+          if (key.name === 'escape') {
+            handleNavigateBack();
+          } else if (selectedMatcher && selectedMatcher.configs.length > 0) {
+            if (keyMatchers[Command.SELECTION_UP](key)) {
+              setMatcherSelectedIndex((prev) => Math.max(0, prev - 1));
+            } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
+              setMatcherSelectedIndex((prev) =>
+                Math.min(selectedMatcher.configs.length - 1, prev + 1),
               );
             } else if (key.name === 'return') {
-              setSelectedConfigIndex(detailSelectedIndex);
+              setSelectedConfigIndex(matcherSelectedIndex);
               setNavigationStack((prev) => [
                 ...prev,
                 HOOKS_MANAGEMENT_STEPS.HOOK_CONFIG_DETAIL,
@@ -222,14 +281,12 @@ export function HooksManagementDialog({
           break;
 
         default:
-          // No action for unknown steps
           break;
       }
     },
     { isActive: true },
   );
 
-  // Load hooks data
   const fetchHooksData = useCallback((): HookEventDisplayInfo[] => {
     if (!config) return [];
 
@@ -239,53 +296,64 @@ export function HooksManagementDialog({
       SettingScope.Workspace,
     ).settings;
 
-    // Get translated source display map
     const sourceDisplayMap = getTranslatedSourceDisplayMap();
 
     const result: HookEventDisplayInfo[] = [];
 
     for (const eventName of DISPLAY_HOOK_EVENTS) {
       const hookInfo = createEmptyHookEventInfo(eventName);
+      const groupByMatcher = supportsMatchers(eventName);
 
-      // Get hooks from user settings (with type validation)
       const userSettingsRecord = userSettings as Record<string, unknown>;
       const userHooksRaw = userSettingsRecord?.['hooks'];
-      if (isValidHooksRecord(userHooksRaw) && userHooksRaw[eventName]) {
-        for (const def of userHooksRaw[eventName]) {
+      if (isValidHooksRecord(userHooksRaw)) {
+        const userDefs = getValidHookDefinitions(userHooksRaw, eventName);
+        for (const def of userDefs) {
           for (const hookConfig of def.hooks) {
-            hookInfo.configs.push({
-              config: hookConfig,
-              source: HooksConfigSource.User,
-              sourceDisplay: sourceDisplayMap[HooksConfigSource.User],
-              enabled: true,
-            });
+            addConfigToMatcherGroup(
+              hookInfo,
+              def.matcher,
+              def.sequential,
+              {
+                config: hookConfig,
+                source: HooksConfigSource.User,
+                sourceDisplay: sourceDisplayMap[HooksConfigSource.User],
+                enabled: true,
+              },
+              groupByMatcher,
+            );
           }
         }
       }
 
-      // Get hooks from workspace settings (with type validation)
       const workspaceSettingsRecord = workspaceSettings as Record<
         string,
         unknown
       >;
       const workspaceHooksRaw = workspaceSettingsRecord?.['hooks'];
-      if (
-        isValidHooksRecord(workspaceHooksRaw) &&
-        workspaceHooksRaw[eventName]
-      ) {
-        for (const def of workspaceHooksRaw[eventName]) {
+      if (isValidHooksRecord(workspaceHooksRaw)) {
+        const workspaceDefs = getValidHookDefinitions(
+          workspaceHooksRaw,
+          eventName,
+        );
+        for (const def of workspaceDefs) {
           for (const hookConfig of def.hooks) {
-            hookInfo.configs.push({
-              config: hookConfig,
-              source: HooksConfigSource.Project,
-              sourceDisplay: sourceDisplayMap[HooksConfigSource.Project],
-              enabled: true,
-            });
+            addConfigToMatcherGroup(
+              hookInfo,
+              def.matcher,
+              def.sequential,
+              {
+                config: hookConfig,
+                source: HooksConfigSource.Project,
+                sourceDisplay: sourceDisplayMap[HooksConfigSource.Project],
+                enabled: true,
+              },
+              groupByMatcher,
+            );
           }
         }
       }
 
-      // Get hooks from extensions (with type validation)
       const extensions = config.getExtensions() || [];
       for (const extension of extensions) {
         if (extension.isActive && extension.hooks?.[eventName]) {
@@ -294,13 +362,19 @@ export function HooksManagementDialog({
             for (const def of extensionHooks) {
               if (isValidHookDefinition(def)) {
                 for (const hookConfig of def.hooks) {
-                  hookInfo.configs.push({
-                    config: hookConfig,
-                    source: HooksConfigSource.Extensions,
-                    sourceDisplay: extension.name,
-                    sourcePath: extension.path,
-                    enabled: true,
-                  });
+                  addConfigToMatcherGroup(
+                    hookInfo,
+                    def.matcher,
+                    def.sequential,
+                    {
+                      config: hookConfig,
+                      source: HooksConfigSource.Extensions,
+                      sourceDisplay: extension.name,
+                      sourcePath: extension.path,
+                      enabled: true,
+                    },
+                    groupByMatcher,
+                  );
                 }
               }
             }
@@ -308,7 +382,6 @@ export function HooksManagementDialog({
         }
       }
 
-      // Get session hooks from SessionHooksManager
       const hookSystem = config.getHookSystem();
       if (hookSystem) {
         const sessionId = config.getSessionId();
@@ -317,20 +390,23 @@ export function HooksManagementDialog({
           const allSessionHooks =
             sessionHooksManager.getAllSessionHooks(sessionId);
 
-          // Filter hooks for this event
           const eventSessionHooks = allSessionHooks.filter(
             (hook: SessionHookEntry) => hook.eventName === eventName,
           );
 
           for (const sessionHook of eventSessionHooks) {
-            // Session hooks have matcher stored separately from config
-            hookInfo.configs.push({
-              config: sessionHook.config as HookConfig,
-              source: HooksConfigSource.Session,
-              sourceDisplay: t('Session (temporary)'),
-              matcher: sessionHook.matcher,
-              enabled: true,
-            });
+            addConfigToMatcherGroup(
+              hookInfo,
+              sessionHook.matcher,
+              sessionHook.sequential,
+              {
+                config: sessionHook.config as HookConfig,
+                source: HooksConfigSource.Session,
+                sourceDisplay: t('Session (temporary)'),
+                enabled: true,
+              },
+              groupByMatcher,
+            );
           }
         }
       }
@@ -341,7 +417,6 @@ export function HooksManagementDialog({
     return result;
   }, [config]);
 
-  // Load hooks data on initial render
   useEffect(() => {
     let cancelled = false;
     setIsLoading(true);
@@ -370,7 +445,6 @@ export function HooksManagementDialog({
     };
   }, [fetchHooksData]);
 
-  // Navigation handler for going back
   const handleNavigateBack = useCallback(() => {
     setNavigationStack((prev) => {
       if (prev.length <= 1) {
@@ -381,27 +455,39 @@ export function HooksManagementDialog({
     });
   }, [onClose]);
 
-  // Selected hook config
   const selectedConfig = useMemo(() => {
+    if (!selectedHook) return null;
+    if (!supportsMatchers(selectedHook.event)) {
+      const flatConfigs = getAllConfigs(selectedHook);
+      if (
+        selectedConfigIndex >= 0 &&
+        selectedConfigIndex < flatConfigs.length
+      ) {
+        return flatConfigs[selectedConfigIndex];
+      }
+      return null;
+    }
     if (
-      selectedHook &&
+      selectedMatcher &&
       selectedConfigIndex >= 0 &&
-      selectedConfigIndex < selectedHook.configs.length
+      selectedConfigIndex < selectedMatcher.configs.length
     ) {
-      return selectedHook.configs[selectedConfigIndex];
+      return selectedMatcher.configs[selectedConfigIndex];
     }
     return null;
-  }, [selectedHook, selectedConfigIndex]);
+  }, [selectedHook, selectedMatcher, selectedConfigIndex]);
 
-  // Calculate total configured hooks count
   const configuredHooksCount = useMemo(
-    () => hooks.reduce((sum, hook) => sum + hook.configs.length, 0),
+    () =>
+      hooks.reduce(
+        (sum, hook) =>
+          sum + hook.matcherGroups.reduce((s, g) => s + g.configs.length, 0),
+        0,
+      ),
     [hooks],
   );
 
-  // Render based on current step
   const renderContent = () => {
-    // Show disabled state first (before loading check)
     if (currentStep === HOOKS_MANAGEMENT_STEPS.HOOKS_DISABLED) {
       return <HooksDisabledStep configuredHooksCount={configuredHooksCount} />;
     }
@@ -446,6 +532,22 @@ export function HooksManagementDialog({
         return (
           <Box flexDirection="column" paddingX={1}>
             <Text color={theme.text.secondary}>{t('No hook selected')}</Text>
+          </Box>
+        );
+
+      case HOOKS_MANAGEMENT_STEPS.HOOK_MATCHER_DETAIL:
+        if (selectedHook && selectedMatcher) {
+          return (
+            <HookMatcherDetailStep
+              hookEvent={selectedHook}
+              matcherGroup={selectedMatcher}
+              selectedIndex={matcherSelectedIndex}
+            />
+          );
+        }
+        return (
+          <Box flexDirection="column" paddingX={1}>
+            <Text color={theme.text.secondary}>{t('No matcher selected')}</Text>
           </Box>
         );
 

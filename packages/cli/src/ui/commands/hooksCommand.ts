@@ -15,7 +15,10 @@ import { t } from '../../i18n/index.js';
 import type {
   HookRegistryEntry,
   SessionHookEntry,
+  HookEventName,
 } from '@qwen-code/qwen-code-core';
+import { supportsMatchers } from '../components/hooks/constants.js';
+import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
 
 /**
  * Format hook source for display
@@ -43,7 +46,7 @@ const listCommand: SlashCommand = {
     return t('List all configured hooks');
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     _args: string,
@@ -71,7 +74,6 @@ const listCommand: SlashCommand = {
     const registry = hookSystem.getRegistry();
     const configHooks = registry.getAllHooks();
 
-    // Get session hooks
     const sessionId = config.getSessionId();
     const sessionHooksManager = hookSystem.getSessionHooksManager();
     const sessionHooks = sessionId
@@ -90,86 +92,94 @@ const listCommand: SlashCommand = {
       };
     }
 
-    // Group hooks by event
-    const hooksByEvent = new Map<
-      string,
-      Array<{ hook: HookRegistryEntry | SessionHookEntry; isSession: boolean }>
-    >();
-
-    // Add config hooks
-    for (const hook of configHooks) {
-      const eventName = hook.eventName;
-      if (!hooksByEvent.has(eventName)) {
-        hooksByEvent.set(eventName, []);
-      }
-      hooksByEvent.get(eventName)!.push({ hook, isSession: false });
+    interface FlattenedHook {
+      name: string;
+      source: string;
     }
 
-    // Add session hooks
-    for (const hook of sessionHooks) {
-      const eventName = hook.eventName;
-      if (!hooksByEvent.has(eventName)) {
-        hooksByEvent.set(eventName, []);
+    const hooksByEvent = new Map<string, Map<string, FlattenedHook[]>>();
+
+    const addHook = (
+      eventName: string,
+      matcher: string,
+      hook: FlattenedHook,
+    ): void => {
+      const matcherKey = supportsMatchers(eventName as HookEventName)
+        ? matcher
+        : '*';
+      let matcherMap = hooksByEvent.get(eventName);
+      if (!matcherMap) {
+        matcherMap = new Map<string, FlattenedHook[]>();
+        hooksByEvent.set(eventName, matcherMap);
       }
-      hooksByEvent.get(eventName)!.push({ hook, isSession: true });
+      let bucket = matcherMap.get(matcherKey);
+      if (!bucket) {
+        bucket = [];
+        matcherMap.set(matcherKey, bucket);
+      }
+      bucket.push(hook);
+    };
+
+    const extractName = (config: {
+      type: string;
+      command?: string;
+      url?: string;
+      name?: string;
+    }): string =>
+      config.name ||
+      (config.type === 'command' ? config.command : undefined) ||
+      (config.type === 'http' ? config.url : undefined) ||
+      'unnamed';
+
+    for (const hook of configHooks) {
+      const configHook = hook as HookRegistryEntry;
+      const config = configHook.config as {
+        type: string;
+        command?: string;
+        url?: string;
+        name?: string;
+      };
+      addHook(configHook.eventName, normalizeMatcher(configHook.matcher), {
+        name: extractName(config),
+        source: formatHookSource(configHook.source),
+      });
+    }
+
+    for (const hook of sessionHooks) {
+      const sessionHook = hook as SessionHookEntry;
+      const config = sessionHook.config as {
+        type: string;
+        command?: string;
+        url?: string;
+        name?: string;
+      };
+      addHook(sessionHook.eventName, normalizeMatcher(sessionHook.matcher), {
+        name: extractName(config),
+        source: formatHookSource('session'),
+      });
     }
 
     let output = `**Configured Hooks (${totalHooks} total)**\n\n`;
 
-    for (const [eventName, hooks] of hooksByEvent) {
-      output += `### ${eventName}\n`;
-      for (const { hook, isSession } of hooks) {
-        let name: string;
-        let source: string;
-        let matcher: string;
-        let config: {
-          type: string;
-          command?: string;
-          url?: string;
-          name?: string;
-        };
-
-        if (isSession) {
-          // Session hook
-          const sessionHook = hook as SessionHookEntry;
-          config = sessionHook.config as {
-            type: string;
-            command?: string;
-            url?: string;
-            name?: string;
-          };
-          name =
-            config.name ||
-            (config.type === 'command' ? config.command : undefined) ||
-            (config.type === 'http' ? config.url : undefined) ||
-            'unnamed';
-          source = formatHookSource('session');
-          matcher = sessionHook.matcher
-            ? ` (matcher: ${sessionHook.matcher})`
-            : '';
-        } else {
-          // Config hook
-          const configHook = hook as HookRegistryEntry;
-          config = configHook.config as {
-            type: string;
-            command?: string;
-            url?: string;
-            name?: string;
-          };
-          name =
-            config.name ||
-            (config.type === 'command' ? config.command : undefined) ||
-            (config.type === 'http' ? config.url : undefined) ||
-            'unnamed';
-          source = formatHookSource(configHook.source);
-          matcher = configHook.matcher
-            ? ` (matcher: ${configHook.matcher})`
-            : '';
+    for (const [eventName, matcherMap] of hooksByEvent) {
+      output += `### ${eventName}\n\n`;
+      const useMatchers = supportsMatchers(eventName as HookEventName);
+      if (useMatchers) {
+        for (const [matcher, hookList] of matcherMap) {
+          output += `#### ${t('Matcher:')} ${matcher}\n`;
+          for (const hook of hookList) {
+            output += `- **${hook.name}** [${hook.source}]\n`;
+          }
+          output += '\n';
         }
-
-        output += `- **${name}** [${source}]${matcher}\n`;
+      } else {
+        for (const hookList of matcherMap.values()) {
+          for (const hook of hookList) {
+            output += `- **${hook.name}** [${hook.source}]\n`;
+          }
+        }
+        output += '\n';
       }
-      output += '\n';
     }
 
     return {
@@ -186,12 +196,11 @@ export const hooksCommand: SlashCommand = {
     return t('Manage Qwen Code hooks');
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<SlashCommandActionReturn> => {
-    // In interactive mode, open the hooks dialog
     const executionMode = context.executionMode ?? 'interactive';
     if (executionMode === 'interactive') {
       return {
@@ -200,7 +209,6 @@ export const hooksCommand: SlashCommand = {
       };
     }
 
-    // In non-interactive mode, list hooks
     const result = await listCommand.action?.(context, args);
     return result ?? { type: 'message', messageType: 'info', content: '' };
   },

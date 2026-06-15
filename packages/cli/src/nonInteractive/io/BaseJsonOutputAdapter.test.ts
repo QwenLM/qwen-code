@@ -1244,6 +1244,70 @@ describe('BaseJsonOutputAdapter', () => {
         expect(result.result).toBe('');
       }
     });
+
+    it('includes structured_result and JSON-stringifies result when structuredResult is provided', () => {
+      const payload = { summary: 'hi', score: 42 };
+      const options: ResultOptions = {
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+        structuredResult: payload,
+      };
+
+      const result = adapter.exposeBuildResultMessage(options);
+
+      if (!result.is_error) {
+        expect(result.result).toBe(JSON.stringify(payload));
+        expect(
+          (result as unknown as { structured_result?: unknown })
+            .structured_result,
+        ).toEqual(payload);
+      }
+    });
+
+    it('omits structured_result when structuredResult is undefined (back-compat)', () => {
+      const options: ResultOptions = {
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      };
+
+      const result = adapter.exposeBuildResultMessage(options);
+
+      expect(
+        (result as unknown as { structured_result?: unknown })
+          .structured_result,
+      ).toBeUndefined();
+    });
+
+    it('emits structured_result=null when the field is explicitly present but undefined', () => {
+      // runNonInteractive sets `structuredResult: undefined` when the
+      // model called structured_output with no args under an empty
+      // schema (`{}`). The previous `!== undefined` guard collapsed
+      // "absent" with "submitted-as-undefined", silently dropping the
+      // field and falling back to the free-text result. Track presence
+      // by key existence and normalize undefined to null so both
+      // `result` and `structured_result` render as JSON-safe values.
+      const options: ResultOptions = {
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+        structuredResult: undefined,
+      };
+
+      const result = adapter.exposeBuildResultMessage(options);
+
+      if (!result.is_error) {
+        expect(result.result).toBe('null');
+      }
+      expect(
+        (result as unknown as { structured_result?: unknown })
+          .structured_result,
+      ).toBeNull();
+    });
   });
 
   describe('startSubagentAssistantMessage', () => {

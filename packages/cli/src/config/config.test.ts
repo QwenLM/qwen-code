@@ -18,9 +18,19 @@ import { loadCliConfig, parseArguments, type CliArgs } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockSessionServiceInstance = vi.hoisted(() => ({
+  loadLastSession: vi.fn(),
+  loadSession: vi.fn(),
+  forkSession: vi.fn(),
+  sessionExists: vi.fn(),
+}));
+const mockSessionServiceCtor = vi.hoisted(() =>
+  vi.fn(() => mockSessionServiceInstance),
+);
 
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
@@ -44,6 +54,22 @@ const createNativeLspServiceInstance = () => ({
   workspaceDiagnostics: vi.fn().mockResolvedValue([]),
   codeActions: vi.fn().mockResolvedValue([]),
   applyWorkspaceEdit: vi.fn().mockResolvedValue(false),
+  getStatusSnapshot: vi.fn().mockReturnValue({
+    enabled: true,
+    configuredServers: 1,
+    readyServers: 1,
+    failedServers: 0,
+    inProgressServers: 0,
+    notStartedServers: 0,
+    servers: [
+      {
+        name: 'typescript',
+        status: 'READY',
+        languages: ['typescript'],
+        transport: 'stdio',
+      },
+    ],
+  }),
 });
 
 vi.mock('./trustedFolders.js', () => ({
@@ -139,6 +165,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     NativeLspService: vi
       .fn()
       .mockImplementation(() => createNativeLspServiceInstance()),
+    SessionService: mockSessionServiceCtor,
     SkillManager: SkillManagerMock,
     IdeClient: {
       getInstance: vi.fn().mockResolvedValue({
@@ -254,6 +281,123 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('rejects --json-schema combined with --acp', async () => {
+    // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
+    // the synthetic structured_output terminal contract. The yargs check
+    // must reject the combination at parse time so users get an actionable
+    // error instead of silently watching the run never terminate.
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema cannot be used with --acp'),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --experimental-acp (deprecated alias)', async () => {
+    // --experimental-acp is the deprecated alias; the same mutual-
+    // exclusion logic must apply or users get the silent-no-terminate
+    // behaviour the --acp check was added to prevent.
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-acp',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema cannot be used with --acp'),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --prompt-interactive (-i)', async () => {
+    // The interactive flow doesn't honour the synthetic-tool terminal
+    // contract — `structured_output` would just print "accepted" and
+    // leave the chat alive. The yargs check must reject this at parse
+    // time so users get an actionable message instead of a silently
+    // misbehaving run.
+    process.argv = [
+      'node',
+      'script.js',
+      '-i',
+      'do work then submit',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'structured output only terminates the non-interactive flow',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --input-format stream-json', async () => {
+    // The "first valid structured_output call ends the session"
+    // contract is incompatible with the long-lived stream-json input
+    // protocol. Also load-bearing: gemini.tsx's
+    // `process.exit(process.exitCode ?? 0)` plumbing in the stream-json
+    // branch explicitly relies on this rejection holding. Pair with
+    // --output-format stream-json because input/output formats must
+    // match (a separate yargs check fires first otherwise).
+    process.argv = [
+      'node',
+      'script.js',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('first structured_output call ends the session'),
+    );
+
+    mockExit.mockRestore();
+  });
+
   it('should parse --system-prompt', async () => {
     process.argv = [
       'node',
@@ -293,6 +437,46 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '-c'];
     const argv = await parseArguments();
     expect(argv.continue).toBe(true);
+  });
+
+  it('should parse --fork-session with --resume', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--resume',
+      '123e4567-e89b-12d3-a456-426614174000',
+      '--fork-session',
+    ];
+    const argv = await parseArguments();
+    expect(argv.resume).toBe('123e4567-e89b-12d3-a456-426614174000');
+    expect(argv.forkSession).toBe(true);
+  });
+
+  it('should parse --fork-session with the --resume picker form', async () => {
+    process.argv = ['node', 'script.js', '--resume', '--fork-session'];
+    const argv = await parseArguments();
+    // Empty string is the existing yargs shape for picker form: --resume
+    // without an explicit session ID.
+    expect(argv.resume).toBe('');
+    expect(argv.forkSession).toBe(true);
+  });
+
+  it('should reject --fork-session without --resume or --continue', async () => {
+    process.argv = ['node', 'script.js', '--fork-session'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--fork-session must be used with --resume or --continue',
+      ),
+    );
+
+    mockExit.mockRestore();
   });
 
   it('should convert positional query argument to prompt by default', async () => {
@@ -503,6 +687,80 @@ describe('parseArguments', () => {
     mockExit.mockRestore();
   });
 
+  it('should reject --json-schema with no prompt source when stdin is a TTY', async () => {
+    // True interactive invocation with no prompt anywhere → fail fast.
+    process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
+
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '--json-schema only applies to non-interactive mode',
+        ),
+      );
+    } finally {
+      mockExit.mockRestore();
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it('should accept --json-schema with no -p / positional when stdin is piped', async () => {
+    // `echo "..." | qwen --json-schema ...` — input arrives via the
+    // pipe, so the prompt-presence check must not block the run.
+    process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
+
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = false;
+    try {
+      const argv = await parseArguments();
+      expect(argv.jsonSchema).toBe('{"type":"object"}');
+      expect(argv.prompt).toBeUndefined();
+    } finally {
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it('should throw when --json-schema is combined with --input-format stream-json', async () => {
+    // stream-json input runs through runNonInteractiveStreamJson which
+    // doesn't honor the structured-output single-shot termination
+    // contract — reject the combination at parse time so the user sees
+    // the mismatch immediately.
+    process.argv = [
+      'node',
+      'script.js',
+      '-p',
+      'hi',
+      '--output-format',
+      'stream-json',
+      '--input-format',
+      'stream-json',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--json-schema cannot be used with --input-format stream-json',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
   it('should parse stream-json formats and include-partial-messages flag', async () => {
     process.argv = [
       'node',
@@ -533,6 +791,27 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.yolo).toBe(true);
     expect(argv.approvalMode).toBeUndefined();
+  });
+
+  it('should accept desktop as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'desktop'];
+    const argv = await parseArguments();
+    expect(argv.channel).toBe('desktop');
+  });
+
+  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    expect(argv.channel).toBe('ACP');
+  });
+
+  it('keeps an explicit --channel when combined with --acp (the desktop invocation)', async () => {
+    process.argv = ['node', 'script.js', '--acp', '--channel', 'desktop'];
+    const argv = await parseArguments();
+    // The `!result['channel']` guard must not override an explicitly provided
+    // channel with the ACP default.
+    expect(argv.channel).toBe('desktop');
+    expect(argv.acp).toBe(true);
   });
 
   it('should reject invalid --approval-mode values', async () => {
@@ -596,13 +875,23 @@ describe('loadCliConfig', () => {
     nativeLspServiceMock.mockImplementation(
       () => createNativeLspServiceInstance() as unknown as NativeLspService,
     );
+    mockSessionServiceCtor.mockImplementation(() => mockSessionServiceInstance);
+    mockSessionServiceInstance.loadLastSession.mockResolvedValue(undefined);
+    mockSessionServiceInstance.loadSession.mockResolvedValue(undefined);
+    mockSessionServiceInstance.forkSession.mockResolvedValue({
+      filePath: '/mock/fork.jsonl',
+      copiedCount: 1,
+    });
+    mockSessionServiceInstance.sessionExists.mockResolvedValue(false);
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    resetMcpApprovalsForTesting();
   });
 
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
 
@@ -662,6 +951,223 @@ describe('loadCliConfig', () => {
     expect(config.getIncludePartialMessages()).toBe(true);
   });
 
+  it('should enable runtime sleep prevention by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(true);
+  });
+
+  it('should propagate runtime sleep prevention setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        general: {
+          preventSystemSleep: false,
+        },
+      },
+      argv,
+    );
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(false);
+  });
+
+  it('places session-injected (ACP/IDE) MCP servers at the top precedence tier', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: {
+        shared: { command: 'settings-cmd' },
+        'settings-only': { command: 'settings-only-cmd' },
+      },
+    };
+    const sessionMcpServers = {
+      shared: new ServerConfig.MCPServerConfig('session-cmd'),
+      'ide-only': new ServerConfig.MCPServerConfig('ide-cmd'),
+    };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      sessionMcpServers,
+    );
+
+    const servers = config.getMcpServers() ?? {};
+    // Session source wins a name clash with settings.
+    expect(servers['shared'].command).toBe('session-cmd');
+    // Both session-only and settings-only servers survive.
+    expect(servers['ide-only'].command).toBe('ide-cmd');
+    expect(servers['settings-only'].command).toBe('settings-only-cmd');
+    // Session servers are never approval-gated.
+    expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
+  });
+
+  it('gates unapproved workspace MCP servers in non-interactive runs', async () => {
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        mcpServers: {
+          'workspace-server': {
+            command: 'workspace-cmd',
+            scope: 'workspace',
+          },
+          'user-server': {
+            command: 'user-cmd',
+          },
+        },
+      },
+      argv,
+    );
+
+    expect(config.isInteractive()).toBe(false);
+    expect(config.isMcpServerPendingApproval('workspace-server')).toBe(true);
+    expect(config.isMcpServerPendingApproval('user-server')).toBe(false);
+  });
+
+  it('keeps session-injected MCP servers ungated in non-interactive runs', async () => {
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        mcpServers: {
+          'workspace-server': {
+            command: 'workspace-cmd',
+            scope: 'workspace',
+          },
+        },
+      },
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      {
+        'ide-only': new ServerConfig.MCPServerConfig('ide-cmd'),
+      },
+    );
+
+    expect(config.isMcpServerPendingApproval('workspace-server')).toBe(true);
+    expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
+  });
+
+  it('should fork and load a new session when --resume is combined with --fork-session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const sourceData = {
+      conversation: { sessionId: sourceSessionId, messages: [] },
+      uiHistory: [],
+    };
+    const forkedData = {
+      conversation: { sessionId: 'forked-session-id', messages: [] },
+      uiHistory: [],
+    };
+    mockSessionServiceInstance.loadSession.mockImplementation(
+      async (sessionId: string) => {
+        if (sessionId === sourceSessionId) return sourceData;
+        return forkedData;
+      },
+    );
+
+    const config = await loadCliConfig({}, {
+      resume: sourceSessionId,
+      forkSession: true,
+    } as CliArgs);
+
+    expect(mockSessionServiceInstance.forkSession).toHaveBeenCalledWith(
+      sourceSessionId,
+      config.getSessionId(),
+    );
+    expect(config.getSessionId()).toBe(
+      mockSessionServiceInstance.forkSession.mock.calls[0]?.[1],
+    );
+    expect(mockSessionServiceInstance.loadSession).toHaveBeenCalledWith(
+      config.getSessionId(),
+    );
+  });
+
+  it('should explain when --fork-session fails to copy the source session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const sourceData = {
+      conversation: { sessionId: sourceSessionId, messages: [] },
+      uiHistory: [],
+    };
+    mockSessionServiceInstance.loadSession.mockResolvedValue(sourceData);
+    mockSessionServiceInstance.forkSession.mockRejectedValue(
+      new Error('source session belongs to another project'),
+    );
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(
+      loadCliConfig({}, {
+        resume: sourceSessionId,
+        forkSession: true,
+      } as CliArgs),
+    ).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      `Failed to fork session ${sourceSessionId}: source session belongs to another project`,
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should explain when --continue --fork-session has no saved session to fork', async () => {
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(
+      loadCliConfig({}, {
+        continue: true,
+        forkSession: true,
+      } as CliArgs),
+    ).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Cannot use --fork-session with --continue: no saved session found to fork.',
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should use internal sandbox session ID without treating it as a new session', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    vi.stubEnv('SANDBOX', 'sandbox-exec');
+    process.argv = ['node', 'script.js', '--sandbox-session-id', sessionId];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(mockSessionServiceInstance.sessionExists).not.toHaveBeenCalled();
+  });
+
+  it('should reject direct use of the internal sandbox session ID flag', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    process.argv = ['node', 'script.js', '--sandbox-session-id', sessionId];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig({}, argv)).rejects.toThrow(
+      'process.exit called',
+    );
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '--sandbox-session-id is for internal sandbox use only.',
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(mockSessionServiceInstance.sessionExists).not.toHaveBeenCalled();
+  });
+
   it('should reset context filenames to defaults when context.fileName is not configured', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -705,6 +1211,28 @@ describe('loadCliConfig', () => {
     expect(lspInstance).toBeDefined();
     expect(lspInstance?.discoverAndPrepare).toHaveBeenCalledTimes(1);
     expect(lspInstance?.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('should collect LSP status snapshots during debug-mode startup', async () => {
+    process.argv = ['node', 'script.js', '--experimental-lsp', '--debug'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    await loadCliConfig(settings, argv);
+
+    const lspInstance = getLastLspInstance();
+    expect(lspInstance?.getStatusSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('should not collect LSP status snapshots during normal startup', async () => {
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    await loadCliConfig(settings, argv);
+
+    const lspInstance = getLastLspInstance();
+    expect(lspInstance?.getStatusSnapshot).not.toHaveBeenCalled();
   });
 
   describe('Proxy configuration', () => {
@@ -1005,6 +1533,24 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
   });
 
+  it('should use includeSensitiveSpanAttributes from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { includeSensitiveSpanAttributes: true },
+    };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it('should default includeSensitiveSpanAttributes to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { telemetry: { enabled: true } };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
+  });
+
   it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1100,6 +1646,63 @@ describe('mergeExcludeTools', () => {
       expect.arrayContaining(['tool1', 'tool2']),
     );
     expect(config.getPermissionsDeny()).toHaveLength(2);
+  });
+
+  it('should add tool_search to deny list when tools.toolSearch.enabled is false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { enabled: false } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-v4 models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-v3 models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-chat models with provider prefix', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--model',
+      'openrouter/deepseek/deepseek-chat',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should not auto-disable tool_search for non-deepseek models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'qwen-max'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+  });
+
+  it('should respect explicit enabled:true override for deepseek models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
   });
 });
 
@@ -1391,7 +1994,7 @@ describe('Approval mode tool exclusion logic', () => {
     await expect(
       loadCliConfig(settings, invalidArgv as CliArgs, undefined, []),
     ).rejects.toThrow(
-      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto-edit, yolo',
+      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto-edit, auto, yolo',
     );
   });
 });
@@ -1597,7 +2200,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    const mcpServers = config.getMcpServers();
+    const mcpServers = config.getMcpServers() ?? {};
     expect(mcpServers['cli-server']).toEqual({
       command: 'node',
       args: ['server.js'],
@@ -1616,7 +2219,8 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    expect(config.getMcpServers()['direct-server']).toEqual({
+    const mcpServers = config.getMcpServers() ?? {};
+    expect(mcpServers['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
   });
@@ -1630,7 +2234,8 @@ describe('loadCliConfig with --mcp-config', () => {
     const config = await loadCliConfig(baseSettings, argv);
 
     // CLI config should override settings
-    expect(config.getMcpServers()['settings-server']).toEqual({
+    const mcpServers = config.getMcpServers() ?? {};
+    expect(mcpServers['settings-server']).toEqual({
       url: 'http://localhost:8888',
     });
   });
@@ -1881,6 +2486,16 @@ describe('loadCliConfig with includeDirectories', () => {
     ]);
   });
 
+  it('should default managed-memory toggles to enabled when not in bare mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getManagedAutoMemoryEnabled()).toBe(true);
+    expect(config.getManagedAutoDreamEnabled()).toBe(true);
+    expect(config.getAutoSkillEnabled()).toBe(true);
+  });
+
   it('should force minimal startup behavior in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
@@ -1915,10 +2530,13 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getCoreTools()).toEqual([
       ToolNames.READ_FILE,
       ToolNames.EDIT,
+      ToolNames.NOTEBOOK_EDIT,
       ToolNames.SHELL,
     ]);
     expect(config.getDisableAllHooks()).toBe(true);
     expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+    expect(config.getManagedAutoDreamEnabled()).toBe(false);
+    expect(config.getAutoSkillEnabled()).toBe(false);
     expect(config.getToolDiscoveryCommand()).toBeUndefined();
     expect(config.getToolCallCommand()).toBeUndefined();
     expect(config.getMcpServers()).toEqual({});
@@ -1933,8 +2551,20 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getCoreTools()).toEqual([
       ToolNames.READ_FILE,
       ToolNames.EDIT,
+      ToolNames.NOTEBOOK_EDIT,
       ToolNames.SHELL,
     ]);
+  });
+
+  it('should preserve plansDirectory in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      plansDirectory: './project-plans',
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getPlansDir()).toContain('project-plans');
   });
 });
 
@@ -1959,13 +2589,13 @@ describe('loadCliConfig chatCompression', () => {
     const settings: Settings = {
       model: {
         chatCompression: {
-          contextPercentageThreshold: 0.5,
+          imageTokenEstimate: 1234,
         },
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getChatCompression()).toEqual({
-      contextPercentageThreshold: 0.5,
+      imageTokenEstimate: 1234,
     });
   });
 
@@ -2355,7 +2985,7 @@ describe('loadCliConfig approval mode', () => {
       tools: { approvalMode: 'invalid_mode' },
     } as unknown as Settings;
     await expect(loadCliConfig(settings, argv, undefined, [])).rejects.toThrow(
-      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto-edit, yolo',
+      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto-edit, auto, yolo',
     );
   });
 
@@ -2662,6 +3292,17 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
   });
 
+  it('should prioritize QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', 'true');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { includeSensitiveSpanAttributes: false },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
   it('should prioritize QWEN_TELEMETRY_OUTFILE over settings', async () => {
     vi.stubEnv('QWEN_TELEMETRY_OUTFILE', '/gemini/env/telemetry.log');
     process.argv = ['node', 'script.js'];
@@ -2671,15 +3312,6 @@ describe('Telemetry configuration via environment variables', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryOutfile()).toBe('/gemini/env/telemetry.log');
-  });
-
-  it('should prioritize QWEN_TELEMETRY_USE_COLLECTOR over settings', async () => {
-    vi.stubEnv('QWEN_TELEMETRY_USE_COLLECTOR', 'true');
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const settings: Settings = { telemetry: { useCollector: false } };
-    const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getTelemetryUseCollector()).toBe(true);
   });
 
   it('should use settings value when QWEN_TELEMETRY_ENABLED is not set', async () => {
@@ -2742,6 +3374,27 @@ describe('Telemetry configuration via environment variables', () => {
       [],
     );
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+  });
+
+  it("should treat QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES='1' as true", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it("should treat QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES='false' as false", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', 'false');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { telemetry: { includeSensitiveSpanAttributes: true } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
   });
 });
 
@@ -2895,5 +3548,43 @@ describe('loadCliConfig runtimeOutputDir', () => {
 
     await loadCliConfig({}, argv);
     expect(Storage.getRuntimeBaseDir()).toBe(Storage.getGlobalQwenDir());
+  });
+});
+
+describe('loadCliConfig plansDirectory', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    process.argv = ['node', 'script.js'];
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.restoreAllMocks();
+  });
+
+  it('should resolve relative plansDirectory against cwd', async () => {
+    const argv = await parseArguments();
+    const cwd = path.resolve('workspace', 'my-project');
+    const settings: Settings = {
+      plansDirectory: './project-plans',
+    };
+
+    const config = await loadCliConfig(settings, argv, cwd);
+
+    expect(config.getPlansDir()).toBe(path.join(cwd, 'project-plans'));
+    expect(config.getPlanFilePath()).toContain(path.join(cwd, 'project-plans'));
+  });
+
+  it('should reject plansDirectory values outside cwd', async () => {
+    const argv = await parseArguments();
+    const cwd = path.resolve('workspace', 'my-project');
+    const settings: Settings = {
+      plansDirectory: '../plans',
+    };
+
+    await expect(loadCliConfig(settings, argv, cwd)).rejects.toThrow(
+      'plansDirectory must resolve within the project root',
+    );
   });
 });

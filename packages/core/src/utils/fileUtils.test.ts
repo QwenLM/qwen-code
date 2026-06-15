@@ -27,6 +27,7 @@ import {
   detectFileType,
   processSingleFileContent,
   detectBOM,
+  decodeBufferWithEncodingInfo,
   readFileWithEncoding,
   readFileWithEncodingInfo,
   detectFileEncoding,
@@ -491,6 +492,31 @@ describe('fileUtils', () => {
     });
 
     describe('readFileWithEncodingInfo', () => {
+      it('should decode plain UTF-8 buffers without reading from a path', () => {
+        const result = decodeBufferWithEncodingInfo(
+          Buffer.from('Hello', 'utf8'),
+        );
+        expect(result).toEqual({
+          content: 'Hello',
+          encoding: 'utf-8',
+          bom: false,
+        });
+      });
+
+      it('should decode UTF-8 BOM buffers without reading from a path', () => {
+        const result = decodeBufferWithEncodingInfo(
+          Buffer.concat([
+            Buffer.from([0xef, 0xbb, 0xbf]),
+            Buffer.from('Hello', 'utf8'),
+          ]),
+        );
+        expect(result).toEqual({
+          content: 'Hello',
+          encoding: 'utf-8',
+          bom: true,
+        });
+      });
+
       it('should return bom: false and encoding utf-8 for plain UTF-8 file', async () => {
         const filePath = path.join(testDir, 'info-utf8.txt');
         await fsPromises.writeFile(filePath, 'Hello', 'utf8');
@@ -844,6 +870,116 @@ describe('fileUtils', () => {
       mockMimeGetType.mockReturnValueOnce(false); // Unknown mime type
       // filePathForDetectTest is already a text file by default from beforeEach
       expect(await detectFileType(filePathForDetectTest)).toBe('text');
+    });
+
+    it('returns text for files with a text/* mime even when the content looks binary (issue #3964 encrypted FS)', async () => {
+      // Frank-Shaw-FS reports `.cpp` / `.c` / `.h` source files on
+      // Windows encrypted / DRM-protected file systems being
+      // misclassified as binary. The OS surfaces encrypted bytes
+      // to `fs.open()` random-access reads, so the 4 KB
+      // `isBinaryFile` heuristic sees nulls / non-printables and
+      // concludes binary. The extension already declares a text
+      // mime, so we must trust that and skip the content sample.
+      mockMimeGetType.mockReturnValueOnce('text/x-c');
+      const filePath = path.join(tempRootDir, 'encrypted.cpp');
+      // Mimic the encrypted-FS sample: leading nulls and high
+      // bytes that would trip isBinaryFile (>30% non-printable
+      // and at least one null).
+      const fakeEncrypted = Buffer.alloc(64);
+      for (let i = 0; i < fakeEncrypted.length; i++) {
+        fakeEncrypted[i] = i % 4 === 0 ? 0 : 0xff;
+      }
+      actualNodeFs.writeFileSync(filePath, fakeEncrypted);
+      try {
+        expect(await detectFileType(filePath)).toBe('text');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
+    });
+
+    it('returns text for application/javascript and similar text-like application mimes', async () => {
+      mockMimeGetType.mockReturnValueOnce('application/javascript');
+      expect(await detectFileType('script.js')).toBe('text');
+      mockMimeGetType.mockReturnValueOnce('application/json');
+      expect(await detectFileType('data.json')).toBe('text');
+      mockMimeGetType.mockReturnValueOnce('application/toml');
+      expect(await detectFileType('config.toml')).toBe('text');
+    });
+
+    it('returns text for +xml and +json structured-data mime suffixes', async () => {
+      // Covers e.g. application/atom+xml, application/ld+json,
+      // application/rls-services+xml (Rust's registered mime).
+      mockMimeGetType.mockReturnValueOnce('application/rls-services+xml');
+      expect(await detectFileType('lib.rs')).toBe('text');
+      mockMimeGetType.mockReturnValueOnce('application/ld+json');
+      expect(await detectFileType('schema.jsonld')).toBe('text');
+    });
+
+    it('returns text for known source-code extensions even when content looks binary (mime/lite gap)', async () => {
+      // `mime/lite`'s registry omits most languages: `.py`, `.kt`,
+      // `.go`, `.rb`, `.swift`, ... all return null. Without a
+      // curated extension override, an encrypted-volume read whose
+      // 4 KB sample looks binary would misclassify these as binary
+      // even though the extension is unambiguously text.
+      const looksBinary = Buffer.alloc(64);
+      for (let i = 0; i < looksBinary.length; i++) {
+        looksBinary[i] = i % 4 === 0 ? 0 : 0xff;
+      }
+      for (const ext of ['.py', '.kt', '.go', '.rb', '.swift']) {
+        mockMimeGetType.mockReturnValueOnce(null);
+        const filePath = path.join(tempRootDir, `encrypted${ext}`);
+        actualNodeFs.writeFileSync(filePath, looksBinary);
+        try {
+          expect(await detectFileType(filePath)).toBe('text');
+        } finally {
+          actualNodeFs.unlinkSync(filePath);
+        }
+      }
+    });
+
+    it('returns text for extensionless build/config basenames (Dockerfile, Makefile, go.mod, …)', async () => {
+      // Build / config / lockfile conventions carry no extension (or
+      // only an ambiguous one like .mod). `path.extname` returns `''`,
+      // so the extension allowlist misses them, and an encrypted-volume
+      // read whose 4 KB sample looks binary would misclassify these as
+      // binary even though the basename is unambiguously text.
+      const looksBinary = Buffer.alloc(64);
+      for (let i = 0; i < looksBinary.length; i++) {
+        looksBinary[i] = i % 4 === 0 ? 0 : 0xff;
+      }
+      for (const basename of [
+        'Dockerfile',
+        'Makefile',
+        'Jenkinsfile',
+        'go.mod',
+        'package-lock.json',
+        '.gitignore',
+        'LICENSE',
+      ]) {
+        mockMimeGetType.mockReturnValueOnce(null);
+        const filePath = path.join(tempRootDir, basename);
+        actualNodeFs.writeFileSync(filePath, looksBinary);
+        try {
+          expect(await detectFileType(filePath)).toBe('text');
+        } finally {
+          actualNodeFs.unlinkSync(filePath);
+        }
+      }
+    });
+
+    it('still classifies files in BINARY_EXTENSIONS as binary even with text-looking content', async () => {
+      // The extension overrides win-list must not weaken the
+      // existing binary-extension pre-empt. A `.png` whose first
+      // bytes happen to be ASCII still gets classified as binary
+      // because the extension is in BINARY_EXTENSIONS.
+      mockMimeGetType.mockReturnValueOnce(null);
+      const filePath = path.join(tempRootDir, 'looksLikeText.png');
+      actualNodeFs.writeFileSync(filePath, 'PNGheader plain text');
+      try {
+        expect(await detectFileType(filePath)).toBe('binary');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
     });
   });
 

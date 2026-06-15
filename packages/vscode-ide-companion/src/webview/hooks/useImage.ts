@@ -23,6 +23,7 @@ export interface WebViewMessageBase {
   role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
+  turnIndex?: number;
   fileContext?: {
     fileName: string;
     filePath: string;
@@ -165,6 +166,7 @@ export function expandUserMessageWithImages(message: WebViewMessageBase): {
     role: 'user',
     content: '',
     timestamp: message.timestamp,
+    turnIndex: message.turnIndex,
     kind: 'image',
     imagePath,
   }));

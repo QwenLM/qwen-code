@@ -11,6 +11,38 @@ import {
   hasExplicitOutputLimit,
 } from '../../tokenLimits.js';
 
+type AssistantMessageWithReasoningFields =
+  OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+    reasoning_content?: string | null;
+    reasoning?: string | null;
+  };
+
+function shouldMirrorReasoningContentForQwen3(model: string): boolean {
+  return model.toLowerCase().includes('qwen3');
+}
+
+function mirrorReasoningContentToReasoning(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): OpenAI.Chat.ChatCompletionMessageParam {
+  if (message.role !== 'assistant') {
+    return message;
+  }
+
+  const assistant = message as AssistantMessageWithReasoningFields;
+  if (
+    typeof assistant.reasoning_content !== 'string' ||
+    assistant.reasoning_content.length === 0 ||
+    typeof assistant.reasoning === 'string'
+  ) {
+    return message;
+  }
+
+  return {
+    ...assistant,
+    reasoning: assistant.reasoning_content,
+  } as OpenAI.Chat.ChatCompletionMessageParam;
+}
+
 /**
  * Default provider for standard OpenAI-compatible APIs
  */
@@ -49,8 +81,9 @@ export class DefaultOpenAICompatibleProvider
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
-    // Configure fetch options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling.
+    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
+    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),
@@ -74,9 +107,13 @@ export class DefaultOpenAICompatibleProvider
     // Apply output token limits to ensure max_tokens is set appropriately
     // This prevents occupying too much context window with output reservation
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
+    const messages = shouldMirrorReasoningContentForQwen3(request.model)
+      ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
+      : requestWithTokenLimits.messages;
 
     return {
       ...requestWithTokenLimits,
+      messages,
       ...(extraBody ? extraBody : {}),
     };
   }

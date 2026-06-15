@@ -5,8 +5,9 @@
  */
 
 // Traditional Chinese (zh-TW) translations for Qwen Code CLI
-// Auto-generated: structure from en.js, values from zh-TW (manual) or opencc(zh.js s2t)
-
+// Bootstrapped from en.js structure with opencc(zh.js s2t),
+// then extensively hand-corrected for Taiwan vocabulary conventions.
+// This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
@@ -14,36 +15,36 @@ export default {
   'Basics:': '基礎功能：',
   'Add context': '添加上下文',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
-    '使用 {{symbol}} 指定文件作爲上下文（例如，{{example}}），用於定位特定文件或文件夾',
+    '使用 {{symbol}} 指定檔案作為上下文（例如，{{example}}），用於定位特定檔案或檔案夾',
   '@': '@',
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
+  'Auto mode': 'Auto 模式',
   'plan mode': '規劃模式',
   'auto-accept edits': '自動接受編輯',
   'Accepting edits': '接受編輯',
-  '(shift + tab to cycle)': '(shift + tab 切換)',
-  '(tab to cycle)': '(按 tab 切換)',
+  '(shift + tab to cycle)': '(Shift + Tab 切換)',
+  '(tab to cycle)': '(按 Tab 切換)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     '通過 {{symbol}} 執行 shell 命令（例如，{{example1}}）或使用自然語言（例如，{{example2}}）',
   '!': '!',
   '!npm run start': '!npm run start',
-  'start server': 'start server',
   'Commands:': '命令：',
   'shell command': 'shell 命令',
   'Model Context Protocol command (from external servers)':
-    '模型上下文協議命令（來自外部服務器）',
+    'Model Context Protocol 命令（來自外部伺服器）',
   'Keyboard Shortcuts:': '鍵盤快捷鍵：',
   'Toggle this help display': '切換此幫助顯示',
   'Toggle shell mode': '切換命令行模式',
-  'Open command menu': '打開命令菜單',
-  'Add file context': '添加文件上下文',
+  'Open command menu': '打開命令選單',
+  'Add file context': '添加檔案上下文',
   'Accept suggestion / Autocomplete': '接受建議 / 自動補全',
   'Reverse search history': '反向搜索歷史',
   'Press ? again to close': '再次按 ? 關閉',
   'for shell mode': '命令行模式',
-  'for commands': '命令菜單',
-  'for file paths': '文件路徑',
+  'for commands': '命令選單',
+  'for file paths': '檔案路徑',
   'to clear input': '清空輸入',
   'to cycle approvals': '切換審批模式',
   'to quit': '退出',
@@ -64,8 +65,8 @@ export default {
   'Send message': '發送消息',
   'Initializing...': '正在初始化...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
-    '正在連接到 MCP 服務器... ({{connected}}/{{total}})',
-  'Type your message or @path/to/file': '輸入您的消息或 @ 文件路徑',
+    '正在連接到 MCP servers... ({{connected}}/{{total}})',
+  'Type your message or @path/to/file': '輸入您的消息或 @ 檔案路徑',
   '? for shortcuts': '按 ? 查看快捷鍵',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 進入插入模式，按 'Esc' 進入普通模式",
@@ -78,42 +79,115 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': '獲取 Qwen Code 幫助',
   'show version info': '顯示版本信息',
+  'show paths for current session files and logs': '顯示目前會話檔案和日誌路徑',
   'submit a bug report': '提交錯誤報告',
-  'About Qwen Code': '關於 Qwen Code',
   Status: '狀態',
   'Qwen Code': 'Qwen Code',
   Runtime: '運行環境',
   OS: '操作系統',
   Auth: '認證',
-  'CLI Version': 'CLI 版本',
-  'Git Commit': 'Git 提交',
   Model: '模型',
   'Fast Model': '快速模型',
   Sandbox: '沙箱',
-  'OS Platform': '操作系統平臺',
-  'OS Arch': '操作系統架構',
-  'OS Release': '操作系統版本',
-  'Node.js Version': 'Node.js 版本',
-  'NPM Version': 'NPM 版本',
   'Session ID': '會話 ID',
-  'Auth Method': '認證方式',
-  'Base URL': '基礎 URL',
+  'Base URL': 'Base URL',
   Proxy: '代理',
   'Memory Usage': '內存使用',
   'IDE Client': 'IDE 客戶端',
   'Analyzes the project and creates a tailored QWEN.md file.':
-    '分析項目並創建定製的 QWEN.md 文件',
+    '分析項目並創建定製的 QWEN.md 檔案',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
-  'List available skills.': '列出可用技能。',
+  'Open the skills panel (browse, search, toggle, pick).':
+    '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
+  'Move this session to a new working directory': '將此會話移動到新的工作目錄',
+  'Manage Skills': '管理技能',
+  'Skills configuration saved.': '技能設定已儲存。',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    '技能設定已儲存，但重新整理失敗：{{error}}。請重新啟動以確保新狀態生效。',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    '目前工作區未受信任，工作區設定會被合併設定忽略。請先執行 /trust，或直接編輯 ~/.qwen/settings.json 在使用者範圍管理技能。',
+  'SkillManager not available.': 'SkillManager 不可用。',
+  'Loading skills…': '正在載入技能…',
+  'Failed to load skills: {{error}}': '載入技能失敗：{{error}}',
+  'Failed to save skills configuration: {{error}}':
+    '儲存技能設定失敗：{{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    '所有可用技能皆已停用。請編輯 ~/.qwen/settings.json 或 .qwen/settings.json（skills.disabled）以重新啟用。',
+  'Press esc to close.': '按 Esc 關閉。',
+  '{{count}} skills · ': '{{count}} 個技能 · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} 個技能 · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    '空白鍵 啟停 · 回車 選取(填入輸入框) · Esc 儲存並離開 · 工作區範圍',
+  'Search:': '搜尋：',
+  'type to filter…': '輸入以篩選…',
+  'No skills are currently available.': '目前沒有可用的技能。',
+  'All available skills are locked at a higher scope (see below).':
+    '所有可用技能都被更高範圍鎖定（詳見下方）。',
+  'No skills match the search.': '沒有符合搜尋條件的技能。',
+  'Locked by higher-scope settings (cannot toggle here):':
+    '被更高範圍設定鎖定（此處無法切換）：',
+  'higher scope': '更高範圍',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [已鎖定：{{scope}}]',
+  '↑/↓ navigate · backspace edits search': '↑/↓ 導覽 · 倒退 編輯搜尋',
+  Bundled: '內建',
   'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
   'No tools available': '沒有可用工具',
   'View or change the approval mode for tool usage':
     '查看或更改工具使用的審批模式',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     '無效的審批模式 "{{arg}}"。有效模式：{{modes}}',
-  'Approval mode set to "{{mode}}"': '審批模式已設置爲 "{{mode}}"',
+  'Approval mode set to "{{mode}}"': '審批模式已設置為 "{{mode}}"',
   'View or change the language setting': '查看或更改語言設置',
+  'List background tasks (text dump — interactive dialog opens via the footer pill)':
+    '列出背景任務（文字列表；互動式對話框可透過頁腳中的「背景任務」入口開啟）',
+  'Delete a previous session': '刪除先前的會話',
+  'Run installation and environment diagnostics': '執行安裝與環境診斷',
+  'Browse dynamic model catalogs and choose which models stay enabled locally':
+    '瀏覽動態模型目錄，並選擇要在本機保持啟用的模型',
+  'Generate a one-line session recap now': '立即生成一條單行會話回顧',
+  'Rename the current conversation. --auto lets the fast model pick a title.':
+    '重新命名目前的對話。--auto 會讓快速模型自動產生標題。',
+  'Rewind conversation to a previous turn': '將對話回退到先前的某一輪',
+  'Rewind Conversation': '回退對話',
+  'No user turns to rewind to.': '沒有可回退的使用者對話輪次。',
+  'Rewind to: ': '回退到：',
+  'Restore code and conversation': '恢復程式碼和對話',
+  'Restore conversation only': '僅恢復對話',
+  'Restore code only': '僅恢復程式碼',
+  'Never mind': '算了',
+  'Computing file changes...': '正在計算檔案變更...',
+  'Restoring...': '正在恢復...',
+  'Restored {{count}} file(s).': '已恢復 {{count}} 個檔案。',
+  'Failed to restore files: {{error}}': '恢復檔案失敗：{{error}}',
+  'Rewind failed: {{error}}': '回退失敗：{{error}}',
+  'Cannot rewind conversation: no active model client.':
+    '無法回退對話：模型客戶端未啟用。',
+  'Code restored, but conversation could not be rewound (no active client).':
+    '程式碼已恢復，但對話無法回退（模型客戶端未啟用）。',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    '對話已回退。修改提示後按 Enter 繼續。',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    '回退不會影響手動編輯或透過 shell 命令修改的檔案。',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    '無法回退到已被壓縮的輪次，請嘗試更近一些的輪次。',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    '該輪次無法還原檔案（沒有擷取到檔案變更，或該輪次屬於本次會話之前）。',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 個檔案)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 個檔案)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '恢復 {{count}} 個檔案失敗：{{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    '無法恢復檔案：該輪對話建立時尚未啟用檔案檢查點功能。',
+  'No files needed to be restored.': '沒有檔案需要恢復。',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ 導覽 · Enter 選取 · Esc 返回',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ 導覽 · Enter 選取 · Esc 取消',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y 確認 · Esc/N 返回',
   'change the theme': '更改主題',
   'Select Theme': '選擇主題',
   Preview: '預覽',
@@ -129,13 +203,36 @@ export default {
   'Clear conversation history and free up context': '清除對話歷史並釋放上下文',
   'Compresses the context by replacing it with a summary.':
     '通過摘要替換來壓縮上下文',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    '無需 AI 的快速上下文壓縮。清理舊工具輸出並剝離思考過程。',
   'open full Qwen Code documentation in your browser':
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
-  'change the auth method': '更改認證方法',
-  'Configure authentication information for login': '配置登錄認證信息',
-  'Copy the last result or code snippet to clipboard':
-    '將最後的結果或代碼片段複製到剪貼板',
+  'Connect an LLM provider': '連接 LLM 提供商',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    '複製到剪貼簿：AI 回應、程式碼區塊（可依語言篩選）、LaTeX 或 Mermaid。N 為倒數第 N 則訊息，index 為程式碼區塊序號',
+  'Show working-tree change stats versus HEAD':
+    '顯示工作區相對 HEAD 的變更統計',
+  'Could not determine current working directory.': '無法確定當前工作目錄。',
+  'Failed to compute git diff stats': '計算 git diff 統計失敗',
+  'No diff available. Either this is not a git repository, HEAD is missing, or a merge/rebase/cherry-pick/revert is in progress.':
+    '無可用 diff。可能不是 Git 倉庫、HEAD 缺失，或正在執行 merge/rebase/cherry-pick/revert。',
+  'Clean working tree — no changes against HEAD.':
+    '工作區乾淨 —— 與 HEAD 無差異。',
+  '{{count}} file changed, +{{added}} / -{{removed}}':
+    '{{count}} 個檔案變更，+{{added}} / -{{removed}}',
+  '{{count}} files changed, +{{added}} / -{{removed}}':
+    '{{count}} 個檔案變更，+{{added}} / -{{removed}}',
+  '{{count}} file changed': '{{count}} 個檔案變更',
+  '{{count}} files changed': '{{count}} 個檔案變更',
+  '…and {{hidden}} more (showing first {{shown}})':
+    '…還有 {{hidden}} 個（僅顯示前 {{shown}} 個）',
+  '(binary)': '（二進位）',
+  '(binary, new)': '（二進位，新增）',
+  '(new)': '（新增）',
+  '(new, partial)': '（新增，部分統計）',
+  '(deleted)': '（已刪除）',
+  '(binary, deleted)': '（二進位，已刪除）',
   'Manage subagents for specialized task delegation.':
     '管理用於專門任務委派的子智能體',
   'Manage existing subagents (view, edit, delete).':
@@ -172,7 +269,7 @@ export default {
   'Delete Agent': '刪除智能體',
   Back: '返回',
   'No agent selected': '未選擇智能體',
-  'File Path: ': '文件路徑: ',
+  'File Path: ': '檔案路徑: ',
   'Tools: ': '工具: ',
   'Color: ': '顏色: ',
   'Description:': '描述:',
@@ -206,7 +303,7 @@ export default {
   'Generate with Qwen Code (Recommended)': '使用 Qwen Code 生成（推薦）',
   'Manual Creation': '手動創建',
   'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)':
-    '描述此子智能體應該做什麼以及何時使用它。（爲了獲得最佳效果，請全面描述）',
+    '描述此子智能體應該做什麼以及何時使用它。（為了獲得最佳效果，請全面描述）',
   'e.g., Expert code reviewer that reviews code based on best practices...':
     '例如：專業的代碼審查員，根據最佳實踐審查代碼...',
   'Generating subagent configuration...': '正在生成子智能體配置...',
@@ -221,7 +318,7 @@ export default {
   'Read-only Tools': '只讀工具',
   'Read & Edit Tools': '讀取和編輯工具',
   'Read & Edit & Execution Tools': '讀取、編輯和執行工具',
-  'All tools selected, including MCP tools': '已選擇所有工具，包括 MCP 工具',
+  'All tools selected, including MCP tools': '已選擇所有工具，包括 MCP tools',
   'Selected tools:': '已選擇的工具:',
   'Read-only tools:': '只讀工具:',
   'Edit tools:': '編輯工具:',
@@ -237,20 +334,20 @@ export default {
   'go back': '返回',
   '↑↓ to navigate, ': '↑↓ 導航，',
   'Enter a clear, unique name for this subagent.':
-    '爲此子智能體輸入一個清晰、唯一的名稱。',
+    '為此子智能體輸入一個清晰、唯一的名稱。',
   'e.g., Code Reviewer': '例如：代碼審查員',
-  'Name cannot be empty.': '名稱不能爲空。',
+  'Name cannot be empty.': '名稱不能為空。',
   "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.":
-    '編寫定義此子智能體行爲的系統提示。爲了獲得最佳效果，請全面描述。',
+    '編寫定義此子智能體行為的系統提示。為了獲得最佳效果，請全面描述。',
   'e.g., You are an expert code reviewer...':
     '例如：您是一位專業的代碼審查員...',
-  'System prompt cannot be empty.': '系統提示不能爲空。',
+  'System prompt cannot be empty.': '系統提示不能為空。',
   'Describe when and how this subagent should be used.':
     '描述何時以及如何使用此子智能體。',
   'e.g., Reviews code for best practices and potential bugs.':
     '例如：審查代碼以查找最佳實踐和潛在錯誤。',
-  'Description cannot be empty.': '描述不能爲空。',
-  'Failed to launch editor: {{error}}': '啓動編輯器失敗: {{error}}',
+  'Description cannot be empty.': '描述不能為空。',
+  'Failed to launch editor: {{error}}': '啟動編輯器失敗: {{error}}',
   'Failed to save and edit subagent: {{error}}':
     '保存並編輯子智能體失敗: {{error}}',
   'Manage Extensions': '管理擴展',
@@ -258,38 +355,28 @@ export default {
   'View Extension': '查看擴展',
   'Update Extension': '更新擴展',
   'Disable Extension': '禁用擴展',
-  'Enable Extension': '啓用擴展',
+  'Enable Extension': '啟用擴展',
   'Uninstall Extension': '卸載擴展',
   'Select Scope': '選擇作用域',
   'User Scope': '用戶作用域',
   'Workspace Scope': '工作區作用域',
   'No extensions found.': '未找到擴展。',
-  Active: '已啓用',
-  Disabled: '已禁用',
-  'Update available': '有可用更新',
-  'Up to date': '已是最新',
-  'Checking...': '檢查中...',
   'Updating...': '更新中...',
   Unknown: '未知',
   Error: '錯誤',
+  'Stopped because': '停止原因',
   'Version:': '版本：',
   'Status:': '狀態：',
   'Are you sure you want to uninstall extension "{{name}}"?':
     '確定要卸載擴展 "{{name}}" 嗎？',
   'This action cannot be undone.': '此操作無法撤銷。',
-  'Extension "{{name}}" disabled successfully.': '擴展 "{{name}}" 禁用成功。',
-  'Extension "{{name}}" enabled successfully.': '擴展 "{{name}}" 啓用成功。',
   'Extension "{{name}}" updated successfully.': '擴展 "{{name}}" 更新成功。',
-  'Failed to update extension "{{name}}": {{error}}':
-    '更新擴展 "{{name}}" 失敗：{{error}}',
-  'Select the scope for this action:': '選擇此操作的作用域：',
-  'User - Applies to all projects': '用戶 - 應用於所有項目',
-  'Workspace - Applies to current project only': '工作區 - 僅應用於當前項目',
   'Name:': '名稱：',
-  'MCP Servers:': 'MCP 服務器：',
+  'MCP Servers:': 'MCP Servers：',
   'Settings:': '設置：',
-  active: '已啓用',
+  active: '已啟用',
   disabled: '已禁用',
+  enabled: '已啟用',
   'View Details': '查看詳情',
   'Update failed:': '更新失敗：',
   'Updating {{name}}...': '正在更新 {{name}}...',
@@ -297,10 +384,8 @@ export default {
   'User (global)': '用戶（全局）',
   'Workspace (project-specific)': '工作區（項目特定）',
   'Disable "{{name}}" - Select Scope': '禁用 "{{name}}" - 選擇作用域',
-  'Enable "{{name}}" - Select Scope': '啓用 "{{name}}" - 選擇作用域',
+  'Enable "{{name}}" - Select Scope': '啟用 "{{name}}" - 選擇作用域',
   'No extension selected': '未選擇擴展',
-  'Press Y/Enter to confirm, N/Esc to cancel': '按 Y/Enter 確認，N/Esc 取消',
-  'Y/Enter to confirm, N/Esc to cancel': 'Y/Enter 確認，N/Esc 取消',
   '{{count}} extensions installed': '已安裝 {{count}} 個擴展',
   "Use '/extensions install' to install your first extension.":
     "使用 '/extensions install' 安裝您的第一個擴展。",
@@ -312,18 +397,14 @@ export default {
   'View and edit Qwen Code settings': '查看和編輯 Qwen Code 設置',
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
-    '要查看更改，必須重啓 Qwen Code。按 r 退出並立即應用更改。',
-  'The command "/{{command}}" is not supported in non-interactive mode.':
-    '不支持在非交互模式下使用命令 "/{{command}}"。',
+    '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
   'Vim Mode': 'Vim 模式',
-  'Disable Auto Update': '禁用自動更新',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
-  'Enable Usage Statistics': '啓用使用統計',
+  'Enable Usage Statistics': '啟用使用統計',
   Theme: '主題',
   'Preferred Editor': '首選編輯器',
   'Auto-connect to IDE': '自動連接到 IDE',
-  'Enable Prompt Completion': '啓用提示補全',
   'Debug Keystroke Logging': '調試按鍵記錄',
   'Language: UI': '語言：界面',
   'Language: Model': '語言：模型',
@@ -335,62 +416,47 @@ export default {
   'Show Citations': '顯示引用',
   'Custom Witty Phrases': '自定義詼諧短語',
   'Show Welcome Back Dialog': '顯示歡迎回來對話框',
-  'Enable User Feedback': '啓用用戶反饋',
+  'Enable User Feedback': '啟用用戶反饋',
   'How is Qwen doing this session? (optional)': 'Qwen 這次表現如何？（可選）',
   Bad: '不滿意',
   Fine: '還行',
   Good: '滿意',
   Dismiss: '忽略',
-  'Not Sure Yet': '暫不評價',
-  'Any other key': '任意其他鍵',
-  'Disable Loading Phrases': '禁用加載短語',
   'Screen Reader Mode': '屏幕閱讀器模式',
-  'IDE Mode': 'IDE 模式',
   'Max Session Turns': '最大會話輪次',
   'Skip Next Speaker Check': '跳過下一個說話者檢查',
   'Skip Loop Detection': '跳過循環檢測',
-  'Skip Startup Context': '跳過啓動上下文',
-  'Enable OpenAI Logging': '啓用 OpenAI 日誌',
+  'Skip Startup Context': '跳過啟動上下文',
+  'Enable OpenAI Logging': '啟用 OpenAI 日誌',
   'OpenAI Logging Directory': 'OpenAI 日誌目錄',
   Timeout: '超時',
   'Max Retries': '最大重試次數',
-  'Disable Cache Control': '禁用緩存控制',
-  'Memory Discovery Max Dirs': '內存發現最大目錄數',
   'Load Memory From Include Directories': '從包含目錄加載內存',
   'Respect .gitignore': '遵守 .gitignore',
   'Respect .qwenignore': '遵守 .qwenignore',
-  'Enable Recursive File Search': '啓用遞歸文件搜索',
-  'Disable Fuzzy Search': '禁用模糊搜索',
+  'Enable Recursive File Search': '啟用遞歸檔案搜索',
   'Interactive Shell (PTY)': '交互式 Shell (PTY)',
   'Show Color': '顯示顏色',
   'Auto Accept': '自動接受',
   'Use Ripgrep': '使用 Ripgrep',
   'Use Builtin Ripgrep': '使用內置 Ripgrep',
-  'Enable Tool Output Truncation': '啓用工具輸出截斷',
   'Tool Output Truncation Threshold': '工具輸出截斷閾值',
   'Tool Output Truncation Lines': '工具輸出截斷行數',
-  'Folder Trust': '文件夾信任',
-  'Vision Model Preview': '視覺模型預覽',
-  'Tool Schema Compliance': '工具 Schema 兼容性',
+  'Folder Trust': '檔案夾信任',
+  'Tool Schema Compliance': 'Tool Schema 兼容性',
   'Auto (detect from system)': '自動（從系統檢測）',
   'Auto (detect terminal theme)': '自動（檢測終端主題）',
   Auto: '自動',
   Text: '文本',
   JSON: 'JSON',
   Plan: '規劃',
-  Default: '默認',
+  'Ask permissions': '請求授權',
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
-  'check session stats. Usage: /stats [model|tools]':
-    '檢查會話統計信息。用法：/stats [model|tools]',
   'Show model-specific usage statistics.': '顯示模型相關的使用統計信息',
   'Show tool-specific usage statistics.': '顯示工具相關的使用統計信息',
   'exit the cli': '退出命令行界面',
-  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
-    '打開 MCP 管理對話框，或在支持 OAuth 的服務器上進行身份驗證',
-  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
-    '列出已配置的 MCP 服務器和工具，或使用支持 OAuth 的服務器進行身份驗證',
   'Manage workspace directories': '管理工作區目錄',
   'Add directories to the workspace. Use comma to separate multiple paths':
     '將目錄添加到工作區。使用逗號分隔多個路徑',
@@ -403,17 +469,12 @@ export default {
   'Your preferred editor is:': '您的首選編輯器是：',
   'Manage extensions': '管理擴展',
   'Manage installed extensions': '管理已安裝的擴展',
-  'List active extensions': '列出活動擴展',
-  'Update extensions. Usage: update <extension-names>|--all':
-    '更新擴展。用法：update <extension-names>|--all',
   'Disable an extension': '禁用擴展',
-  'Enable an extension': '啓用擴展',
+  'Enable an extension': '啟用擴展',
   'Install an extension from a git repo or local path':
     '從 Git 倉庫或本地路徑安裝擴展',
   'Uninstall an extension': '卸載擴展',
   'No extensions installed.': '未安裝擴展。',
-  'Usage: /extensions update <extension-names>|--all':
-    '用法：/extensions update <擴展名>|--all',
   'Extension "{{name}}" not found.': '未找到擴展 "{{name}}"。',
   'No extensions to update.': '沒有可更新的擴展。',
   'Usage: /extensions install <source>': '用法：/extensions install <來源>',
@@ -422,36 +483,19 @@ export default {
   'Extension "{{name}}" installed successfully.': '擴展 "{{name}}" 安裝成功。',
   'Failed to install extension from "{{source}}": {{error}}':
     '從 "{{source}}" 安裝擴展失敗：{{error}}',
-  'Usage: /extensions uninstall <extension-name>':
-    '用法：/extensions uninstall <擴展名>',
-  'Uninstalling extension "{{name}}"...': '正在卸載擴展 "{{name}}"...',
-  'Extension "{{name}}" uninstalled successfully.':
-    '擴展 "{{name}}" 卸載成功。',
-  'Failed to uninstall extension "{{name}}": {{error}}':
-    '卸載擴展 "{{name}}" 失敗：{{error}}',
-  'Usage: /extensions {{command}} <extension> [--scope=<user|workspace>]':
-    '用法：/extensions {{command}} <擴展> [--scope=<user|workspace>]',
-  'Unsupported scope "{{scope}}", should be one of "user" or "workspace"':
-    '不支持的作用域 "{{scope}}"，應爲 "user" 或 "workspace"',
-  'Extension "{{name}}" disabled for scope "{{scope}}"':
-    '擴展 "{{name}}" 已在作用域 "{{scope}}" 中禁用',
-  'Extension "{{name}}" enabled for scope "{{scope}}"':
-    '擴展 "{{name}}" 已在作用域 "{{scope}}" 中啓用',
   'Do you want to continue? [Y/n]: ': '是否繼續？[Y/n]：',
   'Do you want to continue?': '是否繼續？',
   'Installing extension "{{name}}".': '正在安裝擴展 "{{name}}"。',
   '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
-    '**擴展可能會引入意外行爲。請確保您已調查過擴展源並信任作者。**',
+    '**擴展可能會引入意外行為。請確保您已調查過擴展源並信任作者。**',
   'This extension will run the following MCP servers:':
-    '此擴展將運行以下 MCP 服務器：',
+    '此擴展將運行以下 MCP servers：',
   local: '本地',
   remote: '遠程',
   'This extension will add the following commands: {{commands}}.':
     '此擴展將添加以下命令：{{commands}}。',
   'This extension will append info to your QWEN.md context using {{fileName}}':
     '此擴展將使用 {{fileName}} 向您的 QWEN.md 上下文追加信息',
-  'This extension will exclude the following core tools: {{tools}}':
-    '此擴展將排除以下核心工具：{{tools}}',
   'This extension will install the following skills:': '此擴展將安裝以下技能：',
   'This extension will install the following subagents:':
     '此擴展將安裝以下子智能體：',
@@ -461,14 +505,12 @@ export default {
   '--ref and --auto-update are not applicable for marketplace extensions.':
     '--ref 和 --auto-update 不適用於市場擴展。',
   'Extension "{{name}}" installed successfully and enabled.':
-    '擴展 "{{name}}" 安裝成功並已啓用。',
-  'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).':
-    '從 Git 倉庫 URL、本地路徑或 Claude 市場（marketplace-url:plugin-name）安裝擴展。',
+    '擴展 "{{name}}" 安裝成功並已啟用。',
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     '要安裝的擴展的 GitHub URL、本地路徑或市場源（marketplace-url:plugin-name）。',
   'The git ref to install from.': '要安裝的 Git 引用。',
-  'Enable auto-update for this extension.': '爲此擴展啓用自動更新。',
-  'Enable pre-release versions for this extension.': '爲此擴展啓用預發佈版本。',
+  'Enable auto-update for this extension.': '為此擴展啟用自動更新。',
+  'Enable pre-release versions for this extension.': '為此擴展啟用預發佈版本。',
   'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
     '確認安裝擴展的安全風險並跳過確認提示。',
   'The source argument must be provided.': '必須提供來源參數。',
@@ -478,15 +520,15 @@ export default {
   'The name or source path of the extension to uninstall.':
     '要卸載的擴展的名稱或源路徑。',
   'Please include the name of the extension to uninstall as a positional argument.':
-    '請將要卸載的擴展名稱作爲位置參數。',
-  'Enables an extension.': '啓用擴展。',
-  'The name of the extension to enable.': '要啓用的擴展名稱。',
+    '請將要卸載的擴展名稱作為位置參數。',
+  'Enables an extension.': '啟用擴展。',
+  'The name of the extension to enable.': '要啟用的擴展名稱。',
   'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
-    '啓用擴展的作用域。如果未設置，將在所有作用域中啓用。',
+    '啟用擴展的作用域。如果未設置，將在所有作用域中啟用。',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
-    '擴展 "{{name}}" 已在作用域 "{{scope}}" 中啓用。',
+    '擴展 "{{name}}" 已在作用域 "{{scope}}" 中啟用。',
   'Extension "{{name}}" successfully enabled in all scopes.':
-    '擴展 "{{name}}" 已在所有作用域中啓用。',
+    '擴展 "{{name}}" 已在所有作用域中啟用。',
   'Invalid scope: {{scope}}. Please use one of {{scopes}}.':
     '無效的作用域：{{scope}}。請使用 {{scopes}} 之一。',
   'Disables an extension.': '禁用擴展。',
@@ -506,25 +548,26 @@ export default {
   'The name of the extension to update.': '要更新的擴展名稱。',
   'Either an extension name or --all must be provided':
     '必須提供擴展名稱或 --all',
+  'List installed extensions': '列出已安裝的擴展',
   'Lists installed extensions.': '列出已安裝的擴展。',
   'Path:': '路徑：',
   'Source:': '來源：',
   'Type:': '類型：',
   'Ref:': '引用：',
   'Release tag:': '發佈標籤：',
-  'Enabled (User):': '已啓用（用戶）：',
-  'Enabled (Workspace):': '已啓用（工作區）：',
-  'Context files:': '上下文文件：',
+  'Enabled (User):': '已啟用（用戶）：',
+  'Enabled (Workspace):': '已啟用（工作區）：',
+  'Context files:': '上下文檔案：',
   'Skills:': '技能：',
   'Agents:': '智能體：',
-  'MCP servers:': 'MCP 服務器：',
-  'Link extension failed to install.': '鏈接擴展安裝失敗。',
+  'MCP servers:': 'MCP servers：',
+  'Link extension failed to install.': '連結擴展安裝失敗。',
   'Extension "{{name}}" linked successfully and enabled.':
-    '擴展 "{{name}}" 鏈接成功並已啓用。',
+    '擴展 "{{name}}" 連結成功並已啟用。',
   'Links an extension from a local path. Updates made to the local path will always be reflected.':
-    '從本地路徑鏈接擴展。對本地路徑的更新將始終反映。',
-  'The name of the extension to link.': '要鏈接的擴展名稱。',
-  'Set a specific setting for an extension.': '爲擴展設置特定配置。',
+    '從本地路徑連結擴展。對本地路徑的更新將始終反映。',
+  'The name of the extension to link.': '要連結的擴展名稱。',
+  'Set a specific setting for an extension.': '為擴展設置特定配置。',
   'Name of the extension to configure.': '要配置的擴展名稱。',
   'The setting to configure (name or env var).':
     '要配置的設置（名稱或環境變量）。',
@@ -548,14 +591,14 @@ export default {
   'Plugin selection cancelled.': '插件選擇已取消。',
   'Select a plugin from "{{name}}"': '從 "{{name}}" 中選擇插件',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
-    '使用 ↑↓ 或 j/k 導航，回車選擇，Esc 取消',
+    '使用 ↑↓ 或 j/k 導航，Enter 選擇，Escape 取消',
   '{{count}} more above': '上方還有 {{count}} 項',
   '{{count}} more below': '下方還有 {{count}} 項',
   'manage IDE integration': '管理 IDE 集成',
   'check status of IDE integration': '檢查 IDE 集成狀態',
   'install required IDE companion for {{ideName}}':
     '安裝 {{ideName}} 所需的 IDE 配套工具',
-  'enable IDE integration': '啓用 IDE 集成',
+  'enable IDE integration': '啟用 IDE 集成',
   'disable IDE integration': '禁用 IDE 集成',
   'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
     '您當前環境不支持 IDE 集成。要使用此功能，請在以下支持的 IDE 之一中運行 Qwen Code：VS Code 或 VS Code 分支版本。',
@@ -563,47 +606,45 @@ export default {
   'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)':
     '配置終端按鍵綁定以支持多行輸入（VS Code、Cursor、Windsurf、Trae）',
   'Please restart your terminal for the changes to take effect.':
-    '請重啓終端以使更改生效。',
+    '請重啟終端以使更改生效。',
   'Failed to configure terminal: {{error}}': '配置終端失敗：{{error}}',
   'Could not determine {{terminalName}} config path on Windows: APPDATA environment variable is not set.':
     '無法確定 {{terminalName}} 在 Windows 上的配置路徑：未設置 APPDATA 環境變量。',
   '{{terminalName}} keybindings.json exists but is not a valid JSON array. Please fix the file manually or delete it to allow automatic configuration.':
-    '{{terminalName}} keybindings.json 存在但不是有效的 JSON 數組。請手動修復文件或刪除它以允許自動配置。',
-  'File: {{file}}': '文件：{{file}}',
+    '{{terminalName}} keybindings.json 存在但不是有效的 JSON 數組。請手動修復檔案或刪除它以允許自動配置。',
+  'File: {{file}}': '檔案：{{file}}',
   'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
-    '解析 {{terminalName}} keybindings.json 失敗。文件包含無效的 JSON。請手動修復文件或刪除它以允許自動配置。',
+    '解析 {{terminalName}} keybindings.json 失敗。檔案包含無效的 JSON。請手動修復檔案或刪除它以允許自動配置。',
   'Error: {{error}}': '錯誤：{{error}}',
   'Shift+Enter binding already exists': 'Shift+Enter 綁定已存在',
   'Ctrl+Enter binding already exists': 'Ctrl+Enter 綁定已存在',
   'Existing keybindings detected. Will not modify to avoid conflicts.':
-    '檢測到現有按鍵綁定。爲避免衝突，不會修改。',
+    '檢測到現有按鍵綁定。為避免衝突，不會修改。',
   'Please check and modify manually if needed: {{file}}':
     '如有需要，請手動檢查並修改：{{file}}',
   'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.':
-    '已爲 {{terminalName}} 添加 Shift+Enter 和 Ctrl+Enter 按鍵綁定。',
+    '已為 {{terminalName}} 添加 Shift+Enter 和 Ctrl+Enter 按鍵綁定。',
   'Modified: {{file}}': '已修改：{{file}}',
   '{{terminalName}} keybindings already configured.':
     '{{terminalName}} 按鍵綁定已配置。',
   'Failed to configure {{terminalName}}.': '配置 {{terminalName}} 失敗。',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
-    '您的終端已配置爲支持多行輸入（Shift+Enter 和 Ctrl+Enter）的最佳體驗。',
+    '您的終端已配置為支持多行輸入（Shift+Enter 和 Ctrl+Enter）的最佳體驗。',
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
-  'Enable a disabled hook': '啓用已禁用的 Hook',
-  'Disable an active hook': '禁用已啓用的 Hook',
   Hooks: 'Hook',
   'Loading hooks...': '正在加載 Hook...',
   'Error loading hooks:': '加載 Hook 出錯：',
   'Press Escape to close': '按 Escape 關閉',
   'Press Escape, Ctrl+C, or Ctrl+D to cancel':
     '按 Escape、Ctrl+C 或 Ctrl+D 取消',
-  'Press Space, Enter, or Escape to dismiss': '按空格、回車或 Escape 關閉',
+  'Press Space, Enter, or Escape to dismiss': '按 Space、Enter 或 Escape 關閉',
   'No hook selected': '未選擇 Hook',
   'No hook events found.': '未找到 Hook 事件。',
   '{{count}} hook configured': '{{count}} 個 Hook 已配置',
   '{{count}} hooks configured': '{{count}} 個 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
-    '此菜單爲只讀。要添加或修改 Hook，請直接編輯 settings.json 或詢問 Qwen Code。',
+    '此選單為只讀。要添加或修改 Hook，請直接編輯 settings.json 或詢問 Qwen Code。',
   'Enter to select · Esc to cancel': 'Enter 選擇 · Esc 取消',
   'Exit codes:': '退出碼：',
   'Configured hooks:': '已配置的 Hook：',
@@ -629,9 +670,10 @@ export default {
   'Tool operations will proceed without hook validation':
     '工具操作將在沒有 Hook 驗證的情況下繼續',
   'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
-    '要重新啓用 Hook，請從 settings.json 中刪除 "disableAllHooks" 或詢問 Qwen Code。',
+    '要重新啟用 Hook，請從 settings.json 中刪除 "disableAllHooks" 或詢問 Qwen Code。',
   Project: '項目',
   User: '用戶',
+  Skill: '技能',
   System: '系統',
   Extension: '擴展',
   'Local Settings': '本地設置',
@@ -639,43 +681,44 @@ export default {
   'System Settings': '系統設置',
   Extensions: '擴展',
   'Session (temporary)': '會話（臨時）',
-  '✓ Enabled': '✓ 已啓用',
-  '✗ Disabled': '✗ 已禁用',
   'Before tool execution': '工具執行前',
   'After tool execution': '工具執行後',
   'After tool execution fails': '工具執行失敗後',
   'When notifications are sent': '發送通知時',
   'When the user submits a prompt': '用戶提交提示時',
+  'When a slash command expands into a prompt': '斜線命令展開為提示時',
   'When a new session is started': '新會話開始時',
   'Right before Qwen Code concludes its response': 'Qwen Code 結束響應之前',
   'When a subagent (Agent tool call) is started':
-    '子智能體（Agent 工具調用）啓動時',
+    '子智能體（Agent 工具調用）啟動時',
   'Right before a subagent concludes its response': '子智能體結束響應之前',
   'Before conversation compaction': '對話壓縮前',
   'When a session is ending': '會話結束時',
   'When a permission dialog is displayed': '顯示權限對話框時',
   'Input to command is JSON of tool call arguments.':
-    '命令輸入爲工具調用參數的 JSON。',
+    '命令輸入為工具調用參數的 JSON。',
   'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
-    '命令輸入爲包含 "inputs"（工具調用參數）和 "response"（工具調用響應）字段的 JSON。',
+    '命令輸入為包含 "inputs"（工具調用參數）和 "response"（工具調用響應）字段的 JSON。',
   'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
-    '命令輸入爲包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
+    '命令輸入為包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
   'Input to command is JSON with notification message and type.':
-    '命令輸入爲包含通知消息和類型的 JSON。',
+    '命令輸入為包含通知消息和類型的 JSON。',
   'Input to command is JSON with original user prompt text.':
-    '命令輸入爲包含原始用戶提示文本的 JSON。',
+    '命令輸入為包含原始用戶提示文本的 JSON。',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    '命令輸入為包含 command_name、command_args 和展開後提示文本的 JSON。',
   'Input to command is JSON with session start source.':
-    '命令輸入爲包含會話啓動來源的 JSON。',
+    '命令輸入為包含會話啟動來源的 JSON。',
   'Input to command is JSON with session end reason.':
-    '命令輸入爲包含會話結束原因的 JSON。',
+    '命令輸入為包含會話結束原因的 JSON。',
   'Input to command is JSON with agent_id and agent_type.':
-    '命令輸入爲包含 agent_id 和 agent_type 的 JSON。',
+    '命令輸入為包含 agent_id 和 agent_type 的 JSON。',
   'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
-    '命令輸入爲包含 agent_id、agent_type 和 agent_transcript_path 的 JSON。',
+    '命令輸入為包含 agent_id、agent_type 和 agent_transcript_path 的 JSON。',
   'Input to command is JSON with compaction details.':
-    '命令輸入爲包含壓縮詳情的 JSON。',
+    '命令輸入為包含壓縮詳情的 JSON。',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
-    '命令輸入爲包含 tool_name、tool_input 和 tool_use_id 的 JSON。輸出包含 hookSpecificOutput 的 JSON，其中包含允許或拒絕的決定。',
+    '命令輸入為包含 tool_name、tool_input 和 tool_use_id 的 JSON。輸出包含 hookSpecificOutput 的 JSON，其中包含允許或拒絕的決定。',
   'stdout/stderr not shown': 'stdout/stderr 不顯示',
   'show stderr to model and continue conversation':
     '向模型顯示 stderr 並繼續對話',
@@ -686,6 +729,8 @@ export default {
     '僅向用戶顯示 stderr 但繼續工具調用',
   'block processing, erase original prompt, and show stderr to user only':
     '阻止處理，擦除原始提示，僅向用戶顯示 stderr',
+  'block expanded prompt submission and show stderr to user only':
+    '阻止提交展開後的提示，並僅向用戶顯示 stderr',
   'stdout shown to Qwen': '向 Qwen 顯示 stdout',
   'show stderr to user only (blocking errors ignored)':
     '僅向用戶顯示 stderr（忽略阻塞錯誤）',
@@ -694,29 +739,44 @@ export default {
   'show stderr to subagent and continue having it run':
     '向子智能體顯示 stderr 並繼續運行',
   'stdout appended as custom compact instructions':
-    'stdout 作爲自定義壓縮指令追加',
+    'stdout 作為自定義壓縮指令追加',
   'block compaction': '阻止壓縮',
   'show stderr to user only but continue with compaction':
     '僅向用戶顯示 stderr 但繼續壓縮',
   'use hook decision if provided': '如果提供則使用 Hook 決定',
   'Config not loaded.': '配置未加載。',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
-    'Hook 未啓用。請在設置中啓用 Hook 以使用此功能。',
-  'No hooks configured. Add hooks in your settings.json file.':
-    '未配置 Hook。請在 settings.json 文件中添加 Hook。',
-  'Configured Hooks ({{count}} total)': '已配置的 Hook（共 {{count}} 個）',
+    'Hook 未啟用。請在設置中啟用 Hook 以使用此功能。',
   'Export current session message history to a file':
-    '將當前會話的消息記錄導出到文件',
-  'Export session to HTML format': '將會話導出爲 HTML 文件',
-  'Export session to JSON format': '將會話導出爲 JSON 文件',
+    '將當前會話的消息記錄導出到檔案',
+  'Export session to HTML format': '將會話導出為 HTML 檔案',
+  'Export session to JSON format': '將會話導出為 JSON 檔案',
   'Export session to JSONL format (one message per line)':
-    '將會話導出爲 JSONL 文件（每行一條消息）',
-  'Export session to markdown format': '將會話導出爲 Markdown 文件',
+    '將會話導出為 JSONL 檔案（每行一條消息）',
+  'Export session to markdown format': '將會話導出為 Markdown 檔案',
   'generate personalized programming insights from your chat history':
     '根據你的聊天記錄生成個性化編程洞察',
   'Resume a previous session': '恢復先前會話',
+  'Fork the current conversation into a new session': '將目前對話分支到新會話',
+  'Spawn a background agent that inherits the full conversation':
+    '啟動繼承完整對話的背景智能體',
+  'Please provide a directive. Usage: /fork <directive>':
+    '請提供指令。用法：/fork <指令>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
+  'Cannot fork before the first conversation turn.': '首次對話輪次前無法分支。',
+  'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；無法分支。',
+  'Failed to launch fork: {{error}}': '啟動分支失敗：{{error}}',
+  'the background agent could not be started.': '背景智能體無法啟動。',
+  'User launched a background fork via /fork: {{directive}}':
+    '使用者透過 /fork 啟動了背景分支：{{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    '已分支到背景智能體。它會繼承此對話並以非阻塞方式執行，可在背景任務面板中追蹤；完成後會回報結果。',
+  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
+  'No conversation to branch.': '沒有可分支的對話。',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
-    '恢復某次工具調用。這將把對話與文件歷史重置到提出該工具調用建議時的狀態',
+    '恢復某次工具調用。這將把對話與檔案歷史重置到提出該工具調用建議時的狀態',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     '無法檢測終端類型。支持的終端：VS Code、Cursor、Windsurf 和 Trae。',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -727,7 +787,6 @@ export default {
     '語言子命令不接受額外參數',
   'Current UI language: {{lang}}': '當前 UI 語言：{{lang}}',
   'Current LLM output language: {{lang}}': '當前 LLM 輸出語言：{{lang}}',
-  'LLM output language not set': '未設置 LLM 輸出語言',
   'Set UI language': '設置 UI 語言',
   'Set LLM output language': '設置 LLM 輸出語言',
   'Usage: /language ui [{{options}}]': '用法：/language ui [{{options}}]',
@@ -735,159 +794,61 @@ export default {
   'Example: /language output 中文': '示例：/language output 中文',
   'Example: /language output English': '示例：/language output English',
   'Example: /language output 日本語': '示例：/language output 日本語',
-  'Example: /language output Português': '示例：/language output Português',
-  'UI language changed to {{lang}}': 'UI 語言已更改爲 {{lang}}',
-  'LLM output language set to {{lang}}': 'LLM 輸出語言已設置爲 {{lang}}',
-  'LLM output language rule file generated at {{path}}':
-    'LLM 輸出語言規則文件已生成於 {{path}}',
+  'UI language changed to {{lang}}': 'UI 語言已更改為 {{lang}}',
+  'LLM output language set to {{lang}}': 'LLM 輸出語言已設置為 {{lang}}',
   'Please restart the application for the changes to take effect.':
-    '請重啓應用程序以使更改生效。',
+    '請重啟應用程序以使更改生效。',
   'Failed to generate LLM output language rule file: {{error}}':
-    '生成 LLM 輸出語言規則文件失敗：{{error}}',
+    '生成 LLM 輸出語言規則檔案失敗：{{error}}',
   'Invalid command. Available subcommands:': '無效的命令。可用的子命令：',
   'Available subcommands:': '可用的子命令：',
   'To request additional UI language packs, please open an issue on GitHub.':
     '如需請求其他 UI 語言包，請在 GitHub 上提交 issue',
   'Available options:': '可用選項：',
-  'Set UI language to {{name}}': '將 UI 語言設置爲 {{name}}',
+  'Set UI language to {{name}}': '將 UI 語言設置為 {{name}}',
   'Tool Approval Mode': '工具審批模式',
-  'Current approval mode: {{mode}}': '當前審批模式：{{mode}}',
-  'Available approval modes:': '可用的審批模式：',
-  'Approval mode changed to: {{mode}}': '審批模式已更改爲：{{mode}}',
-  'Approval mode changed to: {{mode}} (saved to {{scope}} settings{{location}})':
-    '審批模式已更改爲：{{mode}}（已保存到{{scope}}設置{{location}}）',
-  'Usage: /approval-mode <mode> [--session|--user|--project]':
-    '用法：/approval-mode <mode> [--session|--user|--project]',
-  'Scope subcommands do not accept additional arguments.':
-    '作用域子命令不接受額外參數',
-  'Plan mode - Analyze only, do not modify files or execute commands':
-    '規劃模式 - 僅分析，不修改文件或執行命令',
-  'Default mode - Require approval for file edits or shell commands':
-    '默認模式 - 需要批准文件編輯或 shell 命令',
-  'Auto-edit mode - Automatically approve file edits':
-    '自動編輯模式 - 自動批准文件編輯',
-  'YOLO mode - Automatically approve all tools': 'YOLO 模式 - 自動批准所有工具',
-  '{{mode}} mode': '{{mode}} 模式',
-  'Settings service is not available; unable to persist the approval mode.':
-    '設置服務不可用；無法持久化審批模式。',
-  'Failed to save approval mode: {{error}}': '保存審批模式失敗：{{error}}',
-  'Failed to change approval mode: {{error}}': '更改審批模式失敗：{{error}}',
-  'Apply to current session only (temporary)': '僅應用於當前會話（臨時）',
-  'Persist for this project/workspace': '持久化到此項目/工作區',
-  'Persist for this user on this machine': '持久化到此機器上的此用戶',
   'Analyze only, do not modify files or execute commands':
-    '僅分析，不修改文件或執行命令',
+    '僅分析，不修改檔案或執行命令',
   'Require approval for file edits or shell commands':
-    '需要批准文件編輯或 shell 命令',
-  'Automatically approve file edits': '自動批准文件編輯',
+    '需要批准檔案編輯或 shell 命令',
+  'Automatically approve file edits': '自動批准檔案編輯',
+  'Use classifier to automatically approve safe tool calls':
+    '使用分類器自動批准安全的工具調用',
   'Automatically approve all tools': '自動批准所有工具',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作區審批模式已存在並具有優先級。用戶級別的更改將無效。',
   'Apply To': '應用於',
   'Workspace Settings': '工作區設置',
-  'Commands for interacting with memory.': '用於與記憶交互的命令',
-  'Show the current memory contents.': '顯示當前記憶內容',
-  'Show project-level memory contents.': '顯示項目級記憶內容',
-  'Show global memory contents.': '顯示全局記憶內容',
-  'Add content to project-level memory.': '添加內容到項目級記憶',
-  'Add content to global memory.': '添加內容到全局記憶',
-  'Refresh the memory from the source.': '從源刷新記憶',
-  'Usage: /memory add --project <text to remember>':
-    '用法：/memory add --project <要記住的文本>',
-  'Usage: /memory add --global <text to remember>':
-    '用法：/memory add --global <要記住的文本>',
-  'Attempting to save to project memory: "{{text}}"':
-    '正在嘗試保存到項目記憶："{{text}}"',
-  'Attempting to save to global memory: "{{text}}"':
-    '正在嘗試保存到全局記憶："{{text}}"',
-  'Current memory content from {{count}} file(s):':
-    '來自 {{count}} 個文件的當前記憶內容：',
-  'Memory is currently empty.': '記憶當前爲空',
-  'Project memory file not found or is currently empty.':
-    '項目記憶文件未找到或當前爲空',
-  'Global memory file not found or is currently empty.':
-    '全局記憶文件未找到或當前爲空',
-  'Global memory is currently empty.': '全局記憶當前爲空',
-  'Global memory content:\n\n---\n{{content}}\n---':
-    '全局記憶內容：\n\n---\n{{content}}\n---',
-  'Project memory content from {{path}}:\n\n---\n{{content}}\n---':
-    '項目記憶內容來自 {{path}}：\n\n---\n{{content}}\n---',
-  'Project memory is currently empty.': '項目記憶當前爲空',
-  'Refreshing memory from source files...': '正在從源文件刷新記憶...',
-  'Add content to the memory. Use --global for global memory or --project for project memory.':
-    '添加內容到記憶。使用 --global 表示全局記憶，使用 --project 表示項目記憶',
-  'Usage: /memory add [--global|--project] <text to remember>':
-    '用法：/memory add [--global|--project] <要記住的文本>',
-  'Attempting to save to memory {{scope}}: "{{fact}}"':
-    '正在嘗試保存到記憶 {{scope}}："{{fact}}"',
-  'Open auto-memory folder': '打開自動記憶文件夾',
+  'Open auto-memory folder': '打開自動記憶檔案夾',
   'Auto-memory: {{status}}': '自動記憶：{{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     '自動整理：{{status}} · {{lastDream}} · /dream 立即運行',
+  'Auto-skill: {{status}}': '自動技能：{{status}}',
   never: '從未',
   on: '開',
   off: '關',
-  '✦ dreaming': '✦ 整理中',
   'Remove matching entries from managed auto-memory.':
     '從託管自動記憶中刪除匹配的條目。',
   'Usage: /forget <memory text to remove>': '用法：/forget <要刪除的記憶文本>',
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
-  'Show managed auto-memory status.': '顯示託管自動記憶狀態',
-  'Run managed auto-memory extraction for the current session.':
-    '爲當前會話運行託管自動記憶提煉',
-  'Managed auto-memory root: {{root}}': '託管自動記憶根目錄：{{root}}',
-  'Managed auto-memory topics:': '託管自動記憶主題：',
-  'No extraction cursor found yet.': '尚未找到提煉遊標。',
-  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
-    '遊標：session={{sessionId}}，offset={{offset}}，updated={{updatedAt}}',
-  'No chat client available to extract memory.':
-    '沒有可用於提煉記憶的聊天客戶端。',
-  'Managed auto-memory extraction is already running.':
-    '託管自動記憶提煉已在運行中。',
-  'Managed auto-memory extraction found no new durable memories.':
-    '託管自動記憶提煉未發現新的持久記憶。',
-  'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題文件',
-  'Managed auto-memory dream found nothing to improve.':
-    '託管自動記憶 dream 未發現可改進內容。',
-  'Deduplicated entries: {{count}}': '去重條目數：{{count}}',
-  'Save a durable memory using the save_memory tool.':
-    '使用 save_memory 工具保存一條持久記憶',
-  'Usage: /remember [--global|--project] <text to remember>':
-    '用法：/remember [--global|--project] <要記住的文本>',
-  'Authenticate with an OAuth-enabled MCP server':
-    '使用支持 OAuth 的 MCP 服務器進行認證',
-  'List configured MCP servers and tools': '列出已配置的 MCP 服務器和工具',
-  'Restarts MCP servers.': '重啓 MCP 服務器',
+  'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
+  'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',
   'Could not retrieve tool registry.': '無法檢索工具註冊表',
-  'No MCP servers configured with OAuth authentication.':
-    '未配置支持 OAuth 認證的 MCP 服務器',
-  'MCP servers with OAuth authentication:': '支持 OAuth 認證的 MCP 服務器：',
-  'Use /mcp auth <server-name> to authenticate.':
-    '使用 /mcp auth <server-name> 進行認證',
-  "MCP server '{{name}}' not found.": "未找到 MCP 服務器 '{{name}}'",
   "Successfully authenticated and refreshed tools for '{{name}}'.":
     "成功認證並刷新了 '{{name}}' 的工具",
-  "Failed to authenticate with MCP server '{{name}}': {{error}}":
-    "認證 MCP 服務器 '{{name}}' 失敗：{{error}}",
   "Re-discovering tools from '{{name}}'...":
     "正在重新發現 '{{name}}' 的工具...",
   "Discovered {{count}} tool(s) from '{{name}}'.":
     "從 '{{name}}' 發現了 {{count}} 個工具。",
   'Authentication complete. Returning to server details...':
-    '認證完成，正在返回服務器詳情...',
+    '認證完成，正在返回伺服器詳情...',
   'Authentication successful.': '認證成功。',
-  'If the browser does not open, copy and paste this URL into your browser:':
-    '如果瀏覽器未自動打開，請複製以下 URL 並粘貼到瀏覽器中：',
-  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
-    '⚠️  請確保複製完整的 URL —— 它可能跨越多行。',
-  'Manage MCP servers': '管理 MCP 服務器',
-  'Server Detail': '服務器詳情',
-  'Disable Server': '禁用服務器',
+  'Manage MCP servers': '管理 MCP servers',
+  'Server Detail': '伺服器詳情',
   Tools: '工具',
   'Tool Detail': '工具詳情',
-  'MCP Management': 'MCP 管理',
   'Loading...': '加載中...',
   'Unknown step': '未知步驟',
   'Esc to back': 'Esc 返回',
@@ -899,24 +860,22 @@ export default {
     '↑↓ 導航 · Enter 確認 · Esc 返回',
   'User Settings (global)': '用戶設置（全局）',
   'Workspace Settings (project-specific)': '工作區設置（項目級）',
-  'Disable server:': '禁用服務器：',
+  'Disable server:': '禁用伺服器：',
   'Select where to add the server to the exclude list:':
-    '選擇將服務器添加到排除列表的位置：',
+    '選擇將伺服器添加到排除列表的位置：',
   'Press Enter to confirm, Esc to cancel': '按 Enter 確認，Esc 取消',
   'View tools': '查看工具',
   Reconnect: '重新連接',
-  Enable: '啓用',
+  Enable: '啟用',
   Disable: '禁用',
   Authenticate: '認證',
   'Re-authenticate': '重新認證',
   'Clear Authentication': '清空認證',
-  'Server:': '服務器：',
+  'Server:': '伺服器：',
   'Command:': '命令：',
   'Working Directory:': '工作目錄：',
-  'Capabilities:': '功能：',
-  'No server selected': '未選擇服務器',
+  'No server selected': '未選擇伺服器',
   prompts: '提示詞',
-  '(disabled)': '(已禁用)',
   'Error:': '錯誤：',
   tool: '工具',
   tools: '個工具',
@@ -926,43 +885,31 @@ export default {
   'User MCPs': '用戶 MCP',
   'Project MCPs': '項目 MCP',
   'Extension MCPs': '擴展 MCP',
-  server: '個服務器',
-  servers: '個服務器',
+  server: '個伺服器',
+  servers: '個伺服器',
   'Add MCP servers to your settings to get started.':
-    '請在設置中添加 MCP 服務器以開始使用。',
+    '請在設置中添加 MCP servers 以開始使用。',
   'Run qwen --debug to see error logs': '運行 qwen --debug 查看錯誤日誌',
   'OAuth Authentication': 'OAuth 認證',
-  'Press Enter to start authentication, Esc to go back':
-    '按 Enter 開始認證，Esc 返回',
   'Authenticating... Please complete the login in your browser.':
     '認證中... 請在瀏覽器中完成登錄。',
   'Press c to copy the authorization URL to your clipboard.':
     '按 c 複製授權 URL 到剪貼板。',
   'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
-    '已向終端發送複製請求；若粘貼爲空，請手動複製上方 URL。',
+    '已向終端發送複製請求；若粘貼為空，請手動複製上方 URL。',
   'Cannot write to terminal — copy the URL above manually.':
     '無法寫入終端，請手動複製上方 URL。',
-  'Press Enter or Esc to go back': '按 Enter 或 Esc 返回',
-  'No tools available for this server.': '此服務器沒有可用工具。',
+  'No tools available for this server.': '此伺服器沒有可用工具。',
   destructive: '破壞性',
   'read-only': '只讀',
   'open-world': '開放世界',
   idempotent: '冪等',
-  'Tools for {{name}}': '{{name}} 的工具',
   'Tools for {{serverName}}': '{{serverName}} 的工具',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
   required: '必填',
-  Type: '類型',
-  Enum: '枚舉',
   Parameters: '參數',
   'No tool selected': '未選擇工具',
-  Annotations: '註解',
-  Title: '標題',
-  'Read Only': '只讀',
-  Destructive: '破壞性',
-  Idempotent: '冪等',
-  'Open World': '開放世界',
-  Server: '服務器',
+  Server: '伺服器',
   '{{count}} invalid tools': '{{count}} 個無效工具',
   invalid: '無效',
   'invalid: {{reason}}': '無效：{{reason}}',
@@ -974,44 +921,6 @@ export default {
   Reason: '原因',
   'Tools must have both name and description to be used by the LLM.':
     '工具必須同時具有名稱和描述才能被 LLM 使用。',
-  'Manage conversation history.': '管理對話歷史',
-  'List saved conversation checkpoints': '列出已保存的對話檢查點',
-  'No saved conversation checkpoints found.': '未找到已保存的對話檢查點',
-  'List of saved conversations:': '已保存的對話列表：',
-  'Note: Newest last, oldest first': '注意：最新的在最後，最舊的在最前',
-  'Save the current conversation as a checkpoint. Usage: /chat save <tag>':
-    '將當前對話保存爲檢查點。用法：/chat save <tag>',
-  'Missing tag. Usage: /chat save <tag>': '缺少標籤。用法：/chat save <tag>',
-  'Delete a conversation checkpoint. Usage: /chat delete <tag>':
-    '刪除對話檢查點。用法：/chat delete <tag>',
-  'Missing tag. Usage: /chat delete <tag>':
-    '缺少標籤。用法：/chat delete <tag>',
-  "Conversation checkpoint '{{tag}}' has been deleted.":
-    "對話檢查點 '{{tag}}' 已刪除",
-  "Error: No checkpoint found with tag '{{tag}}'.":
-    "錯誤：未找到標籤爲 '{{tag}}' 的檢查點",
-  'Resume a conversation from a checkpoint. Usage: /chat resume <tag>':
-    '從檢查點恢復對話。用法：/chat resume <tag>',
-  'Missing tag. Usage: /chat resume <tag>':
-    '缺少標籤。用法：/chat resume <tag>',
-  'No saved checkpoint found with tag: {{tag}}.':
-    '未找到標籤爲 {{tag}} 的已保存檢查點',
-  'A checkpoint with the tag {{tag}} already exists. Do you want to overwrite it?':
-    '標籤爲 {{tag}} 的檢查點已存在。您要覆蓋它嗎？',
-  'No chat client available to save conversation.':
-    '沒有可用的聊天客戶端來保存對話',
-  'Conversation checkpoint saved with tag: {{tag}}.':
-    '對話檢查點已保存，標籤：{{tag}}',
-  'No conversation found to save.': '未找到要保存的對話',
-  'No chat client available to share conversation.':
-    '沒有可用的聊天客戶端來分享對話',
-  'Invalid file format. Only .md and .json are supported.':
-    '無效的文件格式。僅支持 .md 和 .json 文件',
-  'Error sharing conversation: {{error}}': '分享對話時出錯：{{error}}',
-  'Conversation shared to {{filePath}}': '對話已分享到 {{filePath}}',
-  'No conversation found to share.': '未找到要分享的對話',
-  'Share the current conversation to a markdown or json file. Usage: /chat share <file>':
-    '將當前對話分享到 markdown 或 json 文件。用法：/chat share <file>',
   'Generate a project summary and save it to .qwen/PROJECT_SUMMARY.md':
     '生成項目摘要並保存到 .qwen/PROJECT_SUMMARY.md',
   'No chat client available to generate summary.':
@@ -1025,6 +934,10 @@ export default {
     '項目摘要已保存到 {{filePathForDisplay}}',
   'Saving project summary...': '正在保存項目摘要...',
   'Generating project summary...': '正在生成項目摘要...',
+  'Processing summary...': '正在處理摘要...',
+  'Project summary generated and saved successfully!':
+    '項目摘要已生成並成功保存！',
+  'Saved to: {{filePath}}': '儲存至：{{filePath}}',
   'Failed to generate summary - no text content received from LLM response':
     '生成摘要失敗 - 未從 LLM 響應中接收到文本內容',
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
@@ -1036,31 +949,29 @@ export default {
   'No models available for the current authentication type ({{authType}}).':
     '當前認證類型 ({{authType}}) 沒有可用的模型',
   // Needs translation
-  ' (not in model registry)': ' (not in model registry)',
   'Starting a new session, resetting chat, and clearing terminal.':
     '正在開始新會話，重置聊天並清屏。',
   'Starting a new session and clearing.': '正在開始新會話並清屏。',
   'Already compressing, wait for previous request to complete':
     '正在壓縮中，請等待上一個請求完成',
-  'Failed to compress chat history.': '壓縮聊天曆史失敗',
-  'Failed to compress chat history: {{error}}': '壓縮聊天曆史失敗：{{error}}',
-  'Compressing chat history': '正在壓縮聊天曆史',
+  'Failed to compress chat history.': '壓縮聊天歷史失敗',
+  'Failed to compress chat history: {{error}}': '壓縮聊天歷史失敗：{{error}}',
+  'Compressing chat history': '正在壓縮聊天歷史',
   'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
-    '聊天曆史已從 {{originalTokens}} 個 token 壓縮到 {{newTokens}} 個 token。',
+    '聊天歷史已從 {{originalTokens}} 個 token 壓縮到 {{newTokens}} 個 token。',
   'Compression was not beneficial for this history size.':
     '對於此歷史記錄大小，壓縮沒有益處。',
   'Chat history compression did not reduce size. This may indicate issues with the compression prompt.':
-    '聊天曆史壓縮未能減小大小。這可能表明壓縮提示存在問題。',
+    '聊天歷史壓縮未能減小大小。這可能表明壓縮提示存在問題。',
   'Could not compress chat history due to a token counting error.':
-    '由於 token 計數錯誤，無法壓縮聊天曆史。',
-  'Chat history is already compressed.': '聊天曆史已經壓縮。',
+    '由於 token 計數錯誤，無法壓縮聊天歷史。',
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
-    '/directory add 命令在限制性沙箱配置文件中不受支持。請改爲在啓動會話時使用 --include-directories。',
+    '/directory add 命令在限制性沙箱配置檔案中不受支持。請改為在啟動會話時使用 --include-directories。',
   "Error adding '{{path}}': {{error}}": "添加 '{{path}}' 時出錯：{{error}}",
   'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
-    '如果存在，已成功從以下目錄添加 QWEN.md 文件：\n- {{directories}}',
+    '如果存在，已成功從以下目錄添加 QWEN.md 檔案：\n- {{directories}}',
   'Error refreshing memory: {{error}}': '刷新內存時出錯：{{error}}',
   'Successfully added directories:\n- {{directories}}':
     '成功添加目錄：\n- {{directories}}',
@@ -1076,7 +987,6 @@ export default {
   Yes: '是',
   No: '否',
   'No (esc)': '否 (esc)',
-  'Yes, allow always for this session': '是，本次會話總是允許',
   'Modify in progress:': '正在修改：',
   'Save and close external editor to continue': '保存並關閉外部編輯器以繼續',
   'Apply this change?': '是否應用此更改？',
@@ -1084,7 +994,6 @@ export default {
   'Modify with external editor': '使用外部編輯器修改',
   'No, suggest changes (esc)': '否，建議更改 (esc)',
   "Allow execution of: '{{command}}'?": "允許執行：'{{command}}'？",
-  'Yes, allow always ...': '是，總是允許 ...',
   'Always allow in this project': '在本項目中總是允許',
   'Always allow {{action}} in this project': '在本項目中總是允許{{action}}',
   'Always allow for this user': '對該用戶總是允許',
@@ -1094,20 +1003,13 @@ export default {
   'Yes, and manually approve edits': '是，並手動批准編輯',
   'No, keep planning (esc)': '否，繼續規劃 (esc)',
   'URLs to fetch:': '要獲取的 URL：',
-  'MCP Server: {{server}}': 'MCP 服務器：{{server}}',
+  'MCP Server: {{server}}': 'MCP Server：{{server}}',
   'Tool: {{tool}}': '工具：{{tool}}',
   'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
-    '允許執行來自服務器 "{{server}}" 的 MCP 工具 "{{tool}}"？',
-  'Yes, always allow tool "{{tool}}" from server "{{server}}"':
-    '是，總是允許來自服務器 "{{server}}" 的工具 "{{tool}}"',
-  'Yes, always allow all tools from server "{{server}}"':
-    '是，總是允許來自服務器 "{{server}}" 的所有工具',
+    '允許執行來自 MCP server "{{server}}" 的 MCP tool "{{tool}}"？',
   'Shell Command Execution': 'Shell 命令執行',
   'A custom command wants to run the following shell commands:':
     '自定義命令想要運行以下 shell 命令：',
-  'Pro quota limit reached for {{model}}.': '{{model}} 的 Pro 配額已達到上限',
-  'Change auth (executes the /auth command)': '更改認證（執行 /auth 命令）',
-  'Continue with {{model}}': '使用 {{model}} 繼續',
   'Current Plan:': '當前計劃：',
   'Progress: {{done}}/{{total}} tasks completed':
     '進度：已完成 {{done}}/{{total}} 個任務',
@@ -1120,18 +1022,13 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 歡迎回來！（最後更新：{{timeAgo}}）',
   '🎯 Overall Goal:': '🎯 總體目標：',
-  'Get started': '開始使用',
-  'Select Authentication Method': '選擇認證方式',
-  'OpenAI API key is required to use OpenAI authentication.':
-    '使用 OpenAI 認證需要 OpenAI API 密鑰',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    '您必須選擇認證方法才能繼續。再次按 Ctrl+C 退出',
+  'Connect a Provider': '連接服務商',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    '必須連接一個服務商才能繼續。再次按 Ctrl+C 退出',
   'Terms of Services and Privacy Notice': '服務條款和隱私聲明',
   'Qwen OAuth': 'Qwen OAuth (免費)',
   'Discontinued — switch to Coding Plan or API Key':
     '已停用 — 請切換到 Coding Plan 或 API Key',
-  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
-    'Qwen OAuth 免費額度已於 2026-04-15 停用。請運行 /auth 切換服務商。',
   'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
     'Qwen OAuth 免費額度已於 2026-04-15 停用。請選擇 Coding Plan 或 API Key。',
   'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
@@ -1140,49 +1037,49 @@ export default {
     '\n⚠ Qwen OAuth 免費額度已於 2026-04-15 停用。請選擇其他選項。\n',
   'Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models':
     '付費 · 每 5 小時最多 6,000 次請求 · 支持阿里雲百鍊 Coding Plan 全部模型',
+  'For teams · Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models':
+    '適合團隊 · 付費 · 每 5 小時最多 6,000 次請求 · 支援阿里雲百鍊 Coding Plan 全部模型',
+  'For individual developers · Pay per model call · 5-hour/weekly quotas':
+    '適合個人開發場景 · 按模型調用次數計費 · 每 5 小時/每週限額',
+  Subscribe: '訂閱計劃',
+  'Paid subscription plans from Alibaba Cloud ModelStudio':
+    'Alibaba Cloud ModelStudio 付費訂閱計劃',
+  'Select Subscription Plan': '選擇訂閱計劃',
   'Alibaba Cloud Coding Plan': '阿里雲百鍊 Coding Plan',
-  'Bring your own API key': '使用自己的 API 密鑰',
-  'API-KEY': 'API-KEY',
+  'Alibaba Cloud Token Plan': '阿里雲百鍊 Token Plan',
+  'Pay-as-you-go tokens · Configure ModelStudio standard API key':
+    '按 Token 付費 · 配置 ModelStudio 標準 API Key',
+  'For individuals · Pay-as-you-go tokens · Dedicated Token Plan endpoint':
+    '適合個人 · 按 Token 付費 · 使用獨立 Token Plan Endpoint',
+  'For teams/companies · Credits deducted by token usage · Dedicated API key and base URL':
+    '適合一人公司/團隊/企業 · 按 Token 消耗抵扣 Credits · 專屬 API Key 和 Base URL',
+  'Token Plan documentation': 'Token Plan 參考文檔',
+  'Bring your own API key': '使用自己的 API Key',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     '基於瀏覽器的第三方提供商認證（例如 OpenRouter、ModelScope）',
-  'Use coding plan credentials or your own api-keys/providers.':
-    '使用 Coding Plan 憑證或您自己的 API 密鑰/提供商。',
-  OpenAI: 'OpenAI',
-  'Failed to login. Message: {{message}}': '登錄失敗。消息：{{message}}',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
-    '認證方式被強制設置爲 {{enforcedType}}，但您當前使用的是 {{currentType}}',
-  'Qwen OAuth authentication timed out. Please try again.':
-    'Qwen OAuth 認證超時。請重試',
-  'Qwen OAuth authentication cancelled.': 'Qwen OAuth 認證已取消',
+    '認證方式被強制設置為 {{enforcedType}}，但您當前使用的是 {{currentType}}',
   'Qwen OAuth Authentication': 'Qwen OAuth 認證',
   'Please visit this URL to authorize:': '請訪問此 URL 進行授權：',
-  'Or scan the QR code below:': '或掃描下方的二維碼：',
   'Waiting for authorization': '等待授權中',
   'Time remaining:': '剩餘時間：',
-  '(Press ESC or CTRL+C to cancel)': '（按 ESC 或 CTRL+C 取消）',
   'Qwen OAuth Authentication Timeout': 'Qwen OAuth 認證超時',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
-    'OAuth 令牌已過期（超過 {{seconds}} 秒）。請重新選擇認證方法',
+    'OAuth token 已過期（超過 {{seconds}} 秒）。請重新選擇認證方法',
   'Press any key to return to authentication type selection.':
     '按任意鍵返回認證類型選擇',
   'Waiting for Qwen OAuth authentication...': '正在等待 Qwen OAuth 認證...',
-  'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
-    '注意：使用 Qwen OAuth 時，settings.json 中現有的 API 密鑰不會被清除。如果需要，您可以稍後切換回 OpenAI 認證。',
-  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
-    '注意：使用 Qwen OAuth 時，現有的 API 密鑰不會被清除。',
   'Authentication timed out. Please try again.': '認證超時。請重試。',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     '正在等待認證...（按 ESC 或 CTRL+C 取消）',
   'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
-    '缺少 OpenAI 兼容認證的 API 密鑰。請設置 settings.security.auth.apiKey 或設置 {{envKeyHint}} 環境變量。',
-  '{{envKeyHint}} environment variable not found.':
-    '未找到 {{envKeyHint}} 環境變量。',
+    '缺少 OpenAI 兼容認證的 API Key。請設置 settings.security.auth.apiKey 或設置 {{envKeyHint}} 環境變量。',
   '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
-    '未找到 {{envKeyHint}} 環境變量。請在 .env 文件或系統環境變量中進行設置。',
+    '未找到 {{envKeyHint}} 環境變量。請在 .env 檔案或系統環境變量中進行設置。',
   '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
-    '未找到 {{envKeyHint}} 環境變量（或設置 settings.security.auth.apiKey）。請在 .env 文件或系統環境變量中進行設置。',
+    '未找到 {{envKeyHint}} 環境變量（或設置 settings.security.auth.apiKey）。請在 .env 檔案或系統環境變量中進行設置。',
   'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
-    '缺少 OpenAI 兼容認證的 API 密鑰。請設置 {{envKeyHint}} 環境變量。',
+    '缺少 OpenAI 兼容認證的 API Key。請設置 {{envKeyHint}} 環境變量。',
   'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
     'Anthropic 提供商缺少必需的 baseUrl，請在 modelProviders[].baseUrl 中配置。',
   'ANTHROPIC_BASE_URL environment variable not found.':
@@ -1192,23 +1089,10 @@ export default {
   'Authenticated successfully with {{authType}} credentials.':
     '使用 {{authType}} 憑據成功認證。',
   'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}':
-    '無效的 QWEN_DEFAULT_AUTH_TYPE 值："{{value}}"。有效值爲：{{validValues}}',
-  'OpenAI Configuration Required': '需要配置 OpenAI',
-  'Please enter your OpenAI configuration. You can get an API key from':
-    '請輸入您的 OpenAI 配置。您可以從以下地址獲取 API 密鑰：',
-  'API Key:': 'API 密鑰：',
-  'Invalid credentials: {{errorMessage}}': '憑據無效：{{errorMessage}}',
-  'Failed to validate credentials': '驗證憑據失敗',
-  'Press Enter to continue, Tab/↑↓ to navigate, Esc to cancel':
-    '按 Enter 繼續，Tab/↑↓ 導航，Esc 取消',
+    '無效的 QWEN_DEFAULT_AUTH_TYPE 值："{{value}}"。有效值為：{{validValues}}',
   'Select Model': '選擇模型',
-  '(Press Esc to close)': '（按 Esc 關閉）',
-  'Current (effective) configuration': '當前（實際生效）配置',
-  AuthType: '認證方式',
-  'API Key': 'API 密鑰',
-  unset: '未設置',
+  'API Key': 'API Key',
   '(default)': '(默認)',
-  '(set)': '(已設置)',
   '(not set)': '(未設置)',
   Modality: '模態',
   'Context Window': '上下文窗口',
@@ -1221,14 +1105,8 @@ export default {
   'not set': '未設置',
   none: '無',
   unknown: '未知',
-  "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
-    "無法切換到模型 '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.6 Plus — 高效混合架構，編程性能業界領先',
-  'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
-    '來自阿里雲 ModelStudio 的最新 Qwen Vision 模型（版本：qwen3-vl-plus-2025-09-23）',
-  'Manage folder trust settings': '管理文件夾信任設置',
-  'Manage permission rules': '管理權限規則',
+  'Manage folder trust settings': '管理檔案夾信任設置',
+  'Manage permission rules': '管理 permission rules',
   Allow: '允許',
   Ask: '詢問',
   Deny: '拒絕',
@@ -1247,42 +1125,38 @@ export default {
   'From user settings': '來自用戶設置',
   'From project settings': '來自項目設置',
   'From session': '來自會話',
-  'Project settings (local)': '項目設置（本地）',
-  'Saved in .qwen/settings.local.json': '保存在 .qwen/settings.local.json',
   'Project settings': '項目設置',
   'Checked in at .qwen/settings.json': '保存在 .qwen/settings.json',
   'User settings': '用戶設置',
   'Saved in at ~/.qwen/settings.json': '保存在 ~/.qwen/settings.json',
   'Add a new rule…': '添加新規則…',
-  'Add {{type}} permission rule': '添加{{type}}權限規則',
+  'Add {{type}} permission rule': '添加 {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
-    '權限規則是一個工具名稱，可選地後跟括號中的限定符。',
+    'permission rules 是工具名稱，可選地後跟括號中的限定符。',
   'e.g.,': '例如',
   or: '或',
-  'Enter permission rule…': '輸入權限規則…',
-  'Enter to submit · Esc to cancel': '回車提交 · Esc 取消',
+  'Enter permission rule…': '輸入 permission rule…',
+  'Enter to submit · Esc to cancel': 'Enter 提交 · Esc 取消',
   'Where should this rule be saved?': '此規則應保存在哪裏？',
-  'Enter to confirm · Esc to cancel': '回車確認 · Esc 取消',
+  'Enter to confirm · Esc to cancel': 'Enter 確認 · Esc 取消',
   'Delete {{type}} rule?': '刪除{{type}}規則？',
   'Are you sure you want to delete this permission rule?':
-    '確定要刪除此權限規則嗎？',
+    '確定要刪除此 permission rule 嗎？',
   'Permissions:': '權限：',
-  '(←/→ or tab to cycle)': '（←/→ 或 tab 切換）',
+  '(←/→ or tab to cycle)': '（←/→ 或 Tab 切換）',
   'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
-    '按 ↑↓ 導航 · 回車選擇 · 輸入搜索 · Esc 取消',
+    '按 ↑↓ 導航 · Enter 選擇 · 輸入搜索 · Esc 取消',
   'Search…': '搜索…',
-  'Use /trust to manage folder trust settings for this workspace.':
-    '使用 /trust 管理此工作區的文件夾信任設置。',
   'Add directory…': '添加目錄…',
   'Add directory to workspace': '添加工作區目錄',
   'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
-    'Qwen Code 可以讀取工作區中的文件，並在自動接受編輯模式開啓時進行編輯。',
+    'Qwen Code 可以讀取工作區中的檔案，並在自動接受編輯模式開啟時進行編輯。',
   'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
-    'Qwen Code 將能夠讀取此目錄中的文件，並在自動接受編輯模式開啓時進行編輯。',
+    'Qwen Code 將能夠讀取此目錄中的檔案，並在自動接受編輯模式開啟時進行編輯。',
   'Enter the path to the directory:': '輸入目錄路徑：',
   'Enter directory path…': '輸入目錄路徑…',
   'Tab to complete · Enter to add · Esc to cancel':
-    'Tab 補全 · 回車添加 · Esc 取消',
+    'Tab 補全 · Enter 添加 · Esc 取消',
   'Remove directory?': '刪除目錄？',
   'Are you sure you want to remove this directory from the workspace?':
     '確定要將此目錄從工作區中移除嗎？',
@@ -1293,13 +1167,13 @@ export default {
   'This directory is already in the workspace.': '此目錄已在工作區中。',
   'Already covered by existing directory: {{dir}}': '已被現有目錄覆蓋：{{dir}}',
   'Using:': '已加載: ',
-  '{{count}} open file': '{{count}} 個打開的文件',
-  '{{count}} open files': '{{count}} 個打開的文件',
+  '{{count}} open file': '{{count}} 個打開的檔案',
+  '{{count}} open files': '{{count}} 個打開的檔案',
   '(ctrl+g to view)': '（按 ctrl+g 查看）',
-  '{{count}} {{name}} file': '{{count}} 個 {{name}} 文件',
-  '{{count}} {{name}} files': '{{count}} 個 {{name}} 文件',
-  '{{count}} MCP server': '{{count}} 個 MCP 服務器',
-  '{{count}} MCP servers': '{{count}} 個 MCP 服務器',
+  '{{count}} {{name}} file': '{{count}} 個 {{name}} 檔案',
+  '{{count}} {{name}} files': '{{count}} 個 {{name}} 檔案',
+  '{{count}} MCP server': '{{count}} 個 MCP server',
+  '{{count}} MCP servers': '{{count}} 個 MCP servers',
   '{{count}} Blocked': '{{count}} 個已阻止',
   '(ctrl+t to view)': '（按 ctrl+t 查看）',
   '(ctrl+t to toggle)': '（按 ctrl+t 切換）',
@@ -1307,15 +1181,15 @@ export default {
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
   'Press ↑ to edit queued messages': '按 ↑ 編輯排隊消息',
-  'No MCP servers configured.': '未配置 MCP 服務器',
+  'No MCP servers configured.': '未配置 MCP servers',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP 服務器正在啓動（{{count}} 個正在初始化）...',
+    '⏳ MCP servers 正在啟動（{{count}} 個正在初始化）...',
   'Note: First startup may take longer. Tool availability will update automatically.':
-    '注意：首次啓動可能需要更長時間。工具可用性將自動更新',
-  'Configured MCP servers:': '已配置的 MCP 服務器：',
+    '注意：首次啟動可能需要更長時間。工具可用性將自動更新',
+  'Configured MCP servers:': '已配置的 MCP servers：',
   Ready: '就緒',
   'Starting... (first startup may take longer)':
-    '正在啓動...（首次啓動可能需要更長時間）',
+    '正在啟動...（首次啟動可能需要更長時間）',
   Disconnected: '已斷開連接',
   '{{count}} tool': '{{count}} 個工具',
   '{{count}} tools': '{{count}} 個工具',
@@ -1333,21 +1207,20 @@ export default {
   Blocked: '已阻止',
   '💡 Tips:': '💡 提示：',
   Use: '使用',
-  'to show server and tool descriptions': '顯示服務器和工具描述',
-  'to show tool parameter schemas': '顯示工具參數架構',
+  'to show server and tool descriptions': '顯示伺服器和工具描述',
+  'to show tool parameter schemas': '顯示 tool parameter schemas',
   'to hide descriptions': '隱藏描述',
   'to authenticate with OAuth-enabled servers':
-    '使用支持 OAuth 的服務器進行認證',
+    '使用支持 OAuth 的伺服器進行認證',
   Press: '按',
   'to toggle tool descriptions on/off': '切換工具描述開關',
   "Starting OAuth authentication for MCP server '{{name}}'...":
-    "正在爲 MCP 服務器 '{{name}}' 啓動 OAuth 認證...",
-  'Restarting MCP servers...': '正在重啓 MCP 服務器...',
+    "正在為 MCP server '{{name}}' 啟動 OAuth 認證...",
   'Tips:': '提示：',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     '對話變長時用 /compress，總結歷史並釋放上下文。',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
-    '用 /clear 或 /new 開啓新思路；之前的會話會保留在歷史記錄中。',
+    '用 /clear 或 /new 開啟新思路；之前的會話會保留在歷史記錄中。',
   'Use /bug to submit issues to the maintainers when something goes off.':
     '遇到問題時，用 /bug 將問題提交給維護者。',
   'Switch auth type quickly with /auth.': '用 /auth 快速切換認證方式。',
@@ -1366,11 +1239,11 @@ export default {
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     '按 Ctrl+O 切換緊湊模式 ── 隱藏工具輸出和思考過程，界面更簡潔。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
-    '添加 QWEN.md 文件，爲 Qwen Code 提供持久的項目上下文。',
+    '添加 QWEN.md 檔案，為 Qwen Code 提供持久的項目上下文。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
     '用 /btw 快速問一個小問題，不會打斷當前對話。',
   'Context is almost full! Run /compress now or start /new to continue.':
-    '上下文即將用滿！請立即執行 /compress 或使用 /new 開啓新會話。',
+    '上下文即將用滿！請立即執行 /compress 或使用 /new 開啟新會話。',
   'Context is getting full. Use /compress to free up space.':
     '上下文空間不足，用 /compress 釋放空間。',
   'Long conversation? /compress summarizes history to free context.':
@@ -1391,32 +1264,49 @@ export default {
   'Tool Time:': '工具時間：',
   'Session Stats': '會話統計',
   'Model Usage': '模型使用情況',
-  Reqs: '請求數',
   'Input Tokens': '輸入 token 數',
   'Output Tokens': '輸出 token 數',
   'Savings Highlight:': '節省亮點：',
   'of input tokens were served from the cache, reducing costs.':
     '從緩存載入 token ，降低了成本',
   'Tip: For a full token breakdown, run `/stats model`.':
-    '提示：要查看完整的令牌明細，請運行 `/stats model`',
+    '提示：要查看完整的 token 明細，請運行 `/stats model`',
   'Model Stats For Nerds': '模型統計（技術細節）',
   'Tool Stats For Nerds': '工具統計（技術細節）',
   Metric: '指標',
   API: 'API',
+  Session: '會話',
+  Activity: '概覽',
+  Efficiency: '性能',
+  Success: '成功率',
+  Today: '今天',
+  'Token Trend': 'Token 趨勢',
+  'Cache Hit Rate': '緩存命中率',
+  'Tool Success': '工具成功率',
+  'Tool Leaderboard': '工具排行',
+  Calls: '調用次數',
+  Time: '耗時',
+  Reqs: '請求',
+  Cache: '緩存',
+  Latency: '延遲',
+  'In/Out': '輸入/輸出',
+  'Code Impact': '代碼變更',
+  'Failed to load stats. Press r to retry.': '載入統計失敗，按 r 重試。',
+  net: '淨增',
+  streak: '連續',
+  best: '最長',
   Requests: '請求數',
   Errors: '錯誤數',
   'Avg Latency': '平均延遲',
-  Tokens: '令牌',
+  Tokens: 'Token',
   Total: '總計',
   Prompt: '提示',
   Cached: '緩存',
   Thoughts: '思考',
-  Tool: '工具',
   Output: '輸出',
   'No API calls have been made in this session.':
     '本次會話中未進行任何 API 調用',
   'Tool Name': '工具名稱',
-  Calls: '調用次數',
   'Success Rate': '成功率',
   'Avg Duration': '平均耗時',
   'User Decision Summary': '用戶決策摘要',
@@ -1430,22 +1320,21 @@ export default {
   'Session start time is unavailable, cannot calculate stats.':
     '會話開始時間不可用，無法計算統計信息',
   'Command Format Migration': '命令格式遷移',
-  'Found {{count}} TOML command file:': '發現 {{count}} 個 TOML 命令文件：',
-  'Found {{count}} TOML command files:': '發現 {{count}} 個 TOML 命令文件：',
+  'Found {{count}} TOML command file:': '發現 {{count}} 個 TOML 命令檔案：',
+  'Found {{count}} TOML command files:': '發現 {{count}} 個 TOML 命令檔案：',
   'Current tasks': '目前任務',
   '... and {{count}} more': '... 以及其他 {{count}} 個',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'TOML 格式已棄用。是否將它們遷移到 Markdown 格式？',
   '(Backups will be created and original files will be preserved)':
-    '（將創建備份，原始文件將保留）',
+    '（將創建備份，原始檔案將保留）',
   'Waiting for user confirmation...': '等待用戶確認...',
-  '(esc to cancel, {{time}})': '（按 esc 取消，{{time}}）',
   WITTY_LOADING_PHRASES: [
     '正在努力搬磚，請稍候...',
     '老闆在身後，快加載啊！',
     '頭髮掉光前，一定能加載完...',
-    '服務器正在深呼吸，準備放大招...',
-    '正在向服務器投餵咖啡...',
+    '伺服器正在深呼吸，準備放大招...',
+    '正在向伺服器投餵咖啡...',
     '正在賦能全鏈路，尋找關鍵抓手...',
     '正在降本增效，優化加載路徑...',
     '正在打破部門壁壘，沉澱方法論...',
@@ -1453,7 +1342,7 @@ export default {
     '正在對齊顆粒度，打磨底層邏輯...',
     '大力出奇跡，正在強行加載...',
     '只要我不寫代碼，代碼就沒有 Bug...',
-    '正在把 Bug 轉化爲 Feature...',
+    '正在把 Bug 轉化為 Feature...',
     '只要我不尷尬，Bug 就追不上我...',
     '正在試圖理解去年的自己寫了什麼...',
     '正在猿力覺醒中，請耐心等待...',
@@ -1470,23 +1359,23 @@ export default {
   'Enter sensitive value...': '請輸入敏感值...',
   'Press Enter to submit, Escape to cancel': '按 Enter 提交，Escape 取消',
   'Markdown file already exists: {{filename}}':
-    'Markdown 文件已存在：{{filename}}',
+    'Markdown 檔案已存在：{{filename}}',
   'TOML Command Format Deprecation Notice': 'TOML 命令格式棄用通知',
   'Found {{count}} command file(s) in TOML format:':
-    '發現 {{count}} 個 TOML 格式的命令文件：',
+    '發現 {{count}} 個 TOML 格式的命令檔案：',
   'The TOML format for commands is being deprecated in favor of Markdown format.':
     '命令的 TOML 格式正在被棄用，推薦使用 Markdown 格式。',
   'Markdown format is more readable and easier to edit.':
     'Markdown 格式更易讀、更易編輯。',
   'You can migrate these files automatically using:':
-    '您可以使用以下命令自動遷移這些文件：',
-  'Or manually convert each file:': '或手動轉換每個文件：',
+    '您可以使用以下命令自動遷移這些檔案：',
+  'Or manually convert each file:': '或手動轉換每個檔案：',
   'TOML: prompt = "..." / description = "..."':
     'TOML：prompt = "..." / description = "..."',
   'Markdown: YAML frontmatter + content': 'Markdown：YAML frontmatter + 內容',
   'The migration tool will:': '遷移工具將：',
-  'Convert TOML files to Markdown': '將 TOML 文件轉換爲 Markdown',
-  'Create backups of original files': '創建原始文件的備份',
+  'Convert TOML files to Markdown': '將 TOML 檔案轉換為 Markdown',
+  'Create backups of original files': '創建原始檔案的備份',
   'Preserve all command functionality': '保留所有命令功能',
   'TOML format will continue to work for now, but migration is recommended.':
     'TOML 格式目前仍可使用，但建議遷移。',
@@ -1499,19 +1388,20 @@ export default {
     '正在瀏覽器中打開擴展頁面：{{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     '打開瀏覽器失敗。請訪問擴展市場：{{url}}',
-  'Rate limit error: {{reason}}': '觸發限流：{{reason}}',
   'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})':
     '將於 {{seconds}} 秒後重試…（第 {{attempt}}/{{maxRetries}} 次）',
   'Press Ctrl+Y to retry': '按 Ctrl+Y 重試。',
   'No failed request to retry.': '沒有可重試的失敗請求。',
   'to retry last request': '重試上一次請求',
-  'API key cannot be empty.': 'API Key 不能爲空。',
+  'API key cannot be empty.': 'API Key 不能為空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '無效的 API Key，Coding Plan API Key 均以 "sk-sp-" 開頭，請檢查',
   'You can get your Coding Plan API key here':
     '您可以在這裏獲取 Coding Plan API Key',
+  'You can get your Token Plan API key here':
+    '您可以在這裏獲取 Token Plan API Key',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
-    'API Key 已存儲在 settings.env 中。您可以將其遷移到 .env 文件以獲得更好的安全性。',
+    'API Key 已存儲在 settings.env 中。您可以將其遷移到 .env 檔案以獲得更好的安全性。',
   'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
     '阿里雲百鍊 Coding Plan 有新模型配置可用。是否立即更新？',
   'Coding Plan configuration updated successfully. New models are now available.':
@@ -1524,30 +1414,21 @@ export default {
     '您可以在 settings.json 中配置 API Key 和模型',
   'Refer to the documentation for setup instructions': '請參考文檔瞭解配置說明',
   'Coding Plan': 'Coding Plan',
-  "Paste your api key of ModelStudio Coding Plan and you're all set!":
-    '粘貼您的百鍊 Coding Plan API Key，即可完成設置！',
   Custom: '自定義',
-  'More instructions about configuring `modelProviders` manually.':
-    '關於手動配置 `modelProviders` 的更多說明。',
-  'Select API-KEY configuration mode:': '選擇 API-KEY 配置模式：',
-  '(Press Escape to go back)': '(按 Escape 鍵返回)',
-  '(Press Enter to submit, Escape to cancel)': '(按 Enter 提交，Escape 取消)',
   'Select Region for Coding Plan': '選擇 Coding Plan 區域',
   'Choose based on where your account is registered':
     '請根據您的賬號註冊地區選擇',
   'Enter Coding Plan API Key': '輸入 Coding Plan API Key',
+  'Enter Token Plan API Key': '輸入 Token Plan API Key',
   'New model configurations are available for {{region}}. Update now?':
     '{{region}} 有新的模型配置可用。是否立即更新？',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} 配置更新成功。模型已切換至 "{{model}}"。',
-  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
-    '成功通過 {{region}} 認證。API Key 和模型配置已保存至 settings.json（已備份）。',
   'Context Usage': '上下文使用情況',
   '% used': '% 已用',
   '% context used': '% 上下文已用',
   'Context exceeds limit! Use /compress or /clear to reduce.':
     '上下文超出限制！請使用 /compress 或 /clear 來減少上下文。',
-  'Use /compress or /clear': '使用 /compress 或 /clear',
   'No API response yet. Send a message to see actual usage.':
     '暫無 API 響應。發送消息以查看實際使用情況。',
   'Estimated pre-conversation overhead': '預估對話前開銷',
@@ -1559,11 +1440,10 @@ export default {
   'Usage by category': '分類用量',
   'System prompt': '系統提示',
   'Built-in tools': '內置工具',
-  'MCP tools': 'MCP 工具',
-  'Memory files': '記憶文件',
+  'MCP tools': 'MCP tools',
+  'Memory files': '記憶檔案',
   Skills: '技能',
   Messages: '消息',
-  'Show context window usage breakdown.': '顯示上下文窗口使用情況分解。',
   'Run /context detail for per-item breakdown.':
     '運行 /context detail 查看詳細分解。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -1575,12 +1455,6 @@ export default {
     '成功通過 {{region}} 認證。API Key 和模型配置已保存至 settings.json。',
   'Tip: Use /model to switch between available Coding Plan models.':
     '提示：使用 /model 切換可用的 Coding Plan 模型。',
-  'Please answer the following question(s):': '請回答以下問題：',
-  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
-    '無法在非交互模式下詢問用戶問題。請在交互模式下運行以使用此工具。',
-  'User declined to answer the questions.': '用戶拒絕回答問題。',
-  'User has provided the following answers:': '用戶提供了以下答案：',
-  'Failed to process user answers:': '處理用戶答案失敗：',
   'Type something...': '輸入內容...',
   Submit: '提交',
   'Submit answers': '提交答案',
@@ -1590,22 +1464,16 @@ export default {
   'Ready to submit your answers?': '準備好提交您的答案了嗎？',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
     '↑/↓: 導航 | ←/→: 切換標籤頁 | Enter: 選擇',
-  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
-    '↑/↓: 導航 | ←/→: 切換標籤頁 | Space/Enter: 切換 | Esc: 取消',
-  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
-    '↑/↓: 導航 | Space/Enter: 切換 | Esc: 取消',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: 導航 | Enter: 選擇 | Esc: 取消',
-  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
-    '使用 Qwen OAuth 或阿里雲百鍊 Coding Plan 配置 Qwen 認證信息',
   'Authenticate using Qwen OAuth': '使用 Qwen OAuth 進行認證',
   'Authenticate using Alibaba Cloud Coding Plan':
     '使用阿里雲百鍊 Coding Plan 進行認證',
   'Region for Coding Plan (china/global)': 'Coding Plan 區域 (china/global)',
-  'API key for Coding Plan': 'Coding Plan 的 API 密鑰',
+  'API key for Coding Plan': 'Coding Plan 的 API Key',
   'Show current authentication status': '顯示當前認證狀態',
   'Authentication completed successfully.': '認證完成。',
-  'Starting Qwen OAuth authentication...': '正在啓動 Qwen OAuth 認證...',
+  'Starting Qwen OAuth authentication...': '正在啟動 Qwen OAuth 認證...',
   'Successfully authenticated with Qwen OAuth.': '已成功通過 Qwen OAuth 認證。',
   'Failed to authenticate with Qwen OAuth: {{error}}':
     'Qwen OAuth 認證失敗：{{error}}',
@@ -1620,7 +1488,7 @@ export default {
   Global: '全球',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': '選擇 Coding Plan 區域：',
-  'Enter your Coding Plan API key: ': '請輸入您的 Coding Plan API 密鑰：',
+  'Enter your Coding Plan API key: ': '請輸入您的 Coding Plan API Key：',
   'Select authentication method:': '選擇認證方式：',
   '\n=== Authentication Status ===\n': '\n=== 認證狀態 ===\n',
   '⚠️  No authentication method configured.\n': '⚠️  未配置認證方式。\n',
@@ -1628,8 +1496,6 @@ export default {
     '運行以下命令之一開始配置：\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
     '  qwen auth qwen-oauth     - 使用 Qwen OAuth 登錄（已停用）',
-  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
-    '  qwen auth coding-plan      - 使用阿里雲百鍊 Coding Plan 認證\n',
   'Or simply run:': '或者直接運行：',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - 交互式認證配置\n',
@@ -1639,7 +1505,6 @@ export default {
   '  Limit: No longer available': '  限額：已不可用',
   'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
     'Qwen OAuth 免費額度已於 2026-04-15 停用。請運行 /auth 切換到 Coding Plan、OpenRouter、Fireworks AI 或其他服務商。',
-  '  Models: Qwen latest models\n': '  模型：Qwen 最新模型\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ 認證方式：阿里雲百鍊 Coding Plan',
   '中国 (China) - 阿里云百炼': '中國 (China) - 阿里雲百鍊',
@@ -1647,11 +1512,11 @@ export default {
   '  Region: {{region}}': '  區域：{{region}}',
   '  Current Model: {{model}}': '  當前模型：{{model}}',
   '  Config Version: {{version}}': '  配置版本：{{version}}',
-  '  Status: API key configured\n': '  狀態：API 密鑰已配置\n',
+  '  Status: API key configured\n': '  狀態：API Key 已配置\n',
   '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
     '⚠️  認證方式：阿里雲百鍊 Coding Plan（不完整）',
   '  Issue: API key not found in environment or settings\n':
-    '  問題：在環境變量或設置中未找到 API 密鑰\n',
+    '  問題：在環境變量或設置中未找到 API Key\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
     '  運行 `qwen auth coding-plan` 重新配置。\n',
   '✓ Authentication Method: {{type}}': '✓ 認證方式：{{type}}',
@@ -1663,19 +1528,209 @@ export default {
     '原始模式不可用。請在交互式終端中運行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭頭導航，Enter 選擇，Ctrl+C 退出)\n',
-  compact: '緊湊',
-  'compact mode: on (Ctrl+O off)': '緊湊模式：開（Ctrl+O 關閉）',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     '緊湊模式下隱藏工具輸出和思考過程，界面更簡潔（Ctrl+O 切換）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看詳細工具調用結果',
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
+  'Set a goal — keep working until the condition is met':
+    '設定目標 — 持續工作直到條件滿足',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
-    '啓用計劃模式。智能體將只分析和規劃，而不執行工具。',
+    '啟用計劃模式。智能體將只分析和規劃，而不執行工具。',
   'Already in plan mode. Use "/plan exit" to exit plan mode.':
     '已處於計劃模式。使用 "/plan exit" 退出計劃模式。',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     '未處於計劃模式。請先使用 "/plan" 進入計劃模式。',
   "Set up Qwen Code's status line UI": '配置 Qwen Code 的狀態欄',
+  'When a new todo item is created': '建立新待辦事項時',
+  'When a todo item is marked as completed': '待辦事項標記為完成時',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    '命令輸入為包含 todo_id、todo_content、todo_status、all_todos 和 phase 的 JSON。在 validation 中，輸出為包含 decision（allow/block/deny）和 reason 的 JSON。在 postWrite 中，block/deny 會被忽略。',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    '命令輸入為包含 todo_id、todo_content、previous_status、all_todos 和 phase 的 JSON。在 validation 中，輸出為包含 decision（allow/block/deny）和 reason 的 JSON。在 postWrite 中，block/deny 會被忽略。',
+  'allow todo creation': '允許建立待辦事項',
+  'block todo creation and show reason to model':
+    '阻止建立待辦事項並向模型顯示原因',
+  'allow todo completion': '允許完成待辦事項',
+  'block todo completion and show reason to model':
+    '阻止完成待辦事項並向模型顯示原因',
+
+  // === Core: added from PR #3328 ===
+  'Open the memory manager.': '打開記憶管理器。',
+  'Show current process memory diagnostics': '顯示目前程序的內存診斷。',
+  'Record a CPU profile for Chrome DevTools analysis':
+    '錄製 CPU 效能分析檔案，用於 Chrome DevTools 分析',
+  'Roll back a standalone update to the previous version':
+    '將獨立安裝回滾到上一個版本',
+  'Rollback is not available in ACP mode.': '回滾在 ACP 模式下不可用。',
+  'Rollback is only available for standalone installations.':
+    '回滾僅適用於獨立安裝。',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    '回滾成功。請重啟終端以使用上一個版本。',
+  'Rollback failed:': '回滾失敗：',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    '在 Windows 上回滾需要手動操作。請將安裝目錄中的 qwen-code.old 重新命名為 qwen-code。',
+  'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
+  'Ask a quick side question without affecting the main conversation':
+    '在不影響主對話的情況下快速提問旁支問題',
+  'Manage Arena sessions': '管理 Arena 會話',
+  'Start an Arena session with multiple models competing on the same task':
+    '啟動一個 Arena 會話，讓多個模型在同一任務上競爭',
+  'Stop the current Arena session': '停止當前的 Arena 會話',
+  'Show the current Arena session status': '顯示當前的 Arena 會話狀態',
+  'Select a model result and merge its diff into the current workspace':
+    '選擇一個模型結果並將其差異合併到當前工作區',
+  'No running Arena session found.': '未找到正在執行的 Arena 會話。',
+  'No Arena session found. Start one with /arena start.':
+    '未找到 Arena 會話。請使用 /arena start 啟動一個。',
+  'Arena session is still running. Wait for it to complete or use /arena stop first.':
+    'Arena 會話仍在執行中。請等待其完成，或先使用 /arena stop。',
+  'No successful agent results to select from. All agents failed or were cancelled.':
+    '沒有可選擇的成功代理結果。所有代理均失敗或被取消。',
+  'Use /arena stop to end the session.': '使用 /arena stop 結束會話。',
+  'No idle agent found matching "{{name}}".':
+    '未找到匹配 "{{name}}" 的空閒代理。',
+  'Failed to apply changes from {{label}}: {{error}}':
+    '從 {{label}} 套用變更失敗：{{error}}',
+  'Applied changes from {{label}} to workspace. Arena session complete.':
+    '已將 {{label}} 的變更套用到工作區。Arena 會話完成。',
+  'Discard all Arena results and clean up worktrees?':
+    '捨棄所有 Arena 結果並清理工作樹？',
+  'Arena results discarded. All worktrees cleaned up.':
+    'Arena 結果已捨棄。所有工作樹已清理。',
+  'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.':
+    'Arena 不支援非互動模式。請使用互動模式啟動 Arena 會話。',
+  'Arena is not supported in non-interactive mode. Use interactive mode to stop an Arena session.':
+    'Arena 不支援非互動模式。請使用互動模式停止 Arena 會話。',
+  'Arena is not supported in non-interactive mode.': 'Arena 不支援非互動模式。',
+  'An Arena session exists. Use /arena stop or /arena select to end it before starting a new one.':
+    '已存在 Arena 會話。請使用 /arena stop 或 /arena select 結束後再啟動新會話。',
+  'Usage: /arena start --models model1,model2 <task>':
+    '用法：/arena start --models model1,model2 <task>',
+  'Models to compete (required, at least 2)':
+    '參與競爭的模型（必須，至少 2 個）',
+  'Format: authType:modelId or just modelId':
+    '格式：authType:modelId 或僅 modelId',
+  'Arena requires at least 2 models. Use --models model1,model2 to specify.':
+    'Arena 至少需要 2 個模型。請使用 --models model1,model2 指定。',
+  'Arena started with {{count}} agents on task: "{{task}}"\nModels:\n{{modelList}}':
+    'Arena 已啟動 {{count}} 個代理處理任務："{{task}}"\n模型：\n{{modelList}}',
+  'Arena panes are running in tmux. Attach with: `{{command}}`':
+    'Arena 面板正在 tmux 中執行。使用以下命令附加：`{{command}}`',
+  '[{{label}}] failed: {{error}}': '[{{label}}] 失敗：{{error}}',
+  'Loading suggestions...': '正在載入建議...',
+  'Show per-item context usage breakdown.':
+    '顯示每個項目的上下文使用情況細分。',
+  'Manage extension settings': '管理擴展設置',
+  'Background tasks': '背景任務',
+  'No tasks currently running': '目前沒有正在執行的任務',
+  'No entry to show.': '沒有可顯示的項目。',
+  'needs approval': '待審批',
+  'Background agent needs approval': '背景 agent 等待審批',
+  'Approve or deny the request above': '請核准或拒絕上方的請求',
+  Running: '執行中',
+  Paused: '已暫停',
+  Completed: '已完成',
+  Failed: '失敗',
+  Stopped: '已停止',
+  Shell: 'Shell',
+  Monitor: '監控',
+  Command: '命令',
+  Dream: '記憶整理',
+  '[dream] memory consolidation': '[記憶整理] 記憶整理',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[記憶整理] 記憶整理（正在檢視 {{count}} 個會話）',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[記憶整理] 記憶整理（正在檢視 {{count}} 個會話）',
+  '{{count}} session': '{{count}} 個會話',
+  '{{count}} sessions': '{{count}} 個會話',
+  '{{count}} topic': '{{count}} 個主題',
+  '{{count}} topics': '{{count}} 個主題',
+  '{{count}} tokens': '{{count}} tokens',
+  '{{count}} tool call': '{{count}} 個工具呼叫',
+  '{{count}} tool calls': '{{count}} 個工具呼叫',
+  '{{count}} event': '{{count}} 個事件',
+  '{{count}} events': '{{count}} 個事件',
+  '{{count}} dropped': '丟棄 {{count}} 行',
+  'pid {{pid}}': 'pid {{pid}}',
+  'exit {{exitCode}}': '退出碼 {{exitCode}}',
+  'Sessions reviewing': '正在檢視的會話',
+  Progress: '進度',
+  'Resume blocked': '恢復受阻',
+  'Working dir': '工作目錄',
+  'Output file': '輸出檔案',
+  'Topics touched ({{count}})': '觸及的主題（{{count}}）',
+  '{{count}} more': '{{count}} 個',
+  'Lock release warning': '鎖釋放警告',
+  'Metadata write warning': '元資料寫入警告',
+  "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
+    '後續記憶整理可能會因鎖定而略過，直到下一次會話過期清理清除此檔案。',
+  "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
+    '排程門控未看到本次記憶整理的時間戳；下一輪記憶整理可能會比平時更早重新觸發。',
+
+  // Stats Dashboard — Category 2 (missing from zh-TW)
+  'Activity Heatmap': '活動熱力圖',
+  Less: '少',
+  More: '多',
+  Sessions: '會話數',
+  Duration: '時長',
+  Projects: '專案統計',
+  'Loading stats...': '載入統計...',
+  '(no data)': '（暫無資料）',
+  d: '天',
+  h: '時',
+  m: '分',
+  Input: '輸入',
+  Models: '模型',
+  'All time': '所有時間',
+  'Last 7 days': '最近 7 天',
+  'Last 30 days': '最近 30 天',
+  'Show usage statistics dashboard.': '顯示使用統計面板。',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API 請求',
+  'Tool Calls': '工具呼叫',
+  'Success rate': '成功率',
+  'Code Changes': '程式碼變更',
+  Tool: '工具',
+  reqs: '請求',
+  in: '輸入',
+  out: '輸出',
+
+  // statsCommand non-interactive output
+  'API requests: {{count}}': 'API 請求：{{count}}',
+  'Code changes': '程式碼變更',
+  Cost: '費用',
+  'Estimated cost: ${{cost}}': '預估費用：${{cost}}',
+  'Files: +{{added}} / -{{removed}} lines':
+    '檔案：+{{added}} / -{{removed}} 行',
+  'N/A': 'N/A',
+  Name: '名稱',
+  'No model usage data yet.': '尚無模型使用資料。',
+  'No tool usage data yet.': '尚無工具使用資料。',
+  'Prompts: {{count}}': '提示：{{count}}',
+  'Session duration: {{duration}}': '會話時長：{{duration}}',
+  'Tokens \u2014 prompt: {{prompt}}, output: {{output}}':
+    'Token — 輸入：{{prompt}}，輸出：{{output}}',
+  'Tool calls': '工具呼叫',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    '工具呼叫：{{total}}（{{success}} 成功，{{fail}} 失敗）',
+  cached: '快取',
+  days: '天',
+  output: '輸出',
+  prompt: '輸入',
+  '\u2191 tabs \u00B7 r to cycle dates \u00B7 esc to close':
+    '\u2191 tab 切換標籤 \u00B7 r 切換時間範圍 \u00B7 esc 關閉',
+
+  // === Same-as-English optimization ===
+  ' (not in model registry)': '（不在模型註冊表中）',
+  'start server': '啟動伺服器',
+  'No compression needed.': '無需壓縮。',
 };

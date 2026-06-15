@@ -38,10 +38,15 @@ export function useMCPHealth(): MCPHealthSnapshot {
   );
 
   useEffect(() => {
-    const listener = (name: string, status: MCPServerStatus) => {
+    const listener = (name: string, status: MCPServerStatus | undefined) => {
       setServers((prev) => {
         const next = new Map(prev);
-        next.set(name, status);
+        if (status === undefined) {
+          // Server was removed from the registry (e.g. disabled via /mcp).
+          next.delete(name);
+        } else {
+          next.set(name, status);
+        }
         return next;
       });
     };

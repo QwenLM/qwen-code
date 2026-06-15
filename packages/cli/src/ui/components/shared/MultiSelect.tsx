@@ -14,6 +14,7 @@ import type { SelectionListItem } from '../../hooks/useSelectionList.js';
 
 export interface MultiSelectItem<T> extends SelectionListItem<T> {
   label: string;
+  separator?: boolean;
 }
 
 export interface MultiSelectProps<T> {
@@ -25,9 +26,14 @@ export interface MultiSelectProps<T> {
   onSelectedKeysChange?: (selectedKeys: string[]) => void;
   onHighlight?: (value: T) => void;
   isFocused?: boolean;
+  /** Suppress j/k vim-nav while keeping arrows/Enter/space active. */
+  disableVimNav?: boolean;
   showNumbers?: boolean;
   showScrollArrows?: boolean;
   maxItemsToShow?: number;
+  checkedText?: string;
+  uncheckedText?: string;
+  showActiveMarker?: boolean;
 }
 
 const EMPTY_SELECTED_KEYS: string[] = [];
@@ -50,9 +56,13 @@ export function MultiSelect<T>({
   onSelectedKeysChange,
   onHighlight,
   isFocused = true,
+  disableVimNav = false,
   showNumbers = true,
   showScrollArrows = false,
   maxItemsToShow = 10,
+  checkedText = '[✓]',
+  uncheckedText = '[ ]',
+  showActiveMarker = false,
 }: MultiSelectProps<T>): React.JSX.Element {
   const [scrollOffset, setScrollOffset] = useState(0);
   const selectedKeySet = useMemo(() => new Set(selectedKeys), [selectedKeys]);
@@ -61,6 +71,7 @@ export function MultiSelect<T>({
     items,
     initialIndex,
     isFocused,
+    disableVimNav,
     // Disable numeric quick-select in useSelectionList — in a multi-select
     // context, onSelect triggers onConfirm (submit), so numeric keys would
     // accidentally submit the dialog instead of toggling checkboxes.
@@ -134,13 +145,18 @@ export function MultiSelect<T>({
 
       {visibleItems.map((item, index) => {
         const itemIndex = scrollOffset + index;
-        const isActive = activeIndex === itemIndex;
+        const isActive = isFocused && activeIndex === itemIndex;
         const isChecked = selectedKeySet.has(item.key);
+        const activeMarker = isActive ? '›' : ' ';
 
         const itemNumberText = `${String(itemIndex + 1).padStart(
           numberColumnWidth,
         )}.`;
-        const checkboxText = item.disabled ? '[x]' : isChecked ? '[✓]' : '[ ]';
+        const checkboxText = item.disabled
+          ? '[x]'
+          : isChecked
+            ? checkedText
+            : uncheckedText;
 
         let textColor = theme.text.primary;
         if (item.disabled) {
@@ -151,8 +167,31 @@ export function MultiSelect<T>({
           textColor = theme.text.accent;
         }
 
+        if (item.separator) {
+          return (
+            <Box key={item.key} alignItems="flex-start">
+              {showActiveMarker && (
+                <Box minWidth={2} flexShrink={0}>
+                  <Text color={textColor}>{activeMarker}</Text>
+                </Box>
+              )}
+              <Box minWidth={4} flexShrink={0}>
+                <Text> </Text>
+              </Box>
+              <Box flexGrow={1}>
+                <Text color={theme.text.secondary}>{item.label}</Text>
+              </Box>
+            </Box>
+          );
+        }
+
         return (
           <Box key={item.key} alignItems="flex-start">
+            {showActiveMarker && (
+              <Box minWidth={2} flexShrink={0}>
+                <Text color={textColor}>{activeMarker}</Text>
+              </Box>
+            )}
             <Box minWidth={4} flexShrink={0}>
               <Text color={textColor}>{checkboxText}</Text>
             </Box>

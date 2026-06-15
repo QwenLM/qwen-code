@@ -22,6 +22,16 @@ import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../../../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+
 // Mock OpenAI
 vi.mock('openai', () => ({
   default: vi.fn().mockImplementation((config) => ({
@@ -38,6 +48,20 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
+// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value
+vi.mock('../constants.js', () => ({
+  DEFAULT_TIMEOUT: 120000,
+  DEFAULT_MAX_RETRIES: 3,
+  DEFAULT_OPENAI_BASE_URL: 'https://api.openai.com/v1',
+  DEFAULT_DASHSCOPE_BASE_URL:
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  DEFAULT_DEEPSEEK_BASE_URL: 'https://api.deepseek.com/v1',
+  DEFAULT_OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
+  get DASHSCOPE_PROXY_BASE_URL() {
+    return process.env['DASHSCOPE_PROXY_BASE_URL'];
+  },
+}));
+
 describe('DashScopeOpenAICompatibleProvider', () => {
   let provider: DashScopeOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
@@ -45,6 +69,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     const mockedBuildRuntimeFetchOptions =
       buildRuntimeFetchOptions as unknown as MockedFunction<
         (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
@@ -139,6 +164,106 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for Token Plan URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for internal alibaba-inc.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'DashScope provider activated via internal origin: gateway.alibaba-inc.com',
+      );
+    });
+
+    it('should return true for internal aliyun-inc.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://model-gateway.aliyun-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for multi-level internal subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://a.b.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for port-bearing internal URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alibaba-inc.com:8443/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false for bare alibaba-inc.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://alibaba-inc.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for bare aliyun-inc.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://aliyun-inc.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for lookalike internal domains without dot boundary', () => {
+      const configs = [
+        'https://notalibaba-inc.com/v1',
+        'https://notaliyun-inc.com/v1',
+        'https://alibaba-inc.com.evil.com/v1',
+        'https://aliyun-inc.com.evil.com/v1',
+        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
+        'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+      ];
+
+      configs.forEach((baseUrl) => {
+        const result = DashScopeOpenAICompatibleProvider.isDashScopeProvider({
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+        } as ContentGeneratorConfig);
+        expect(result).toBe(false);
+      });
+    });
+
     it('should return false for non-DashScope configurations', () => {
       const configs = [
         {
@@ -161,6 +286,134 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         );
         expect(result).toBe(false);
       });
+    });
+
+    it('should return false when the dashscope domain only appears in the URL path', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://evil.example.com/dashscope.aliyuncs.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for a domain that only ends with dashscope.aliyuncs.com as a suffix without a dot', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://notdashscope.aliyuncs.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for an unparseable baseUrl', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'not a url',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return true when baseUrl matches DASHSCOPE_PROXY_BASE_URL', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://your-proxy.com/dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false when baseUrl does not match DASHSCOPE_PROXY_BASE_URL', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://other-proxy.com/dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should debug log when baseUrl does not match DASHSCOPE_PROXY_BASE_URL', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://other-proxy.com/dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+
+      expect(result).toBe(false);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match',
+        ),
+      );
+    });
+
+    it('should log internal-origin activation instead of proxy mismatch for internal domains', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+
+      expect(result).toBe(true);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'DashScope provider activated via internal origin: gateway.alibaba-inc.com',
+      );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining(
+          'DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match',
+        ),
+      );
+    });
+
+    it('should return true when baseUrl matches DASHSCOPE_PROXY_BASE_URL with trailing slash', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://your-proxy.com/dashscope/',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
     });
   });
 

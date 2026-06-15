@@ -27,7 +27,7 @@ import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { isSubpaths } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
-import { isAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -120,10 +120,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     if (
       workspaceContext.isPathWithinWorkspace(filePath) ||
       isSubpaths(allowedRoots, filePath) ||
-      // isAutoMemPath uses the narrower managed auto-memory root for this
-      // project — not the broad getMemoryBaseDir() — to avoid exposing
-      // sensitive ~/.qwen files such as settings.json or OAuth credentials.
-      isAutoMemPath(filePath, this.config.getTargetDir())
+      // isAnyAutoMemPath narrows to the managed auto-memory roots
+      // (per-project + user-level under ~/.qwen/memories/) — never the
+      // broad getMemoryBaseDir() — to avoid exposing sensitive ~/.qwen
+      // files such as settings.json or OAuth credentials.
+      isAnyAutoMemPath(filePath, this.config.getTargetDir())
     ) {
       return 'allow';
     }
@@ -140,7 +141,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // file_unchanged placeholder would skip that prepend, silently
     // dropping the staleness warning for the rest of the session.
     // These files are small; re-emit them on every read.
-    const isAutoMem = isAutoMemPath(absPath, projectRoot);
+    const isAutoMem = isAnyAutoMemPath(absPath, projectRoot);
     // The cache can be disabled at the Config level (escape hatch for
     // sessions where the "model has already seen the prior tool result"
     // assumption breaks down — e.g. after context compaction or
@@ -156,10 +157,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const cacheEnabled = !this.config.getFileReadCacheDisabled();
     const useFastPath = cacheEnabled && !isAutoMem;
     const cache = this.config.getFileReadCache();
-    // A "full" Read consumes the whole file: no offset, no limit, no PDF
-    // page range. Only full Reads are eligible for the file_unchanged
-    // fast-path; range-scoped Reads always go through, since the model
-    // may legitimately ask for a different slice next time.
+    // A request-level "full" Read asks for the whole file: no offset,
+    // no limit, no PDF page range. The cache entry is only marked as
+    // full later if the produced content was not truncated.
     const isFullRead =
       this.params.offset === undefined &&
       this.params.limit === undefined &&
@@ -186,6 +186,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         status.entry.lastReadAt !== undefined &&
         status.entry.lastReadWasFull &&
         status.entry.lastReadCacheable &&
+        // Only quote-back if that read is still in history (issue
+        // #4239: idle microcompaction flips this off when it blanks it).
+        status.entry.readResidentInHistory &&
         (status.entry.lastWriteAt === undefined ||
           status.entry.lastReadAt > status.entry.lastWriteAt)
       ) {
@@ -215,14 +218,36 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     }
 
     // Record a cache entry so that subsequent identical Reads can hit
-    // the file_unchanged fast-path. An entry is "cacheable" only when
-    //   - the content is plain text (not binary / image / audio / video
-    //     / PDF / notebook — those need their structured payload), and
-    //   - the read was not truncated. A truncated full Read means the
-    //     model only saw the head of the file; returning a placeholder
-    //     on the next call would falsely imply "you've already seen
-    //     everything", so we force the next call back through the full
-    //     pipeline.
+    // the file_unchanged fast-path, and so prior-read enforcement on
+    // Edit / WriteFile can recognise the read.
+    //
+    // Two independent flags are recorded:
+    //
+    //  - `cacheable` — whether the content is plain text (not binary /
+    //    image / audio / video / PDF / notebook). This is the flag
+    //    `priorReadEnforcement.ts` consults to decide whether the
+    //    model has seen a payload that Edit / WriteFile can mutate as
+    //    text. It must NOT include "was the read truncated", because
+    //    a truncated text read still produced text — bundling those
+    //    two concerns is what produced the issue #3964 regression
+    //    where a partial Read of a regular `.kt` / `.cpp` / `.py`
+    //    file caused the next Edit to be rejected with the
+    //    misleading "binary / image / audio / video / PDF / notebook
+    //    payload" error.
+    //
+    //  - `full` — whether the model has seen every byte of the
+    //    current file. This now gates ONLY the file_unchanged
+    //    fast-path; PR #4002 removed WriteFile's `requireFullRead`
+    //    (the truncate-tool-output limit made "fully read" an
+    //    impossible precondition on files past the limit, deadlocking
+    //    issue #3945). A "full" Read at the request level (no
+    //    offset / limit / pages) only counts as full at the cache
+    //    level if the produced content was not truncated, otherwise
+    //    the model only saw the head and a follow-up `file_unchanged`
+    //    placeholder would falsely imply "you've already seen
+    //    everything". NotebookEdit also requires this flag so a
+    //    truncated notebook render does not authorize structured writes
+    //    against unseen cells.
     //
     // The stat we record is the one taken inside `processSingleFileContent`
     // and surfaced via `result.stats`. The internal stat happens
@@ -242,17 +267,20 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     if (cacheEnabled && (result.stats ?? stats)) {
       const cacheable =
         typeof result.llmContent === 'string' &&
-        result.originalLineCount !== undefined &&
-        !result.isTruncated;
+        result.originalLineCount !== undefined;
       const recordStats: Stats = result.stats ?? stats!;
       cache.recordRead(absPath, recordStats, {
-        full: isFullRead,
+        full: isFullRead && !result.isTruncated,
         cacheable,
       });
     }
 
     let llmContent: PartUnion;
-    if (result.isTruncated) {
+    if (
+      result.isTruncated &&
+      result.linesShown &&
+      result.originalLineCount !== undefined
+    ) {
       const [start, end] = result.linesShown!;
       const total = result.originalLineCount!;
       llmContent = `Showing lines ${start}-${end} of ${total} total lines.\n\n---\n\n${result.llmContent}`;
@@ -352,11 +380,19 @@ export class ReadFileTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.READ_FILE;
 
+  // Self-managed: ReadFile controls its own size via line-based paging
+  // (offset/limit, default 2000 lines), so it is exempt from the scheduler's
+  // char-based truncation. Oversized reads are bounded by the per-message
+  // batch budget instead.
+  override get maxOutputChars(): number {
+    return Number.POSITIVE_INFINITY;
+  }
+
   constructor(private config: Config) {
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
+      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {
@@ -408,6 +444,23 @@ export class ReadFileTool extends BaseDeclarativeTool<
     }
     if (params.limit !== undefined && params.limit <= 0) {
       return 'Limit must be a positive number';
+    }
+
+    if (params.pages !== undefined) {
+      const pages = params.pages.trim();
+      params.pages = pages.length > 0 ? pages : undefined;
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    if (
+      (params.offset !== undefined || params.limit !== undefined) &&
+      ext === '.ipynb'
+    ) {
+      return 'offset and limit are not supported for Jupyter notebook (.ipynb) files. Notebooks are always read in full with structured cell output.';
+    }
+
+    if (params.pages !== undefined && ext === '.ipynb') {
+      return 'pages is not supported for Jupyter notebook (.ipynb) files. Notebooks are always read in full with structured cell output.';
     }
 
     if (params.pages) {

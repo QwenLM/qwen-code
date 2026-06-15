@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SpanKind, SpanStatusCode, type HrTime } from '@opentelemetry/api';
+import {
+  isSpanContextValid,
+  SpanKind,
+  SpanStatusCode,
+  TraceFlags,
+  type HrTime,
+  type SpanContext,
+} from '@opentelemetry/api';
 import type {
   LogRecordProcessor,
   ReadableLogRecord,
@@ -15,17 +22,61 @@ import {
   resourceFromAttributes,
 } from '@opentelemetry/resources';
 
-import { createHash } from 'node:crypto';
+import { EVENT_SUBAGENT_EXECUTION, SERVICE_NAME } from './constants.js';
+import {
+  deriveTraceId,
+  randomHexString,
+  randomSpanId,
+} from './trace-id-utils.js';
+import { getCurrentSessionId } from './session-context.js';
+import { isInNativeSubagentSpan } from './session-tracing.js';
 
-import { SERVICE_NAME } from './constants.js';
+/**
+ * LogRecord event names that have native span coverage when emitted
+ * inside a `runInSubagentSpanContext` body. The bridge is only skipped
+ * when the ALS confirms a native subagent span is active — paths that
+ * emit the same event WITHOUT a native span (e.g. `runForkedAgent`)
+ * still get a bridge span so trace-tree observability is preserved.
+ */
+const BRIDGE_SKIP_EVENT_NAMES = new Set<string>([EVENT_SUBAGENT_EXECUTION]);
 
 const EXPORT_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_BUFFER_SIZE = 10_000;
+const BUFFER_OVERFLOW_WARNING_INTERVAL_MS = 30_000;
+const LOG_EVENT_ERROR_STATUS_MESSAGE = 'Log event recorded error';
+const DEFAULT_LOG_SPAN_NAME = 'log.event';
 const MAX_SPAN_NAME_LENGTH = 128;
 const SENSITIVE_ATTRIBUTE_KEYS = new Set([
+  'error',
+  'error.message',
+  'error_message',
   'prompt',
   'function_args',
   'response_text',
 ]);
+
+/**
+ * Sink for processor-internal diagnostic messages (export failures, buffer
+ * overflows, timeouts). Messages are passed without a trailing newline — the
+ * sink implementation decides how to terminate them.
+ *
+ * Default sink writes to stderr to keep diagnostics visible when the host
+ * environment has no other logging pipeline. Hosts running a TUI should
+ * inject a sink that routes to a file-based logger to avoid the message
+ * landing in the rendered terminal area.
+ */
+export type LogToSpanDiagnosticsSink = (message: string) => void;
+
+const defaultDiagnosticsSink: LogToSpanDiagnosticsSink = (message) => {
+  process.stderr.write(`${message}\n`);
+};
+
+interface LogToSpanProcessorOptions {
+  flushIntervalMs?: number;
+  includeSensitiveSpanAttributes?: boolean;
+  maxBufferSize?: number;
+  diagnosticsSink?: LogToSpanDiagnosticsSink;
+}
 
 /**
  * A LogRecordProcessor that converts each OTel log record into a span
@@ -37,6 +88,10 @@ const SENSITIVE_ATTRIBUTE_KEYS = new Set([
  * this processor directly constructs ReadableSpan objects and feeds
  * them to the exporter.
  *
+ * Internal diagnostics (export failures, buffer overflows, timeouts) are
+ * routed through {@link LogToSpanDiagnosticsSink} so TUI hosts can keep
+ * them off the rendered terminal area; see the `diagnosticsSink` option.
+ *
  * When a log record has a `duration_ms` attribute, the resulting span
  * will have a matching duration. Otherwise, the span is instantaneous.
  */
@@ -45,12 +100,43 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private flushTimer: ReturnType<typeof setInterval> | undefined;
   private inFlightExport: Promise<void> | undefined;
   private readonly flushIntervalMs: number;
+  private cachedSessionId: string | undefined;
+  private cachedTraceId: string | undefined;
+  private readonly includeSensitiveSpanAttributes: boolean;
+  private readonly maxBufferSize: number;
+  private readonly diagnosticsSink: LogToSpanDiagnosticsSink;
+  private lastBufferOverflowWarningMs: number | undefined;
+  private droppedSpansSinceLastBufferWarning = 0;
+  private totalDroppedSpans = 0;
+  private isShutdown = false;
 
+  constructor(spanExporter: SpanExporter);
+  constructor(
+    spanExporter: SpanExporter,
+    flushIntervalMs: number,
+    maxBufferSize?: number,
+  );
+  constructor(spanExporter: SpanExporter, options: LogToSpanProcessorOptions);
   constructor(
     private readonly spanExporter: SpanExporter,
-    flushIntervalMs = 5000,
+    flushIntervalMsOrOptions: number | LogToSpanProcessorOptions = 5000,
+    maxBufferSize = DEFAULT_MAX_BUFFER_SIZE,
   ) {
-    this.flushIntervalMs = flushIntervalMs;
+    if (typeof flushIntervalMsOrOptions === 'number') {
+      this.flushIntervalMs = flushIntervalMsOrOptions;
+      this.includeSensitiveSpanAttributes = false;
+      this.maxBufferSize = normalizeMaxBufferSize(maxBufferSize);
+      this.diagnosticsSink = defaultDiagnosticsSink;
+    } else {
+      this.flushIntervalMs = flushIntervalMsOrOptions.flushIntervalMs ?? 5000;
+      this.includeSensitiveSpanAttributes =
+        flushIntervalMsOrOptions.includeSensitiveSpanAttributes ?? false;
+      this.maxBufferSize = normalizeMaxBufferSize(
+        flushIntervalMsOrOptions.maxBufferSize,
+      );
+      this.diagnosticsSink =
+        flushIntervalMsOrOptions.diagnosticsSink ?? defaultDiagnosticsSink;
+    }
     this.flushTimer = setInterval(() => {
       void this.flush();
     }, this.flushIntervalMs);
@@ -58,7 +144,22 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   }
 
   onEmit(logRecord: ReadableLogRecord): void {
-    const name = sanitizeSpanName(logRecord.body);
+    if (this.isShutdown) {
+      return;
+    }
+
+    // Skip bridge only when a native subagent span is active in the ALS.
+    // Paths without native coverage (e.g. runForkedAgent) still get bridged.
+    const eventName = logRecord.attributes?.['event.name'];
+    if (
+      typeof eventName === 'string' &&
+      BRIDGE_SKIP_EVENT_NAMES.has(eventName) &&
+      isInNativeSubagentSpan()
+    ) {
+      return;
+    }
+
+    const name = deriveSpanName(logRecord);
     const startTime = logRecord.hrTime;
 
     const attributes: Record<string, string | number | boolean> = {};
@@ -67,7 +168,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         if (
           value !== undefined &&
           value !== null &&
-          !SENSITIVE_ATTRIBUTE_KEYS.has(key)
+          (this.includeSensitiveSpanAttributes ||
+            !SENSITIVE_ATTRIBUTE_KEYS.has(key))
         ) {
           attributes[key] =
             typeof value === 'object'
@@ -99,13 +201,29 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       endTime = [secs + Math.floor(endNanos / 1e9), endNanos % 1e9] as HrTime;
     }
 
-    // Derive traceId from session.id so all events in one session
-    // appear under a single trace. spanId is random per event.
-    const sessionId = logRecord.attributes?.['session.id'];
-    const traceId = sessionId
-      ? deriveTraceId(String(sessionId))
-      : randomHexString(32);
-    const spanId = randomHexString(16);
+    // Prefer a real active span context when OTel logs provide one, preserving
+    // direct parentage. Otherwise derive traceId from session.id so all events
+    // in one session appear under a single trace.  Fall back to
+    // getCurrentSessionId() when the log record has no session.id attribute
+    // (e.g. after a session change via /clear or /resume).
+    const parentSpanContext = getValidParentSpanContext(logRecord.spanContext);
+    // || (not ??) so empty-string session.id also falls through to the fallback
+    const sessionId =
+      logRecord.attributes?.['session.id'] || getCurrentSessionId();
+    let traceId: string;
+    if (parentSpanContext) {
+      traceId = parentSpanContext.traceId;
+    } else if (sessionId) {
+      const sid = String(sessionId);
+      if (sid !== this.cachedSessionId) {
+        this.cachedSessionId = sid;
+        this.cachedTraceId = deriveTraceId(sid);
+      }
+      traceId = this.cachedTraceId!;
+    } else {
+      traceId = randomHexString(32);
+    }
+    const spanId = randomSpanId();
 
     this.buffer.push({
       name,
@@ -113,7 +231,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       spanContext: () => ({
         traceId,
         spanId,
-        traceFlags: 1, // SAMPLED
+        traceFlags: parentSpanContext?.traceFlags ?? TraceFlags.SAMPLED,
       }),
       startTime,
       endTime,
@@ -128,12 +246,63 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         version: '',
       },
       ended: true,
-      parentSpanContext: undefined,
+      parentSpanContext,
       droppedAttributesCount: 0,
       droppedEventsCount: 0,
       droppedLinksCount: 0,
       recordException: () => {},
     });
+    if (this.buffer.length > this.maxBufferSize) {
+      const droppedSpanCount = this.buffer.length - this.maxBufferSize;
+      this.buffer.splice(0, droppedSpanCount);
+      this.warnBufferOverflow(droppedSpanCount);
+    }
+  }
+
+  private warnBufferOverflow(droppedSpanCount: number): void {
+    this.droppedSpansSinceLastBufferWarning += droppedSpanCount;
+    this.totalDroppedSpans += droppedSpanCount;
+    const now = Date.now();
+    if (
+      this.lastBufferOverflowWarningMs !== undefined &&
+      now - this.lastBufferOverflowWarningMs <
+        BUFFER_OVERFLOW_WARNING_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    this.emitBufferOverflowWarning(now);
+  }
+
+  private emitBufferOverflowWarning(now = Date.now()): void {
+    if (this.droppedSpansSinceLastBufferWarning === 0) {
+      return;
+    }
+
+    const droppedSinceLastWarning = this.droppedSpansSinceLastBufferWarning;
+    this.droppedSpansSinceLastBufferWarning = 0;
+    this.lastBufferOverflowWarningMs = now;
+    this.emitDiagnostic(
+      `[LogToSpan] buffer exceeded max size (${this.maxBufferSize}); dropped ${droppedSinceLastWarning} oldest span(s) since last warning, ${this.totalDroppedSpans} total`,
+    );
+  }
+
+  /**
+   * Route a diagnostic message to the configured sink, swallowing any sink
+   * error so a misbehaving sink can never interrupt telemetry ingestion.
+   *
+   * Tradeoff: when the sink itself is broken (e.g. file-logger failing on
+   * EACCES), bridge-specific diagnostics go dark. We accept that — the host
+   * surfaces overall logging health via `isDebugLoggingDegraded()`, and
+   * falling back to stderr here would re-introduce the TUI-pollution this
+   * sink injection was added to prevent.
+   */
+  private emitDiagnostic(message: string): void {
+    try {
+      this.diagnosticsSink(message);
+    } catch {
+      // Diagnostics must never interrupt telemetry ingestion.
+    }
   }
 
   private flush(): Promise<void> {
@@ -142,8 +311,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     const spans = this.buffer.splice(0);
     const exportPromise = new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
-        process.stderr.write(
-          `[LogToSpan] export timeout after ${EXPORT_TIMEOUT_MS}ms\n`,
+        this.emitDiagnostic(
+          `[LogToSpan] export timeout after ${EXPORT_TIMEOUT_MS}ms (${spans.length} span(s))`,
         );
         resolve();
       }, EXPORT_TIMEOUT_MS);
@@ -155,8 +324,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
           (result) => {
             clearTimeout(timeout);
             if (result.code !== 0) {
-              process.stderr.write(
-                `[LogToSpan] export failed: code=${result.code} error=${result.error?.message ?? 'unknown'}\n`,
+              this.emitDiagnostic(
+                `[LogToSpan] export failed: code=${result.code} ${formatExportError(result.error)}`,
               );
             }
             resolve();
@@ -164,9 +333,15 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         );
       } catch (err) {
         clearTimeout(timeout);
-        process.stderr.write(
-          `[LogToSpan] export threw: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
+        // Reuse formatExportError for Error instances so a sync-thrown
+        // OTLPExporterError surfaces httpCode/data the same way callback
+        // failures do. Non-Error throws fall back to JSON.stringify to
+        // preserve the single-line invariant.
+        const detail =
+          err instanceof Error
+            ? formatExportError(err)
+            : `error=${JSON.stringify(String(err))}`;
+        this.emitDiagnostic(`[LogToSpan] export threw: ${detail}`);
         resolve();
       }
     });
@@ -177,6 +352,10 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   }
 
   async shutdown(): Promise<void> {
+    if (this.isShutdown) {
+      return;
+    }
+    this.isShutdown = true;
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
       this.flushTimer = undefined;
@@ -186,16 +365,27 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       await this.inFlightExport;
     }
     await this.flush();
+    this.emitBufferOverflowWarning();
     await this.spanExporter.shutdown();
   }
 
   async forceFlush(): Promise<void> {
+    if (this.isShutdown) {
+      return;
+    }
     if (this.inFlightExport) {
       await this.inFlightExport;
     }
     await this.flush();
     await this.spanExporter.forceFlush?.();
   }
+}
+
+function normalizeMaxBufferSize(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) {
+    return DEFAULT_MAX_BUFFER_SIZE;
+  }
+  return Math.floor(value);
 }
 
 interface ReadableSpanLike {
@@ -212,11 +402,19 @@ interface ReadableSpanLike {
   resource: Resource;
   instrumentationScope: { name: string; version?: string; schemaUrl?: string };
   ended: boolean;
-  parentSpanContext?: { traceId: string; spanId: string; traceFlags: number };
+  parentSpanContext?: SpanContext;
   droppedAttributesCount: number;
   droppedEventsCount: number;
   droppedLinksCount: number;
   recordException: () => void;
+}
+
+function deriveSpanName(logRecord: ReadableLogRecord): string {
+  const eventName = logRecord.attributes?.['event.name'] ?? logRecord.eventName;
+  if (typeof eventName === 'string' && eventName.trim().length > 0) {
+    return sanitizeSpanName(eventName);
+  }
+  return DEFAULT_LOG_SPAN_NAME;
 }
 
 function sanitizeSpanName(body: unknown): string {
@@ -224,6 +422,15 @@ function sanitizeSpanName(body: unknown): string {
   return rawName.length > MAX_SPAN_NAME_LENGTH
     ? `${rawName.slice(0, MAX_SPAN_NAME_LENGTH)}...`
     : rawName;
+}
+
+function getValidParentSpanContext(
+  spanContext: SpanContext | undefined,
+): SpanContext | undefined {
+  if (!spanContext || !isSpanContextValid(spanContext)) {
+    return undefined;
+  }
+  return spanContext;
 }
 
 /**
@@ -239,23 +446,6 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function randomHexString(length: number): string {
-  const bytes = new Uint8Array(length / 2);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/**
- * Derive a deterministic 32-char hex traceId from a session ID.
- * All events in the same session will share this traceId,
- * making them appear under a single trace in the backend.
- * Uses SHA-256 truncated to 32 hex chars (128 bits) to match the
- * OTel trace ID format.
- */
-function deriveTraceId(sessionId: string): string {
-  return createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
-}
-
 /**
  * Derive span status from log record attributes.
  * Marks the span as ERROR when explicit error indicators are present
@@ -268,13 +458,49 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
   message?: string;
 } {
   if (!attrs) return { code: SpanStatusCode.OK };
-  if (!!attrs['error'] || !!attrs['error_message'] || !!attrs['error_type']) {
-    const msg = String(
-      attrs['error_message'] ?? attrs['error'] ?? attrs['error_type'] ?? '',
-    );
-    return { code: SpanStatusCode.ERROR, ...(msg && { message: msg }) };
+  if (
+    !!attrs['error'] ||
+    !!attrs['error.message'] ||
+    !!attrs['error_message'] ||
+    !!attrs['error_type']
+  ) {
+    return {
+      code: SpanStatusCode.ERROR,
+      message: LOG_EVENT_ERROR_STATUS_MESSAGE,
+    };
   }
   return { code: SpanStatusCode.OK };
+}
+
+// OTLPExporterError carries an HTTP status `code` and response `data`, but its
+// `message` is the HTTP reason-phrase — which is empty on HTTP/2 or when the
+// gateway strips it. Surface name/code/data so the operator has something to
+// act on (e.g. a 403 from ARMS with empty body).
+//
+// Both `message` and `data` can carry embedded newlines or other characters
+// that would break log parsing when the backend returns a JSON error body.
+// JSON.stringify each field to keep the diagnostic on a single line —
+// otherwise a torn record breaks downstream log greps and corrupts the
+// file-logger format. The 200 figure is JS string length (UTF-16 code
+// units), not bytes — non-ASCII payloads may stringify to more bytes; this
+// is fine because the cap is a leak/noise budget, not a hard byte limit.
+function formatExportError(err: Error | undefined): string {
+  if (!err) return 'error="unknown"';
+  // `code` is typed as `number | string` because Node networking errors (e.g.
+  // ECONNREFUSED) surface a string here, while OTLPExporterError uses number.
+  // The `typeof === 'number'` guard below is load-bearing — don't relax it to
+  // a truthy check or string codes get mislabelled as HTTP statuses.
+  const extra = err as { code?: number | string; data?: string };
+  const msg = err.message || err.name || 'unknown';
+  const parts = [`error=${JSON.stringify(msg)}`];
+  // `code` is only meaningful as an HTTP status. Networking errors surface
+  // string codes like 'ECONNREFUSED' on the same field — labelling those as
+  // `httpCode` would be a lie, so only emit for numeric codes.
+  if (typeof extra.code === 'number') parts.push(`httpCode=${extra.code}`);
+  if (typeof extra.data === 'string' && extra.data.length > 0) {
+    parts.push(`data=${JSON.stringify(extra.data.slice(0, 200))}`);
+  }
+  return parts.join(' ');
 }
 
 function hrTimeDiff(start: HrTime, end: HrTime): HrTime {

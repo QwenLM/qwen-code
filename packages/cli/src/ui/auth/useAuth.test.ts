@@ -6,19 +6,22 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  deepseekProvider,
+  openRouterProvider,
+  tokenPlanProvider,
+  customProvider,
+  generateCustomEnvKey as generateCustomApiKeyEnvKey,
+  getDefaultModelIds,
+  resolveBaseUrl,
+  type ProviderSetupInputs,
+} from '@qwen-code/qwen-code-core';
 import {
   useAuthCommand,
-  generateCustomApiKeyEnvKey,
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
-import {
-  OPENROUTER_OAUTH_CALLBACK_URL,
-  applyOpenRouterModelsConfiguration,
-  createOpenRouterOAuthSession,
-  runOpenRouterOAuthLogin,
-} from '../../commands/auth/openrouterOAuth.js';
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: vi.fn(() => ({
@@ -29,36 +32,12 @@ vi.mock('../hooks/useQwenAuth.js', () => ({
 
 vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),
+  restoreSettingsFromBackup: vi.fn(),
+  cleanupSettingsBackup: vi.fn(),
 }));
 
 vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),
-}));
-
-vi.mock('../../commands/auth/openrouterOAuth.js', () => ({
-  OPENROUTER_OAUTH_CALLBACK_URL: 'http://localhost:3000/openrouter/callback',
-  createOpenRouterOAuthSession: vi.fn(() => ({
-    callbackUrl: 'http://localhost:3000/openrouter/callback',
-    codeVerifier: 'test-verifier',
-    state: 'test-state',
-    authorizationUrl:
-      'https://openrouter.ai/auth?callback_url=http%3A%2F%2Flocalhost%3A3000%2Fopenrouter%2Fcallback&code_challenge=test-challenge&state=test-state',
-  })),
-  applyOpenRouterModelsConfiguration: vi.fn(async () => ({
-    updatedConfigs: [
-      {
-        id: 'openai/gpt-4o-mini:free',
-        name: 'OpenRouter · GPT-4o mini',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-    ],
-    activeModelId: 'openai/gpt-4o-mini:free',
-    persistScope: 'user',
-  })),
-  runOpenRouterOAuthLogin: vi.fn(
-    () => new Promise(() => undefined) as Promise<{ apiKey: string }>,
-  ),
 }));
 
 const createSettings = () => ({
@@ -66,24 +45,33 @@ const createSettings = () => ({
     modelProviders: {},
   },
   setValue: vi.fn(),
+  recomputeMerged: vi.fn(),
   forScope: vi.fn(() => ({
     path: '/tmp/settings.json',
+    settings: {},
+    originalSettings: {},
   })),
 });
 
-const createConfig = () => ({
-  getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-  getUsageStatisticsEnabled: vi.fn(() => false),
-  reloadModelProvidersConfig: vi.fn(),
-  refreshAuth: vi.fn(async () => undefined),
-});
+const createConfig = () => {
+  const modelsConfig = {
+    syncAfterAuthRefresh: vi.fn(),
+  };
+  return {
+    getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+    getUsageStatisticsEnabled: vi.fn(() => false),
+    reloadModelProvidersConfig: vi.fn(),
+    refreshAuth: vi.fn(async () => undefined),
+    getModelsConfig: vi.fn(() => modelsConfig),
+  };
+};
 
 describe('useAuthCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('closes auth dialog immediately when starting OpenRouter OAuth', async () => {
+  it('exposes closeAuthDialog that flips isAuthDialogOpen to false', () => {
     const settings = createSettings();
     const config = createConfig();
     const addItem = vi.fn();
@@ -95,27 +83,16 @@ describe('useAuthCommand', () => {
     act(() => {
       result.current.openAuthDialog();
     });
-
     expect(result.current.isAuthDialogOpen).toBe(true);
 
-    await act(async () => {
-      void result.current.handleOpenRouterSubmit();
-      await Promise.resolve();
-    });
-
-    expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
-    expect(result.current.isAuthenticating).toBe(true);
-    expect(result.current.externalAuthState).toEqual({
-      title: 'OpenRouter Authentication',
-      message:
-        'Open the authorization page if your browser does not launch automatically.',
-      detail: expect.stringContaining('https://openrouter.ai/auth'),
+    act(() => {
+      result.current.closeAuthDialog();
     });
     expect(result.current.isAuthDialogOpen).toBe(false);
-    expect(addItem).not.toHaveBeenCalled();
+    expect(result.current.authError).toBe(null);
   });
 
-  it('cancels OpenRouter OAuth wait and reopens the auth dialog', async () => {
+  it('configures DeepSeek via the unified provider submit', async () => {
     const settings = createSettings();
     const config = createConfig();
     const addItem = vi.fn();
@@ -124,161 +101,255 @@ describe('useAuthCommand', () => {
       useAuthCommand(settings as never, config as never, addItem),
     );
 
-    act(() => {
-      result.current.openAuthDialog();
-    });
+    const inputs: ProviderSetupInputs = {
+      baseUrl: resolveBaseUrl(deepseekProvider),
+      apiKey: 'sk-deepseek',
+      modelIds: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    };
 
     await act(async () => {
-      void result.current.handleOpenRouterSubmit();
-      await Promise.resolve();
+      await result.current.handleProviderSubmit(deepseekProvider, inputs);
     });
 
-    expect(result.current.isAuthenticating).toBe(true);
-    expect(createOpenRouterOAuthSession).toHaveBeenCalledWith(
-      OPENROUTER_OAUTH_CALLBACK_URL,
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'env.DEEPSEEK_API_KEY',
+      'sk-deepseek',
     );
-    expect(runOpenRouterOAuthLogin).toHaveBeenCalledWith(
-      OPENROUTER_OAUTH_CALLBACK_URL,
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      'openai',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'model.name',
+      'deepseek-v4-flash',
+    );
+    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(result.current.isAuthDialogOpen).toBe(false);
+    expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
-        abortSignal: expect.any(AbortSignal),
-        session: expect.objectContaining({
-          authorizationUrl: expect.stringContaining(
-            'https://openrouter.ai/auth',
-          ),
-        }),
+        text: expect.stringContaining('Successfully configured DeepSeek'),
       }),
+      expect.any(Number),
     );
+  });
+
+  it('configures OpenRouter via the unified provider submit', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(openRouterProvider, {
+        baseUrl: resolveBaseUrl(openRouterProvider),
+        apiKey: 'sk-or-v1-key',
+        modelIds: ['z-ai/glm-4.5-air:free'],
+      });
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'env.OPENROUTER_API_KEY',
+      'sk-or-v1-key',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      'openai',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'model.name',
+      'z-ai/glm-4.5-air:free',
+    );
+    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+  });
+
+  it('configures Token Plan with the independent Token Plan endpoint', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(tokenPlanProvider, {
+        baseUrl: resolveBaseUrl(tokenPlanProvider),
+        apiKey: 'sk-token-plan',
+        modelIds: getDefaultModelIds(tokenPlanProvider),
+      });
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'env.BAILIAN_TOKEN_PLAN_API_KEY',
+      'sk-token-plan',
+    );
+    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+  });
+
+  it('configures Custom API Key via the provider install plan flow', async () => {
+    const envKey = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api.example.com/v1',
+    );
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.example.com/v1',
+        apiKey: 'sk-custom',
+        modelIds: ['custom-model'],
+        advancedConfig: {
+          enableThinking: true,
+        },
+      });
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      `env.${envKey}`,
+      'sk-custom',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI,
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'model.name',
+      'custom-model',
+    );
+    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+  });
+
+  it('cancelAuthentication resets dialog + flags + clears authError', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    // Put the hook into the middle of an in-flight auth + an error to make
+    // sure cancel resets *all* the visible state, not just isAuthenticating.
+    act(() => {
+      result.current.onAuthError('boom');
+    });
+    expect(result.current.authError).toBe('boom');
+    expect(result.current.isAuthDialogOpen).toBe(true);
 
     act(() => {
       result.current.cancelAuthentication();
     });
 
-    const abortSignal = vi.mocked(runOpenRouterOAuthLogin).mock.calls[0]?.[1]
-      ?.abortSignal;
-    expect(abortSignal?.aborted).toBe(true);
     expect(result.current.isAuthenticating).toBe(false);
-    expect(result.current.externalAuthState).toBe(null);
-    expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
+    expect(result.current.externalAuthState).toBeNull();
     expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.authError).toBeNull();
   });
 
-  it('cleans up UI state when OpenRouter OAuth rejects with AbortError', async () => {
+  it('surfaces install-plan rejection as an auth error and records telemetry', async () => {
     const settings = createSettings();
     const config = createConfig();
+    config.refreshAuth = vi.fn(async () => {
+      throw new Error('refreshAuth rejected: bad endpoint');
+    });
     const addItem = vi.fn();
-    vi.mocked(runOpenRouterOAuthLogin).mockRejectedValueOnce(
-      new DOMException('OpenRouter OAuth cancelled.', 'AbortError'),
-    );
 
     const { result } = renderHook(() =>
       useAuthCommand(settings as never, config as never, addItem),
     );
 
     await act(async () => {
-      await result.current.handleOpenRouterSubmit();
+      await result.current.handleProviderSubmit(deepseekProvider, {
+        baseUrl: resolveBaseUrl(deepseekProvider),
+        apiKey: 'sk-bad',
+        modelIds: ['deepseek-v4-flash'],
+      });
     });
 
-    expect(result.current.isAuthenticating).toBe(false);
-    expect(result.current.externalAuthState).toBe(null);
-    expect(result.current.pendingAuthType).toBeUndefined();
+    // handleAuthFailure should have set the error, reopened the dialog, and
+    // cleared the in-flight flag. The success toast must NOT have fired.
+    expect(result.current.authError).toEqual(
+      expect.stringContaining('refreshAuth rejected'),
+    );
     expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.isAuthenticating).toBe(false);
     expect(addItem).not.toHaveBeenCalled();
-  });
-
-  it('adds /model and /manage-models guidance after OpenRouter auth succeeds', async () => {
-    const settings = createSettings();
-    const config = createConfig();
-    const addItem = vi.fn();
-    vi.mocked(runOpenRouterOAuthLogin).mockResolvedValueOnce({
-      apiKey: 'oauth-key-123',
-      userId: 'user-1',
-    });
-
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
-
-    await act(async () => {
-      await result.current.handleOpenRouterSubmit();
-    });
-
-    expect(applyOpenRouterModelsConfiguration).toHaveBeenCalledWith(
-      expect.objectContaining({
-        settings: expect.anything(),
-        config: expect.anything(),
-        apiKey: 'oauth-key-123',
-        reloadConfig: true,
-      }),
-    );
-    expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({ text: 'Successfully configured OpenRouter.' }),
-      expect.any(Number),
-    );
-    expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({ text: 'Use /model to switch models.' }),
-      expect.any(Number),
-    );
-    expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: 'Want more OpenRouter models? Use /manage-models to browse and enable them.',
-      }),
-      expect.any(Number),
-    );
+    // pendingAuthType was set before applyProviderInstallPlan ran, so
+    // handleAuthFailure had it available — the AuthEvent path is no longer
+    // silently dropped on failure. (We can't assert the telemetry sink
+    // directly here, but the visible side effects above all depend on
+    // handleAuthFailure having seen pendingAuthType.)
+    expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
   });
 });
 
 describe('generateCustomApiKeyEnvKey', () => {
-  it('generates env key from openai protocol and base URL', () => {
+  it('generates deterministic URL-based env key', () => {
     const key = generateCustomApiKeyEnvKey(
-      'openai',
+      AuthType.USE_OPENAI,
       'https://api.openai.com/v1',
     );
-    expect(key).toBe('QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_OPENAI_COM_V1');
+    expect(key).toMatch(/^QWEN_CUSTOM_API_KEY_[A-Z0-9_]+$/);
+    const key2 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api.openai.com/v1',
+    );
+    expect(key).toBe(key2);
   });
 
-  it('generates env key from anthropic protocol and base URL', () => {
-    const key = generateCustomApiKeyEnvKey(
-      'anthropic',
-      'https://api.anthropic.com/v1',
+  it('produces different keys for different protocols', () => {
+    const key1 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api.example.com/v1',
     );
-    expect(key).toBe(
-      'QWEN_CUSTOM_API_KEY_ANTHROPIC_HTTPS_API_ANTHROPIC_COM_V1',
+    const key2 = generateCustomApiKeyEnvKey(
+      AuthType.USE_ANTHROPIC,
+      'https://api.example.com/v1',
     );
+    expect(key1).not.toBe(key2);
   });
 
-  it('generates env key from gemini protocol and base URL', () => {
-    const key = generateCustomApiKeyEnvKey(
-      'gemini',
-      'https://generativelanguage.googleapis.com',
+  it('produces different keys for different base URLs', () => {
+    const key1 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api.openai.com/v1',
     );
-    expect(key).toBe(
-      'QWEN_CUSTOM_API_KEY_GEMINI_HTTPS_GENERATIVELANGUAGE_GOOGLEAPIS_COM',
-    );
-  });
-
-  it('handles localhost URLs', () => {
-    const key = generateCustomApiKeyEnvKey(
-      'openai',
+    const key2 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
       'http://localhost:11434/v1',
     );
-    expect(key).toBe('QWEN_CUSTOM_API_KEY_OPENAI_HTTP_LOCALHOST_11434_V1');
+    expect(key1).not.toBe(key2);
   });
 
-  it('normalizes trailing slashes and special chars', () => {
-    const key = generateCustomApiKeyEnvKey(
-      'openai',
+  it('produces equal keys for URLs that differ only in trailing slash', () => {
+    const key1 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
       'https://openrouter.ai/api/v1/',
     );
-    expect(key).toBe('QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_OPENROUTER_AI_API_V1');
-  });
-
-  it('different protocols with same base URL produce different keys', () => {
-    const baseUrl = 'https://api.example.com/v1';
-    const openaiKey = generateCustomApiKeyEnvKey('openai', baseUrl);
-    const anthropicKey = generateCustomApiKeyEnvKey('anthropic', baseUrl);
-    expect(openaiKey).not.toBe(anthropicKey);
-    expect(openaiKey).toContain('OPENAI');
-    expect(anthropicKey).toContain('ANTHROPIC');
+    const key2 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://openrouter.ai/api/v1',
+    );
+    expect(key1).toBe(key2);
   });
 });
 

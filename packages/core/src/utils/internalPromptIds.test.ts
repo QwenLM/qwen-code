@@ -32,4 +32,19 @@ describe('isInternalPromptId', () => {
     expect(isInternalPromptId('btw-prompt-id')).toBe(false);
     expect(isInternalPromptId('context-prompt-id')).toBe(false);
   });
+
+  it('returns false for undefined', () => {
+    expect(isInternalPromptId(undefined)).toBe(false);
+  });
+
+  it('returns true for any side-query: prefixed id', () => {
+    expect(isInternalPromptId('side-query:chat-compression')).toBe(true);
+    expect(isInternalPromptId('side-query:session-recap')).toBe(true);
+    expect(isInternalPromptId('side-query:')).toBe(true);
+  });
+
+  it('returns false for ids that contain but do not start with side-query:', () => {
+    expect(isInternalPromptId('my-side-query:test')).toBe(false);
+    expect(isInternalPromptId(' side-query:leading-space')).toBe(false);
+  });
 });

@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { HistoryItemStats } from '../types.js';
 import { MessageType } from '../types.js';
 import { formatDuration } from '../utils/formatters.js';
 import {
   type CommandContext,
   type SlashCommand,
   type MessageActionReturn,
+  type OpenDialogActionReturn,
   CommandKind,
 } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -20,36 +20,19 @@ export const statsCommand: SlashCommand = {
   name: 'stats',
   altNames: ['usage'],
   get description() {
-    return t('check session stats. Usage: /stats [model|tools]');
+    return t('Show usage statistics dashboard.');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  action: (context: CommandContext): MessageActionReturn | void => {
-    const now = new Date();
-    const { sessionStartTime } = context.session.stats;
-    if (!sessionStartTime) {
-      if (context.executionMode !== 'interactive') {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            'Session start time is unavailable, cannot calculate stats.',
-          ),
-        };
-      }
-      context.ui.addItem(
-        {
-          type: MessageType.ERROR,
-          text: t('Session start time is unavailable, cannot calculate stats.'),
-        },
-        Date.now(),
-      );
-      return;
-    }
-    const wallDuration = now.getTime() - sessionStartTime.getTime();
-
+  action: (
+    context: CommandContext,
+  ): OpenDialogActionReturn | MessageActionReturn | void => {
     if (context.executionMode !== 'interactive') {
-      const { promptCount, metrics } = context.session.stats;
+      const now = new Date();
+      const { sessionStartTime, promptCount, metrics } = context.session.stats;
+      const wallDuration = sessionStartTime
+        ? now.getTime() - sessionStartTime.getTime()
+        : 0;
       let totalPromptTokens = 0;
       let totalCandidateTokens = 0;
       let totalRequests = 0;
@@ -62,22 +45,29 @@ export const statsCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content: [
-          `Session duration: ${formatDuration(wallDuration)}`,
-          `Prompts: ${promptCount}`,
-          `API requests: ${totalRequests}`,
-          `Tokens — prompt: ${totalPromptTokens}, output: ${totalCandidateTokens}`,
-          `Tool calls: ${metrics.tools.totalCalls} (${metrics.tools.totalSuccess} ok, ${metrics.tools.totalFail} fail)`,
-          `Files: +${metrics.files.totalLinesAdded} / -${metrics.files.totalLinesRemoved} lines`,
+          t('Session duration: {{duration}}', {
+            duration: formatDuration(wallDuration),
+          }),
+          t('Prompts: {{count}}', { count: String(promptCount) }),
+          t('API requests: {{count}}', { count: String(totalRequests) }),
+          t('Tokens — prompt: {{prompt}}, output: {{output}}', {
+            prompt: String(totalPromptTokens),
+            output: String(totalCandidateTokens),
+          }),
+          t('Tool calls: {{total}} ({{success}} ok, {{fail}} fail)', {
+            total: String(metrics.tools.totalCalls),
+            success: String(metrics.tools.totalSuccess),
+            fail: String(metrics.tools.totalFail),
+          }),
+          t('Files: +{{added}} / -{{removed}} lines', {
+            added: String(metrics.files.totalLinesAdded),
+            removed: String(metrics.files.totalLinesRemoved),
+          }),
         ].join('\n'),
       };
     }
 
-    const statsItem: HistoryItemStats = {
-      type: MessageType.STATS,
-      duration: formatDuration(wallDuration),
-    };
-
-    context.ui.addItem(statsItem, Date.now());
+    return { type: 'dialog', dialog: 'stats' };
   },
   subCommands: [
     {
@@ -96,7 +86,7 @@ export const statsCommand: SlashCommand = {
             metrics.models,
           )) {
             lines.push(
-              `${modelName}: prompt=${modelMetrics.tokens.prompt}, output=${modelMetrics.tokens.candidates}, cached=${modelMetrics.tokens.cached}`,
+              `${modelName}: ${t('prompt')}=${modelMetrics.tokens.prompt}, ${t('output')}=${modelMetrics.tokens.candidates}, ${t('cached')}=${modelMetrics.tokens.cached}`,
             );
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,
@@ -105,11 +95,13 @@ export const statsCommand: SlashCommand = {
               pricing: pricing?.[modelName],
             });
             if (cost != null) {
-              lines.push(`  Estimated cost: $${cost.toFixed(4)}`);
+              lines.push(
+                `  ${t('Estimated cost: ${{cost}}', { cost: cost.toFixed(4) })}`,
+              );
             }
           }
           if (lines.length === 0) {
-            lines.push('No model usage data yet.');
+            lines.push(t('No model usage data yet.'));
           }
           return {
             type: 'message',
@@ -140,10 +132,14 @@ export const statsCommand: SlashCommand = {
           const content =
             toolNames.length > 0
               ? [
-                  `Tool calls: ${tools.totalCalls} total (${tools.totalSuccess} ok, ${tools.totalFail} fail)`,
+                  t('Tool calls: {{total}} ({{success}} ok, {{fail}} fail)', {
+                    total: String(tools.totalCalls),
+                    success: String(tools.totalSuccess),
+                    fail: String(tools.totalFail),
+                  }),
                   ...toolNames.map((name) => `  ${name}`),
                 ].join('\n')
-              : 'No tool usage data yet.';
+              : t('No tool usage data yet.');
           return { type: 'message', messageType: 'info', content };
         }
         context.ui.addItem(

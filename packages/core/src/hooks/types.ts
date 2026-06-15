@@ -26,10 +26,14 @@ export enum HookEventName {
   PostToolUse = 'PostToolUse',
   // PostToolUseFailure - After tool execution fails
   PostToolUseFailure = 'PostToolUseFailure',
+  // PostToolBatch - After a batch of tool calls resolves
+  PostToolBatch = 'PostToolBatch',
   // Notification - When notifications are sent
   Notification = 'Notification',
   // UserPromptSubmit - When the user submits a prompt
   UserPromptSubmit = 'UserPromptSubmit',
+  // UserPromptExpansion - When a slash command expands into a prompt
+  UserPromptExpansion = 'UserPromptExpansion',
   // SessionStart - When a new session is started
   SessionStart = 'SessionStart',
   // Stop - Right before Claude concludes its response
@@ -46,8 +50,27 @@ export enum HookEventName {
   SessionEnd = 'SessionEnd',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
+  // When a tool call is denied before a permission dialog is displayed
+  PermissionDenied = 'PermissionDenied',
   // StopFailure - When the turn ends due to an API error (instead of Stop)
   StopFailure = 'StopFailure',
+  // TodoCreated - When a new todo item is added to the list (Qwen Code specific)
+  TodoCreated = 'TodoCreated',
+  // TodoCompleted - When a todo item's status changes to 'completed' (Qwen Code specific)
+  TodoCompleted = 'TodoCompleted',
+  // InstructionsLoaded - When an instruction or context file is loaded
+  InstructionsLoaded = 'InstructionsLoaded',
+}
+
+/**
+ * Hook execution phase for todo events
+ * Used to split validation from side effects for atomic updates
+ */
+export enum HookPhase {
+  /** Validation phase - hooks should only check and return block/approve decisions, no side effects */
+  Validation = 'validation',
+  /** PostWrite phase - hooks can perform side effects (logging, HTTP sync, etc.) after data is persisted */
+  PostWrite = 'postWrite',
 }
 
 /**
@@ -139,6 +162,36 @@ export interface FunctionHookConfig {
 }
 
 /**
+ * LLM Hook response format - used by prompt hooks
+ */
+export interface LLMHookResponse {
+  /** true = allow operation, false = block operation */
+  ok: boolean;
+  /** Decision reason (required when ok=false, shown to user) */
+  reason?: string;
+  /** Optional additional context to add to conversation */
+  additionalContext?: string;
+}
+
+/**
+ * Hook configuration entry for prompt hooks
+ * Sends hook input to LLM for single-turn evaluation
+ */
+export interface PromptHookConfig {
+  type: HookType.Prompt;
+  /** Prompt template with $ARGUMENTS placeholder for hook input JSON */
+  prompt: string;
+  /** Optional model override (defaults to the user's current model) */
+  model?: string;
+  /** Timeout in seconds (default 30) */
+  timeout?: number;
+  name?: string;
+  description?: string;
+  source?: HooksConfigSource;
+  statusMessage?: string;
+}
+
+/**
  * Messages provider callback type for automatically passing conversation history
  * to function hooks during execution
  */
@@ -147,7 +200,8 @@ export type MessagesProvider = () => Array<Record<string, unknown>> | undefined;
 export type HookConfig =
   | CommandHookConfig
   | HttpHookConfig
-  | FunctionHookConfig;
+  | FunctionHookConfig
+  | PromptHookConfig;
 
 /**
  * Hook definition with matcher
@@ -165,6 +219,7 @@ export enum HookType {
   Command = 'command',
   Http = 'http',
   Function = 'function',
+  Prompt = 'prompt',
 }
 
 /**
@@ -181,6 +236,8 @@ export function getHookKey(hook: HookConfig): string {
       return name
         ? `${name}:${hook.id ?? 'function'}`
         : (hook.id ?? 'function');
+    case HookType.Prompt:
+      return name ? `${name}:${hook.prompt}` : hook.prompt;
     default:
       return name || 'unknown';
   }
@@ -202,6 +259,21 @@ export interface HookInput {
   timestamp: string;
 }
 
+export type InstructionMemoryType = 'user' | 'project' | 'local' | 'extension';
+
+export type InstructionLoadReason = 'session_start' | 'include' | 'refresh';
+
+/**
+ * Input for InstructionsLoaded hook events
+ */
+export interface InstructionsLoadedInput extends HookInput {
+  file_path: string;
+  memory_type: InstructionMemoryType;
+  load_reason: InstructionLoadReason;
+  trigger_file_path?: string;
+  parent_file_path?: string;
+}
+
 /**
  * Base hook output - common fields for all events
  */
@@ -210,9 +282,23 @@ export interface HookOutput {
   stopReason?: string;
   suppressOutput?: boolean;
   systemMessage?: string;
+  terminalSequence?: string;
   decision?: HookDecision;
   reason?: string;
   hookSpecificOutput?: Record<string, unknown>;
+}
+
+export const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;
+
+export function sanitizeUserPromptExpansionAdditionalContext(
+  raw: string,
+): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)
+    .replace(/&(?:a(?:mp?)?|lt?|gt?)?$/, '');
 }
 
 /**
@@ -230,6 +316,10 @@ export function createHookOutput(
       return new PostToolUseHookOutput(data);
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
+    case HookEventName.UserPromptExpansion:
+      return new UserPromptExpansionHookOutput(data);
+    case HookEventName.PostToolBatch:
+      return new PostToolBatchHookOutput(data);
     case HookEventName.Stop:
     case HookEventName.SubagentStop:
       return new StopHookOutput(data);
@@ -248,6 +338,7 @@ export class DefaultHookOutput implements HookOutput {
   stopReason?: string;
   suppressOutput?: boolean;
   systemMessage?: string;
+  terminalSequence?: string;
   decision?: HookDecision;
   reason?: string;
   hookSpecificOutput?: Record<string, unknown>;
@@ -257,6 +348,7 @@ export class DefaultHookOutput implements HookOutput {
     this.stopReason = data.stopReason;
     this.suppressOutput = data.suppressOutput;
     this.systemMessage = data.systemMessage;
+    this.terminalSequence = data.terminalSequence;
     this.decision = data.decision;
     this.reason = data.reason;
     this.hookSpecificOutput = data.hookSpecificOutput;
@@ -283,19 +375,23 @@ export class DefaultHookOutput implements HookOutput {
     return this.stopReason || this.reason || 'No reason provided';
   }
 
-  /**
-   * Get sanitized additional context for adding to responses.
-   */
-  getAdditionalContext(): string | undefined {
+  protected getRawAdditionalContext(): string | undefined {
     if (
       this.hookSpecificOutput &&
       'additionalContext' in this.hookSpecificOutput
     ) {
       const context = this.hookSpecificOutput['additionalContext'];
-      if (typeof context !== 'string') {
-        return undefined;
-      }
+      return typeof context === 'string' ? context : undefined;
+    }
+    return undefined;
+  }
 
+  /**
+   * Get sanitized additional context for adding to responses.
+   */
+  getAdditionalContext(): string | undefined {
+    const context = this.getRawAdditionalContext();
+    if (context !== undefined) {
       // Sanitize by escaping < and > to prevent tag injection
       return context.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
@@ -435,6 +531,31 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
 }
 
 /**
+ * Specific hook output class for UserPromptExpansion events.
+ */
+export class UserPromptExpansionHookOutput extends DefaultHookOutput {
+  override getAdditionalContext(): string | undefined {
+    const raw = this.getRawAdditionalContext();
+    if (raw === undefined) {
+      return undefined;
+    }
+    return sanitizeUserPromptExpansionAdditionalContext(raw);
+  }
+}
+
+/**
+ * Specific hook output class for PostToolBatch events.
+ */
+export class PostToolBatchHookOutput extends DefaultHookOutput {
+  /**
+   * Check if batch processing should stop after the resolved tool calls.
+   */
+  override shouldStopExecution(): boolean {
+    return super.shouldStopExecution() || this.isBlockingDecision();
+  }
+}
+
+/**
  * Specific hook output class for Stop events.
  */
 export class StopHookOutput extends DefaultHookOutput {
@@ -472,6 +593,22 @@ export interface PermissionRequestInput extends HookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   permission_suggestions?: PermissionSuggestion[];
+}
+
+export type PermissionDeniedReason =
+  /** AUTO classifier evaluated the request and actively blocked it. */
+  | 'classifier_blocked'
+  /** AUTO classifier could not return a verdict, so AUTO mode denied it. */
+  | 'classifier_unavailable';
+
+/**
+ * Input for PermissionDenied hook events
+ */
+export interface PermissionDeniedInput extends HookInput {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+  reason: PermissionDeniedReason;
 }
 
 /**
@@ -617,6 +754,40 @@ export interface PostToolUseFailureOutput extends HookOutput {
 }
 
 /**
+ * Tool call summary for PostToolBatch hook input
+ */
+export interface PostToolBatchToolCall {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+  status: 'success' | 'error' | 'cancelled';
+  /**
+   * Serialized ToolCallResponseInfo fields for the resolved call:
+   * response_parts, result_display, error, error_type, and content_length.
+   */
+  tool_response?: Record<string, unknown>;
+}
+
+/**
+ * PostToolBatch hook input
+ * Fired once after all tool calls in a batch have resolved.
+ */
+export interface PostToolBatchInput extends HookInput {
+  permission_mode: PermissionMode;
+  tool_calls: PostToolBatchToolCall[];
+}
+
+/**
+ * PostToolBatch hook output
+ */
+export interface PostToolBatchOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'PostToolBatch';
+    additionalContext?: string;
+  };
+}
+
+/**
  * UserPromptSubmit hook input
  */
 export interface UserPromptSubmitInput extends HookInput {
@@ -629,6 +800,28 @@ export interface UserPromptSubmitInput extends HookInput {
 export interface UserPromptSubmitOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'UserPromptSubmit';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * UserPromptExpansion hook input
+ *
+ * Field names intentionally follow the JSON hook payload convention rather
+ * than TypeScript camelCase, matching UserPromptSubmit and other hook inputs.
+ */
+export interface UserPromptExpansionInput extends HookInput {
+  command_name: string;
+  command_args: string;
+  prompt: string;
+}
+
+/**
+ * UserPromptExpansion hook output
+ */
+export interface UserPromptExpansionOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'UserPromptExpansion';
     additionalContext?: string;
   };
 }
@@ -688,12 +881,14 @@ export enum SessionStartSource {
   Resume = 'resume',
   Clear = 'clear',
   Compact = 'compact',
+  Branch = 'branch',
 }
 
 export enum PermissionMode {
   Default = 'default',
   Plan = 'plan',
   AutoEdit = 'auto_edit',
+  Auto = 'auto',
   Yolo = 'yolo',
 }
 
@@ -881,6 +1076,111 @@ export interface StopFailureInput extends HookInput {
  * This type alias is used instead of an empty interface to satisfy ESLint rules
  */
 export type StopFailureOutput = HookOutput;
+
+/**
+ * Todo item status types
+ */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+
+/**
+ * TodoCreated hook input
+ * Fired when a new todo item is added to the list
+ */
+export interface TodoCreatedInput extends HookInput {
+  hook_event_name: 'TodoCreated';
+  todo_id: string;
+  todo_content: string;
+  todo_status: TodoStatus;
+  all_todos: TodoItem[];
+  /** Execution phase: validation (no side effects) or postWrite (side effects allowed) */
+  phase: HookPhase;
+}
+
+/**
+ * TodoCreated hook output
+ */
+export interface TodoCreatedOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'TodoCreated';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * TodoCompleted hook input
+ * Fired when a todo item's status changes to 'completed'
+ */
+export interface TodoCompletedInput extends HookInput {
+  hook_event_name: 'TodoCompleted';
+  todo_id: string;
+  todo_content: string;
+  previous_status: 'pending' | 'in_progress';
+  all_todos: TodoItem[];
+  /** Execution phase: validation (no side effects) or postWrite (side effects allowed) */
+  phase: HookPhase;
+}
+
+/**
+ * TodoCompleted hook output
+ */
+export interface TodoCompletedOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'TodoCompleted';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * Todo item structure (mirrors the one in todoWrite.ts)
+ */
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: TodoStatus;
+}
+
+/**
+ * Changes detected when comparing old and new todo lists
+ */
+export interface TodoChanges {
+  created: TodoItem[];
+  completed: TodoItem[];
+}
+
+/**
+ * Compare old and new todo lists to detect changes
+ * @param oldTodos The previous todo list
+ * @param newTodos The new todo list
+ * @returns TodoChanges containing created and completed items
+ */
+export function detectTodoChanges(
+  oldTodos: TodoItem[],
+  newTodos: TodoItem[],
+): TodoChanges {
+  const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
+
+  const changes: TodoChanges = {
+    created: [],
+    completed: [],
+  };
+
+  for (const newTodo of newTodos) {
+    const oldTodo = oldTodosMap.get(newTodo.id);
+
+    if (!oldTodo) {
+      // New todo created (ID not found in old todos)
+      changes.created.push(newTodo);
+    } else if (
+      oldTodo.status !== 'completed' &&
+      newTodo.status === 'completed'
+    ) {
+      // Todo completed (status changed to 'completed')
+      changes.completed.push(newTodo);
+    }
+  }
+
+  return changes;
+}
 
 /**
  * Hook execution result

@@ -6,6 +6,7 @@
 
 import { type FC, memo } from 'react';
 import { MessageContent } from '../MessageContent.js';
+import { MessageMeta } from '../MessageMeta.js';
 import './AssistantMessage.css';
 
 export type AssistantMessageStatus =
@@ -34,7 +35,7 @@ export interface AssistantMessageProps {
  */
 const AssistantMessageBase: FC<AssistantMessageProps> = ({
   content,
-  timestamp: _timestamp,
+  timestamp,
   onFileClick,
   status = 'default',
   hideStatusIcon = false,
@@ -65,7 +66,7 @@ const AssistantMessageBase: FC<AssistantMessageProps> = ({
 
   return (
     <div
-      className={`qwen-message message-item assistant-message-container ${getStatusClass()}`}
+      className={`qwen-message message-item assistant-message-container group ${getStatusClass()}`}
       data-first={isFirst}
       data-last={isLast}
       style={{
@@ -92,6 +93,7 @@ const AssistantMessageBase: FC<AssistantMessageProps> = ({
             enableFileLinks={false}
           />
         </div>
+        <MessageMeta timestamp={timestamp} copyText={content} />
       </span>
     </div>
   );

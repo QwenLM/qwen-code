@@ -33,13 +33,14 @@ import type {
   AgentBootstrapRecordPayload,
   ChatRecord,
 } from '../services/chatRecordingService.js';
+import type { SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { FunctionDeclaration, Content } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 
-function sanitizeFilenameComponent(value: string): string {
+export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
@@ -108,6 +109,8 @@ export interface AgentMeta {
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /** Launch-time CLI/runtime flags that should survive process restart. */
+  persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
   subagentName?: string;
   /** UI hint preserved for resumed task rows. */
@@ -116,6 +119,17 @@ export interface AgentMeta {
   resumeCount?: number;
   /** Last terminal error, if any. */
   lastError?: string;
+}
+
+export interface AgentPersistedCliFlags {
+  /** Mirrors resolvedApprovalMode; kept here so the restored flag set is explicit. */
+  approvalMode?: string;
+  bare?: boolean;
+  sandbox?: SandboxConfig | null;
+  screenReader?: boolean;
+  model?: string;
+  maxSessionTurns?: number;
+  maxToolCalls?: number;
 }
 
 /**
@@ -360,11 +374,15 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
-  const recordUserMessage = (text: string) => {
+  const recordUserMessage = (
+    text: string,
+    externalInputKind?: AgentExternalMessageEvent['kind'],
+  ) => {
     if (!text) return;
     append({
       ...baseFields('user'),
       message: { role: 'user', parts: [{ text }] },
+      ...(externalInputKind ? { externalInputKind } : {}),
     });
   };
 
@@ -380,7 +398,7 @@ export function attachJsonlTranscriptWriter(
   };
 
   const onExternalMessage = (event: AgentExternalMessageEvent) => {
-    recordUserMessage(event.text);
+    recordUserMessage(event.text, event.kind ?? 'message');
   };
 
   const hasBootstrapPayload =

@@ -5,7 +5,29 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { CommandKind, type SlashCommand } from '../commands/types.js';
 import { parseInputForHighlighting } from './highlight.js';
+
+const slashCommands: SlashCommand[] = [
+  {
+    name: 'help',
+    description: 'Help',
+    kind: CommandKind.BUILT_IN,
+    userInvocable: true,
+  },
+  {
+    name: 'review',
+    description: 'Review',
+    kind: CommandKind.SKILL,
+    modelInvocable: true,
+  },
+  {
+    name: 'clear',
+    description: 'Clear',
+    kind: CommandKind.BUILT_IN,
+    modelInvocable: false,
+  },
+];
 
 describe('parseInputForHighlighting', () => {
   it('should handle an empty string', () => {
@@ -45,10 +67,12 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
-  it('should not highlight a command in the middle', () => {
+  it('should highlight a command in the middle when preceded by whitespace', () => {
     const text = 'I need /help with this';
     expect(parseInputForHighlighting(text, 0)).toEqual([
-      { text: 'I need /help with this', type: 'default' },
+      { text: 'I need ', type: 'default' },
+      { text: '/help', type: 'command' },
+      { text: ' with this', type: 'default' },
     ]);
   });
 
@@ -61,12 +85,16 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
-  it('should highlight files but not commands not at the start', () => {
+  it('should highlight commands and files when commands are preceded by whitespace', () => {
     const text = 'Use /run with @file.js and also /format @another/file.ts';
     expect(parseInputForHighlighting(text, 0)).toEqual([
-      { text: 'Use /run with ', type: 'default' },
+      { text: 'Use ', type: 'default' },
+      { text: '/run', type: 'command' },
+      { text: ' with ', type: 'default' },
       { text: '@file.js', type: 'file' },
-      { text: ' and also /format ', type: 'default' },
+      { text: ' and also ', type: 'default' },
+      { text: '/format', type: 'command' },
+      { text: ' ', type: 'default' },
       { text: '@another/file.ts', type: 'file' },
     ]);
   });
@@ -79,10 +107,11 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
-  it('should not highlight command at the end of the string', () => {
+  it('should highlight command at the end of the string when preceded by whitespace', () => {
     const text = 'Get help with /help';
     expect(parseInputForHighlighting(text, 0)).toEqual([
-      { text: 'Get help with /help', type: 'default' },
+      { text: 'Get help with ', type: 'default' },
+      { text: '/help', type: 'command' },
     ]);
   });
 
@@ -94,10 +123,12 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
-  it('should not highlight command with dashes and numbers not at start', () => {
+  it('should highlight command with dashes and numbers when preceded by whitespace', () => {
     const text = 'Run /command-123 now';
     expect(parseInputForHighlighting(text, 0)).toEqual([
-      { text: 'Run /command-123 now', type: 'default' },
+      { text: 'Run ', type: 'default' },
+      { text: '/command-123', type: 'command' },
+      { text: ' now', type: 'default' },
     ]);
   });
 
@@ -126,11 +157,36 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
+  it('should highlight mid-input slash command (the key use case)', () => {
+    const text = 'hello /review sssss';
+    expect(parseInputForHighlighting(text, 0)).toEqual([
+      { text: 'hello ', type: 'default' },
+      { text: '/review', type: 'command' },
+      { text: ' sssss', type: 'default' },
+    ]);
+  });
+
   it('should highlight a file path with escaped spaces', () => {
     const text = 'cat @/my\\ path/file.txt';
     expect(parseInputForHighlighting(text, 0)).toEqual([
       { text: 'cat ', type: 'default' },
       { text: '@/my\\ path/file.txt', type: 'file' },
+    ]);
+  });
+
+  it('should only highlight valid slash commands when command metadata is provided', () => {
+    const text = '/help please /review this /clear and /missing plus /usr/bin';
+    expect(parseInputForHighlighting(text, 0, slashCommands)).toEqual([
+      { text: '/help', type: 'command' },
+      { text: ' please ', type: 'default' },
+      { text: '/review', type: 'command' },
+      { text: ' this ', type: 'default' },
+      { text: '/clear', type: 'default' },
+      { text: ' and ', type: 'default' },
+      { text: '/missing', type: 'default' },
+      { text: ' plus ', type: 'default' },
+      { text: '/usr', type: 'default' },
+      { text: '/bin', type: 'default' },
     ]);
   });
 });

@@ -147,6 +147,62 @@ CLI:
 qwen mcp add --transport sse sseServer http://localhost:8080/sse --timeout 30000
 ```
 
+## Progressive availability and discovery timeouts
+
+Qwen Code discovers MCP servers in the background after the UI is already
+interactive. You see the cli's first prompt within a few hundred
+milliseconds even when one of your MCP servers takes several seconds
+(or never responds), and the model's tool list updates within roughly
+one frame (~16 ms) of each server completing its discover handshake.
+
+- **Interactive mode**: the UI appears immediately; an MCP status pill in
+  the bottom-right shows `N/M MCP servers ready` while discovery is in
+  flight. Sending a prompt before MCP finishes simply means the model
+  sees the tools that are ready _at that moment_; subsequent prompts see
+  more tools as servers come online.
+- **Non-interactive mode** (`--prompt`, stream-json, ACP): the cli still
+  waits for MCP discovery to settle before sending the first prompt, so
+  scripted / piped invocations see the same complete tool set the
+  legacy synchronous behavior produced.
+
+### Per-server `discoveryTimeoutMs`
+
+Each MCP server gets a discovery-only timeout that caps how long the
+initial handshake (`connect` + `tools/list` + `prompts/list` +
+`resources/list`) is allowed to take. Defaults:
+
+- **stdio servers**: 30 s
+- **remote HTTP / SSE servers**: 5 s (network risk is higher)
+
+Override per server when needed:
+
+```jsonc
+{
+  "mcpServers": {
+    "slow-stdio": {
+      "command": "node",
+      "args": ["./slow-server.js"],
+      "discoveryTimeoutMs": 60000,
+    },
+    "flaky-remote": {
+      "httpUrl": "https://example.com/mcp",
+      "discoveryTimeoutMs": 10000,
+    },
+  },
+}
+```
+
+The existing `timeout` field is **tool-call** timeout (used for each
+`tools/call` request, default 10 minutes) and is unaffected by
+`discoveryTimeoutMs` — a long-running tool invocation is not a startup
+pathology.
+
+### Rolling back progressive MCP
+
+If you need the old synchronous behavior (cli waits for every MCP server
+before showing any UI), set `QWEN_CODE_LEGACY_MCP_BLOCKING=1` in your
+environment. This is kept as an escape hatch for at least one release.
+
 ## Safety and control
 
 ### Trust (skip confirmations)

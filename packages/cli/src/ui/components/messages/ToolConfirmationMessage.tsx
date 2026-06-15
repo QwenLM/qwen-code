@@ -31,6 +31,11 @@ import { theme } from '../../semantic-colors.js';
 import { t } from '../../../i18n/index.js';
 import { AskUserQuestionDialog } from './AskUserQuestionDialog.js';
 
+// Cap the body height of inline subagent approval banners so a
+// multi-line command can't dominate the screen. MaxSizedBox renders
+// a "... N more lines" footer past this cap.
+const COMPACT_BODY_MAX_LINES = 5;
+
 export interface ToolConfirmationMessageProps {
   confirmationDetails: ToolCallConfirmationDetails;
   config: Config;
@@ -110,43 +115,6 @@ export const ToolConfirmationMessage: React.FC<
 
   const handleSelect = (item: ToolConfirmationOutcome) => handleConfirm(item);
 
-  // Compact mode: return simple 3-option display
-  if (compactMode) {
-    const compactOptions: Array<RadioSelectItem<ToolConfirmationOutcome>> = [
-      {
-        key: 'proceed-once',
-        label: t('Yes, allow once'),
-        value: ToolConfirmationOutcome.ProceedOnce,
-      },
-      {
-        key: 'proceed-always',
-        label: t('Allow always'),
-        value: ToolConfirmationOutcome.ProceedAlways,
-      },
-      {
-        key: 'cancel',
-        label: t('No'),
-        value: ToolConfirmationOutcome.Cancel,
-      },
-    ];
-
-    return (
-      <Box flexDirection="column">
-        <Box>
-          <Text wrap="truncate">{t('Do you want to proceed?')}</Text>
-        </Box>
-        <Box>
-          <RadioButtonSelect
-            items={compactOptions}
-            onSelect={handleSelect}
-            isFocused={isFocused}
-          />
-        </Box>
-      </Box>
-    );
-  }
-
-  // Original logic continues unchanged below
   let bodyContent: React.ReactNode | null = null; // Removed contextDisplay here
   let question: string;
 
@@ -168,12 +136,14 @@ export const ToolConfirmationMessage: React.FC<
     }
 
     // Calculate the vertical space (in lines) consumed by UI elements
-    // surrounding the main body content.
-    const PADDING_OUTER_Y = 2; // Main container has `padding={1}` (top & bottom).
-    const MARGIN_BODY_BOTTOM = 1; // margin on the body container.
-    const HEIGHT_QUESTION = 1; // The question text is one line.
-    const MARGIN_QUESTION_BOTTOM = 1; // Margin on the question container.
-    const HEIGHT_OPTIONS = options.length; // Each option in the radio select takes one line.
+    // surrounding the main body content. Compact mode drops outer padding
+    // and inter-section margins, and renders a fixed 3-option list rather
+    // than the full options array.
+    const PADDING_OUTER_Y = compactMode ? 0 : 2;
+    const MARGIN_BODY_BOTTOM = compactMode ? 0 : 1;
+    const HEIGHT_QUESTION = 1;
+    const MARGIN_QUESTION_BOTTOM = compactMode ? 0 : 1;
+    const HEIGHT_OPTIONS = compactMode ? 3 : options.length;
 
     const surroundingElementsHeight =
       PADDING_OUTER_Y +
@@ -280,9 +250,47 @@ export const ToolConfirmationMessage: React.FC<
       key: 'No, suggest changes (esc)',
     });
 
+    // Warnings render as a sibling Box *below* the MaxSizedBox-capped
+    // command body, with marginTop={1}. They sit outside the MaxSizedBox
+    // cap, so we have to reserve their footprint up-front; otherwise the
+    // overall exec block can exceed availableTerminalHeight /
+    // COMPACT_BODY_MAX_LINES on small terminals and push the options
+    // list off-screen.
+    //
+    // Each warning may wrap across multiple visual rows on a narrow
+    // terminal. Account for that by computing `ceil(rendered_len /
+    // contentWidth)` per warning (rendered length includes the leading
+    // `⚠ ` glyph + space, so add 2). Falling back to a 1-row estimate
+    // when contentWidth is non-positive keeps the math defined for
+    // pathological inputs.
+    const warningPrefixLen = 2; // "⚠ "
+    const safeWidth = Math.max(contentWidth, 1);
+    const warnings = executionProps.warnings ?? [];
+    const warningsCount = warnings.length;
+    const wrappedWarningRows = warnings.reduce(
+      (sum, w) =>
+        sum + Math.max(Math.ceil((w.length + warningPrefixLen) / safeWidth), 1),
+      0,
+    );
+    // wrapped rows + 1 line for the marginTop separator (only when at
+    // least one warning is present).
+    const warningsHeight = warningsCount > 0 ? wrappedWarningRows + 1 : 0;
+
     let bodyContentHeight = availableBodyContentHeight();
     if (bodyContentHeight !== undefined) {
       bodyContentHeight -= 2; // Account for padding;
+    }
+    if (compactMode) {
+      bodyContentHeight = Math.min(
+        bodyContentHeight ?? COMPACT_BODY_MAX_LINES,
+        COMPACT_BODY_MAX_LINES,
+      );
+    }
+    // Subtract the warnings footprint last so it applies in both the
+    // normal-height and compact-cap paths. Floor at 1 so a long warning
+    // list never zeroes out the command body.
+    if (bodyContentHeight !== undefined && warningsHeight > 0) {
+      bodyContentHeight = Math.max(bodyContentHeight - warningsHeight, 1);
     }
     bodyContent = (
       <Box flexDirection="column">
@@ -290,12 +298,22 @@ export const ToolConfirmationMessage: React.FC<
           <MaxSizedBox
             maxHeight={bodyContentHeight}
             maxWidth={Math.max(contentWidth, 1)}
+            overflowDirection="bottom"
           >
             <Box>
               <Text color={theme.text.link}>{executionProps.command}</Text>
             </Box>
           </MaxSizedBox>
         </Box>
+        {warningsCount > 0 ? (
+          <Box flexDirection="column" paddingX={1} marginLeft={1} marginTop={1}>
+            {warnings.map((warning, idx) => (
+              <Text key={idx} color={theme.status.warning}>
+                ⚠ {warning}
+              </Text>
+            ))}
+          </Box>
+        ) : null}
       </Box>
     );
   } else if (confirmationDetails.type === 'plan') {
@@ -325,12 +343,18 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.Cancel,
     });
 
+    const planHeight = compactMode
+      ? Math.min(
+          availableBodyContentHeight() ?? COMPACT_BODY_MAX_LINES,
+          COMPACT_BODY_MAX_LINES,
+        )
+      : availableBodyContentHeight();
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
         <MarkdownDisplay
           text={planProps.plan}
           isPending={false}
-          availableTerminalHeight={availableBodyContentHeight()}
+          availableTerminalHeight={planHeight}
           contentWidth={contentWidth}
         />
       </Box>
@@ -462,25 +486,71 @@ export const ToolConfirmationMessage: React.FC<
     });
   }
 
+  // For exec/mcp confirmations the type-specific question text would
+  // restate what the body already shows (the full command, or the labeled
+  // server + tool). Use the generic prompt so the question line acts as a
+  // body→options transition without duplicating information.
+  const renderedQuestion =
+    compactMode &&
+    (confirmationDetails.type === 'exec' || confirmationDetails.type === 'mcp')
+      ? t('Do you want to proceed?')
+      : question;
+
+  // Compact mode trims the option list to a fixed 3-option set (the
+  // project/user-scope "Always allow" variants would clutter the inline
+  // subagent banner) but still shows the per-type body and question so the
+  // parent knows what is being approved.
+  const renderedOptions: Array<RadioSelectItem<ToolConfirmationOutcome>> =
+    compactMode
+      ? [
+          {
+            key: 'proceed-once',
+            label: t('Yes, allow once'),
+            value: ToolConfirmationOutcome.ProceedOnce,
+          },
+          ...(!confirmationDetails.hideAlwaysAllow
+            ? [
+                {
+                  key: 'proceed-always',
+                  label: t('Allow always'),
+                  value: ToolConfirmationOutcome.ProceedAlways,
+                },
+              ]
+            : []),
+          {
+            key: 'cancel',
+            label: t('No'),
+            value: ToolConfirmationOutcome.Cancel,
+          },
+        ]
+      : options;
+
+  // Compact mode strips outer padding, inter-section margins, and explicit
+  // width — the parent (SubagentExecutionRenderer) already provides those.
+  const outerPadding = compactMode ? 0 : 1;
+  const sectionMargin = compactMode ? 0 : 1;
+  const outerWidth = compactMode ? undefined : contentWidth;
+
   return (
-    <Box flexDirection="column" padding={1} width={contentWidth}>
-      {/* Body Content (Diff Renderer or Command Info) */}
-      {/* No separate context display here anymore for edits */}
-      <Box flexGrow={1} flexShrink={1} overflow="hidden" marginBottom={1}>
+    <Box flexDirection="column" padding={outerPadding} width={outerWidth}>
+      <Box
+        flexGrow={1}
+        flexShrink={1}
+        overflow="hidden"
+        marginBottom={sectionMargin}
+      >
         {bodyContent}
       </Box>
 
-      {/* Confirmation Question */}
-      <Box marginBottom={1} flexShrink={0}>
+      <Box marginBottom={sectionMargin} flexShrink={0}>
         <Text color={theme.text.primary} wrap="truncate">
-          {question}
+          {renderedQuestion}
         </Text>
       </Box>
 
-      {/* Select Input for Options */}
       <Box flexShrink={0}>
         <RadioButtonSelect
-          items={options}
+          items={renderedOptions}
           onSelect={handleSelect}
           isFocused={isFocused}
         />

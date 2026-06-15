@@ -20,6 +20,8 @@ export default {
 
   'channel-plugins': 'Channel Plugin Guide',
   tools: 'Tools',
+  'qwen-serve-protocol': 'qwen serve HTTP protocol',
+  daemon: 'Daemon 模式 · 开发者深度指南',
 
   examples: {
     display: 'hidden',

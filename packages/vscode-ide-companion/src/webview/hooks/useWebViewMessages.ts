@@ -71,6 +71,7 @@ interface UseWebViewMessagesProps {
 
   // Message handling
   messageHandling: {
+    messages: WebViewMessage[];
     setMessages: (
       messages:
         | WebViewMessage[]
@@ -92,6 +93,7 @@ interface UseWebViewMessagesProps {
   // Tool calls
   handleToolCallUpdate: (update: ToolCallUpdate) => void;
   clearToolCalls: () => void;
+  rewindToolCallsToTimestamp?: (cutoffTimestamp: number) => void;
 
   // Plan
   setPlanEntries: (entries: PlanEntry[]) => void;
@@ -169,8 +171,30 @@ type ConversationResetHandlers = {
     UseWebViewMessagesProps['sessionManagement'],
     'setCurrentSessionId' | 'setCurrentSessionTitle'
   >;
+  resetUserTurnCounter?: () => void;
   setUsageStats?: UseWebViewMessagesProps['setUsageStats'];
 };
+
+/**
+ * Surface the canonical tool name (the ACP frame's `_meta.toolName`) onto the
+ * PermissionToolCall so the drawer can render tool-specific UI (e.g. the Agent
+ * tool's "Launch this agent?" prompt) without depending on a protocol `kind`
+ * ACP can't carry. Mutates in place; a pre-existing `toolName` is preserved and
+ * an absent `_meta` is a no-op.
+ */
+export function liftToolNameFromMeta(
+  toolCall:
+    | (PermissionToolCall & { _meta?: { toolName?: string } })
+    | undefined,
+): void {
+  if (
+    toolCall &&
+    toolCall.toolName === undefined &&
+    typeof toolCall._meta?.toolName === 'string'
+  ) {
+    toolCall.toolName = toolCall._meta.toolName;
+  }
+}
 
 export function resetConversationState({
   handlers,
@@ -187,6 +211,7 @@ export function resetConversationState({
   handlers.messageHandling.clearThinking();
   handlers.messageHandling.clearMessages();
   handlers.clearToolCalls();
+  handlers.resetUserTurnCounter?.();
   handlers.setPlanEntries([]);
   handlers.handlePermissionRequest(null);
   handlers.handleAskUserQuestion(null);
@@ -201,6 +226,42 @@ export function resetConversationState({
   });
 }
 
+function indexUserMessagesForEditRewind(messages: WebViewMessageBase[]): {
+  messages: WebViewMessageBase[];
+  nextTurnIndex: number;
+} {
+  let nextTurnIndex = 0;
+  const indexedMessages = messages.map((entry) => {
+    if (entry.role !== 'user') {
+      return entry;
+    }
+    const indexed = { ...entry, turnIndex: nextTurnIndex };
+    nextTurnIndex += 1;
+    return indexed;
+  });
+
+  return { messages: indexedMessages, nextTurnIndex };
+}
+
+function restoreMessagesForEditRewind({
+  messages,
+  materializeMessages,
+}: {
+  messages: WebViewMessageBase[];
+  materializeMessages: (messages: WebViewMessageBase[]) => WebViewMessage[];
+}): { messages: WebViewMessage[]; nextTurnIndex: number } {
+  // IMPORTANT: indexUserMessagesForEditRewind must be called before
+  // materializeMessages. Image message expansion creates additional
+  // user-role entries that share the parent's turnIndex.
+  const { messages: indexedMessages, nextTurnIndex } =
+    indexUserMessagesForEditRewind(messages);
+
+  return {
+    messages: materializeMessages(indexedMessages),
+    nextTurnIndex,
+  };
+}
+
 /**
  * WebView message handling Hook
  * Handles all messages from VSCode Extension uniformly
@@ -211,6 +272,7 @@ export const useWebViewMessages = ({
   messageHandling,
   handleToolCallUpdate,
   clearToolCalls,
+  rewindToolCallsToTimestamp,
   setPlanEntries,
   handlePermissionRequest,
   handleAskUserQuestion,
@@ -248,6 +310,7 @@ export const useWebViewMessages = ({
   // Track the active requestId from the latest streamStart so we can
   // discard stale streamEnd events from cancelled/previous requests.
   const activeRequestIdRef = useRef<string | null>(null);
+  const userTurnCounterRef = useRef(0);
   // Use ref to store callbacks to avoid useEffect dependency issues
   const handlersRef = useRef({
     sessionManagement,
@@ -255,6 +318,7 @@ export const useWebViewMessages = ({
     messageHandling,
     handleToolCallUpdate,
     clearToolCalls,
+    rewindToolCallsToTimestamp,
     setPlanEntries,
     handlePermissionRequest,
     handleAskUserQuestion,
@@ -332,6 +396,7 @@ export const useWebViewMessages = ({
       messageHandling,
       handleToolCallUpdate,
       clearToolCalls,
+      rewindToolCallsToTimestamp,
       setPlanEntries,
       handlePermissionRequest,
       handleAskUserQuestion,
@@ -556,11 +621,15 @@ export const useWebViewMessages = ({
 
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
+          const { messages: restoredMessages, nextTurnIndex } =
+            restoreMessagesForEditRewind({
+              messages: conversation.messages as WebViewMessageBase[],
+              materializeMessages,
+            });
+          userTurnCounterRef.current = nextTurnIndex;
           clearInsightState();
           clearImageResolutions();
-          handlers.messageHandling.setMessages(
-            materializeMessages(conversation.messages as WebViewMessageBase[]),
-          );
+          handlers.messageHandling.setMessages(restoredMessages);
           break;
         }
 
@@ -576,7 +645,12 @@ export const useWebViewMessages = ({
               endLine?: number;
             };
           };
-          materializeMessage(msg as WebViewMessageBase).forEach((entry) =>
+          const baseMessage = msg as WebViewMessageBase;
+          if (baseMessage.role === 'user') {
+            baseMessage.turnIndex = userTurnCounterRef.current;
+            userTurnCounterRef.current += 1;
+          }
+          materializeMessage(baseMessage).forEach((entry) =>
             handlers.messageHandling.addMessage(entry),
           );
           // Robustness: if an assistant message arrives outside the normal stream
@@ -606,6 +680,68 @@ export const useWebViewMessages = ({
           break;
         }
 
+        case 'conversationRewound': {
+          const targetTurnIndex =
+            typeof message.data?.targetTurnIndex === 'number'
+              ? message.data.targetTurnIndex
+              : -1;
+          if (targetTurnIndex < 0) {
+            break;
+          }
+
+          const currentMessages = handlers.messageHandling.messages;
+          let fallbackUserTurnIndex = 0;
+          let truncateAt = currentMessages.length;
+          let cutoffTimestamp = Date.now();
+          let foundTargetTurn = false;
+
+          for (let i = 0; i < currentMessages.length; i++) {
+            const msg = currentMessages[i];
+            if (msg?.role !== 'user') {
+              continue;
+            }
+            const turnIndex =
+              typeof msg.turnIndex === 'number'
+                ? msg.turnIndex
+                : fallbackUserTurnIndex;
+            fallbackUserTurnIndex = Math.max(
+              fallbackUserTurnIndex,
+              turnIndex + 1,
+            );
+            if (turnIndex === targetTurnIndex) {
+              truncateAt = i;
+              cutoffTimestamp = msg.timestamp;
+              foundTargetTurn = true;
+              break;
+            }
+          }
+
+          if (!foundTargetTurn) {
+            console.warn(
+              '[useWebViewMessages] conversationRewound target turn not found:',
+              targetTurnIndex,
+            );
+            break;
+          }
+
+          userTurnCounterRef.current = targetTurnIndex;
+          handlers.messageHandling.setMessages(
+            currentMessages.slice(0, truncateAt),
+          );
+          handlers.rewindToolCallsToTimestamp?.(cutoffTimestamp);
+          activeExecToolCallsRef.current.clear();
+          clearInsightState();
+          clearImageResolutions();
+          handlers.setPlanEntries([]);
+          lastPlanSnapshotRef.current = null;
+          handlers.setUsageStats?.(undefined);
+          handlers.handlePermissionRequest(null);
+          handlers.handleAskUserQuestion(null);
+          handlers.messageHandling.clearWaitingForResponse();
+          handlers.messageHandling.clearThinking();
+          break;
+        }
+
         case 'streamStart': {
           const startData = message.data as
             | { timestamp?: number; requestId?: string }
@@ -629,7 +765,7 @@ export const useWebViewMessages = ({
 
         case 'streamEnd': {
           const endData = message.data as
-            | { reason?: string; requestId?: string }
+            | { reason?: string; requestId?: string; source?: string }
             | undefined;
           const endRequestId = endData?.requestId ?? null;
 
@@ -641,6 +777,8 @@ export const useWebViewMessages = ({
                 endRequestId,
                 'active:',
                 activeRequestIdRef.current,
+                'source:',
+                endData?.source,
               );
               break;
             }
@@ -649,6 +787,7 @@ export const useWebViewMessages = ({
           // Always end local streaming state and clear thinking state
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
+          activeRequestIdRef.current = null;
 
           // If stream ended due to explicit user cancellation, proactively clear
           // waiting indicator and reset tracked execution calls.
@@ -711,6 +850,16 @@ export const useWebViewMessages = ({
         }
 
         case 'permissionRequest': {
+          // Surface the canonical tool name (the ACP frame's `_meta.toolName`)
+          // onto the PermissionToolCall so the drawer can render tool-specific
+          // UI (e.g. the Agent tool's "Launch this agent?" prompt) without
+          // depending on a protocol `kind` ACP can't carry.
+          liftToolNameFromMeta(
+            message.data?.toolCall as
+              | (PermissionToolCall & { _meta?: { toolName?: string } })
+              | undefined,
+          );
+
           handlers.handlePermissionRequest(message.data);
 
           const permToolCall = message.data?.toolCall as {
@@ -1015,12 +1164,15 @@ export const useWebViewMessages = ({
           }
           if (message.data.messages) {
             clearImageResolutions();
-            handlers.messageHandling.setMessages(
-              materializeMessages(
-                message.data.messages as WebViewMessageBase[],
-              ),
-            );
+            const { messages: restoredMessages, nextTurnIndex } =
+              restoreMessagesForEditRewind({
+                messages: message.data.messages as WebViewMessageBase[],
+                materializeMessages,
+              });
+            userTurnCounterRef.current = nextTurnIndex;
+            handlers.messageHandling.setMessages(restoredMessages);
           } else {
+            userTurnCounterRef.current = 0;
             handlers.messageHandling.clearMessages();
           }
 
@@ -1064,6 +1216,9 @@ export const useWebViewMessages = ({
               ...handlers,
               clearActiveExecToolCalls: () => {
                 activeExecToolCallsRef.current.clear();
+              },
+              resetUserTurnCounter: () => {
+                userTurnCounterRef.current = 0;
               },
             },
             clearImageResolutions,

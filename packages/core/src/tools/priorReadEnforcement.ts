@@ -82,6 +82,27 @@ export type PriorReadVerb = 'editing' | 'overwriting';
  *    drift, not a "the file genuinely never existed" disappearance
  *    race. The default (`expectExisting: false`) is the pre-read
  *    behaviour: ENOENT means "go ahead and create".
+ *
+ * **Do not re-introduce a `requireFullRead` (or any "stricter for
+ * WriteFile than Edit") option here.** PR #3932 added one with the
+ * rationale that WriteFile's overwrite path needs more evidence than
+ * Edit's `old_string`-matched in-place change; PR #4002 removed it
+ * because the truncate-tool-output limit makes "fully read" an
+ * impossible precondition on files larger than the limit, producing
+ * the deadlock issue #3945 reported. The contract now matches Claude
+ * Code's `readFileState`: any prior read clears enforcement for both
+ * tools, the mtime/size drift check is the safety net.
+ *
+ * There is no built-in "stricter than this" mode. `fileReadCacheDisabled:
+ * true` is the OPPOSITE — it bypasses the cache (and thus prior-read
+ * enforcement) entirely, ceding the safety net to whatever
+ * application-level overwrite-protection the operator wires up
+ * (lockfiles, content hashing, atomic temp-file rename, etc.). Users
+ * who want STRICTER built-in enforcement than the residual #2499 risk
+ * accepts have no flag here today; file a feature request.
+ *
+ * See the docstring on {@link checkPriorRead} for the full rationale
+ * and the residual #2499 risk it accepts.
  */
 export interface CheckPriorReadOptions {
   expectExisting?: boolean;
@@ -92,12 +113,28 @@ export interface CheckPriorReadOptions {
  * `filePath` based on the session FileReadCache.
  *
  * Approval requires more than `cache.check === 'fresh'`: the recorded
- * read must also have been (a) stamped with `lastReadAt`,
- * (b) `lastReadWasFull` (no offset / limit / pages), and
- * (c) `lastReadCacheable` (i.e. plain text, not binary / image /
- * audio / video / PDF / notebook). Otherwise the model has only seen
- * a slice or a structured proxy of the file, not the bytes a
- * prospective edit would mutate.
+ * read must also have been (a) stamped with `lastReadAt` and
+ * (b) `lastReadCacheable` (i.e. plain text, not binary / image /
+ * audio / video / PDF / notebook — those return a structured payload
+ * the Edit / WriteFile tools cannot mutate as text).
+ *
+ * `lastReadCacheable` is purely about content type, not completeness.
+ * A truncated or partial text read still records `lastReadCacheable:
+ * true` because the bytes the model saw were text. Whether the model
+ * has seen *every* byte is recorded on `lastReadWasFull` for the
+ * Read fast-path; we do NOT consult it for enforcement, because the
+ * truncate-tool-output limit makes "fully read" an impossible
+ * precondition on files larger than the limit (issue #3945).
+ * Aligning with Claude Code's `readFileState`: any prior read clears
+ * enforcement for both Edit and WriteFile; the mtime/size drift
+ * check above is the only gate that distinguishes "the model has
+ * seen current bytes" from "the model has seen older bytes", and it
+ * fires identically for both tools. Issue #2499 (model hallucinates
+ * unread bytes on overwrite) is the residual risk this stance
+ * accepts, mitigated by the drift check. There is no built-in
+ * stricter mode — `fileReadCacheDisabled: true` is an OPT-OUT (it
+ * bypasses enforcement entirely so application-level locking can
+ * take over), not an opt-in to anything stricter.
  *
  * Stat policy: `ENOENT` means the path disappeared between the
  * caller's `fileExists` check and now — a disappearance race that is
@@ -109,11 +146,11 @@ export interface CheckPriorReadOptions {
  *
  * Note on `recordWrite` interaction: when a tool *creates* a file via
  * Edit (`old_string === ''`) or WriteFile (new path), the FileReadCache
- * `recordWrite` call seeds `lastReadAt` / `lastReadWasFull` /
- * `lastReadCacheable` on the brand-new entry, so a subsequent edit on
- * that same file passes here without an intervening explicit Read.
- * The model authored those bytes; for the purposes of prior-read
- * enforcement that counts as having seen them.
+ * `recordWrite` call seeds `lastReadAt` / `lastReadCacheable` on the
+ * brand-new entry, so a subsequent edit on that same file passes here
+ * without an intervening explicit Read. The model authored those bytes;
+ * for the purposes of prior-read enforcement that counts as having
+ * seen them.
  */
 export async function checkPriorRead(
   cache: FileReadCache,
@@ -212,7 +249,6 @@ export async function checkPriorRead(
   if (
     status.state === 'fresh' &&
     status.entry.lastReadAt !== undefined &&
-    status.entry.lastReadWasFull &&
     status.entry.lastReadCacheable
   ) {
     return { ok: true };
@@ -231,14 +267,13 @@ export async function checkPriorRead(
     };
   }
   // Differentiate "fresh but the recorded read was non-cacheable"
-  // (binary / image / audio / video / PDF / notebook) from "no /
-  // partial read at all". Telling the model to "re-read with read_file"
-  // for a binary file would loop forever because that read would
-  // also leave `lastReadCacheable === false`.
+  // (binary / image / audio / video / PDF / notebook) from "never
+  // read at all". Telling the model to "re-read with read_file" for
+  // a binary file would loop forever because that read would also
+  // leave `lastReadCacheable === false`.
   if (
     status.state === 'fresh' &&
     status.entry.lastReadAt !== undefined &&
-    status.entry.lastReadWasFull &&
     !status.entry.lastReadCacheable
   ) {
     // Both raw and displayMessage use the bare verb (`edit` /
@@ -254,8 +289,11 @@ export async function checkPriorRead(
       `notebook payload that the ${ToolNames.READ_FILE} tool returns ` +
       `as a structured value rather than as plain text. The Edit / ` +
       `WriteFile tools cannot mutate that payload safely — re-reading ` +
-      `it would not change this. Use a different mechanism (e.g. shell ` +
-      `tool with a binary-aware writer) if you need to ${verbBare} it.`;
+      `it would not change this. If this is a Jupyter notebook (.ipynb), ` +
+      `use the ${ToolNames.NOTEBOOK_EDIT} tool for cell-level edits after ` +
+      `reading it. For other non-text files, use a different mechanism ` +
+      `(e.g. shell tool with an appropriate writer) if you need to ` +
+      `${verbBare} it.`;
     return {
       ok: false,
       type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
@@ -263,13 +301,26 @@ export async function checkPriorRead(
       displayMessage: `non-text payload; cannot ${verbBare} via this tool.`,
     };
   }
-  // unknown OR fresh-but-partial: require a fresh full text read.
-  const raw =
-    `File ${filePath} has not been fully read in this session. ` +
-    `Use the ${ToolNames.READ_FILE} tool first (without offset / limit ` +
-    `/ pages) to load the entire current text content before ${verb} it.`;
+  // unknown: the model has never read this file in this session.
+  const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
   const verbDisplay =
     verb === 'editing' ? 'editing this file' : 'overwriting this file';
+  // Tool-specific guidance on partial reads. Edit can use a partial
+  // read (the model only needs to have seen `old_string`-bearing
+  // bytes; the rest of the file passes through untouched). WriteFile
+  // OVERWRITES — the model is replacing the entire file, so a
+  // partial read leaves any unseen bytes as collateral damage. The
+  // mtime/size drift check still catches the worst case (#2499
+  // hallucinated-bytes risk), but recommending a partial read here
+  // would actively encourage the foot-gun.
+  const partialReadGuidance =
+    verb === 'editing'
+      ? `(a partial read with offset / limit is fine — you only need to have seen the bytes you intend to ${verbBare})`
+      : `(read the full file — overwriting replaces every byte, so any unseen bytes would be discarded)`;
+  const raw =
+    `File ${filePath} has not been read in this session. ` +
+    `Use the ${ToolNames.READ_FILE} tool first to load the current ` +
+    `content ${partialReadGuidance} before ${verb} it.`;
   return {
     ok: false,
     type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,

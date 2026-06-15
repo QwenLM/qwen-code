@@ -41,8 +41,17 @@ const addFormatsFunc = (addFormats as any).default || addFormats;
 addFormatsFunc(ajvDefault);
 addFormatsFunc(ajv2020);
 
-// Canonical draft-2020-12 meta-schema URI (used by rmcp MCP servers)
+// Canonical draft-2020-12 meta-schema URI (used by rmcp MCP servers).
+// JSON Schema authors commonly include both `…/schema` and `…/schema#`
+// — the trailing `#` is an empty fragment and points at the same
+// document. Normalize before comparing so either form selects ajv2020.
 const DRAFT_2020_12_SCHEMA = 'https://json-schema.org/draft/2020-12/schema';
+
+function isDraft2020Uri(uri: unknown): boolean {
+  if (typeof uri !== 'string') return false;
+  const normalized = uri.endsWith('#') ? uri.slice(0, -1) : uri;
+  return normalized === DRAFT_2020_12_SCHEMA;
+}
 
 /**
  * Returns the appropriate validator based on schema's $schema field.
@@ -52,7 +61,7 @@ function getValidator(schema: AnySchema): Ajv {
     typeof schema === 'object' &&
     schema !== null &&
     '$schema' in schema &&
-    schema.$schema === DRAFT_2020_12_SCHEMA
+    isDraft2020Uri(schema.$schema)
   ) {
     return ajv2020;
   }
@@ -64,6 +73,55 @@ function getValidator(schema: AnySchema): Ajv {
  * Supports both draft-07 (default) and draft-2020-12 schemas.
  */
 export class SchemaValidator {
+  /**
+   * Strictly compiles a schema. Returns an error message if the schema is
+   * malformed or uses unsupported draft/features for our Ajv configuration
+   * (see {@link getValidator} — `$schema` selects between draft-07 and
+   * draft-2020-12; anything else falls through to draft-07's compiler).
+   * Returns null on success. Unlike {@link validate}, this does NOT
+   * silently skip on compile failure — callers (e.g. the CLI's
+   * `--json-schema` parser) need to surface invalid schemas instead of
+   * letting them no-op at runtime.
+   */
+  static compileStrict(schema: unknown): string | null {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+      return 'schema must be a JSON object';
+    }
+    // Use a dedicated Ajv with `strictSchema: true` so typos like
+    // `propertees` raise instead of being silently ignored. The shared
+    // ajvDefault/ajv2020 instances run with `strictSchema: false` so
+    // unknown MCP keywords don't break runtime validation — that
+    // leniency is wrong for explicit user-supplied schemas where
+    // `compileStrict` is exactly the surface meant to surface mistakes.
+    //
+    // We deliberately do NOT pass `strict: true` (which would also
+    // enable `strictRequired`, `strictTypes`, etc): those rules go
+    // beyond JSON Schema validity and would reject spec-valid schemas
+    // like `{type:'object', required:['x']}` (no matching `properties`)
+    // or anything using a custom `format`. Keep typo detection;
+    // tolerate the looser-but-still-spec-valid patterns users actually
+    // ship in `--json-schema`.
+    const strictOptions = {
+      strictSchema: true, // catches unknown keywords (typos)
+      strictRequired: false, // allow `required` without `properties`
+      strictTypes: false, // allow inferred / partial type info
+      validateFormats: false, // unknown `format` values don't fail
+      allowUnionTypes: true, // type: ["a","b"]
+    };
+    const strictAjv: Ajv = isDraft2020Uri(
+      (schema as { $schema?: unknown }).$schema,
+    )
+      ? new Ajv2020Class(strictOptions)
+      : new AjvClass(strictOptions);
+    addFormatsFunc(strictAjv);
+    try {
+      strictAjv.compile(schema as AnySchema);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   /**
    * Returns null if the data conforms to the schema described by schema (or if schema
    *  is null). Otherwise, returns a string describing the error.
@@ -101,7 +159,10 @@ export class SchemaValidator {
     let valid = validate(data);
     if (!valid && validate.errors) {
       // Coerce string boolean values ("true"/"false") to actual booleans
-      fixBooleanValues(data as Record<string, unknown>);
+      fixBooleanValues(
+        data as Record<string, unknown>,
+        anySchema as Record<string, unknown>,
+      );
       // Coerce stringified JSON values (arrays/objects) back to their proper types.
       // Some LLMs serialize complex values as strings when the schema uses
       // anyOf/oneOf (e.g., '["url"]' instead of ["url"] for anyOf: [array, null]).
@@ -214,20 +275,45 @@ function fixStringifiedJsonValues(
   }
 }
 
-function fixBooleanValues(data: Record<string, unknown>) {
+function fixBooleanValues(
+  data: Record<string, unknown>,
+  schema?: Record<string, unknown>,
+) {
+  const properties = schema?.['properties'] as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  const items = schema?.['items'] as Record<string, unknown> | undefined;
+
   for (const key of Object.keys(data)) {
     if (!(key in data)) continue;
     const value = data[key];
+    // Array elements share the `items` schema; object fields use their
+    // per-property schema.
+    const childSchema = Array.isArray(data) ? items : properties?.[key];
 
     if (typeof value === 'object' && value !== null) {
-      fixBooleanValues(value as Record<string, unknown>);
-    } else if (typeof value === 'string') {
-      const lower = value.toLowerCase();
-      if (lower === 'true') {
-        data[key] = true;
-      } else if (lower === 'false') {
-        data[key] = false;
-      }
+      fixBooleanValues(value as Record<string, unknown>, childSchema);
+      continue;
+    }
+
+    if (typeof value !== 'string') continue;
+
+    // Only coerce when the field's schema explicitly types it as boolean (and
+    // does not also accept string). Without this guard a legitimate string
+    // value of "true"/"false" — e.g. an `old_string`/`content` argument that
+    // happens to be the text "true" — would be silently rewritten into a
+    // boolean, corrupting the tool call. Mirrors fixStringifiedJsonValues,
+    // which is already schema-aware for the same reason.
+    const accepted = childSchema ? getAcceptedTypes(childSchema) : null;
+    if (!accepted || accepted.has('string') || !accepted.has('boolean')) {
+      continue;
+    }
+
+    const lower = value.toLowerCase();
+    if (lower === 'true') {
+      data[key] = true;
+    } else if (lower === 'false') {
+      data[key] = false;
     }
   }
 }

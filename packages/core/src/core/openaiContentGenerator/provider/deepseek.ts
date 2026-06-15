@@ -7,9 +7,9 @@
 import type OpenAI from 'openai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import type { ExtendedChatCompletionAssistantMessageParam } from '../converter.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { GenerateContentConfig } from '@google/genai';
+import { ensureReasoningContentOnAssistantMessage } from './utils.js';
 
 /**
  * Hostname-only check used to decide whether `reasoning.effort` should be
@@ -108,7 +108,7 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
 
     const messages = reshaped.messages.map((message) => {
       const flattened = flattenContentParts(message);
-      return ensureReasoningContentOnToolCalls(flattened);
+      return ensureReasoningContentOnAssistantMessage(flattened);
     });
 
     return {
@@ -215,28 +215,4 @@ function translateReasoningEffort(
     next['reasoning'] = rest;
   }
   return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;
-}
-
-// DeepSeek's thinking mode requires reasoning_content to be replayed on every
-// prior assistant turn, including ones without tool_calls. The model may
-// legitimately return a turn without reasoning text, so the field can be
-// missing when we rebuild the request. Send an empty string in that case so
-// the API contract is satisfied. https://github.com/QwenLM/qwen-code/issues/3695
-function ensureReasoningContentOnToolCalls(
-  message: OpenAI.Chat.ChatCompletionMessageParam,
-): OpenAI.Chat.ChatCompletionMessageParam {
-  if (message.role !== 'assistant') {
-    return message;
-  }
-  const extended = message as ExtendedChatCompletionAssistantMessageParam;
-  if (
-    typeof extended.reasoning_content === 'string' &&
-    extended.reasoning_content.length > 0
-  ) {
-    return message;
-  }
-  return {
-    ...extended,
-    reasoning_content: '',
-  } as OpenAI.Chat.ChatCompletionMessageParam;
 }

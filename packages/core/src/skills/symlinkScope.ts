@@ -5,77 +5,54 @@
  */
 
 import * as fs from 'fs/promises';
-import * as path from 'path';
 
 /**
- * Result of validating a symlink entry's scope inside a skills directory.
+ * Result of validating a symlink entry inside a skills directory.
  *
- *  - `ok: true`  → target exists, is a directory, and stays inside `baseRealPath`.
- *  - `ok: false` → one of `escapes` / `not-directory` / `invalid` (broken or
- *    permission-denied symlink). Callers log a warn and skip the entry.
+ *  - `ok: true`  → target resolves and is a directory.
+ *  - `ok: false` → `not-directory` (target exists but is a file/socket/etc.)
+ *    or `invalid` (broken link, permission denied, stat race). Callers log
+ *    a warn and skip the entry.
+ *
+ * Symlinks pointing outside the skills directory are intentionally **not**
+ * rejected. The original symlink support
+ * (`f02225226 feat(core): add symlink support for skill manager`) was
+ * designed to let users "organize and share skills more flexibly by using
+ * symbolic links" — typical layout is one skills repo on disk, with
+ * subsets symlinked into `~/.qwen/skills/`. PR #3604 added a containment
+ * check that rejected any out-of-scope target as a code-execution-vector
+ * mitigation; the threat model only fits scenarios where an attacker can
+ * write a symlink but **not** a regular file (extremely narrow on a
+ * single-user `~/.qwen/skills/`, since write access to the dir lets the
+ * attacker drop a real `SKILL.md` directly), so the check was net
+ * negative — it broke the supported user-managed-symlink workflow without
+ * meaningfully reducing the underlying hooks-as-shell-execution risk.
+ * If a project-level containment policy is wanted later, scope it to the
+ * `project` level only rather than re-enabling it everywhere.
  */
-export type SymlinkScopeCheck =
+export type SymlinkTargetCheck =
   | { ok: true; realPath: string }
   | {
       ok: false;
-      reason: 'escapes' | 'not-directory' | 'invalid';
+      reason: 'not-directory' | 'invalid';
       error?: unknown;
     };
 
 /**
- * Validate that a symlink at `skillDir` (a) resolves, (b) targets a
- * directory, and (c) stays within `baseRealPath` after both sides are
- * canonicalized.
+ * Validate that a symlink at `skillDir` (a) resolves and (b) targets a
+ * directory. The target is allowed to live anywhere on disk.
  *
- * Caller contract:
- *  - Pass `baseRealPath` already realpath-resolved (typically once outside
- *    a directory-iteration loop). The helper canonicalizes the target
- *    again to keep both sides on the same canonical form — `path.resolve`
- *    alone only collapses `.` / `..` / relative segments, leaving Windows
- *    case differences and short-vs-long-path forms unrecorded. The
- *    failing Windows CI on the symlinked-skill test traced back to that
- *    asymmetry: `realpath(target)` returned the long-form, casing-fixed
- *    path while the prefix being compared was the raw `path.resolve(base)`,
- *    so a legitimate in-tree symlink got flagged as escaping.
- *
- * Containment uses `path.relative` rather than `startsWith(base + sep)`
- * so we don't false-positive on sibling directories whose names happen
- * to share a prefix with the base, and we get cross-platform separator
- * handling for free. The `'..'`-prefix and `path.isAbsolute` checks
- * cover both POSIX (`../foo`) and Windows (`C:\\elsewhere\\foo` →
- * absolute relative-path) escape shapes.
- *
- * Without the scope check at all, a symlink anywhere in the skills tree
- * could pull in arbitrary on-disk content as a "skill" — and skills can
- * ship hooks that invoke shell commands, so this is a code-execution
- * vector. Used by both `skill-load.ts` (sequential extension parser) and
- * `skill-manager.ts` (parallel project/user/bundled parser); kept here
- * so the two paths can't drift.
+ * Used by both `skill-load.ts` (extension parser) and `skill-manager.ts`
+ * (project/user/bundled parser) so the two paths stay in sync.
  */
-export async function validateSymlinkScope(
+export async function validateSymlinkTarget(
   skillDir: string,
-  baseRealPath: string,
-): Promise<SymlinkScopeCheck> {
+): Promise<SymlinkTargetCheck> {
   let realPath: string;
   try {
     realPath = await fs.realpath(skillDir);
   } catch (error) {
     return { ok: false, reason: 'invalid', error };
-  }
-  const rel = path.relative(baseRealPath, realPath);
-  // `rel === ''` means target IS the base directory — degenerate but
-  // technically inside scope; let it through and rely on the caller's
-  // SKILL.md presence check to filter. Containment requires that the
-  // FIRST path segment is not `..`. The previous `rel.startsWith('..')`
-  // check false-rejected legitimate in-base directories whose names
-  // happen to start with two dots (`..shared/foo` is `path.relative`'s
-  // output for `/base/..shared/foo` against `/base` — a real filename
-  // shape, not a parent traversal). Split on both `/` and `\\` so the
-  // segment walk works regardless of platform-specific output from
-  // `path.relative`.
-  const segments = rel.split(/[/\\]/);
-  if (segments[0] === '..' || path.isAbsolute(rel)) {
-    return { ok: false, reason: 'escapes' };
   }
   let targetStat: Awaited<ReturnType<typeof fs.stat>>;
   try {

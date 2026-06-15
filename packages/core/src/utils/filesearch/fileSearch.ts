@@ -11,7 +11,7 @@ import { loadIgnoreRules } from './ignore.js';
 import { ResultCache } from './result-cache.js';
 import { crawl } from './crawler.js';
 import type { FzfResultItem } from 'fzf';
-import { AsyncFzf } from 'fzf';
+import { FzfWorkerHandle } from './fzfWorkerHandle.js';
 import { unescapePath } from '../paths.js';
 
 /**
@@ -98,13 +98,19 @@ export interface SearchOptions {
 export interface FileSearch {
   initialize(): Promise<void>;
   search(pattern: string, options?: SearchOptions): Promise<string[]>;
+  /**
+   * Release any worker / native resources held by this search instance.
+   * Optional because the directory-only path holds no such resources.
+   * Implementations must be safe to call multiple times.
+   */
+  dispose?(): Promise<void>;
 }
 
 class RecursiveFileSearch implements FileSearch {
   private ignore: Ignore | undefined;
   private resultCache: ResultCache | undefined;
   private allFiles: string[] = [];
-  private fzf: AsyncFzf<string[]> | undefined;
+  private fzf: FzfWorkerHandle | undefined;
 
   constructor(private readonly options: FileSearchOptions) {}
 
@@ -114,12 +120,19 @@ class RecursiveFileSearch implements FileSearch {
       crawlDirectory: this.options.projectRoot,
       cwd: this.options.projectRoot,
       ignore: this.ignore,
+      useGitignore: this.options.useGitignore,
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
       maxDepth: this.options.maxDepth,
       maxFiles: MAX_CRAWL_FILES,
     });
-    this.buildResultCache();
+    await this.buildResultCache();
+  }
+
+  async dispose(): Promise<void> {
+    const handle = this.fzf;
+    this.fzf = undefined;
+    await handle?.dispose();
   }
 
   async search(
@@ -150,8 +163,13 @@ class RecursiveFileSearch implements FileSearch {
       if (pattern.includes('*') || !this.fzf) {
         filteredCandidates = await filter(candidates, pattern, options.signal);
       } else {
+        // Pass a generous limit to the worker so results are trimmed before
+        // IPC serialization — avoids sending 50k+ entries across postMessage
+        // when only ~72 are displayed. The 200 cap leaves headroom for
+        // downstream ignore-filter to drop entries without starving results.
+        const fzfLimit = Math.max(200, (options.maxResults ?? 200) * 3);
         filteredCandidates = await this.fzf
-          .find(pattern)
+          .find(pattern, fzfLimit)
           .then((results: Array<FzfResultItem<string>>) =>
             results.map((entry: FzfResultItem<string>) => entry.item),
           )
@@ -189,14 +207,21 @@ class RecursiveFileSearch implements FileSearch {
     return results;
   }
 
-  private buildResultCache(): void {
+  private async buildResultCache(): Promise<void> {
     this.resultCache = new ResultCache(this.allFiles);
     // Initialize fuzzy search if enabled (or undefined, default true).
     if (this.options.enableFuzzySearch !== false) {
       // The v1 algorithm is much faster since it only looks at the first
       // occurence of the pattern. We use it for search spaces that have >20k
       // files, because the v2 algorithm is just too slow in those cases.
-      this.fzf = new AsyncFzf(this.allFiles, {
+      //
+      // Construction is the actual main-thread freeze on large workspaces
+      // (the AsyncFzf constructor is misleadingly named — it runs sync
+      // during `new`). FzfWorkerHandle hosts the instance in a
+      // worker_threads worker once the file count crosses ~5k; below that
+      // it stays in-thread because worker spawn + IPC overhead exceeds the
+      // construction cost.
+      this.fzf = await FzfWorkerHandle.create(this.allFiles, {
         fuzzy: this.allFiles.length > 20000 ? 'v1' : 'v2',
       });
     }
@@ -222,11 +247,16 @@ class DirectoryFileSearch implements FileSearch {
     pattern = pattern || '*';
 
     const dir = pattern.endsWith('/') ? pattern : path.dirname(pattern);
+    const crawlDirectory = path.join(this.options.projectRoot, dir);
+    const listingProjectRoot =
+      path.resolve(crawlDirectory) === path.resolve(this.options.projectRoot);
+
     const results = await crawl({
-      crawlDirectory: path.join(this.options.projectRoot, dir),
+      crawlDirectory,
       cwd: this.options.projectRoot,
       maxDepth: 0,
       ignore: this.ignore,
+      useGitignore: this.options.useGitignore,
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
     });
@@ -240,6 +270,9 @@ class DirectoryFileSearch implements FileSearch {
         break;
       }
       if (candidate === '.') {
+        continue;
+      }
+      if (candidate.endsWith('/') && !listingProjectRoot) {
         continue;
       }
       if (!fileFilter(candidate)) {

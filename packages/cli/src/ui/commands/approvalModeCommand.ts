@@ -13,7 +13,12 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  ApprovalMode as ApprovalModeEnum,
+} from '@qwen-code/qwen-code-core';
+import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
+import { formatApprovalModeName } from '../utils/approvalModeDisplay.js';
 
 /**
  * Parses the argument string and returns the corresponding ApprovalMode if valid.
@@ -33,6 +38,7 @@ export const approvalModeCommand: SlashCommand = {
   get description() {
     return t('View or change the approval mode for tool usage');
   },
+  argumentHint: '<mode>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: async (
@@ -63,9 +69,11 @@ export const approvalModeCommand: SlashCommand = {
     }
 
     // Set the mode for current session only (not persisted)
-    const { config } = context.services;
+    const { config, settings } = context.services;
+    let priorMode: ApprovalMode | undefined;
     if (config) {
       try {
+        priorMode = config.getApprovalMode();
         config.setApprovalMode(mode);
       } catch (e) {
         return {
@@ -76,10 +84,27 @@ export const approvalModeCommand: SlashCommand = {
       }
     }
 
+    // When the user switches INTO AUTO via this command (not just via
+    // Shift+Tab), emit the same first-time-acknowledgement + stripped-rules
+    // notices as the keyboard handler.
+    if (
+      mode === ApprovalModeEnum.AUTO &&
+      priorMode !== ApprovalModeEnum.AUTO &&
+      config
+    ) {
+      emitAutoModeEntryNotices({
+        config,
+        settings,
+        addItem: context.ui.addItem,
+      });
+    }
+
     return {
       type: 'message',
       messageType: 'info',
-      content: t('Approval mode set to "{{mode}}"', { mode }),
+      content: t('Approval mode set to "{{mode}}"', {
+        mode: formatApprovalModeName(mode),
+      }),
     };
   },
 };

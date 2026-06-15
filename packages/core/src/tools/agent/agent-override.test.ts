@@ -53,7 +53,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (parent as any).toolRegistry = parentRegistry;
 
-    const child = await createApprovalModeOverride(
+    const { config: child } = await createApprovalModeOverride(
       parent,
       ApprovalMode.AUTO_EDIT,
     );
@@ -71,7 +71,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (parent as any).toolRegistry = parentRegistry;
 
-    const child = await createApprovalModeOverride(
+    const { config: child } = await createApprovalModeOverride(
       parent,
       ApprovalMode.AUTO_EDIT,
     );
@@ -110,7 +110,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (parent as any).toolRegistry = parentRegistry;
 
-    const child = await createApprovalModeOverride(
+    const { config: child } = await createApprovalModeOverride(
       parent,
       ApprovalMode.AUTO_EDIT,
     );
@@ -140,7 +140,10 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
 
     expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
 
-    const child = await createApprovalModeOverride(parent, ApprovalMode.YOLO);
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.YOLO,
+    );
     expect(child.getApprovalMode()).toBe(ApprovalMode.YOLO);
 
     const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
@@ -162,7 +165,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     // hook is reachable by introspecting the parent registry first.
     const beforeNames = parentRegistry.getAllToolNames().sort();
 
-    const child = await createApprovalModeOverride(
+    const { config: child } = await createApprovalModeOverride(
       parent,
       ApprovalMode.AUTO_EDIT,
     );
@@ -199,7 +202,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (parentNonBare as any).toolRegistry = parentNonBareRegistry;
 
-    const childNonBare = await createApprovalModeOverride(
+    const { config: childNonBare } = await createApprovalModeOverride(
       parentNonBare,
       ApprovalMode.AUTO_EDIT,
     );
@@ -209,6 +212,42 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(childNonBareWrite).toBeInstanceOf(WriteFileTool);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((childNonBareWrite as any).config).toBe(childNonBare);
+  });
+
+  it('applies persisted launch flags before rebuilding the child registry', async () => {
+    const parent = new Config({ ...baseParams, bareMode: false });
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO_EDIT,
+      {
+        persistedCliFlags: {
+          bare: true,
+          sandbox: null,
+          screenReader: true,
+          model: 'agent-model',
+          maxSessionTurns: 7,
+          maxToolCalls: 11,
+        },
+      },
+    );
+
+    expect(child.getBareMode()).toBe(true);
+    expect(child.getSandbox()).toBeUndefined();
+    expect(child.getScreenReader()).toBe(true);
+    expect(child.getModel()).toBe('agent-model');
+    expect(child.getMaxSessionTurns()).toBe(7);
+    expect(child.getMaxToolCalls()).toBe(11);
+
+    await child.getToolRegistry().warmAll();
+    expect(child.getToolRegistry().getAllToolNames()).not.toContain(
+      ToolNames.WRITE_FILE,
+    );
   });
 
   describe('TOOL_REGISTRY_REBUILT marker propagation', () => {
@@ -228,7 +267,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (parent as any).toolRegistry = parentRegistry;
 
-      const upstream = await createApprovalModeOverride(
+      const { config: upstream } = await createApprovalModeOverride(
         parent,
         ApprovalMode.AUTO_EDIT,
       );

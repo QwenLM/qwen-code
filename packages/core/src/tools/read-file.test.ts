@@ -158,6 +158,29 @@ describe('ReadFileTool', () => {
         'Limit must be a positive number',
       );
     });
+
+    it('should reject offset or limit for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        offset: 0,
+        limit: 10,
+      };
+
+      expect(() => tool.build(params)).toThrow(
+        'offset and limit are not supported for Jupyter notebook (.ipynb) files',
+      );
+    });
+
+    it('should reject pages for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        pages: '1',
+      };
+
+      expect(() => tool.build(params)).toThrow(
+        'pages is not supported for Jupyter notebook (.ipynb) files',
+      );
+    });
   });
 
   describe('getDefaultPermission', () => {
@@ -505,6 +528,36 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('Read notebook: test.ipynb');
     });
 
+    it('records truncated notebook reads as not full', async () => {
+      const nbPath = path.join(tempRootDir, 'large.ipynb');
+      const notebook = {
+        cells: Array.from({ length: 200 }, (_, i) => ({
+          cell_type: 'code',
+          source: ['x = ' + 'a'.repeat(600) + '\n'],
+          execution_count: i + 1,
+          outputs: [{ output_type: 'stream', text: ['result '.repeat(100)] }],
+          metadata: {},
+        })),
+        metadata: { language_info: { name: 'python' } },
+      };
+      await fsp.writeFile(nbPath, JSON.stringify(notebook), 'utf-8');
+      const invocation = tool.build({
+        file_path: nbPath,
+      }) as ToolInvocation<ReadFileToolParams, ToolResult>;
+
+      const result = await invocation.execute(abortSignal);
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('remaining cells truncated');
+      expect(result.llmContent).not.toContain('Showing lines');
+
+      const status = fileReadCache.check(fs.statSync(nbPath));
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadWasFull).toBe(false);
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
+    });
+
     it('should reject invalid pages parameter', () => {
       const params: ReadFileToolParams = {
         file_path: '/tmp/test.pdf',
@@ -544,7 +597,9 @@ describe('ReadFileTool', () => {
         file_path: path.join(tempRootDir, 'test.txt'),
         pages: '',
       };
-      expect(() => tool.build(params)).not.toThrow();
+      const invocation = tool.build(params);
+
+      expect(invocation.params.pages).toBeUndefined();
     });
 
     it('should support offset and limit for text files', async () => {
@@ -643,6 +698,50 @@ describe('ReadFileTool', () => {
         // Placeholder must not echo the original content.
         expect(second.llmContent).not.toContain('hello world');
         expect(second.returnDisplay).toMatch(/^Unchanged: /);
+      });
+
+      it('re-emits bytes (no placeholder) after the read was evicted from history by microcompaction (issue #4239)', async () => {
+        const filePath = path.join(tempRootDir, 'evicted.txt');
+        await fsp.writeFile(filePath, 'hello world', 'utf-8');
+
+        const first = await read({ file_path: filePath });
+        expect(first.llmContent).toBe('hello world');
+
+        // Simulate idle microcompaction blanking this read's output:
+        // the bytes are no longer quotable from history.
+        fileReadCache.markReadEvictedFromHistory(fs.statSync(filePath));
+
+        // The fast-path must NOT serve a placeholder pointing at content
+        // the model can no longer retrieve — it must re-emit real bytes.
+        const second = await read({ file_path: filePath });
+        expect(second.llmContent).toBe('hello world');
+        expect(second.llmContent).not.toMatch(/unchanged since/);
+
+        // And a re-read re-arms the fast-path (bytes are back in history).
+        const third = await read({ file_path: filePath });
+        expect(third.llmContent).toMatch(
+          /unchanged since last read in this session/,
+        );
+      });
+
+      it('a partial read after eviction does NOT re-arm the placeholder (Codex P2)', async () => {
+        const filePath = path.join(tempRootDir, 'evicted-partial.txt');
+        await fsp.writeFile(filePath, 'line1\nline2\nline3\n', 'utf-8');
+
+        // Full read, then microcompaction blanks it.
+        await read({ file_path: filePath });
+        fileReadCache.markReadEvictedFromHistory(fs.statSync(filePath));
+
+        // A partial (ranged) read of the unchanged file: only a slice
+        // is now resident, not the full bytes.
+        const partial = await read({ file_path: filePath, limit: 1 });
+        expect(partial.llmContent).not.toMatch(/unchanged since/);
+
+        // A follow-up full Read must STILL re-emit real bytes — the
+        // full content is not in history, only the slice is.
+        const full = await read({ file_path: filePath });
+        expect(full.llmContent).toContain('line3');
+        expect(full.llmContent).not.toMatch(/unchanged since/);
       });
 
       it('serves a fresh full Read after an external modification (stale)', async () => {
@@ -821,6 +920,100 @@ describe('ReadFileTool', () => {
         if (status.state === 'fresh') {
           expect(status.entry.lastReadAt).toBeDefined();
           expect(status.entry.lastReadWasFull).toBe(true);
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
+      });
+
+      it('records partial text reads with lastReadCacheable=true so a follow-up Edit passes enforcement (issue #3964)', async () => {
+        // Pre-fix, ReadFileToolInvocation derived `cacheable` as
+        // `string && originalLineCount && !isTruncated`. A partial
+        // read of a regular text file (offset/limit) sets
+        // `isTruncated = true`, which collapsed `cacheable` to false
+        // and recorded the entry as `lastReadCacheable: false`.
+        // priorReadEnforcement.ts then mistook this for "binary
+        // payload" on the next Edit and rejected the call with the
+        // misleading "binary / image / audio / video / PDF /
+        // notebook payload" error. Decoupling the truncation check
+        // from `cacheable` (truncation now lives on
+        // `lastReadWasFull`) means partial text reads correctly
+        // record as text-cacheable.
+        const filePath = path.join(tempRootDir, 'partial.kt');
+        const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`);
+        await fsp.writeFile(filePath, lines.join('\n'), 'utf-8');
+
+        await read({ file_path: filePath, offset: 10, limit: 5 });
+
+        const status = fileReadCache.check(fs.statSync(filePath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
+          expect(status.entry.lastReadAt).toBeDefined();
+          // The truncation check moved to `lastReadWasFull`: a
+          // ranged read leaves the model without sight of every
+          // byte, so this stays false.
+          expect(status.entry.lastReadWasFull).toBe(false);
+          // The bytes the model saw were text — Edit must accept
+          // this read.
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
+      });
+
+      it('records truncated full reads with lastReadCacheable=true (issue #3964)', async () => {
+        // Symmetric regression for the other arm of issue #3964:
+        // `read_file(file_path)` without offset/limit but on a file
+        // larger than the truncate-tool-output limit. Pre-fix the
+        // truncated content collapsed `cacheable` to false; post-fix
+        // it stays true (the bytes were text), and only
+        // `lastReadWasFull` is false (the model only saw the head).
+        const filePath = path.join(tempRootDir, 'long.cpp');
+        // Mock Config caps truncate-tool-output-lines at 500.
+        const bigContent = Array.from(
+          { length: 700 },
+          (_, i) => `line ${i + 1}`,
+        ).join('\n');
+        await fsp.writeFile(filePath, bigContent, 'utf-8');
+
+        const result = await read({ file_path: filePath });
+        expect(result.returnDisplay).toMatch(/Read lines .* of 700/);
+
+        const status = fileReadCache.check(fs.statSync(filePath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
+          // Truncated → model has not seen every byte.
+          expect(status.entry.lastReadWasFull).toBe(false);
+          // But the bytes are text, so Edit (which accepts partial
+          // reads) must not be rejected as "binary payload".
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
+      });
+
+      it('reads source-code files with binary-looking content as text (encrypted FS, issue #3964)', async () => {
+        // Frank-Shaw-FS reports `.cpp` source files on Windows
+        // encrypted / DRM-protected file systems being misclassified
+        // as binary. The OS surfaces encrypted bytes to `fs.open()`
+        // random-access reads, so the 4 KB `isBinaryFile` heuristic
+        // sees nulls / non-printables and concludes binary even
+        // though the user-visible content is plain text. The
+        // extension-based override in detectFileType skips the
+        // content sample for known text extensions; verify that
+        // routes through `processSingleFileContent` correctly and
+        // records the read as text-cacheable so a follow-up Edit
+        // passes prior-read enforcement.
+        //
+        // We can't easily simulate a real encrypted volume in a
+        // unit test, so we approximate by writing nominally text
+        // content to a `.cpp` file. The test relies on the
+        // extension override winning over any future content-side
+        // heuristic — there is no isBinaryFile mocking in scope.
+        const filePath = path.join(tempRootDir, 'src.cpp');
+        await fsp.writeFile(filePath, '#include <iostream>\nint main() {}\n');
+
+        const result = await read({ file_path: filePath });
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.llmContent).toContain('#include');
+
+        const status = fileReadCache.check(fs.statSync(filePath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
           expect(status.entry.lastReadCacheable).toBe(true);
         }
       });

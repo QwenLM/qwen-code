@@ -119,6 +119,8 @@ describe('FileCommandLoader', () => {
     const command = commands[0];
     expect(command).toBeDefined();
     expect(command.name).toBe('test');
+    expect(command.sourceLabel).toBe('Custom');
+    expect(command.sourceDetail).toBe('custom');
 
     const result = await command.action?.(
       createMockCommandContext({

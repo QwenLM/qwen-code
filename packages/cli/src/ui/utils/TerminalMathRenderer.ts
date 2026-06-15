@@ -126,7 +126,6 @@ const SYMBOLS: Record<string, string> = {
   star: '⋆',
   circ: '∘',
   bullet: '•',
-  opulus: '⊕',
   oplus: '⊕',
   otimes: '⊗',
   oslash: '⊘',
@@ -227,6 +226,8 @@ const SPACING_COMMANDS: Record<string, string> = {
   medspace: ' ',
   thickspace: ' ',
 };
+
+const MAX_PARSE_DEPTH = 128;
 
 const SUPERSCRIPT: Record<string, string> = {
   '0': '⁰',
@@ -335,7 +336,7 @@ function textBox(text: string, kind?: MathBox['kind']): MathBox {
 }
 
 function emptyBox(): MathBox {
-  return textBox('');
+  return { lines: [], baseline: 0, inline: '' };
 }
 
 function boxWidth(box: MathBox): number {
@@ -579,11 +580,28 @@ function splitRows(input: string): string[] {
   let start = 0;
   let braceDepth = 0;
   let bracketDepth = 0;
+  let environmentDepth = 0;
 
   for (let index = 0; index < input.length; index++) {
+    if (input.startsWith('\\begin{', index)) {
+      environmentDepth++;
+      index += '\\begin{'.length - 1;
+      continue;
+    }
+    if (input.startsWith('\\end{', index)) {
+      environmentDepth = Math.max(0, environmentDepth - 1);
+      index += '\\end{'.length - 1;
+      continue;
+    }
+
     const char = input[index]!;
     if (char === '\\') {
-      if (input[index + 1] === '\\' && braceDepth === 0 && bracketDepth === 0) {
+      if (
+        input[index + 1] === '\\' &&
+        braceDepth === 0 &&
+        bracketDepth === 0 &&
+        environmentDepth === 0
+      ) {
         rows.push(input.slice(start, index));
         index++;
         start = index + 1;
@@ -606,8 +624,20 @@ function splitCells(input: string): string[] {
   let start = 0;
   let braceDepth = 0;
   let bracketDepth = 0;
+  let environmentDepth = 0;
 
   for (let index = 0; index < input.length; index++) {
+    if (input.startsWith('\\begin{', index)) {
+      environmentDepth++;
+      index += '\\begin{'.length - 1;
+      continue;
+    }
+    if (input.startsWith('\\end{', index)) {
+      environmentDepth = Math.max(0, environmentDepth - 1);
+      index += '\\end{'.length - 1;
+      continue;
+    }
+
     const char = input[index]!;
     if (char === '\\') {
       index++;
@@ -617,7 +647,12 @@ function splitCells(input: string): string[] {
     if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
     if (char === '[') bracketDepth++;
     if (char === ']') bracketDepth = Math.max(0, bracketDepth - 1);
-    if (char === '&' && braceDepth === 0 && bracketDepth === 0) {
+    if (
+      char === '&' &&
+      braceDepth === 0 &&
+      bracketDepth === 0 &&
+      environmentDepth === 0
+    ) {
       cells.push(input.slice(start, index));
       start = index + 1;
     }
@@ -627,13 +662,23 @@ function splitCells(input: string): string[] {
 }
 
 function padBox(box: MathBox, width: number): MathBox {
+  if (box.lines.length === 0 && width > 0) {
+    return {
+      ...box,
+      lines: [spaces(width)],
+    };
+  }
   return {
     ...box,
     lines: box.lines.map((line) => padRight(line, width)),
   };
 }
 
-function renderEnvironment(name: string, rawContent: string): MathBox {
+function renderEnvironment(
+  name: string,
+  rawContent: string,
+  depth = 0,
+): MathBox {
   const normalizedName = name.replace(/\*$/, '');
   const rows = splitRows(rawContent)
     .map((row) => row.trim())
@@ -643,14 +688,16 @@ function renderEnvironment(name: string, rawContent: string): MathBox {
 
   if (normalizedName === 'cases') {
     const rowBoxes = rows.map((row) => {
-      const cells = splitCells(row).map((cell) => renderMathToBox(cell));
+      const cells = splitCells(row).map((cell) =>
+        renderMathToBox(cell, depth + 1),
+      );
       return hJoin(cells, '  ');
     });
     return wrapFence(vStack(rowBoxes), '{', '');
   }
 
   const cellRows = rows.map((row) =>
-    splitCells(row).map((cell) => renderMathToBox(cell.trim())),
+    splitCells(row).map((cell) => renderMathToBox(cell.trim(), depth + 1)),
   );
   const columnCount = Math.max(...cellRows.map((row) => row.length));
   const columnWidths = Array.from({ length: columnCount }, (_, column) =>
@@ -687,11 +734,18 @@ class TeXParser {
 
   constructor(private readonly input: string) {}
 
-  parse(): MathBox {
-    return this.parseSequence();
+  parse(depth = 0): MathBox {
+    return this.parseSequence(undefined, depth);
   }
 
-  private parseSequence(stopChar?: string): MathBox {
+  private assertDepth(depth: number): void {
+    if (depth > MAX_PARSE_DEPTH) {
+      throw new Error('Maximum TeX parse depth exceeded');
+    }
+  }
+
+  private parseSequence(stopChar?: string, depth = 0): MathBox {
+    this.assertDepth(depth);
     const boxes: MathBox[] = [];
     let lastWasSpace = false;
 
@@ -708,15 +762,16 @@ class TeXParser {
         continue;
       }
 
-      boxes.push(this.parseAtomWithScripts());
+      boxes.push(this.parseAtomWithScripts(depth + 1));
       lastWasSpace = false;
     }
 
     return hJoin(boxes);
   }
 
-  private parseAtomWithScripts(): MathBox {
-    let base = this.parseAtom();
+  private parseAtomWithScripts(depth: number): MathBox {
+    this.assertDepth(depth);
+    let base = this.parseAtom(depth + 1);
     let sub: MathBox | undefined;
     let sup: MathBox | undefined;
 
@@ -724,7 +779,7 @@ class TeXParser {
       const char = this.input[this.position]!;
       if (char !== '_' && char !== '^') break;
       this.position++;
-      const script = this.parseScriptArgument();
+      const script = this.parseScriptArgument(depth + 1);
       if (char === '_') {
         sub = script;
       } else {
@@ -738,18 +793,19 @@ class TeXParser {
     return base;
   }
 
-  private parseAtom(): MathBox {
+  private parseAtom(depth: number): MathBox {
+    this.assertDepth(depth);
     if (this.position >= this.input.length) return emptyBox();
 
     const char = this.input[this.position]!;
     if (char === '{') {
       this.position++;
-      const group = this.parseSequence('}');
+      const group = this.parseSequence('}', depth + 1);
       if (this.input[this.position] === '}') this.position++;
       return group;
     }
     if (char === '\\') {
-      return this.parseCommand();
+      return this.parseCommand(depth + 1);
     }
     if (char === '^' || char === '_') {
       this.position++;
@@ -760,7 +816,8 @@ class TeXParser {
     return textBox(char);
   }
 
-  private parseCommand(): MathBox {
+  private parseCommand(depth: number): MathBox {
+    this.assertDepth(depth);
     this.position++;
     if (this.position >= this.input.length) return textBox('\\');
 
@@ -799,14 +856,14 @@ class TeXParser {
       case 'dfrac':
       case 'tfrac':
       case 'binom': {
-        const numerator = this.parseRequiredArgument();
-        const denominator = this.parseRequiredArgument();
+        const numerator = this.parseRequiredArgument(depth + 1);
+        const denominator = this.parseRequiredArgument(depth + 1);
         const fraction = fractionBox(numerator, denominator);
         return command === 'binom' ? wrapFence(fraction, '(', ')') : fraction;
       }
       case 'sqrt': {
         const degree = this.parseOptionalBracketArgument();
-        const radical = this.parseRequiredArgument();
+        const radical = this.parseRequiredArgument(depth + 1);
         return sqrtBox(radical, degree);
       }
       case 'text':
@@ -817,9 +874,9 @@ class TeXParser {
       case 'operatorname':
         return textBox(this.readRequiredGroupText());
       case 'overline':
-        return applyOverline(this.parseRequiredArgument());
+        return applyOverline(this.parseRequiredArgument(depth + 1));
       case 'underline':
-        return this.parseRequiredArgument();
+        return applyUnderline(this.parseRequiredArgument(depth + 1));
       case 'hat':
       case 'widehat':
       case 'bar':
@@ -828,14 +885,15 @@ class TeXParser {
       case 'ddot':
       case 'tilde':
       case 'widetilde':
-        return applyAccent(command, this.parseRequiredArgument());
+        return applyAccent(command, this.parseRequiredArgument(depth + 1));
       case 'left':
+        return this.parseLeftRight(depth + 1);
       case 'right':
         return textBox(this.readDelimiter());
       case 'begin': {
         const environmentName = this.readRequiredGroupText();
         const content = this.readEnvironmentContent(environmentName);
-        return renderEnvironment(environmentName, content);
+        return renderEnvironment(environmentName, content, depth + 1);
       }
       default:
         break;
@@ -860,24 +918,26 @@ class TeXParser {
     return textBox(command.length === 1 ? command : `\\${command}`);
   }
 
-  private parseScriptArgument(): MathBox {
+  private parseScriptArgument(depth: number): MathBox {
+    this.assertDepth(depth);
     this.skipSpaces();
     if (this.position >= this.input.length) return emptyBox();
     if (this.input[this.position] === '{') {
-      return this.parseAtom();
+      return this.parseAtom(depth + 1);
     }
     if (this.input[this.position] === '\\') {
-      return this.parseCommand();
+      return this.parseCommand(depth + 1);
     }
     const char = this.input[this.position]!;
     this.position++;
     return textBox(char);
   }
 
-  private parseRequiredArgument(): MathBox {
+  private parseRequiredArgument(depth: number): MathBox {
+    this.assertDepth(depth);
     this.skipSpaces();
     if (this.position >= this.input.length) return emptyBox();
-    return this.parseAtom();
+    return this.parseAtom(depth + 1);
   }
 
   private parseOptionalBracketArgument(): MathBox | undefined {
@@ -898,16 +958,74 @@ class TeXParser {
   }
 
   private readEnvironmentContent(environmentName: string): string {
+    const beginToken = `\\begin{${environmentName}}`;
     const endToken = `\\end{${environmentName}}`;
-    const end = this.input.indexOf(endToken, this.position);
-    if (end === -1) {
-      const content = this.input.slice(this.position);
-      this.position = this.input.length;
-      return content;
+    let depth = 1;
+
+    for (let cursor = this.position; cursor < this.input.length; ) {
+      if (this.input.startsWith(beginToken, cursor)) {
+        depth++;
+        cursor += beginToken.length;
+        continue;
+      }
+
+      if (this.input.startsWith(endToken, cursor)) {
+        depth--;
+        if (depth === 0) {
+          const content = this.input.slice(this.position, cursor);
+          this.position = cursor + endToken.length;
+          return content;
+        }
+        cursor += endToken.length;
+        continue;
+      }
+
+      cursor++;
     }
-    const content = this.input.slice(this.position, end);
-    this.position = end + endToken.length;
+
+    const content = this.input.slice(this.position);
+    this.position = this.input.length;
     return content;
+  }
+
+  private parseLeftRight(depth: number): MathBox {
+    this.assertDepth(depth);
+    const left = this.readDelimiter();
+    const contentStart = this.position;
+    let nestedDepth = 1;
+
+    for (let cursor = this.position; cursor < this.input.length; ) {
+      if (this.isControlWordAt('left', cursor)) {
+        nestedDepth++;
+        cursor += '\\left'.length;
+        continue;
+      }
+
+      if (this.isControlWordAt('right', cursor)) {
+        nestedDepth--;
+        if (nestedDepth > 0) {
+          cursor += '\\right'.length;
+          continue;
+        }
+
+        const content = this.input.slice(contentStart, cursor);
+        this.position = cursor + '\\right'.length;
+        const right = this.readDelimiter();
+        return wrapFence(renderMathToBox(content, depth + 1), left, right);
+      }
+      cursor++;
+    }
+
+    const content = this.input.slice(contentStart);
+    this.position = this.input.length;
+    return wrapFence(renderMathToBox(content, depth + 1), left, '');
+  }
+
+  private isControlWordAt(command: string, position: number): boolean {
+    const token = `\\${command}`;
+    if (!this.input.startsWith(token, position)) return false;
+    const next = this.input[position + token.length];
+    return next === undefined || !/[A-Za-z*]/.test(next);
   }
 
   private readDelimiter(): string {
@@ -945,8 +1063,12 @@ class TeXParser {
   }
 }
 
-function renderMathToBox(source: string): MathBox {
-  return new TeXParser(source.trim()).parse();
+function applyUnderline(box: MathBox): MathBox {
+  return textBox(`${box.inline}\u0332`);
+}
+
+function renderMathToBox(source: string, depth = 0): MathBox {
+  return new TeXParser(source.trim()).parse(depth);
 }
 
 export function renderTerminalMathInline(source: string): string {
@@ -968,10 +1090,11 @@ function isEscaped(text: string, index: number): boolean {
 
 function isProbablyMath(content: string): boolean {
   const trimmed = content.trim();
-  if (!trimmed || trimmed !== content) return false;
+  if (!trimmed) return false;
   if (/^\d+(?:\.\d+)?$/.test(trimmed)) return false;
+  if (/^[A-Za-z]$/.test(trimmed)) return true;
   if (/^[A-Z_][A-Z0-9_]*$/.test(trimmed)) return false;
-  return /\\|[\^_{}=+\-*/<>]|[α-ωΑ-Ω∂∑∫∞≤≥≈≠]/u.test(trimmed);
+  return /\\|[()^_{}=+\-*/<>]|[α-ωΑ-Ω∂∑∫∞≤≥≈≠]/u.test(trimmed);
 }
 
 function findClosingDollar(text: string, start: number): number {

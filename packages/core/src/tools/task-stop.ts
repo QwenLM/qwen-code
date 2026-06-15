@@ -247,6 +247,11 @@ export class TaskStopTool extends BaseDeclarativeTool<
         required: ['task_id'],
         additionalProperties: false,
       },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — stopping tasks is infrequent
+      false, // alwaysLoad
+      'task stop cancel kill background',
     );
   }
 

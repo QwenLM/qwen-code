@@ -6,7 +6,10 @@
 
 import type { ExtendedSystemInfo } from './systemInfo.js';
 import { t } from '../i18n/index.js';
-import { isCodingPlanConfig } from '@qwen-code/qwen-code-core';
+import {
+  findProviderByCredentials,
+  resolveMetadataKey,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Field configuration for system information display
@@ -29,6 +32,7 @@ export function getSystemInfoFields(
   addField(fields, t('Qwen Code'), formatCliVersion(info));
   addField(fields, t('Runtime'), formatRuntime(info));
   addField(fields, t('IDE Client'), info.ideClient);
+  addField(fields, 'LSP', info.lspStatus ?? '');
   addField(fields, t('OS'), formatOs(info));
   addField(fields, t('Auth'), formatAuth(info));
   addField(fields, t('Base URL'), formatBaseUrl(info));
@@ -90,8 +94,12 @@ function formatAuth(info: ExtendedSystemInfo): string {
     return '';
   }
 
-  if (isCodingPlanConfig(info.baseUrl, info.apiKeyEnvKey)) {
-    return t('Alibaba Cloud Coding Plan');
+  const managedProvider = findProviderByCredentials(
+    info.baseUrl,
+    info.apiKeyEnvKey,
+  );
+  if (managedProvider && resolveMetadataKey(managedProvider)) {
+    return t(managedProvider.label);
   }
 
   if (

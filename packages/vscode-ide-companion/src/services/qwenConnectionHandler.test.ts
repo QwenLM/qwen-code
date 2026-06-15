@@ -135,12 +135,24 @@ describe('QwenConnectionHandler', () => {
   });
 
   describe('connect retry logic', () => {
+    // Advances directly to the next scheduled timer regardless of how many
+    // microtask hops connect() took to schedule it. Avoids coupling the test
+    // to connect()'s internal async structure. Throws a clear error if no
+    // timer is pending.
+    const runPendingRetryTimer = async () => {
+      await vi.advanceTimersToNextTimerAsync();
+    };
+
     beforeEach(() => {
       mockGetConfiguration.mockReturnValue({
         get: () => undefined,
       });
-      // Speed up tests by mocking setTimeout-based delays
-      vi.useFakeTimers({ shouldAdvanceTime: true });
+      // Note: this suite only exercises the connect()-level backoff timer.
+      // newSessionWithRetry schedules its own 300ms auth-delay setTimeout
+      // (see qwenConnectionHandler.ts), which is currently unreachable
+      // because newSession is mocked to succeed on first attempt. If a future
+      // test exercises that path, advance its timer with the same helper.
+      vi.useFakeTimers();
     });
 
     afterEach(() => {
@@ -162,7 +174,16 @@ describe('QwenConnectionHandler', () => {
         )
         .mockResolvedValueOnce(undefined);
 
-      await handler.connect(mockConnection, '/workspace', '/path/to/cli.js');
+      const connectPromise = handler.connect(
+        mockConnection,
+        '/workspace',
+        '/path/to/cli.js',
+      );
+
+      await runPendingRetryTimer();
+      await expect(connectPromise).resolves.toMatchObject({
+        sessionCreated: true,
+      });
 
       expect(mockConnection.connect).toHaveBeenCalledTimes(2);
     });
@@ -175,9 +196,20 @@ describe('QwenConnectionHandler', () => {
         spawnError,
       );
 
-      await expect(
-        handler.connect(mockConnection, '/workspace', '/path/to/cli.js'),
-      ).rejects.toThrow(spawnError);
+      const connectPromise = handler.connect(
+        mockConnection,
+        '/workspace',
+        '/path/to/cli.js',
+      );
+      // Attach a noop catch so the unhandled-rejection guard does not fire
+      // while we drive the retry timers. The original promise is still the
+      // one we assert on, so a runPendingRetryTimer() throw surfaces as
+      // itself rather than being swallowed by .catch(e => e).
+      connectPromise.catch(() => {});
+
+      await runPendingRetryTimer();
+      await runPendingRetryTimer();
+      await expect(connectPromise).rejects.toBe(spawnError);
 
       expect(mockConnection.connect).toHaveBeenCalledTimes(3);
     });

@@ -191,6 +191,7 @@ interface SessionStatsContextValue {
   startNewSession: (sessionId: string) => void;
   startNewPrompt: () => void;
   getPromptCount: () => number;
+  seedPromptCount: (count: number) => void;
 }
 
 // --- Context Definition ---
@@ -271,14 +272,22 @@ export const SessionStatsProvider: React.FC<{
     [stats.promptCount],
   );
 
+  const seedPromptCount = useCallback((count: number) => {
+    setStats((prevState) => ({
+      ...prevState,
+      promptCount: Math.max(prevState.promptCount, count),
+    }));
+  }, []);
+
   const value = useMemo(
     () => ({
       stats,
       startNewSession,
       startNewPrompt,
       getPromptCount,
+      seedPromptCount,
     }),
-    [stats, startNewSession, startNewPrompt, getPromptCount],
+    [stats, startNewSession, startNewPrompt, getPromptCount, seedPromptCount],
   );
 
   return (

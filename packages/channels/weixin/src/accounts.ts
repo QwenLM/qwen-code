@@ -12,7 +12,7 @@ import {
   chmodSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { getGlobalQwenDir } from '@qwen-code/channel-base';
 
 export const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com';
 
@@ -26,7 +26,7 @@ export interface AccountData {
 export function getStateDir(): string {
   const dir =
     process.env['WEIXIN_STATE_DIR'] ||
-    join(homedir(), '.qwen', 'channels', 'weixin');
+    join(getGlobalQwenDir(), 'channels', 'weixin');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }

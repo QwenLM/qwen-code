@@ -8,13 +8,27 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ExitPlanModeTool, type ExitPlanModeParams } from './exitPlanMode.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolConfirmationOutcome } from './tools.js';
+import { runPlanApprovalGate } from '../plan-gate/planApprovalGate.js';
+import type { GateDecision, MergedGateFinding } from '../plan-gate/types.js';
+
+vi.mock('../plan-gate/planApprovalGate.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../plan-gate/planApprovalGate.js')>();
+
+  return {
+    ...actual,
+    runPlanApprovalGate: vi.fn(),
+  };
+});
 
 describe('ExitPlanModeTool', () => {
   let tool: ExitPlanModeTool;
   let mockConfig: Config;
   let approvalMode: ApprovalMode;
+  const mockedRunPlanApprovalGate = vi.mocked(runPlanApprovalGate);
 
   beforeEach(() => {
+    mockedRunPlanApprovalGate.mockReset();
     approvalMode = ApprovalMode.PLAN;
     mockConfig = {
       getApprovalMode: vi.fn(() => approvalMode),
@@ -23,6 +37,7 @@ describe('ExitPlanModeTool', () => {
         approvalMode = mode;
       }),
       savePlan: vi.fn(),
+      getPlanGateState: vi.fn(() => undefined),
     } as unknown as Config;
 
     tool = new ExitPlanModeTool(mockConfig);
@@ -54,6 +69,18 @@ describe('ExitPlanModeTool', () => {
             plan: {
               type: 'string',
               description: expect.stringContaining('The plan you came up with'),
+            },
+            originalRequest: {
+              type: 'string',
+              description: expect.stringContaining('original user request'),
+            },
+            researchSummary: {
+              type: 'string',
+              description: expect.stringContaining('investigation'),
+            },
+            resolutionSummary: {
+              type: 'string',
+              description: expect.stringContaining('gate review'),
             },
           },
           required: ['plan'],
@@ -136,12 +163,10 @@ describe('ExitPlanModeTool', () => {
 
       const result = await invocation.execute(signal);
 
-      expect(result.llmContent).toContain(
-        'User has approved your plan. You can now start coding',
-      );
+      expect(result.llmContent).toContain('You can now start coding');
       expect(result.returnDisplay).toEqual({
         type: 'plan_summary',
-        message: 'User approved the plan.',
+        message: expect.stringContaining('User approved'),
         plan: params.plan,
       });
 
@@ -333,33 +358,176 @@ describe('ExitPlanModeTool', () => {
   });
 
   describe('YOLO mode', () => {
-    it('should exit plan mode without onConfirm being called when approval mode is YOLO', async () => {
-      // Simulate YOLO: scheduler sets approvalMode=YOLO but never calls onConfirm
-      approvalMode = ApprovalMode.YOLO;
+    const finding: MergedGateFinding = {
+      id: 'GF-1',
+      severity: 'P2',
+      issue: 'The plan omits the rollback path.',
+      rationale: 'Autonomous execution would not know how to recover safely.',
+      suggestedFix: 'Add rollback steps before exiting plan mode.',
+    };
+
+    it('should restore YOLO via user_override gate path', async () => {
+      // With the gate, YOLO exit goes through the autonomous path.
+      // user_override skips the gate and restores prePlanMode.
+      approvalMode = ApprovalMode.PLAN;
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        {
+          entryId: 1,
+          reviewCount: 0,
+          gateMode: 'user_override',
+          lastFindings: [],
+          capEscalationPending: false,
+          needsUserPending: false,
+        },
+      );
+
       const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
       const signal = new AbortController().signal;
 
       const invocation = tool.build(params);
-      // Do NOT call onConfirm — this mirrors what the YOLO scheduler does
       const result = await invocation.execute(signal);
 
-      expect(result.llmContent).toContain(
-        'User has approved your plan. You can now start coding',
-      );
+      expect(result.llmContent).toContain('You can now start coding');
       expect(result.llmContent).not.toContain('not approved');
+      // Should restore YOLO, not downgrade
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.YOLO,
+      );
     });
 
-    it('should not downgrade approval mode to AUTO_EDIT when YOLO', async () => {
-      approvalMode = ApprovalMode.YOLO;
+    it('should return allow from getDefaultPermission when prePlanMode is YOLO', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        {
+          entryId: 1,
+          reviewCount: 0,
+          gateMode: 'capped',
+          lastFindings: [],
+          capEscalationPending: false,
+          needsUserPending: false,
+        },
+      );
+
       const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
-      const signal = new AbortController().signal;
-
       const invocation = tool.build(params);
-      await invocation.execute(signal);
-
-      // Approval mode must remain YOLO — do not downgrade to AUTO_EDIT
-      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
-      expect(approvalMode).toBe(ApprovalMode.YOLO);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
     });
+
+    it('should fall back to ask when no gateState even with YOLO prePlanMode', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        undefined,
+      );
+
+      const params: ExitPlanModeParams = { plan: 'YOLO no gate' };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
+    it.each<{
+      name: string;
+      decision: GateDecision;
+      expectedMessage: string;
+      expectedDetail: string;
+      expectedNeedsUserPending?: boolean;
+      expectedCapEscalationPending?: boolean;
+    }>([
+      {
+        name: 'blocked',
+        decision: { kind: 'blocked', findings: [finding] },
+        expectedMessage: 'Plan gate: blocked (1 finding(s))',
+        expectedDetail: 'GF-1',
+      },
+      {
+        name: 'needs_user',
+        decision: {
+          kind: 'needs_user',
+          findings: [finding],
+          questions: ['Which migration path should be used?'],
+        },
+        expectedMessage: 'Plan gate: needs user input (1 question(s))',
+        expectedDetail: 'Which migration path should be used?',
+        expectedNeedsUserPending: true,
+      },
+      {
+        name: 'cap_escalation',
+        decision: { kind: 'cap_escalation', blockingFindings: [finding] },
+        expectedMessage: 'Plan gate: cap reached with 1 blocking finding(s)',
+        expectedDetail: 'Approve execution',
+        expectedCapEscalationPending: true,
+      },
+      {
+        name: 'unavailable',
+        decision: { kind: 'unavailable', reason: 'review model timed out' },
+        expectedMessage: 'Plan gate: unavailable - review model timed out',
+        expectedDetail: 'review model timed out',
+      },
+    ])(
+      'should keep the submitted plan visible when the gate returns $name',
+      async ({
+        decision,
+        expectedMessage,
+        expectedDetail,
+        expectedNeedsUserPending,
+        expectedCapEscalationPending,
+      }) => {
+        approvalMode = ApprovalMode.PLAN;
+        const gateState = {
+          entryId: 1,
+          reviewCount: 0,
+          gateMode: 'capped' as const,
+          lastFindings: [],
+          capEscalationPending: false,
+          needsUserPending: false,
+        };
+        (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+          ApprovalMode.YOLO,
+        );
+        (
+          mockConfig.getPlanGateState as ReturnType<typeof vi.fn>
+        ).mockReturnValue(gateState);
+        mockedRunPlanApprovalGate.mockResolvedValue(decision);
+
+        const params: ExitPlanModeParams = {
+          plan: '1. Update the parser.\n2. Add regression tests.',
+          originalRequest: 'Fix plan mode display',
+        };
+        const signal = new AbortController().signal;
+
+        const result = await tool.build(params).execute(signal);
+
+        expect(result.llmContent).toContain(expectedDetail);
+        expect(result.returnDisplay).toEqual({
+          type: 'plan_summary',
+          message: expectedMessage,
+          plan: expect.stringContaining(params.plan),
+          rejected: true,
+        });
+        expect(result.returnDisplay).toEqual(
+          expect.objectContaining({
+            plan: expect.stringContaining(expectedDetail),
+          }),
+        );
+        expect(gateState.needsUserPending).toBe(
+          Boolean(expectedNeedsUserPending),
+        );
+        expect(gateState.capEscalationPending).toBe(
+          Boolean(expectedCapEscalationPending),
+        );
+        expect(mockConfig.savePlan).not.toHaveBeenCalled();
+        expect(approvalMode).toBe(ApprovalMode.PLAN);
+      },
+    );
   });
 });

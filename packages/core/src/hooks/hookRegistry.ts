@@ -51,6 +51,13 @@ export interface HookRegistryEntry {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /**
+   * Identifier for ephemeral entries attached at runtime by a specific
+   * subagent (via {@link HookRegistry.addAgentHooks}). Used by the matching
+   * unregister callback to remove the entries when the subagent ends. Plain
+   * (session/user/project/extension) entries leave this undefined.
+   */
+  agentScope?: string;
 }
 
 /**
@@ -98,6 +105,51 @@ export class HookRegistry {
   }
 
   /**
+   * Append ephemeral hook entries scoped to a specific subagent. Used by
+   * `SubagentManager` to wire the `hooks` field from a declarative agent
+   * frontmatter into the live registry when the subagent spawns.
+   *
+   * The hooks are validated through the same per-definition pipeline as
+   * session/user/project hooks (`processHookDefinition`), so a malformed
+   * entry is logged and dropped instead of breaking the spawn. Returns an
+   * unregister callback that removes exactly the entries added by this call;
+   * the caller is responsible for invoking it when the subagent finishes.
+   *
+   * v1 scope limitation: entries added here fire for every event of their
+   * declared type while they remain in the registry, regardless of which
+   * agent is currently active. If two subagents with different per-agent
+   * hook sets run concurrently, both sets fire for both agents. Proper
+   * per-agent scope filtering at firing time is left to a follow-up.
+   */
+  addAgentHooks(
+    hooks: { [K in HookEventName]?: HookDefinition[] },
+    agentScope: string,
+  ): () => void {
+    const before = this.entries.length;
+    this.processHooksConfiguration(
+      hooks,
+      HooksConfigSource.Session,
+      agentScope,
+    );
+    const addedCount = this.entries.length - before;
+    debugLogger.debug(
+      `Registered ${addedCount} ephemeral hook entries for agent scope "${agentScope}"`,
+    );
+    return () => {
+      const sizeBefore = this.entries.length;
+      this.entries = this.entries.filter(
+        (entry) => entry.agentScope !== agentScope,
+      );
+      const removed = sizeBefore - this.entries.length;
+      if (removed > 0) {
+        debugLogger.debug(
+          `Removed ${removed} ephemeral hook entries for agent scope "${agentScope}"`,
+        );
+      }
+    };
+  }
+
+  /**
    * Enable or disable a specific hook
    */
   setHookEnabled(hookName: string, enabled: boolean): void {
@@ -120,9 +172,10 @@ export class HookRegistry {
   }
 
   /**
-   * Get hook name for identification and display purposes
+   * Get a stable unique identity for duplicate detection.
+   * Uses full values (not truncated) to ensure accurate duplicate detection.
    */
-  private getHookName(
+  private getHookIdentity(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
     const config = entry.config;
@@ -133,7 +186,24 @@ export class HookRegistry {
       return (config as { url?: string }).url || 'unknown-url';
     if (config.type === 'function')
       return (config as { id?: string }).id || 'unknown-function';
+    if (config.type === 'prompt')
+      return (config as { prompt?: string }).prompt || 'prompt-hook';
     return 'unknown-hook';
+  }
+
+  /**
+   * Get hook name for display purposes (may be truncated for readability).
+   */
+  private getHookName(
+    entry: HookRegistryEntry | { config: HookConfig },
+  ): string {
+    const identity = this.getHookIdentity(entry);
+    // Truncate prompt identities for display
+    const config = entry.config;
+    if (!config.name && config.type === 'prompt') {
+      return identity.length > 30 ? identity.slice(0, 30) + '...' : identity;
+    }
+    return identity;
   }
 
   /**
@@ -171,6 +241,7 @@ export class HookRegistry {
   private processHooksConfiguration(
     hooksConfig: { [K in HookEventName]?: HookDefinition[] },
     source: HooksConfigSource,
+    agentScope?: string,
   ): void {
     for (const [eventName, definitions] of Object.entries(hooksConfig)) {
       if (HOOKS_CONFIG_FIELDS.includes(eventName)) {
@@ -195,7 +266,12 @@ export class HookRegistry {
       }
 
       for (const definition of definitions) {
-        this.processHookDefinition(definition, typedEventName, source);
+        this.processHookDefinition(
+          definition,
+          typedEventName,
+          source,
+          agentScope,
+        );
       }
     }
   }
@@ -207,6 +283,7 @@ export class HookRegistry {
     definition: HookDefinition,
     eventName: HookEventName,
     source: HooksConfigSource,
+    agentScope?: string,
   ): void {
     if (
       !definition ||
@@ -226,14 +303,19 @@ export class HookRegistry {
         typeof hookConfig === 'object' &&
         this.validateHookConfig(hookConfig, eventName, source)
       ) {
+        const hookIdentity = this.getHookIdentity({ config: hookConfig });
         const hookName = this.getHookName({ config: hookConfig });
 
-        // Check for duplicate hooks (same name+command+source+eventName+matcher+sequential)
+        // Check for duplicate hooks. `agentScope` participates in the key so
+        // a per-agent hook does not get swallowed when an identical
+        // session/user/project hook already exists, and so two concurrent
+        // subagents declaring the same hook each keep their own copy.
         const isDuplicate = this.entries.some(
           (existing) =>
             existing.eventName === eventName &&
             existing.source === source &&
-            this.getHookName(existing) === hookName &&
+            existing.agentScope === agentScope &&
+            this.getHookIdentity(existing) === hookIdentity &&
             existing.matcher === definition.matcher &&
             existing.sequential === definition.sequential,
         );
@@ -256,6 +338,7 @@ export class HookRegistry {
           matcher: definition.matcher,
           sequential: definition.sequential,
           enabled: true,
+          ...(agentScope !== undefined ? { agentScope } : {}),
         });
       } else {
         // Invalid hooks are logged and discarded here, they won't reach HookRunner
@@ -277,7 +360,7 @@ export class HookRegistry {
   ): boolean {
     if (
       !config.type ||
-      !['command', 'http', 'function'].includes(config.type)
+      !['command', 'http', 'function', 'prompt'].includes(config.type)
     ) {
       debugLogger.warn(
         `Invalid hook ${eventName} from ${source} type: ${config.type}`,
@@ -302,6 +385,13 @@ export class HookRegistry {
     if (config.type === 'function' && typeof config.callback !== 'function') {
       debugLogger.warn(
         `Function hook ${eventName} from ${source} missing or invalid callback`,
+      );
+      return false;
+    }
+
+    if (config.type === 'prompt' && !config.prompt) {
+      debugLogger.warn(
+        `Prompt hook ${eventName} from ${source} missing prompt field`,
       );
       return false;
     }

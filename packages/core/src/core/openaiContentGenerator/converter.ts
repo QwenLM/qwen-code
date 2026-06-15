@@ -21,7 +21,7 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import type { RequestContext } from './types.js';
+import type { RequestContext, StreamingTextDeltaState } from './types.js';
 import { parseTaggedThinkingText } from './taggedThinkingParser.js';
 import {
   convertSchema,
@@ -29,6 +29,7 @@ import {
 } from '../../utils/schemaConverter.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
+const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
 
 /**
  * Extended usage type that supports both OpenAI standard format and alternative formats
@@ -57,6 +58,149 @@ export interface ExtendedCompletionChunkDelta
   extends OpenAI.Chat.ChatCompletionChunk.Choice.Delta {
   reasoning_content?: string | null;
   reasoning?: string | null;
+}
+
+// Threshold for treating an exact-repeat chunk as a cumulative marker rather
+// than legitimate repeated content. Cumulative providers replay the entire
+// accumulated buffer (typically hundreds of bytes) on each re-send, while
+// legitimate repeats in real output (duplicated import lines, repeated short
+// boilerplate like "</div>\n</div>", repeated emoji sequences) are usually
+// well under this threshold. 64 sits comfortably above realistic legit-repeat
+// lengths while remaining far below any practical cumulative-buffer replay,
+// so it preserves catch-rate without silently suppressing legitimate chunks.
+const CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH = 64;
+
+// Once this many bytes have been emitted without entering cumulative mode the
+// stream is almost certainly a standard incremental provider. Stop growing
+// emittedText beyond this point to bound per-stream memory and CPU. The true
+// emitted total is preserved separately in `state.emittedLength` so a late
+// transition into cumulative mode still slices the correct suffix.
+const CUMULATIVE_DETECTION_WINDOW_BYTES = 1024;
+
+/**
+ * Some OpenAI-compatible providers (e.g. DashScope) send the entire
+ * accumulated content in each `delta.content` field instead of incremental
+ * suffixes. Normalize that shape to incremental suffixes before the Gemini
+ * stream layer appends it to the live transcript.
+ *
+ * State invariants and lifecycle:
+ * - `state` is per-stream and per-channel — the content and reasoning
+ *   channels are tracked independently to avoid cross-contamination. State
+ *   MUST NOT be shared or reused across requests; stale state will silently
+ *   corrupt text output.
+ * - In cumulative mode `state.emittedText` retains the full accumulated text
+ *   for the request lifetime (worst case: ~final response size, e.g. ~100KB
+ *   for a long answer). This is single-request scoped and bounded by request
+ *   completion. A future optimization could retain only the last N bytes once
+ *   cumulative mode is firmly established, but is not required today.
+ * - In non-cumulative mode `state.emittedText` is capped at
+ *   CUMULATIVE_DETECTION_WINDOW_BYTES; `state.emittedLength` tracks the true
+ *   user-visible total separately so a late transition into cumulative mode
+ *   still produces the correct suffix.
+ * - The "exit cumulative" path is a verbatim-emit path with no overlap
+ *   reconciliation: the diverged chunk is assumed to be fully fresh content.
+ *   Cumulative providers that emit a half-overlapping chunk on exit (not
+ *   observed on DashScope-class providers) would produce visible duplication
+ *   on the overlap.
+ */
+function normalizeStreamingTextDelta(
+  rawDelta: string,
+  state: StreamingTextDeltaState,
+): string {
+  if (rawDelta.length === 0) {
+    return '';
+  }
+
+  if (state.emittedText.length === 0) {
+    state.emittedText = rawDelta;
+    state.emittedLength = rawDelta.length;
+    return rawDelta;
+  }
+
+  if (state.cumulativeMode) {
+    if (rawDelta.startsWith(state.emittedText)) {
+      const suffix = rawDelta.slice(state.emittedText.length);
+      state.emittedText = rawDelta;
+      state.emittedLength = rawDelta.length;
+      return suffix;
+    }
+
+    if (state.emittedText.startsWith(rawDelta)) {
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: cumulative rewind suppression (emitted=${state.emittedText.length}b, chunk=${rawDelta.length}b)`,
+      );
+      return '';
+    }
+
+    debugLogger.debug(
+      'normalizeStreamingTextDelta: exiting cumulative mode (chunk does not match prior accumulated text)',
+    );
+    state.cumulativeMode = false;
+    // Reset baseline to current chunk so future prefix checks use fresh state.
+    // Note: this is a verbatim-emit path with no overlap reconciliation — the
+    // diverged chunk is assumed to be fully fresh content. If a cumulative
+    // provider were to emit a half-overlapping chunk on exit (rare; not
+    // observed on DashScope-class providers) the overlap would be visible.
+    state.emittedText = rawDelta;
+    state.emittedLength += rawDelta.length;
+    return rawDelta;
+  }
+
+  if (
+    rawDelta.length > state.emittedText.length &&
+    rawDelta.startsWith(state.emittedText)
+  ) {
+    const baselineLen = state.emittedText.length;
+    // The baseline may have been frozen at CUMULATIVE_DETECTION_WINDOW_BYTES
+    // during a long incremental phase. If the cap actually kicked in and the
+    // real emitted total exceeds the (frozen) baseline, slice the suffix from
+    // the real total so an incremental-then-cumulative hybrid stream doesn't
+    // re-emit bytes the user already saw between the cap and the true total.
+    // Outside that hybrid-after-cap case, use the baseline so the historical
+    // short-repeat-then-extend behaviour is preserved (the baseline is kept
+    // unmodified across short exact repeats specifically to support that
+    // case).
+    const baselineFrozenAtCap =
+      baselineLen >= CUMULATIVE_DETECTION_WINDOW_BYTES &&
+      state.emittedLength > baselineLen;
+    const sliceFrom = baselineFrozenAtCap ? state.emittedLength : baselineLen;
+    if (rawDelta.length > sliceFrom) {
+      const suffix = rawDelta.slice(sliceFrom);
+      state.emittedText = rawDelta;
+      state.emittedLength = rawDelta.length;
+      state.cumulativeMode = true;
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: entered cumulative mode (prefix overlap, baseline=${baselineLen}b sliceFrom=${sliceFrom}b -> curr=${rawDelta.length}b)`,
+      );
+      return suffix;
+    }
+    // rawDelta startsWith baseline but isn't strictly longer than sliceFrom.
+    // Only reachable in the baselineFrozenAtCap branch when the cumulative
+    // chunk is shorter than the real emitted total (a cumulative-rewind-like
+    // shape during the transition). Treat as a no-op: don't enter cumulative
+    // mode here, fall through to the rewind/passthrough branches below.
+  }
+
+  if (rawDelta === state.emittedText) {
+    if (rawDelta.length >= CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH) {
+      state.cumulativeMode = true;
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: entered cumulative mode (exact repeat, ${rawDelta.length}b)`,
+      );
+      return '';
+    }
+    // Short exact repeat: don't mutate emittedText so it remains a valid
+    // prefix baseline for the next prefix-overlap check. The chunk is still
+    // emitted verbatim, so bump emittedLength to track user-visible bytes.
+    state.emittedLength += rawDelta.length;
+    return rawDelta;
+  }
+
+  if (state.emittedText.length < CUMULATIVE_DETECTION_WINDOW_BYTES) {
+    state.emittedText += rawDelta;
+  }
+  state.emittedLength += rawDelta.length;
+  return rawDelta;
 }
 
 /**
@@ -237,11 +381,11 @@ export function convertGeminiRequestToOpenAI(
   // Handle contents
   processContents(request.contents, messages, requestContext);
 
-  // Clean up orphaned tool calls and merge consecutive assistant messages
+  messages = mergeConsecutiveAssistantMessages(messages);
   if (options.cleanOrphanToolCalls) {
     messages = cleanOrphanedToolCalls(messages);
+    messages = mergeConsecutiveAssistantMessages(messages);
   }
-  messages = mergeConsecutiveAssistantMessages(messages);
 
   return messages;
 }
@@ -401,6 +545,11 @@ function processContent(
   const reasoningParts: string[] = [];
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
   let toolCallIndex = 0;
+  const emittedFunctionCallIds = new Set<string>();
+  const emittedFunctionResponseIds = new Set<string>();
+  // New history is normalized before reaching this converter. These local
+  // guards only keep already-corrupted or programmatic duplicate parts from
+  // leaking duplicate IDs into OpenAI payloads.
   // When `splitToolMedia` is enabled, media stripped from tool messages is
   // accumulated here and emitted as a single follow-up user message after
   // ALL tool messages in this group have been pushed. OpenAI Chat
@@ -432,8 +581,19 @@ function processContent(
     }
 
     if ('functionCall' in part && part.functionCall && role === 'assistant') {
+      const callId = part.functionCall.id;
+      if (callId) {
+        if (emittedFunctionCallIds.has(callId)) {
+          debugLogger.debug(
+            `Dropping duplicate functionCall id=${callId} while converting content`,
+          );
+          continue;
+        }
+        emittedFunctionCallIds.add(callId);
+      }
+
       toolCalls.push({
-        id: part.functionCall.id || `call_${toolCallIndex}`,
+        id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
         function: {
           name: part.functionCall.name || '',
@@ -444,24 +604,33 @@ function processContent(
     }
 
     if (part.functionResponse && role === 'user') {
+      const responseId = part.functionResponse.id;
+      if (responseId) {
+        if (emittedFunctionResponseIds.has(responseId)) {
+          continue;
+        }
+        emittedFunctionResponseIds.add(responseId);
+      }
+
       // Create tool message for the function response (with embedded media)
       const toolMessage = createToolMessage(
         part.functionResponse,
         requestContext,
       );
       if (toolMessage) {
-        // Opt-in only (ContentGeneratorConfig.splitToolMedia). OpenAI spec
-        // only permits string / text-part content on `role: "tool"` messages.
-        // Strict OpenAI-compatible servers (e.g. LM Studio) reject tool
-        // messages containing image_url / input_audio / video_url / file
-        // parts with HTTP 400 "Invalid 'messages' in payload". When the flag
-        // is set, strip non-text media from this tool message and accumulate
-        // it; the combined media is emitted as a single follow-up user
-        // message after the parts loop completes — preserving the
-        // "all tool responses contiguous" requirement for parallel tool
-        // calls. Default (flag false) preserves prior behavior: media is
-        // embedded in the tool message and permissive providers continue
-        // to receive it that way. See #3616.
+        // Controlled by ContentGeneratorConfig.splitToolMedia (default true;
+        // resolved in pipeline.ts). OpenAI spec only permits string / text-part
+        // content on `role: "tool"` messages. Strict OpenAI-compatible servers
+        // (e.g. doubao / new-api / LM Studio) silently drop or reject tool
+        // messages containing image_url / input_audio / video_url / file parts
+        // (HTTP 400 "Invalid 'messages' in payload"), so an image read via
+        // read_file never reaches the model. When the flag is set, strip
+        // non-text media from this tool message and accumulate it; the combined
+        // media is emitted as a single follow-up user message after the parts
+        // loop completes — preserving the "all tool responses contiguous"
+        // requirement for parallel tool calls. Opt out (flag false) to restore
+        // the legacy behavior: media embedded in the tool message, which only
+        // permissive providers accept. See #4876, #3616.
         if (
           requestContext.splitToolMedia &&
           Array.isArray(toolMessage.content)
@@ -502,7 +671,7 @@ function processContent(
       content: [
         {
           type: 'text',
-          text: '(attached media from previous tool call)',
+          text: SPLIT_TOOL_MEDIA_TEXT,
         },
         ...accumulatedSplitMedia,
       ] as unknown as OpenAI.Chat.ChatCompletionContentPartText[],
@@ -601,8 +770,22 @@ function createToolMessage(
     contentParts.push({ type: 'text' as const, text: textContent });
   }
 
-  // Add media parts from function response
+  // Add nested parts from the function response. Most entries here are
+  // media (image/document attachments) — but the compaction slimmer
+  // replaces inlineData/fileData with text placeholders like
+  // `[image: image/png]` so the summary side-query doesn't carry raw
+  // base64. Pass those text placeholders through as text content;
+  // otherwise they'd be silently dropped by createMediaContentPart
+  // (which only knows image_url / file_url shapes), and the summary
+  // model would receive an empty tool response with no indication that
+  // an image was ever there.
   for (const part of response.parts || []) {
+    if ('text' in part && typeof part.text === 'string') {
+      if (part.text.length > 0) {
+        contentParts.push({ type: 'text' as const, text: part.text });
+      }
+      continue;
+    }
     const mediaPart = createMediaContentPart(part, requestContext);
     if (mediaPart) {
       contentParts.push(mediaPart);
@@ -1030,19 +1213,41 @@ export function convertOpenAIChunkToGemini(
         (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
         (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
       if (reasoningText) {
-        parts.push({ text: reasoningText, thought: true });
+        const normalizedReasoningText = normalizeStreamingTextDelta(
+          reasoningText,
+          (requestContext.reasoningDeltaState ??= {
+            emittedText: '',
+            emittedLength: 0,
+            cumulativeMode: false,
+          }),
+        );
+        if (normalizedReasoningText) {
+          parts.push({ text: normalizedReasoningText, thought: true });
+        }
       }
     }
 
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
-      parts.push(
-        ...convertOpenAITextToParts(
-          choice.delta.content,
-          requestContext,
-          Boolean(choice.finish_reason),
-        ),
+      const normalizedContent = normalizeStreamingTextDelta(
+        choice.delta.content,
+        (requestContext.textDeltaState ??= {
+          emittedText: '',
+          emittedLength: 0,
+          cumulativeMode: false,
+        }),
       );
+      // Skip empty-string push mid-stream; still call on finish_reason to
+      // flush any buffered tagged-thinking content.
+      if (normalizedContent || choice.finish_reason) {
+        parts.push(
+          ...convertOpenAITextToParts(
+            normalizedContent,
+            requestContext,
+            Boolean(choice.finish_reason),
+          ),
+        );
+      }
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
       parts.push(...convertOpenAITextToParts('', requestContext, true));
@@ -1199,60 +1404,161 @@ function mapGeminiFinishReasonToOpenAI(
     case FinishReason.MAX_TOKENS:
       return 'length';
     case FinishReason.SAFETY:
+    case FinishReason.RECITATION:
+    case FinishReason.BLOCKLIST:
+    case FinishReason.PROHIBITED_CONTENT:
+    case FinishReason.SPII:
+    case FinishReason.IMAGE_SAFETY:
+    case FinishReason.IMAGE_RECITATION:
+    case FinishReason.IMAGE_PROHIBITED_CONTENT:
+    case FinishReason.IMAGE_OTHER:
       return 'content_filter';
+    case FinishReason.NO_IMAGE:
+      return 'stop';
     default:
-      if (geminiReason === ('RECITATION' as FinishReason)) {
-        return 'content_filter';
-      }
       return 'stop';
   }
 }
 
+/** Type guard: is this an assistant message with at least one tool call? */
+function hasToolCalls(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+  tool_calls: OpenAI.Chat.ChatCompletionMessageToolCall[];
+} {
+  return (
+    message.role === 'assistant' &&
+    'tool_calls' in message &&
+    Array.isArray(message.tool_calls) &&
+    message.tool_calls.length > 0
+  );
+}
+
+function isSplitToolMediaMessage(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): boolean {
+  if (
+    message.role !== 'user' ||
+    !('content' in message) ||
+    !Array.isArray(message.content)
+  ) {
+    return false;
+  }
+
+  const firstPart = message.content[0] as
+    | { type?: string; text?: string }
+    | undefined;
+  return firstPart?.type === 'text' && firstPart.text === SPLIT_TOOL_MEDIA_TEXT;
+}
+
 /**
  * Clean up orphaned tool calls from message history to prevent OpenAI API errors.
+ *
+ * Assumes consecutive assistant messages have already been merged.
  */
 function cleanOrphanedToolCalls(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const cleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  const toolCallIds = new Set<string>();
-  const toolResponseIds = new Set<string>();
+  const validToolCallsByAssistant = new Map<
+    number,
+    OpenAI.Chat.ChatCompletionMessageToolCall[]
+  >();
+  const validToolResponseIndexesByAssistant = new Map<number, number[]>();
+  const splitMediaIndexesByAssistant = new Map<number, number[]>();
+  const emittedWithAssistant = new Set<number>();
+  const survivingToolCallIds = new Set<string>();
 
-  // First pass: collect all tool call IDs and tool response IDs
-  for (const message of messages) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (hasToolCalls(message)) {
+      const candidateToolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] =
+        [];
+      const candidateToolCallIds = new Set<string>();
       for (const toolCall of message.tool_calls) {
-        if (toolCall.id) {
-          toolCallIds.add(toolCall.id);
+        const id = toolCall.id;
+        if (!id || survivingToolCallIds.has(id)) {
+          continue;
         }
+        if (candidateToolCallIds.has(id)) {
+          continue;
+        }
+        candidateToolCallIds.add(id);
+        candidateToolCalls.push(toolCall);
       }
-    } else if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      toolResponseIds.add(message.tool_call_id);
+
+      const adjacentToolResponseIds = new Set<string>();
+      const toolResponseIndexes: number[] = [];
+      const splitMediaIndexes: number[] = [];
+      let lastToolResponseMatchesAssistant = false;
+
+      for (
+        let nextIndex = index + 1;
+        nextIndex < messages.length;
+        nextIndex += 1
+      ) {
+        const nextMessage = messages[nextIndex];
+        if (nextMessage.role === 'tool' && 'tool_call_id' in nextMessage) {
+          if (!nextMessage.tool_call_id) {
+            lastToolResponseMatchesAssistant = false;
+            continue;
+          }
+
+          if (
+            candidateToolCallIds.has(nextMessage.tool_call_id) &&
+            !adjacentToolResponseIds.has(nextMessage.tool_call_id)
+          ) {
+            adjacentToolResponseIds.add(nextMessage.tool_call_id);
+            toolResponseIndexes.push(nextIndex);
+            lastToolResponseMatchesAssistant = true;
+          } else {
+            lastToolResponseMatchesAssistant = false;
+          }
+
+          // Other tool responses in this block may belong to another assistant.
+          continue;
+        }
+
+        if (isSplitToolMediaMessage(nextMessage)) {
+          if (lastToolResponseMatchesAssistant) {
+            splitMediaIndexes.push(nextIndex);
+          }
+          continue;
+        }
+
+        if (nextMessage.role === 'assistant' && !hasToolCalls(nextMessage)) {
+          // Consecutive assistant turns are merged before cleanup.
+          continue;
+        }
+
+        break;
+      }
+
+      const validToolCalls = candidateToolCalls.filter((toolCall) =>
+        adjacentToolResponseIds.has(toolCall.id),
+      );
+      for (const toolCall of validToolCalls) {
+        survivingToolCallIds.add(toolCall.id);
+      }
+      validToolCallsByAssistant.set(index, validToolCalls);
+      validToolResponseIndexesByAssistant.set(index, toolResponseIndexes);
+      splitMediaIndexesByAssistant.set(index, splitMediaIndexes);
     }
   }
 
-  // Second pass: filter out orphaned messages
-  for (const message of messages) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
-      // Filter out tool calls that don't have corresponding responses
-      const validToolCalls = message.tool_calls.filter(
-        (toolCall) => toolCall.id && toolResponseIds.has(toolCall.id),
-      );
+  for (let index = 0; index < messages.length; index += 1) {
+    if (emittedWithAssistant.has(index)) {
+      continue;
+    }
+
+    const message = messages[index];
+    if (hasToolCalls(message)) {
+      const reasoningContent = (
+        message as ExtendedChatCompletionAssistantMessageParam
+      ).reasoning_content;
+      const validToolCalls = validToolCallsByAssistant.get(index) ?? [];
 
       if (validToolCalls.length > 0) {
-        // Keep the message but only with valid tool calls
         const cleanedMessage = { ...message };
         (
           cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -1260,11 +1566,30 @@ function cleanOrphanedToolCalls(
           }
         ).tool_calls = validToolCalls;
         cleaned.push(cleanedMessage);
+
+        for (const toolResponseIndex of validToolResponseIndexesByAssistant.get(
+          index,
+        ) ?? []) {
+          const toolResponse = messages[toolResponseIndex];
+          if (toolResponse) {
+            cleaned.push(toolResponse);
+            emittedWithAssistant.add(toolResponseIndex);
+          }
+        }
+
+        for (const splitMediaIndex of splitMediaIndexesByAssistant.get(index) ??
+          []) {
+          const splitMediaMessage = messages[splitMediaIndex];
+          if (splitMediaMessage) {
+            cleaned.push(splitMediaMessage);
+            emittedWithAssistant.add(splitMediaIndex);
+          }
+        }
       } else if (
-        typeof message.content === 'string' &&
-        message.content.trim()
+        (typeof message.content === 'string' && message.content.trim()) ||
+        reasoningContent
       ) {
-        // Keep the message if it has text content, but remove tool calls
+        // Keep text/reasoning content, but remove orphaned tool calls.
         const cleanedMessage = { ...message };
         delete (
           cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -1272,91 +1597,25 @@ function cleanOrphanedToolCalls(
           }
         ).tool_calls;
         cleaned.push(cleanedMessage);
+      } else {
+        debugLogger.debug(
+          `cleanOrphanedToolCalls: dropping assistant with ${message.tool_calls.length} orphaned tool call(s) and no text/reasoning content`,
+        );
       }
-      // If no valid tool calls and no content, skip the message entirely
-    } else if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      // Only keep tool responses that have corresponding tool calls
-      if (toolCallIds.has(message.tool_call_id)) {
-        cleaned.push(message);
-      }
+    } else if (message.role === 'tool' && 'tool_call_id' in message) {
+      debugLogger.debug(
+        `cleanOrphanedToolCalls: dropping orphaned tool response ${message.tool_call_id || '<empty>'}`,
+      );
+    } else if (isSplitToolMediaMessage(message)) {
+      debugLogger.debug(
+        'cleanOrphanedToolCalls: dropping orphaned split tool media message',
+      );
     } else {
-      // Keep all other messages as-is
       cleaned.push(message);
     }
   }
 
-  // Final validation: ensure every assistant message with tool_calls has corresponding tool responses
-  const finalCleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  const finalToolCallIds = new Set<string>();
-
-  // Collect all remaining tool call IDs
-  for (const message of cleaned) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
-      for (const toolCall of message.tool_calls) {
-        if (toolCall.id) {
-          finalToolCallIds.add(toolCall.id);
-        }
-      }
-    }
-  }
-
-  // Verify all tool calls have responses
-  const finalToolResponseIds = new Set<string>();
-  for (const message of cleaned) {
-    if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      finalToolResponseIds.add(message.tool_call_id);
-    }
-  }
-
-  // Remove any remaining orphaned tool calls
-  for (const message of cleaned) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
-      const finalValidToolCalls = message.tool_calls.filter(
-        (toolCall) => toolCall.id && finalToolResponseIds.has(toolCall.id),
-      );
-
-      if (finalValidToolCalls.length > 0) {
-        const cleanedMessage = { ...message };
-        (
-          cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-            tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-          }
-        ).tool_calls = finalValidToolCalls;
-        finalCleaned.push(cleanedMessage);
-      } else if (
-        typeof message.content === 'string' &&
-        message.content.trim()
-      ) {
-        const cleanedMessage = { ...message };
-        delete (
-          cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-            tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-          }
-        ).tool_calls;
-        finalCleaned.push(cleanedMessage);
-      }
-    } else {
-      finalCleaned.push(message);
-    }
-  }
-
-  return finalCleaned;
+  return cleaned;
 }
 
 /**

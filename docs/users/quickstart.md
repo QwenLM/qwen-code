@@ -21,13 +21,13 @@ To install Qwen Code, use one of the following methods:
 **Linux / macOS**
 
 ```sh
-curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash
 ```
 
-**Windows (Run as Administrator)**
+**Windows**
 
-```cmd
-powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+```powershell
+irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex
 ```
 
 > [!note]
@@ -38,7 +38,7 @@ powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou
 
 **Prerequisites**
 
-Make sure you have Node.js 20 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
+Make sure you have Node.js 22 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
 
 **NPM**
 
@@ -79,7 +79,7 @@ Choose your preferred authentication method:
 
 > [!tip]
 >
-> You can also configure authentication directly from the terminal without starting a session by running `qwen auth`. Use `qwen auth status` to check your current configuration at any time. See the [Authentication](./configuration/auth) page for details.
+> To configure authentication, start Qwen Code and run `/auth`. Use `/doctor` to check your current configuration at any time. See the [Authentication](./configuration/auth) page for details.
 
 ## Step 3: Start your first session
 
@@ -222,9 +222,7 @@ Here are the most important commands for daily use:
 | --------------------- | ------------------------------------------------ | ----------------------------- |
 | `qwen`                | start Qwen Code                                  | `qwen`                        |
 | `/auth`               | Change authentication method (in session)        | `/auth`                       |
-| `qwen auth`           | Configure authentication from the terminal       | `qwen auth`                   |
-| `qwen auth api-key`   | Configure API key authentication                 | `qwen auth api-key`           |
-| `qwen auth status`    | Check current authentication status              | `qwen auth status`            |
+| `/doctor`             | Check current authentication and environment     | `/doctor`                     |
 | `/help`               | Display help information for available commands  | `/help` or `/?`               |
 | `/compress`           | Replace chat history with summary to save Tokens | `/compress`                   |
 | `/clear`              | Clear terminal screen content                    | `/clear` (shortcut: `Ctrl+L`) |

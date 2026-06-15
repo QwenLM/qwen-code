@@ -6,12 +6,15 @@
 
 import { useMemo } from 'react';
 import { Box } from 'ink';
-import { AuthType, isCodingPlanConfig } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  findProviderByCredentials,
+  resolveMetadataKey,
+} from '@qwen-code/qwen-code-core';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { useUIState } from '../contexts/UIStateContext.js';
 import { resolveCustomBanner } from '../utils/customBanner.js';
 
 interface AppHeaderProps {
@@ -25,14 +28,14 @@ function getAuthDisplayType(
   authType?: AuthType,
   baseUrl?: string,
   apiKeyEnvKey?: string,
-): AuthDisplayType {
+): AuthDisplayType | string {
   if (!authType) {
     return AuthDisplayType.UNKNOWN;
   }
 
-  // Check if it's a Coding Plan config
-  if (isCodingPlanConfig(baseUrl, apiKeyEnvKey)) {
-    return AuthDisplayType.CODING_PLAN;
+  const matched = findProviderByCredentials(baseUrl, apiKeyEnvKey);
+  if (matched && resolveMetadataKey(matched)) {
+    return matched.label;
   }
 
   switch (authType) {
@@ -46,11 +49,9 @@ function getAuthDisplayType(
 export const AppHeader = ({ version }: AppHeaderProps) => {
   const settings = useSettings();
   const config = useConfig();
-  const uiState = useUIState();
-
   const contentGeneratorConfig = config.getContentGeneratorConfig();
   const authType = contentGeneratorConfig?.authType;
-  const model = uiState.currentModel;
+  const model = config.getModelDisplayName();
   const targetDir = config.getTargetDir();
   const showBanner =
     !config.getScreenReader() && !settings.merged.ui?.hideBanner;

@@ -9,12 +9,15 @@ import { IdeIntegrationNudge } from '../IdeIntegrationNudge.js';
 import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
+import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
+import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
 import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
+import { StatusLineDialog } from './StatusLineDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { ExternalAuthProgress } from './ExternalAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
@@ -22,7 +25,6 @@ import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { TrustDialog } from './TrustDialog.js';
 import { PermissionsDialog } from './PermissionsDialog.js';
 import { ModelDialog } from './ModelDialog.js';
-import { ManageModelsDialog } from './ManageModelsDialog.js';
 import { ArenaStartDialog } from './arena/ArenaStartDialog.js';
 import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
@@ -39,17 +41,23 @@ import process from 'node:process';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
 import { WelcomeBackDialog } from './WelcomeBackDialog.js';
+import { WorktreeExitDialog } from './WorktreeExitDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
+import { SkillsManagerDialog } from './skills/SkillsManagerDialog.js';
 import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
+import { StatsDialog } from './StatsDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
+import { DiffDialog } from './DiffDialog.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
+import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -69,6 +77,11 @@ export const DialogManager = ({
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
+  const dialogMaxHeight = getDialogMaxHeight(terminalHeight, staticExtraHeight);
+  const constrainedDialogHeight = constrainHeight ? dialogMaxHeight : undefined;
+  // Long list-style dialogs use this finite budget for their own internal
+  // virtualization even when the outer app layout is not height-constrained.
+  const listDialogHeight = dialogMaxHeight;
 
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
@@ -76,6 +89,19 @@ export const DialogManager = ({
         welcomeBackInfo={uiState.welcomeBackInfo}
         onSelect={uiActions.handleWelcomeBackSelection}
         onClose={uiActions.handleWelcomeBackClose}
+      />
+    );
+  }
+  if (uiState.showWorktreeExitDialog && uiState.activeWorktree) {
+    return (
+      <WorktreeExitDialog
+        slug={uiState.activeWorktree.slug}
+        branch={uiState.activeWorktree.branch}
+        worktreePath={uiState.activeWorktree.path}
+        originalHeadCommit={uiState.activeWorktree.originalHeadCommit}
+        onKeep={() => void uiActions.handleWorktreeExit('keep')}
+        onRemove={() => void uiActions.handleWorktreeExit('remove')}
+        onCancel={() => void uiActions.handleWorktreeExit('cancel')}
       />
     );
   }
@@ -106,9 +132,25 @@ export const DialogManager = ({
       />
     );
   }
+  if (uiState.isMcpApprovalDialogOpen && uiState.currentMcpApproval) {
+    return (
+      <MCPServerApprovalDialog
+        serverName={uiState.currentMcpApproval.name}
+        summary={uiState.currentMcpApproval.summary}
+        source={uiState.currentMcpApproval.source}
+        pendingServers={uiState.pendingMcpApprovals}
+        remaining={uiState.mcpApprovalRemaining}
+        onSelect={uiActions.handleMcpApprovalSelect}
+      />
+    );
+  }
   if (uiState.shellConfirmationRequest) {
     return (
-      <ShellConfirmationDialog request={uiState.shellConfirmationRequest} />
+      <ShellConfirmationDialog
+        request={uiState.shellConfirmationRequest}
+        availableTerminalHeight={constrainedDialogHeight}
+        contentWidth={mainAreaWidth}
+      />
     );
   }
   if (uiState.loopDetectionConfirmationRequest) {
@@ -124,6 +166,7 @@ export const DialogManager = ({
         prompt={uiState.confirmationRequest.prompt}
         onConfirm={uiState.confirmationRequest.onConfirm}
         terminalWidth={terminalWidth}
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }
@@ -134,15 +177,15 @@ export const DialogManager = ({
         prompt={request.prompt}
         onConfirm={request.onConfirm}
         terminalWidth={terminalWidth}
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }
-  if (uiState.codingPlanUpdateRequest) {
+  if (uiState.providerUpdateRequest) {
     return (
-      <ConsentPrompt
-        prompt={uiState.codingPlanUpdateRequest.prompt}
-        onConfirm={uiState.codingPlanUpdateRequest.onConfirm}
-        terminalWidth={terminalWidth}
+      <ProviderUpdatePrompt
+        entries={uiState.providerUpdateRequest.entries}
+        onConfirm={uiState.providerUpdateRequest.onConfirm}
       />
     );
   }
@@ -186,9 +229,7 @@ export const DialogManager = ({
           onSelect={uiActions.handleThemeSelect}
           onHighlight={uiActions.handleThemeHighlight}
           settings={settings}
-          availableTerminalHeight={
-            constrainHeight ? terminalHeight - staticExtraHeight : undefined
-          }
+          availableTerminalHeight={constrainedDialogHeight}
           terminalWidth={mainAreaWidth}
         />
       </Box>
@@ -218,14 +259,6 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.isManageModelsDialogOpen) {
-    return (
-      <ManageModelsDialog
-        config={config}
-        onClose={uiActions.closeManageModelsDialog}
-      />
-    );
-  }
   if (uiState.isSettingsDialogOpen) {
     return (
       <Box flexDirection="column">
@@ -247,14 +280,39 @@ export const DialogManager = ({
             uiActions.closeSettingsDialog();
           }}
           onRestartRequest={() => process.exit(0)}
-          availableTerminalHeight={terminalHeight - staticExtraHeight}
+          availableTerminalHeight={listDialogHeight}
           config={config}
         />
       </Box>
     );
   }
+  if (uiState.isStatusLineDialogOpen) {
+    return (
+      <StatusLineDialog
+        settings={settings}
+        config={config}
+        uiState={uiState}
+        addItem={addItem}
+        onSaved={uiActions.notifyStatusLineSettingsChanged}
+        onClose={uiActions.closeStatusLineDialog}
+        availableTerminalHeight={listDialogHeight}
+      />
+    );
+  }
   if (uiState.isMemoryDialogOpen) {
     return <MemoryDialog onClose={uiActions.closeMemoryDialog} />;
+  }
+  if (uiState.isHelpDialogOpen) {
+    return (
+      <Help
+        commands={uiState.slashCommands}
+        width={mainAreaWidth}
+        activeTab={uiState.activeHelpTab}
+        onTabChange={uiActions.setHelpTab}
+        onClose={uiActions.closeHelpDialog}
+        isInteractive
+      />
+    );
   }
   if (uiState.isApprovalModeDialogOpen) {
     const currentMode = config.getApprovalMode();
@@ -264,9 +322,7 @@ export const DialogManager = ({
           settings={settings}
           currentMode={currentMode}
           onSelect={uiActions.handleApprovalModeSelect}
-          availableTerminalHeight={
-            constrainHeight ? terminalHeight - staticExtraHeight : undefined
-          }
+          availableTerminalHeight={constrainedDialogHeight}
         />
       </Box>
     );
@@ -314,7 +370,7 @@ export const DialogManager = ({
     }
   }
 
-  if (uiState.isAuthDialogOpen || uiState.authError) {
+  if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
         <AuthDialog />
@@ -322,19 +378,19 @@ export const DialogManager = ({
     );
   }
 
-  if (uiState.isAuthenticating) {
+  if (uiState.auth.isAuthenticating) {
     if (
-      uiState.pendingAuthType === AuthType.USE_OPENAI &&
-      uiState.externalAuthState
+      uiState.auth.pendingAuthType === AuthType.USE_OPENAI &&
+      uiState.auth.externalAuthState
     ) {
       return (
         <ExternalAuthProgress
-          title={uiState.externalAuthState.title}
-          message={uiState.externalAuthState.message}
-          detail={uiState.externalAuthState.detail}
+          title={uiState.auth.externalAuthState.title}
+          message={uiState.auth.externalAuthState.message}
+          detail={uiState.auth.externalAuthState.detail}
           onCancel={() => {
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
         />
       );
@@ -342,20 +398,20 @@ export const DialogManager = ({
 
     // OpenAI authentication now handled through AuthDialog with coding-plan/custom sub-modes
     // Qwen OAuth remains as a separate flow
-    if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {
+    if (uiState.auth.pendingAuthType === AuthType.QWEN_OAUTH) {
       return (
         <QwenOAuthProgress
-          deviceAuth={uiState.qwenAuthState.deviceAuth || undefined}
-          authStatus={uiState.qwenAuthState.authStatus}
-          authMessage={uiState.qwenAuthState.authMessage}
+          deviceAuth={uiState.auth.qwenAuthState.deviceAuth || undefined}
+          authStatus={uiState.auth.qwenAuthState.authStatus}
+          authMessage={uiState.auth.qwenAuthState.authMessage}
           onTimeout={() => {
-            uiActions.onAuthError('Qwen OAuth authentication timed out.');
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.onAuthError('Qwen OAuth authentication timed out.');
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
           onCancel={() => {
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
         />
       );
@@ -389,6 +445,20 @@ export const DialogManager = ({
     );
   }
 
+  if (uiState.isSkillsManagerDialogOpen) {
+    return (
+      <SkillsManagerDialog
+        settings={settings}
+        config={config}
+        addItem={addItem}
+        onClose={uiActions.closeSkillsManagerDialog}
+        reloadCommands={uiActions.reloadCommands}
+        setInputBuffer={uiActions.setInputBuffer}
+        availableTerminalHeight={constrainedDialogHeight}
+      />
+    );
+  }
+
   if (uiState.isExtensionsManagerDialogOpen) {
     return (
       <ExtensionsManagerDialog
@@ -399,6 +469,11 @@ export const DialogManager = ({
   }
   if (uiState.isHooksDialogOpen) {
     return <HooksManagementDialog onClose={uiActions.closeHooksDialog} />;
+  }
+  if (uiState.isStatsDialogOpen) {
+    return (
+      <StatsDialog onClose={uiActions.closeStatsDialog} width={mainAreaWidth} />
+    );
   }
   if (uiState.isMcpDialogOpen) {
     return <MCPManagementDialog onClose={uiActions.closeMcpDialog} />;
@@ -418,6 +493,7 @@ export const DialogManager = ({
   }
 
   if (uiState.isDeleteDialogOpen) {
+    const currentSessionId = config.getSessionId();
     return (
       <SessionPicker
         sessionService={config.getSessionService()}
@@ -425,6 +501,9 @@ export const DialogManager = ({
         onSelect={uiActions.handleDelete}
         onCancel={uiActions.closeDeleteDialog}
         title={t('Delete Session')}
+        enableMultiSelect
+        onConfirmMulti={uiActions.handleDeleteMany}
+        disabledIds={currentSessionId ? [currentSessionId] : undefined}
       />
     );
   }
@@ -435,6 +514,20 @@ export const DialogManager = ({
         history={uiState.history}
         onRewind={uiActions.handleRewindConfirm}
         onCancel={uiActions.closeRewindSelector}
+        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+        fileHistoryService={config.getFileHistoryService()}
+      />
+    );
+  }
+
+  if (uiState.isDiffDialogOpen) {
+    return (
+      <DiffDialog
+        history={uiState.history}
+        cwd={config.getWorkingDir() || config.getProjectRoot()}
+        fileHistoryService={config.getFileHistoryService()}
+        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+        onClose={uiActions.closeDiffDialog}
       />
     );
   }
@@ -447,7 +540,7 @@ export const DialogManager = ({
   if (bgTasksDialogOpen) {
     return (
       <BackgroundTasksDialog
-        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        availableTerminalHeight={listDialogHeight}
         terminalWidth={mainAreaWidth}
       />
     );

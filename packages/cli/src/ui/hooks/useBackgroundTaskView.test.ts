@@ -11,17 +11,25 @@ import { useBackgroundTaskView, entryId } from './useBackgroundTaskView.js';
 
 interface FakeRegistry {
   setStatusChangeCallback: ReturnType<typeof vi.fn>;
-  /** Test helper — invokes the currently-set callback. */
+  setApprovalChangeCallback: ReturnType<typeof vi.fn>;
+  /** Test helper — invokes the currently-set status callback. */
   fire: () => void;
+  /** Test helper — invokes the currently-set approval callback. */
+  fireApproval: () => void;
 }
 
 function makeFakeRegistry(): FakeRegistry {
   let cb: (() => void) | undefined;
+  let approvalCb: (() => void) | undefined;
   return {
     setStatusChangeCallback: vi.fn((next: (() => void) | undefined) => {
       cb = next;
     }),
+    setApprovalChangeCallback: vi.fn((next: (() => void) | undefined) => {
+      approvalCb = next;
+    }),
     fire: () => cb?.(),
+    fireApproval: () => approvalCb?.(),
   };
 }
 
@@ -97,36 +105,77 @@ function makeConfig(opts: {
   return { config, agentReg, shellReg, monitorReg, memoryMgr };
 }
 
-const agent = (id: string, startTime: number) => ({
+type StatusOverride = {
+  status?: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  endTime?: number;
+};
+
+const agent = (
+  id: string,
+  startTime: number,
+  overrides: StatusOverride = {},
+) => ({
+  id,
+  kind: 'agent' as const,
   agentId: id,
   description: 'desc',
-  status: 'running' as const,
+  isBackgrounded: true,
+  status: overrides.status ?? ('running' as const),
   startTime,
+  endTime: overrides.endTime,
   abortController: new AbortController(),
+  outputFile: '/tmp/agent.jsonl',
+  outputOffset: 0,
+  notified: false,
 });
 
-const shell = (id: string, startTime: number) => ({
+const shell = (
+  id: string,
+  startTime: number,
+  overrides: Omit<StatusOverride, 'status'> & {
+    status?: 'running' | 'completed' | 'failed' | 'cancelled';
+  } = {},
+) => ({
+  id,
+  kind: 'shell' as const,
   shellId: id,
   command: 'sleep 60',
+  description: 'sleep 60',
   cwd: '/tmp',
-  status: 'running' as const,
+  status: overrides.status ?? ('running' as const),
   startTime,
+  endTime: overrides.endTime,
   outputPath: '/tmp/x.out',
+  outputFile: '/tmp/x.out',
+  outputOffset: 0,
+  notified: false,
   abortController: new AbortController(),
 });
 
-const monitor = (id: string, startTime: number) => ({
+const monitor = (
+  id: string,
+  startTime: number,
+  overrides: Omit<StatusOverride, 'status'> & {
+    status?: 'running' | 'completed' | 'failed' | 'cancelled';
+  } = {},
+) => ({
+  id,
+  kind: 'monitor' as const,
   monitorId: id,
   command: 'tail -f log',
   description: 'watch logs',
-  status: 'running' as const,
+  status: overrides.status ?? ('running' as const),
   startTime,
+  endTime: overrides.endTime,
   abortController: new AbortController(),
   eventCount: 0,
   lastEventTime: 0,
   maxEvents: 1000,
   idleTimeoutMs: 300_000,
   droppedLines: 0,
+  outputFile: '/tmp/monitor.log',
+  outputOffset: 0,
+  notified: false,
 });
 
 // Mirror the MemoryTaskRecord shape that MemoryManager.listTasksByType
@@ -175,8 +224,96 @@ describe('useBackgroundTaskView', () => {
     });
     const { result } = renderHook(() => useBackgroundTaskView(config));
     expect(result.current.entries).toHaveLength(3);
-    // Sort order is by startTime ascending — shell (50) → agent (100) → monitor (200).
-    expect(result.current.entries.map(entryId)).toEqual(['s1', 'a1', 'm1']);
+    // Sort order is by startTime descending — newest first: monitor
+    // (200) → agent (100) → shell (50). The dialog opens with the
+    // cursor on row 0, so the most recently launched task is the one
+    // immediately selected.
+    expect(result.current.entries.map(entryId)).toEqual(['m1', 'a1', 's1']);
+  });
+
+  it('orders entries newest-first across all kinds', () => {
+    // Pin the descending sort so a future refactor that flips the
+    // comparator silently re-introduces the "new task buried at the
+    // bottom of a long list" UX. Mix all four kinds at varying
+    // startTimes to exercise the merge path end-to-end.
+    const { config } = makeConfig({
+      agents: () => [agent('a-old', 10), agent('a-new', 400)],
+      shells: () => [shell('s-mid', 200)],
+      monitors: () => [monitor('m-second-newest', 300)],
+      dreams: () => [dream('d-oldest', 5)],
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    expect(result.current.entries.map(entryId)).toEqual([
+      'a-new',
+      'm-second-newest',
+      's-mid',
+      'a-old',
+      'd-oldest',
+    ]);
+  });
+
+  it('puts active (running + paused) entries above terminal entries even when terminals are newer', () => {
+    // The literal phrasing of the issue is "new OR running tasks
+    // should appear at the top". A pure startTime DESC sort handles
+    // the "new" half but lets a long-running entry get buried under a
+    // batch of newer terminals (a quick agent that started AND
+    // finished after the long one). Pin the bucket order so the user
+    // opening the dialog to check on running work doesn't have to
+    // scroll past stale completed rows to find it.
+    const { config } = makeConfig({
+      agents: () => [
+        // Old running agent — must NOT be pushed below newer terminals.
+        agent('a-running-old', 100),
+        // Recently-completed agent — newer startTime than the running
+        // one, but should still sort below it because it's terminal.
+        agent('a-done-fresh', 500, { status: 'completed', endTime: 600 }),
+        // Paused agent — same bucket as running (user can resume /
+        // abandon), ranks by startTime DESC inside the bucket.
+        agent('a-paused', 300, { status: 'paused' }),
+      ],
+      shells: () => [
+        // Failed shell launched in between the two active agents —
+        // belongs in the terminal bucket regardless of startTime.
+        shell('s-failed', 400, { status: 'failed', endTime: 450 }),
+      ],
+      monitors: () => [],
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    expect(result.current.entries.map(entryId)).toEqual([
+      // Active bucket (startTime DESC): paused (300), running (100).
+      'a-paused',
+      'a-running-old',
+      // Terminal bucket (endTime DESC): a-done-fresh (600), s-failed (450).
+      'a-done-fresh',
+      's-failed',
+    ]);
+  });
+
+  it('orders the terminal bucket by endTime DESC (not startTime)', () => {
+    // A long-running task that just settled is more "interesting" to
+    // a returning user than an old quick task that finished hours
+    // ago, even if the latter has a higher startTime.
+    const { config } = makeConfig({
+      agents: () => [
+        // Started early, just finished — most recent terminal event.
+        agent('a-just-finished', 100, {
+          status: 'completed',
+          endTime: 1_000,
+        }),
+        // Started later, finished early — older terminal event.
+        agent('a-quick-and-old', 500, {
+          status: 'completed',
+          endTime: 600,
+        }),
+      ],
+      shells: () => [],
+      monitors: () => [],
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    expect(result.current.entries.map(entryId)).toEqual([
+      'a-just-finished',
+      'a-quick-and-old',
+    ]);
   });
 
   it('tags each merged entry with the right `kind` discriminator', () => {
@@ -206,6 +343,9 @@ describe('useBackgroundTaskView', () => {
     expect(monitorReg.setStatusChangeCallback).toHaveBeenCalledWith(
       expect.any(Function),
     );
+    expect(agentReg.setApprovalChangeCallback).toHaveBeenCalledWith(
+      expect.any(Function),
+    );
   });
 
   it('refreshes entries when any registry fires statusChange', () => {
@@ -226,8 +366,43 @@ describe('useBackgroundTaskView', () => {
 
     monitors.push(monitor('m1', 50));
     act(() => monitorReg.fire());
-    // monitor's startTime (50) sorts before agent's (100).
-    expect(result.current.entries.map(entryId)).toEqual(['m1', 'a1']);
+    // Sort is descending by startTime: agent (100) sits above monitor
+    // (50) because the user wants the newest entry on top.
+    expect(result.current.entries.map(entryId)).toEqual(['a1', 'm1']);
+  });
+
+  it('refreshes agent entries when approval state changes without a status change', () => {
+    const agents = [agent('a1', 100)];
+    const { config, agentReg } = makeConfig({
+      agents: () => agents,
+      shells: () => [],
+      monitors: () => [],
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    expect(result.current.entries).toHaveLength(1);
+    expect(result.current.entries[0]).not.toHaveProperty('pendingApprovals');
+
+    agents[0] = {
+      ...agents[0],
+      pendingApprovals: [
+        {
+          callId: 'c1',
+          name: 'Shell',
+          description: 'run',
+          args: {},
+          confirmationDetails: { type: 'exec' },
+          respond: vi.fn(),
+          timestamp: Date.now(),
+        },
+      ],
+    } as typeof agents[number];
+
+    act(() => agentReg.fireApproval());
+
+    expect(result.current.entries[0]).toMatchObject({
+      kind: 'agent',
+      pendingApprovals: [expect.objectContaining({ callId: 'c1' })],
+    });
   });
 
   it('clears all three subscriptions on unmount', () => {
@@ -244,6 +419,10 @@ describe('useBackgroundTaskView', () => {
     // into an unmounted component (warning + state-update on unmounted
     // tree, sometimes crashes the next render).
     expect(agentReg.setStatusChangeCallback.mock.calls).toEqual([
+      [expect.any(Function)],
+      [undefined],
+    ]);
+    expect(agentReg.setApprovalChangeCallback.mock.calls).toEqual([
       [expect.any(Function)],
       [undefined],
     ]);

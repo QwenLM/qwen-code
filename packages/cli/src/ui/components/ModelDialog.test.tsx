@@ -5,6 +5,7 @@
  */
 
 import { render, cleanup } from '@testing-library/react';
+import process from 'node:process';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -43,6 +44,7 @@ const mockedSelect = vi.mocked(DescriptiveRadioButtonSelect);
 const renderComponent = (
   props: Partial<React.ComponentProps<typeof ModelDialog>> = {},
   contextValue: Partial<Config> | undefined = undefined,
+  settingsValue: Partial<LoadedSettings> | undefined = undefined,
 ) => {
   const defaultProps = {
     onClose: vi.fn(),
@@ -54,6 +56,7 @@ const renderComponent = (
     user: { settings: {} },
     workspace: { settings: {} },
     setValue: vi.fn(),
+    ...(settingsValue ?? {}),
   } as unknown as LoadedSettings;
 
   const mockConfig = {
@@ -70,6 +73,10 @@ const renderComponent = (
         authType: AuthType.QWEN_OAUTH,
       })),
     ),
+    getModelsConfig: vi.fn(() => ({
+      getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
+    })),
+    getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
 
     // --- Functions used by ClearcutLogger ---
     getUsageStatisticsEnabled: vi.fn(() => true),
@@ -268,11 +275,9 @@ describe('<ModelDialog />', () => {
     // Select a non-OAuth model (USE_OPENAI)
     await childOnSelect(`${AuthType.USE_OPENAI}::gpt-4`);
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.USE_OPENAI,
-      'gpt-4',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
+      baseUrl: undefined,
+    });
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
@@ -284,6 +289,200 @@ describe('<ModelDialog />', () => {
       AuthType.USE_OPENAI,
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows MiniMax-M3 image + video modality and 1M context details', () => {
+    const { getByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'MiniMax-M3'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'MiniMax-M3',
+          label: '[MiniMax] MiniMax-M3',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api.minimaxi.com/v1',
+          envKey: 'MINIMAX_API_KEY',
+          modalities: { image: true, video: true },
+          contextWindowSize: 1000000,
+        },
+      ]),
+      getModelsConfig: vi.fn(() => ({
+        getGenerationConfig: vi.fn(() => ({
+          baseUrl: 'https://api.minimaxi.com/v1',
+        })),
+      })),
+    } as unknown as Partial<Config>);
+
+    expect(getByText('Modality:')).toBeDefined();
+    expect(getByText('text · image · video')).toBeDefined();
+    expect(getByText('Context Window:')).toBeDefined();
+    expect(getByText('1,000,000 tokens')).toBeDefined();
+  });
+
+  it('hydrates provider API key env from settings.env before switching', async () => {
+    const previousMinimaxKey = process.env['MINIMAX_API_KEY'];
+    delete process.env['MINIMAX_API_KEY'];
+
+    try {
+      const switchModel = vi.fn().mockImplementation(async () => {
+        expect(process.env['MINIMAX_API_KEY']).toBe('sk-minimax-from-settings');
+      });
+
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'MiniMax-M2.7'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          switchModel,
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'MiniMax-M3',
+              label: '[MiniMax] MiniMax-M3',
+              description: '',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://api.minimaxi.com/v1',
+              envKey: 'MINIMAX_API_KEY',
+              modalities: { image: true, video: true },
+              contextWindowSize: 1000000,
+            },
+          ]),
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: vi.fn(() => ({
+              baseUrl: 'https://api.minimaxi.com/v1',
+            })),
+          })),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'MiniMax-M3',
+            apiKey: 'sk-minimax-from-settings',
+            baseUrl: 'https://api.minimaxi.com/v1',
+          })),
+        } as unknown as Partial<Config>,
+        {
+          merged: {
+            env: { MINIMAX_API_KEY: 'sk-minimax-from-settings' },
+          },
+        } as unknown as Partial<LoadedSettings>,
+      );
+
+      const selected = mockedSelect.mock.calls[0][0].items[0].value;
+      await mockedSelect.mock.calls[0][0].onSelect(selected);
+
+      expect(switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'MiniMax-M3',
+        { baseUrl: 'https://api.minimaxi.com/v1' },
+      );
+    } finally {
+      if (previousMinimaxKey === undefined) {
+        delete process.env['MINIMAX_API_KEY'];
+      } else {
+        process.env['MINIMAX_API_KEY'] = previousMinimaxKey;
+      }
+    }
+  });
+
+  it('stores authType-qualified selectors in fast model mode', async () => {
+    const setFastModel = vi.fn();
+    const { props, mockSettings } = renderComponent({ isFastModelMode: true }, {
+      getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+      getModel: vi.fn(() => 'claude-opus-4-7'),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'deepseek-v4-flash',
+          label: 'deepseek-v4-flash',
+          authType: AuthType.USE_OPENAI,
+        },
+        {
+          id: 'claude-opus-4-7',
+          label: 'claude-opus-4-7',
+          authType: AuthType.USE_ANTHROPIC,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+      })),
+      setFastModel,
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::deepseek-v4-flash`);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'fastModel',
+      'openai:deepseek-v4-flash',
+    );
+    expect(setFastModel).toHaveBeenCalledWith('openai:deepseek-v4-flash');
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('highlights the cross-auth row for a bare fast-model setting', () => {
+    // `/model --fast deepseek-v4-flash` validates across all providers and
+    // persists the bare model id. When the dialog re-opens, it must locate
+    // the right row even though the setting carries no authType prefix —
+    // otherwise the highlight falls back to the current auth's first row
+    // and Enter would silently overwrite the setting.
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: { fastModel: 'deepseek-v4-flash' },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const allModels = [
+      {
+        id: 'claude-opus-4-7',
+        label: 'claude-opus-4-7',
+        description: '',
+        authType: AuthType.USE_ANTHROPIC,
+      },
+      {
+        id: 'deepseek-v4-flash',
+        label: 'deepseek-v4-flash',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+      },
+    ];
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'claude-opus-4-7'),
+              getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_ANTHROPIC,
+                model: 'claude-opus-4-7',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isFastModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    const deepseekIndex = items.findIndex((item) =>
+      String(item.value).includes('deepseek-v4-flash'),
+    );
+    expect(deepseekIndex).toBeGreaterThanOrEqual(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(deepseekIndex);
   });
 
   it('blocks switching to qwen-oauth from another authType (discontinued)', async () => {
@@ -370,6 +569,10 @@ describe('<ModelDialog />', () => {
   it('updates initialIndex when config context changes', () => {
     const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
     const mockGetAuthType = vi.fn(() => 'qwen-oauth');
+    const mockGetModelsConfig = vi.fn(() => ({
+      getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
+    }));
+    const mockGetActiveRuntimeModelSnapshot = vi.fn(() => undefined);
     const mockSettings = {
       isTrusted: true,
       user: { settings: {} },
@@ -393,6 +596,8 @@ describe('<ModelDialog />', () => {
                   authType: AuthType.QWEN_OAUTH,
                 })),
               ),
+              getModelsConfig: mockGetModelsConfig,
+              getActiveRuntimeModelSnapshot: mockGetActiveRuntimeModelSnapshot,
             } as unknown as Config
           }
         >
@@ -417,6 +622,8 @@ describe('<ModelDialog />', () => {
           authType: AuthType.QWEN_OAUTH,
         })),
       ),
+      getModelsConfig: mockGetModelsConfig,
+      getActiveRuntimeModelSnapshot: mockGetActiveRuntimeModelSnapshot,
     } as unknown as Config;
 
     rerender(

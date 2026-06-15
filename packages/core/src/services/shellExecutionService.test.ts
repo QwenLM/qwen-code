@@ -19,7 +19,10 @@ import { type ChildProcess } from 'node:child_process';
 import pkg from '@xterm/headless';
 import type {
   ShellAbortReason,
+  ShellExecutionConfig,
+  ShellExecuteOptions,
   ShellOutputEvent,
+  ShellPostPromoteSettleInfo,
 } from './shellExecutionService.js';
 import {
   getShellAbortReasonKind,
@@ -120,7 +123,7 @@ const shellExecutionConfig = {
   pager: 'cat',
   showColor: false,
   disableDynamicLineTrimming: true,
-};
+} satisfies ShellExecutionConfig;
 
 const WINDOWS_SYSTEM_PATH = 'C:\\Windows\\System32;C:\\Shared\\Tools';
 const WINDOWS_USER_PATH = 'C:\\Users\\tester\\bin;C:\\Shared\\Tools';
@@ -265,7 +268,8 @@ describe('ShellExecutionService', () => {
       ptyProcess: typeof mockPtyProcess,
       ac: AbortController,
     ) => void,
-    config = shellExecutionConfig,
+    config: ShellExecutionConfig = shellExecutionConfig,
+    options: ShellExecuteOptions = {},
   ) => {
     const abortController = new AbortController();
     const handle = await ShellExecutionService.execute(
@@ -275,6 +279,7 @@ describe('ShellExecutionService', () => {
       abortController.signal,
       true,
       config,
+      options,
     );
 
     await new Promise((resolve) => process.nextTick(resolve));
@@ -331,6 +336,65 @@ describe('ShellExecutionService', () => {
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
       });
       expect(result.output.trim()).toBe('你好');
+    });
+
+    it('bounds buffered PTY output before building the final string', async () => {
+      const { result } = await simulateExecution(
+        'large-output',
+        (pty) => {
+          pty.onData.mock.calls[0][0]('12345678');
+          pty.onData.mock.calls[0][0]('abcdefg');
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.rawOutput.length).toBe(10);
+      expect(result.output).toContain('12345678ab');
+      expect(result.output).toContain(
+        'Output exceeded the maximum captured size',
+      );
+      expect(result.output).not.toContain('cdefg');
+    });
+
+    it('keeps PTY replay fallback bounded after the capture limit is exceeded', async () => {
+      mockSerializeTerminalToText.mockImplementationOnce(() => {
+        throw new Error('replay failed');
+      });
+
+      const { result } = await simulateExecution(
+        'large-output-replay-fallback',
+        (pty) => {
+          pty.onData.mock.calls[0][0]('12345678');
+          pty.onData.mock.calls[0][0]('abcdefg');
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.rawOutput.toString()).toBe('12345678ab');
+      expect(result.output).toContain('12345678ab');
+      expect(result.output).toContain(
+        'Output exceeded the maximum captured size',
+      );
+      expect(result.output).not.toContain('cdefg');
+    });
+
+    it('does not add a capture-limit notice at the exact PTY buffer boundary', async () => {
+      const { result } = await simulateExecution(
+        'exact-output',
+        (pty) => {
+          pty.onData.mock.calls[0][0]('1234567890');
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.rawOutput.length).toBe(10);
+      expect(result.output).toBe('1234567890');
+      expect(result.output).not.toContain(
+        'Output exceeded the maximum captured size',
+      );
     });
 
     it('should handle commands with no output', async () => {
@@ -639,7 +703,7 @@ describe('ShellExecutionService', () => {
       );
     });
 
-    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true', async () => {
+    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true (and aborted: false per design question 7)', async () => {
       // Critical: do NOT fire onExit — the child is still alive after the
       // background-promote abort. The result Promise must resolve via the
       // abort handler's own immediate resolve, not via the exit handler.
@@ -653,7 +717,11 @@ describe('ShellExecutionService', () => {
         },
       );
 
-      expect(result.aborted).toBe(true);
+      // `aborted: false` (despite signal.aborted = true) is intentional —
+      // see #3831 design question 7. The flag answers "emit cancel/timeout
+      // copy?" not "did the signal fire?", and a promoted shell is
+      // neither cancelled nor timed out.
+      expect(result.aborted).toBe(false);
       expect(result.promoted).toBe(true);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();
@@ -739,6 +807,283 @@ describe('ShellExecutionService', () => {
       const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
         .value as { dispose: Mock };
       expect(exitDisposableStub.dispose).toHaveBeenCalled();
+    });
+
+    it('PR-2.5: post-promote bytes route to postPromote.onData when callback provided', async () => {
+      // Pin the new opt-in contract: when `postPromote.onData` is set,
+      // bytes the still-running PTY emits after promote go to the
+      // caller's handler instead of being lost. PR-2 fully detached
+      // listeners; PR-2.5 re-attaches a minimal forwarder when the
+      // caller opts in.
+      const onDataCalls: ShellOutputEvent[] = [];
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_data',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onData: (event) => onDataCalls.push(event),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // After promote, drive a fresh post-promote chunk through the
+      // PTY's onData. The service should have attached a NEW listener
+      // (the foreground one is disposed); look at the latest
+      // mock.calls entry — index 1 since PR-2.5 adds a second.
+      const onDataRegistrations = mockPtyProcess.onData.mock.calls;
+      expect(onDataRegistrations.length).toBeGreaterThanOrEqual(2);
+      const postPromoteHandler =
+        onDataRegistrations[onDataRegistrations.length - 1][0];
+      postPromoteHandler('post-promote-byte-stream');
+      expect(onDataCalls).toEqual([
+        { type: 'data', chunk: 'post-promote-byte-stream' },
+      ]);
+    });
+
+    it('PR-2.5: postPromote.onSettle fires on natural child exit after promote', async () => {
+      // Pin the natural-exit settle: when the child terminates AFTER
+      // promote, the caller's onSettle handler is invoked exactly
+      // once with the exit code (or signal / error). PR-2 detached
+      // the exit listener entirely; PR-2.5 re-attaches a forwarder
+      // when the caller opts in.
+      const settleCalls: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_settle',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onSettle: (info) => settleCalls.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // After promote, drive the PTY's onExit to simulate natural
+      // completion. The service attaches a new exit listener for
+      // post-promote settle — find the most-recently-registered.
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      expect(onExitRegistrations.length).toBeGreaterThanOrEqual(2);
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      expect(settleCalls).toHaveLength(1);
+      expect(settleCalls[0].exitCode).toBe(0);
+      expect(settleCalls[0].signal).toBeNull();
+      expect(settleCalls[0].error).toBeUndefined();
+      expect(typeof settleCalls[0].endTime).toBe('number');
+    });
+
+    it('PR-2.5 wave-2 (C2): unexpected post-promote PTY error routes to onSettle as failure (does NOT crash the CLI)', async () => {
+      // Foreground PTY error handler removed at promote handoff. Before
+      // the wave-2 fix the post-promote path attached NO error listener,
+      // so an unhandled `error` event would take Node down. Now we
+      // attach a forwarder: unexpected errors flow through onSettle
+      // with `error` populated; expected PTY read-exit errors
+      // (EIO / EAGAIN) are filtered.
+      const settleCalls: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'long-running-with-error',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_pty_err',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onSettle: (info) => settleCalls.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+
+      // 1. An expected PTY read-exit error (EIO) is FILTERED — onSettle
+      //    is NOT invoked yet (the upcoming onExit will carry status).
+      mockPtyProcess.emit(
+        'error',
+        Object.assign(new Error('read EIO'), { code: 'EIO' }),
+      );
+      expect(settleCalls).toHaveLength(0);
+
+      // 2. An UNEXPECTED error (EPIPE) routes to onSettle as a failure.
+      //    Critically: emitting must NOT throw (no unhandled `error`).
+      const unexpectedErr = Object.assign(new Error('disk gone'), {
+        code: 'EPIPE',
+      });
+      expect(() => mockPtyProcess.emit('error', unexpectedErr)).not.toThrow();
+      expect(settleCalls).toHaveLength(1);
+      expect(settleCalls[0].error).toBe(unexpectedErr);
+      expect(settleCalls[0].exitCode).toBeNull();
+      expect(settleCalls[0].signal).toBeNull();
+      expect(typeof settleCalls[0].endTime).toBe('number');
+
+      // 3. A subsequent onExit MUST NOT fire onSettle again (single-fire
+      //    latch): callers like the registry's `complete`/`fail`
+      //    transitions are not idempotent across status types.
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      expect(settleCalls).toHaveLength(1);
+    });
+
+    it('PR-2.5 wave-3 (T6): post-promote IDisposables and error listener are released on settle (no GC roots dangling)', async () => {
+      // Each promoted PTY child can sit dead for milliseconds while
+      // the caller's `cancelChild` finalizes. Node's EventEmitter
+      // holds refs to listener closures, which in turn hold refs to
+      // `onPostData` / `onPostSettle` / the caller's
+      // `promoteArtifacts`. Without disposal on settle, those refs
+      // dangle until the PTY itself is collected. The fix captures
+      // the IDisposables returned by `onData` / `onExit` AND the
+      // `'error'` listener function we registered on the EE, then
+      // releases them when `firePostSettle` fires (no matter which
+      // path triggers settle).
+      const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
+
+      const settleCalls: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'long-running-disposable',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_dispose',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onData: () => {},
+            onSettle: (info) => settleCalls.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+
+      // The mocked `mockReturnValue({ dispose: vi.fn() })` reuses the
+      // SAME disposable object across calls, so foreground +
+      // post-promote share the same dispose Mock. The foreground
+      // disposable was already disposed at promote handoff; clear
+      // the call history so we can assert ONLY on post-settle
+      // disposal.
+      const sharedDataDisposable = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      const sharedExitDisposable = mockPtyProcess.onExit.mock.results[0]
+        .value as { dispose: Mock };
+      sharedDataDisposable.dispose.mockClear();
+      sharedExitDisposable.dispose.mockClear();
+      removeListenerSpy.mockClear();
+
+      // Drive onExit → firePostSettle runs disposePostPromoteListeners.
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+      expect(settleCalls).toHaveLength(1);
+      // Post-settle: BOTH disposables released, error listener removed.
+      expect(sharedDataDisposable.dispose).toHaveBeenCalledTimes(1);
+      expect(sharedExitDisposable.dispose).toHaveBeenCalledTimes(1);
+      // The post-promote error listener was attached via
+      // `ptyProcess.on('error', listener)` and is released via
+      // `removeListener('error', listener)`. Verify removeListener
+      // was called on the 'error' channel.
+      const errorRemoves = removeListenerSpy.mock.calls.filter(
+        (args: unknown[]) => args[0] === 'error',
+      );
+      expect(errorRemoves.length).toBeGreaterThanOrEqual(1);
+
+      // Re-driving onExit must NOT re-fire settle (latched) AND
+      // dispose calls must NOT double-count (idempotent disposal —
+      // disposePostPromoteListeners nulls the slots after first
+      // disposal).
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      expect(settleCalls).toHaveLength(1);
+      expect(sharedDataDisposable.dispose).toHaveBeenCalledTimes(1);
+      expect(sharedExitDisposable.dispose).toHaveBeenCalledTimes(1);
+
+      removeListenerSpy.mockRestore();
+    });
+
+    it('PR-2.5: onData-only PTY caller has post-promote error + exit listeners (no crash, listeners disposed on exit)', async () => {
+      const dataChunks: ShellOutputEvent[] = [];
+      const { result } = await simulateExecution(
+        'tail -f /dev/null',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pty_ondata_only',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onData: (event) => dataChunks.push(event),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+
+      // Error listener must be installed even without onSettle —
+      // emitting 'error' on an EventEmitter with no listener throws.
+      expect(() =>
+        mockPtyProcess.emit('error', new Error('post-promote pty err')),
+      ).not.toThrow();
+
+      // onExit must also be installed so disposePostPromoteListeners
+      // runs on natural exit (cleaning up data + error listeners).
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      expect(onExitRegistrations.length).toBeGreaterThanOrEqual(2);
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+
+      // Simulate natural exit — should dispose listeners without crash.
+      postPromoteExitHandler({ exitCode: 0 });
+    });
+
+    it('PR-2.5 backwards compat: without postPromote, listeners stay fully detached (no regression on PR-2 contract)', async () => {
+      // Pin that omitting `postPromote` preserves the PR-2 detach-
+      // everything contract. The pre-existing post-promote test at
+      // line ~680 already covers this for the data path; this one
+      // adds the symmetric guarantee for the exit path — natural
+      // post-promote exit must NOT invoke any callback the caller
+      // didn't provide.
+      const onDataCalls: ShellOutputEvent[] = [];
+      const onSettleCalls: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'no-post-promote-handlers',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_compat',
+          } satisfies ShellAbortReason);
+        },
+        // No options arg → postPromote unset → PR-2 contract.
+      );
+      expect(result.promoted).toBe(true);
+      // Drive both PTY events post-promote.
+      const onDataRegistrations = mockPtyProcess.onData.mock.calls;
+      // PR-2 contract: only ONE onData registration (the foreground
+      // one, now disposed). PR-2.5's re-attach is gated on
+      // `postPromote.onData` being set, so without it the
+      // registration count stays at 1.
+      expect(onDataRegistrations.length).toBe(1);
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      expect(onExitRegistrations.length).toBe(1);
+      // Caller-provided handlers were never invoked.
+      expect(onDataCalls).toHaveLength(0);
+      expect(onSettleCalls).toHaveLength(0);
     });
 
     it('post-exit race: PTY background-promote refuses if process.kill(pid, 0) reports the pid is gone', async () => {
@@ -1206,6 +1551,7 @@ describe('ShellExecutionService child_process fallback', () => {
   const simulateExecution = async (
     command: string,
     simulation: (cp: typeof mockChildProcess, ac: AbortController) => void,
+    options: ShellExecuteOptions = {},
   ) => {
     const abortController = new AbortController();
     const handle = await ShellExecutionService.execute(
@@ -1215,6 +1561,30 @@ describe('ShellExecutionService child_process fallback', () => {
       abortController.signal,
       true,
       shellExecutionConfig,
+      options,
+    );
+
+    await new Promise((resolve) => process.nextTick(resolve));
+    simulation(mockChildProcess, abortController);
+    const result = await handle.result;
+    return { result, handle, abortController };
+  };
+
+  const simulateExecutionWithConfig = async (
+    command: string,
+    simulation: (cp: typeof mockChildProcess, ac: AbortController) => void,
+    config: ShellExecutionConfig,
+    options: ShellExecuteOptions = {},
+  ) => {
+    const abortController = new AbortController();
+    const handle = await ShellExecutionService.execute(
+      command,
+      '/test/dir',
+      onOutputEventMock,
+      abortController.signal,
+      true,
+      config,
+      options,
     );
 
     await new Promise((resolve) => process.nextTick(resolve));
@@ -1277,6 +1647,128 @@ describe('ShellExecutionService child_process fallback', () => {
         cp.emit('close', 0, null);
       });
       expect(result.output.trim()).toBe('你好');
+    });
+
+    it('bounds buffered child_process output before building the final string', async () => {
+      const abortController = new AbortController();
+      const handle = await ShellExecutionService.execute(
+        'large-output',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        false,
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      await new Promise((resolve) => process.nextTick(resolve));
+      mockChildProcess.stdout?.emit('data', Buffer.from('12345678'));
+      mockChildProcess.stdout?.emit('data', Buffer.from('abcdefg'));
+      mockChildProcess.emit('exit', 0, null);
+      mockChildProcess.emit('close', 0, null);
+
+      const result = await handle.result;
+
+      expect(result.rawOutput.length).toBe(10);
+      expect(result.output).toContain('12345678ab');
+      expect(result.output).toContain(
+        'Output exceeded the maximum captured size',
+      );
+      expect(result.output).not.toContain('cdefg');
+      expect(onOutputEventMock).toHaveBeenCalledWith({
+        type: 'data',
+        chunk: expect.stringContaining(
+          'Output exceeded the maximum captured size',
+        ),
+      });
+    });
+
+    it('does not add a capture-limit notice at the exact child_process buffer boundary', async () => {
+      const { result } = await simulateExecutionWithConfig(
+        'exact-output',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('1234567890'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.rawOutput.length).toBe(10);
+      expect(result.output).toBe('1234567890');
+      expect(result.output).not.toContain(
+        'Output exceeded the maximum captured size',
+      );
+    });
+
+    it.each([
+      0,
+      0.5,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      'abc',
+      undefined,
+    ])(
+      'falls back to the default capture limit for invalid maxBufferedOutputBytes: %s',
+      async (configuredValue) => {
+        const { result } = await simulateExecutionWithConfig(
+          'invalid-limit',
+          (cp) => {
+            cp.stdout?.emit('data', Buffer.from('1234567890abcde'));
+            cp.emit('exit', 0, null);
+            cp.emit('close', 0, null);
+          },
+          {
+            ...shellExecutionConfig,
+            maxBufferedOutputBytes: configuredValue as unknown as number,
+          },
+        );
+
+        expect(result.rawOutput.length).toBe(15);
+        expect(result.output).toBe('1234567890abcde');
+        expect(result.output).not.toContain(
+          'Output exceeded the maximum captured size',
+        );
+      },
+    );
+
+    it('reports capture-limit notice for streaming child_process output', async () => {
+      const { result } = await simulateExecutionWithConfig(
+        'streaming-large-output',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('abcdef'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 1 },
+        { streamStdout: true },
+      );
+
+      expect(onOutputEventMock).toHaveBeenCalledWith({
+        type: 'data',
+        chunk: 'abcdef',
+      });
+      expect(result.rawOutput.length).toBe(1);
+      expect(result.output).toContain(
+        'Output exceeded the maximum captured size',
+      );
+    });
+
+    it('emits only the capture-limit notice when stripped captured output is empty', async () => {
+      const { result } = await simulateExecutionWithConfig(
+        'empty-captured-output',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('\nabc'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 1 },
+      );
+
+      expect(result.rawOutput.length).toBe(1);
+      expect(result.output).toMatch(
+        /^\[Output exceeded the maximum captured size/,
+      );
     });
 
     it('should handle commands with no output', async () => {
@@ -1410,7 +1902,7 @@ describe('ShellExecutionService child_process fallback', () => {
       );
     });
 
-    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true', async () => {
+    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true (and aborted: false per design question 7)', async () => {
       mockPlatform.mockReturnValue('linux');
       // Critical: do NOT fire 'exit' — the child is still alive after the
       // background-promote abort. The result Promise must resolve via the
@@ -1427,7 +1919,8 @@ describe('ShellExecutionService child_process fallback', () => {
         },
       );
 
-      expect(result.aborted).toBe(true);
+      // See PTY equivalent test for the rationale on `aborted: false`.
+      expect(result.aborted).toBe(false);
       expect(result.promoted).toBe(true);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();
@@ -1549,6 +2042,257 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.promoted).toBe(true);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();
+    });
+
+    it('PR-2.5 child_process: post-promote stdout/stderr forward to postPromote.onData with SEPARATE decoders', async () => {
+      // Pin: post-promote bytes from the still-running child route to
+      // the caller's onData handler. Separate decoders for stdout vs
+      // stderr — a single shared decoder would corrupt interleaved
+      // multibyte UTF-8 (the continuation-byte state machine assumes
+      // one byte source).
+      mockPlatform.mockReturnValue('linux');
+      const events: Array<{ type: string; chunk?: string | unknown }> = [];
+      const { result } = await simulateExecution(
+        'tail -f',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_data',
+          } satisfies ShellAbortReason);
+          // Drive post-promote chunks — should now flow to onData.
+          cp.stdout?.emit('data', Buffer.from('post-promote-stdout\n'));
+          cp.stderr?.emit('data', Buffer.from('post-promote-stderr\n'));
+        },
+        {
+          postPromote: {
+            onData: (event) => events.push(event),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // Both streams forwarded.
+      const dataChunks = events
+        .filter((e) => e.type === 'data')
+        .map((e) => e.chunk);
+      expect(dataChunks).toContain('post-promote-stdout\n');
+      expect(dataChunks).toContain('post-promote-stderr\n');
+    });
+
+    it('PR-2.5 child_process: onSettle fires on `close` (NOT `exit`) so late chunks land before the registry transitions', async () => {
+      // Pin the `close`-not-`exit` contract: child can emit buffered
+      // data AFTER 'exit' but BEFORE 'close'. If onSettle fired on
+      // 'exit' the caller would close the output stream + transition
+      // the registry while late chunks were still in flight — they'd
+      // hit a closed stream and be dropped, producing truncated logs.
+      mockPlatform.mockReturnValue('linux');
+      const events: Array<{ type: string; chunk?: string | unknown }> = [];
+      const settles: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_close',
+          } satisfies ShellAbortReason);
+          // Order matters: emit 'exit' first (this would have settled
+          // PR-1 of PR-2.5 too early), then a final stdout chunk, then
+          // 'close'. With the new contract, onSettle only fires on
+          // 'close' so the late chunk is captured.
+          cp.emit('exit', 0, null);
+          cp.stdout?.emit('data', Buffer.from('late-chunk\n'));
+          cp.emit('close', 0, null);
+        },
+        {
+          postPromote: {
+            onData: (event) => events.push(event),
+            onSettle: (info) => settles.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // Late chunk made it through.
+      const dataChunks = events
+        .filter((e) => e.type === 'data')
+        .map((e) => e.chunk);
+      expect(dataChunks).toContain('late-chunk\n');
+      // onSettle fired exactly once with exitCode 0.
+      expect(settles).toHaveLength(1);
+      expect(settles[0].exitCode).toBe(0);
+      expect(settles[0].signal).toBeNull();
+    });
+
+    it('PR-2.5 child_process: post-promote spawn error routes to onSettle with error populated', async () => {
+      mockPlatform.mockReturnValue('linux');
+      const settles: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_err',
+          } satisfies ShellAbortReason);
+          cp.emit('error', new Error('post-promote spawn boom'));
+        },
+        {
+          postPromote: {
+            onSettle: (info) => settles.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      expect(settles).toHaveLength(1);
+      expect(settles[0].error?.message).toBe('post-promote spawn boom');
+      expect(settles[0].exitCode).toBeNull();
+      expect(settles[0].signal).toBeNull();
+    });
+
+    it('PR-2.5 wave-4 (T1): post-promote `error` followed by `close` fires onSettle EXACTLY ONCE', async () => {
+      // Regression for the double-fire bug: pre-fix, `child.once('close', ...)`
+      // and `child.once('error', ...)` were independent and each invoked
+      // `onPostSettle` directly. A spawn-side error followed by the
+      // child-process automatic 'close' event would call the caller's
+      // settle twice, violating the exactly-once contract and racing
+      // the caller's `transitionRegistry`. Fix wraps both branches in
+      // a `firePostSettle` latch (mirroring the PTY path).
+      mockPlatform.mockReturnValue('linux');
+      const settles: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_double',
+          } satisfies ShellAbortReason);
+          // First: error fires.
+          cp.emit('error', new Error('error first'));
+          // Then: close (Node child_process always emits 'close' even
+          // after an error). Pre-fix this would call onSettle a second
+          // time.
+          cp.emit('close', 1, null);
+        },
+        {
+          postPromote: {
+            onSettle: (info) => settles.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      expect(settles).toHaveLength(1);
+      expect(settles[0].error?.message).toBe('error first');
+    });
+
+    it('PR-2.5 wave-4 (T3): onData-only caller still gets decoder flush on close (no trailing multibyte loss)', async () => {
+      // T3 regression: the close handler used to be installed only
+      // when `onSettle` was set, so an `onData`-only caller never got
+      // the trailing-multibyte flush — a UTF-8 character split across
+      // chunks could vanish. Fix installs close whenever ANY
+      // postPromote handler is set, and the flush helper runs whenever
+      // onData is set independent of onSettle.
+      mockPlatform.mockReturnValue('linux');
+      const dataChunks: ShellOutputEvent[] = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_t3',
+          } satisfies ShellAbortReason);
+          // Push the FIRST byte of a 3-byte UTF-8 char (€ = 0xE2 0x82 0xAC).
+          // Without flush, the trailing two bytes would be stuck in the
+          // decoder's continuation state and lost.
+          cp.stdout?.emit('data', Buffer.from([0xe2]));
+          cp.stdout?.emit('data', Buffer.from([0x82, 0xac]));
+          // Trigger close so the flush runs; no onSettle to gate on.
+          cp.emit('close', 0, null);
+        },
+        {
+          postPromote: {
+            onData: (event) => dataChunks.push(event),
+            // NO onSettle — close handler must still fire flush.
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // The € character should appear once the second chunk completes
+      // the multibyte sequence; flush at close ensures any remainder
+      // is surfaced.
+      const joined = dataChunks
+        .map((d) =>
+          d.type === 'data' && typeof d.chunk === 'string' ? d.chunk : '',
+        )
+        .join('');
+      expect(joined).toContain('€');
+    });
+
+    it('PR-2.5 wave-4 (T6): onData-only caller has post-promote `error` listener (does not crash CLI)', async () => {
+      // T6 regression: `child.once('error', ...)` install was gated
+      // on `onSettle`, so an `onData`-only caller had the foreground
+      // errorHandler detached at promote with no replacement — a
+      // post-promote spawn error would surface as Node's default
+      // unhandled-error crash. Fix attaches an error listener
+      // whenever ANY postPromote handler is set.
+      mockPlatform.mockReturnValue('linux');
+      const dataChunks: ShellOutputEvent[] = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_t6',
+          } satisfies ShellAbortReason);
+          // Emitting 'error' on an EventEmitter with no listener throws
+          // synchronously. With the fix, our listener is attached so
+          // the emit does not throw.
+          expect(() =>
+            cp.emit('error', new Error('post-promote err')),
+          ).not.toThrow();
+          // child_process auto-emits 'close' after 'error'.
+          cp.emit('close', null, null);
+        },
+        {
+          postPromote: {
+            onData: (event) => dataChunks.push(event),
+            // NO onSettle — but error must still be handled (no crash).
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+    });
+
+    it('PR-2.5 wave-4 (T7): onSettle-only caller has stdout/stderr resumed (child does not block on full pipes)', async () => {
+      // T7 regression: when `onSettle` is set but `onData` is NOT, the
+      // post-promote path used to leave stdout/stderr without any data
+      // listener. The Readables stay paused; the OS pipe buffer fills
+      // (~64KB on Linux); the child blocks on stdout.write; 'close'
+      // never fires; onSettle never fires. Fix calls .resume() on
+      // both streams in the no-onData branch so the child can drain.
+      mockPlatform.mockReturnValue('linux');
+      const settles: ShellPostPromoteSettleInfo[] = [];
+      const stdoutResumeSpy = vi.fn();
+      const stderrResumeSpy = vi.fn();
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          // Patch resume() so we can verify the wire was driven.
+          if (cp.stdout) cp.stdout.resume = stdoutResumeSpy;
+          if (cp.stderr) cp.stderr.resume = stderrResumeSpy;
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_t7',
+          } satisfies ShellAbortReason);
+          cp.emit('close', 0, null);
+        },
+        {
+          postPromote: {
+            // NO onData — but stdout/stderr must still be resumed.
+            onSettle: (info) => settles.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      expect(stdoutResumeSpy).toHaveBeenCalled();
+      expect(stderrResumeSpy).toHaveBeenCalled();
+      expect(settles).toHaveLength(1);
     });
 
     it('should gracefully attempt SIGKILL on linux if SIGTERM fails', async () => {

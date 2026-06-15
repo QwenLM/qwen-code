@@ -24,12 +24,15 @@ const DEFAULT_ENV_KEYS: Record<string, string> = {
 };
 
 /**
- * Find model configuration from modelProviders by authType and modelId
+ * Find model configuration from modelProviders by authType and modelId.
+ * When multiple models share the same id (different baseUrls), returns the
+ * first match. Callers that need an exact match should also compare baseUrl.
  */
 function findModelConfig(
   modelProviders: ModelProvidersConfig | undefined,
   authType: string,
   modelId: string | undefined,
+  baseUrl?: string,
 ): ProviderModelConfig | undefined {
   if (!modelProviders || !modelId) {
     return undefined;
@@ -40,7 +43,24 @@ function findModelConfig(
     return undefined;
   }
 
+  if (baseUrl) {
+    return models.find((m) => m.id === modelId && m.baseUrl === baseUrl);
+  }
   return models.find((m) => m.id === modelId);
+}
+
+function hasEnvValue(settings: Settings, envKey: string | undefined): boolean {
+  if (!envKey) {
+    return false;
+  }
+  if (process.env[envKey]) {
+    return true;
+  }
+  const settingsEnv = settings.env as Record<string, unknown> | undefined;
+  const settingsEnvValue = settingsEnv?.[envKey];
+  return (
+    typeof settingsEnvValue === 'string' && settingsEnvValue.trim().length > 0
+  );
 }
 
 /**
@@ -88,7 +108,7 @@ function hasApiKeyForAuth(
 
   if (modelConfig?.envKey) {
     // Explicit envKey configured - only check this env var, no apiKey fallback
-    const hasKey = !!process.env[modelConfig.envKey];
+    const hasKey = hasEnvValue(settings, modelConfig.envKey);
     return {
       hasKey,
       checkedEnvKey: modelConfig.envKey,
@@ -99,7 +119,7 @@ function hasApiKeyForAuth(
   // Using default environment variable - apiKey fallback is allowed
   const defaultEnvKey = DEFAULT_ENV_KEYS[authType];
   if (defaultEnvKey) {
-    const hasKey = !!process.env[defaultEnvKey];
+    const hasKey = hasEnvValue(settings, defaultEnvKey);
     if (hasKey) {
       return { hasKey, checkedEnvKey: defaultEnvKey, isExplicitEnvKey: false };
     }
@@ -159,7 +179,7 @@ export function validateAuthMethod(
   authMethod: string,
   config?: Config,
 ): string | null {
-  const settings = loadSettings();
+  const settings = loadSettings(process.cwd(), false);
   loadEnvironment(settings.merged);
 
   if (authMethod === AuthType.USE_OPENAI) {
