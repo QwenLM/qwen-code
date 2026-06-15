@@ -140,6 +140,7 @@ function createMockConfig() {
     getAuthType: vi.fn().mockReturnValue('openai'),
     getModelsConfig: vi.fn().mockReturnValue({
       getResolvedModel: vi.fn().mockReturnValue(undefined),
+      getProtocol: vi.fn().mockImplementation((authType) => authType),
     }),
   } as never;
 }
