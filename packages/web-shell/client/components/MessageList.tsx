@@ -471,12 +471,17 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    // Final answer = last assistant-with-content row in (start, end].
+    // Final answer = last assistant-with-content row in (start, end]. An active
+    // turn has none yet — its latest assistant text is just another streaming
+    // step — so leave it unset; otherwise collapsing the turn would strand that
+    // intermediate line instead of folding down to the prompt + seam.
     let answerIdx = -1;
-    for (let i = end; i > start; i--) {
-      if (isAssistantAnswer(items[i])) {
-        answerIdx = i;
-        break;
+    if (!isActiveTurn) {
+      for (let i = end; i > start; i--) {
+        if (isAssistantAnswer(items[i])) {
+          answerIdx = i;
+          break;
+        }
       }
     }
 

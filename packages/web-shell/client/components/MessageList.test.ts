@@ -423,9 +423,28 @@ describe('applyTurnCollapse', () => {
     ]);
     const out = collapseItems(items, { isResponding: true });
     // Every row stays visible; the head carries the seam but is not collapsed.
+    // While live there is no final answer, so the trailing assistant text counts
+    // as a step too (tool group + assistant text = 2).
     expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
     expect(messageRow(out[0]).collapse?.collapsed).toBe(false);
-    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(1);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(2);
+  });
+
+  it('collapsing the active turn folds to prompt + seam (no stranded line)', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      // An intermediate status line, not a final answer — the turn is still live.
+      { id: 'a1', role: 'assistant', content: 'Deterministic analysis clean…' },
+    ]);
+    const out = collapseItems(items, {
+      isResponding: true,
+      overrides: new Map([['u1', false]]),
+    });
+    // No final answer yet, so the fold drops the intermediate text too — only
+    // the prompt row (carrying the seam) survives.
+    expect(rowIds(out)).toEqual(['u1']);
+    expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
   });
 
   it('collapses earlier turns but leaves the active last turn expanded', () => {
