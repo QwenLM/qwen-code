@@ -759,7 +759,10 @@ const EN: Messages = {
   'todo.title': 'Current tasks',
   'turn.collapse': 'Collapse steps',
   'turn.expand': 'Expand steps',
-  'turn.hiddenSteps': (v) => `${v?.count ?? 0} steps`,
+  'turn.hiddenSteps': (v) => {
+    const n = v?.count ?? 0;
+    return `${n} step${n === 1 ? '' : 's'}`;
+  },
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
   'tasks.refreshStale': 'Task status may be stale; reconnecting...',

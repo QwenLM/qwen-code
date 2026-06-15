@@ -346,12 +346,14 @@ function collapseItems(
   opts: Partial<{
     overrides: Map<string, boolean>;
     isResponding: boolean;
+    pendingApprovalCallId: string | null;
     enabled: boolean;
   }> = {},
 ): DisplayItem[] {
   return applyTurnCollapse(items, {
     overrides: opts.overrides ?? new Map(),
     isResponding: opts.isResponding ?? false,
+    pendingApprovalCallId: opts.pendingApprovalCallId ?? null,
     enabled: opts.enabled ?? true,
   });
 }
@@ -556,6 +558,43 @@ describe('applyTurnCollapse', () => {
     const out = collapseItems(items);
     expect(rowIds(out)).toEqual(['u1', 'a1']);
     expect(messageRow(out[0]).collapse?.hiddenCount).toBe(1);
+  });
+
+  it('treats an assistant row with undefined content as a non-answer without crashing', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      // Daemon SSE can leave content undefined despite the `string` type.
+      { id: 'x', role: 'assistant', content: undefined as unknown as string },
+    ]);
+    const out = collapseItems(items);
+    // No assistant-with-content → no final answer → fold to just the prompt.
+    expect(rowIds(out)).toEqual(['u1']);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(2);
+  });
+
+  it('force-expands a completed turn that holds a pending approval', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    // call-g1-a belongs to g1's tool group → the turn must stay expanded so
+    // its inline approve/reject UI is reachable.
+    const out = collapseItems(items, { pendingApprovalCallId: 'call-g1-a' });
+    expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
+    expect(messageRow(out[0]).collapse).toBeUndefined();
+  });
+
+  it('still collapses when the pending approval is in a different turn', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items, { pendingApprovalCallId: 'call-other' });
+    expect(rowIds(out)).toEqual(['u1', 'a1']);
+    expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
   });
 });
 

@@ -309,6 +309,12 @@ export interface ApplyTurnCollapseOptions {
    * and un-collapsible so live output is never hidden.
    */
   isResponding: boolean;
+  /**
+   * Tool-call id of a pending approval, if any. The turn containing it is
+   * force-expanded so the inline approve/reject UI is never folded away (mirrors
+   * compact mode's `isForceExpandGroup`).
+   */
+  pendingApprovalCallId?: string | null;
   /** Master switch; when false the items pass through untouched. */
   enabled: boolean;
 }
@@ -317,6 +323,11 @@ function isAssistantAnswer(item: DisplayItem): boolean {
   return (
     item.type === 'message' &&
     item.message.role === 'assistant' &&
+    // `content` is typed `string`, but daemon SSE text can be undefined at
+    // runtime (transcriptToMessages copies `textBlock.text` through). Guard it:
+    // `applyTurnCollapse` runs in render, so a bare `.trim()` would blank the
+    // whole transcript.
+    !!item.message.content &&
     item.message.content.trim().length > 0
   );
 }
@@ -334,8 +345,23 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       return true;
     case 'assistant':
       return !isFinalAnswer;
-    default:
+    case 'user':
+    case 'system':
+    case 'user_shell':
+    case 'btw':
+    case 'insight_progress':
+    case 'insight_ready':
+    case 'insight_error':
       return false;
+    default: {
+      // Compile-time exhaustiveness: a newly added DaemonMessage role fails to
+      // assign to `never` here. At runtime (e.g. a newer daemon sending an
+      // unknown role) it falls through as not-hideable — kept visible rather
+      // than crashing the transcript or vanishing from a collapsed turn.
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _exhaustive: never = item.message;
+      return false;
+    }
   }
 }
 
@@ -367,9 +393,37 @@ export function findTurnIdForIndex(
  * remains. Returns the original array untouched when disabled or when there is
  * nothing to collapse.
  */
+/** Does any tool group / parallel-agents row in [start, end] own `callId`? */
+function turnOwnsCallId(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+  callId: string | null | undefined,
+): boolean {
+  if (!callId) return false;
+  for (let i = start; i <= end; i++) {
+    const item = items[i];
+    if (item.type === 'parallel_agents') {
+      if (item.agents.some((agent) => toolContainsCallId(agent, callId))) {
+        return true;
+      }
+    } else if (item.message.role === 'tool_group') {
+      if (item.message.tools.some((tool) => toolContainsCallId(tool, callId))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function applyTurnCollapse(
   items: DisplayItem[],
-  { overrides, isResponding, enabled }: ApplyTurnCollapseOptions,
+  {
+    overrides,
+    isResponding,
+    pendingApprovalCallId,
+    enabled,
+  }: ApplyTurnCollapseOptions,
 ): DisplayItem[] {
   if (!enabled || items.length === 0) return items;
 
@@ -393,6 +447,12 @@ export function applyTurnCollapse(
     const head = items[start] as Extract<DisplayItem, { type: 'message' }>;
     const turnId = head.message.id;
     const isActiveTurn = k === userIdxs.length - 1 && isResponding;
+    const hasPendingApproval = turnOwnsCallId(
+      items,
+      start,
+      end,
+      pendingApprovalCallId,
+    );
 
     // Final answer = last assistant-with-content row in (start, end].
     let answerIdx = -1;
@@ -408,8 +468,9 @@ export function applyTurnCollapse(
       if (isHideableStep(items[i], i === answerIdx)) hiddenCount++;
     }
 
-    if (isActiveTurn || hiddenCount === 0) {
-      // Nothing to fold (or still streaming): emit the turn untouched.
+    if (isActiveTurn || hasPendingApproval || hiddenCount === 0) {
+      // Nothing to fold (still streaming, awaiting an approval, or no steps):
+      // emit the turn untouched so live/actionable rows stay visible.
       for (let i = start; i <= end; i++) result.push(items[i]);
       continue;
     }
@@ -569,9 +630,16 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         applyTurnCollapse(displayItems, {
           overrides: collapseOverrides,
           isResponding,
+          pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
           enabled: collapseEnabled,
         }),
-      [displayItems, collapseOverrides, isResponding, collapseEnabled],
+      [
+        displayItems,
+        collapseOverrides,
+        isResponding,
+        pendingApproval?.toolCallId,
+        collapseEnabled,
+      ],
     );
 
     const containerRef = useRef<HTMLDivElement>(null);
@@ -837,11 +905,13 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       }
     }, []);
 
-    // Clear screen (e.g. /clear) → reset to follow mode and drop stale
-    // per-turn collapse overrides so they don't accumulate across sessions.
+    // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
+    // collapse overrides, and disarm any deferred scroll so it can't fire
+    // against the next session.
     useEffect(() => {
       if (messages.length === 0) {
         shouldFollow.current = true;
+        pendingScrollRef.current = null;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
       }
     }, [messages.length]);
@@ -876,6 +946,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       }
       if (lastId && lastId !== prevLastUserMsgId.current) {
         shouldFollow.current = true;
+        // A new prompt supersedes any pending "Show in transcript" scroll.
+        pendingScrollRef.current = null;
         requestAnimationFrame(scrollToBottom);
       }
       prevLastUserMsgId.current = lastId;
