@@ -165,6 +165,7 @@ export const InstalledTab = ({
       // a 401 (runtime signal), or OAuth is declared but no token is stored.
       // Connected servers are skipped — they are evidently authenticated.
       const needsAuthNames = new Set<string>();
+      const tokenStorage = new MCPOAuthTokenStorage();
       for (const [name, sc] of Object.entries(mcpServers)) {
         if (getMCPServerStatus(name) === MCPServerStatus.CONNECTED) continue;
         if (mcpServerRequiresOAuth.get(name)) {
@@ -173,7 +174,7 @@ export const InstalledTab = ({
         }
         if (sc.oauth?.enabled) {
           try {
-            const creds = await new MCPOAuthTokenStorage().getCredentials(name);
+            const creds = await tokenStorage.getCredentials(name);
             if (!creds) needsAuthNames.add(name);
           } catch {
             needsAuthNames.add(name);

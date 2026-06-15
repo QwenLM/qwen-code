@@ -212,7 +212,7 @@ function pluginsFromConfig(
     description: sanitizeDisplay(plugin.description),
     version: plugin.version,
     author: sanitizeDisplay(plugin.author?.name),
-    homepage: plugin.homepage,
+    homepage: sanitizeDisplay(plugin.homepage),
     category: plugin.category,
     lastUpdated: pluginLastUpdated(plugin),
     installs: pluginInstalls(plugin),

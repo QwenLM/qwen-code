@@ -719,9 +719,10 @@ async function collectResources(
   const destFolderName = path.basename(destDir);
 
   for (const resourcePath of paths) {
-    const resolvedPath = path.isAbsolute(resourcePath)
-      ? resourcePath
-      : path.join(pluginRoot, resourcePath);
+    // Resource paths come from an untrusted manifest; confine them to the
+    // plugin so a value like "/etc/ssh" or "../../secrets" can't be copied in.
+    const resolvedPath = resolvePluginRelativeFile(pluginRoot, resourcePath);
+    if (!resolvedPath) continue;
 
     if (!fs.existsSync(resolvedPath)) {
       debugLogger.warn(`Resource path not found: ${resolvedPath}`);
@@ -924,9 +925,20 @@ async function resolvePluginSource(
       return pluginDir;
     }
 
-    // Relative path within marketplace
+    // Relative path within marketplace. Confine it: a manifest source like
+    // "../../../../etc/ssh" must not resolve outside the marketplace dir.
     const pluginRoot = marketplaceDir;
     const sourcePath = path.join(pluginRoot, source);
+    const resolvedSource = path.resolve(sourcePath);
+    const marketplaceBase = path.resolve(marketplaceDir);
+    if (
+      resolvedSource !== marketplaceBase &&
+      !resolvedSource.startsWith(marketplaceBase + path.sep)
+    ) {
+      throw new Error(
+        `Plugin source "${source}" escapes the marketplace directory`,
+      );
+    }
 
     if (!fs.existsSync(sourcePath)) {
       throw new Error(`Plugin source not found at ${sourcePath}`);
