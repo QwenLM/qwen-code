@@ -1,5 +1,11 @@
-import { createContext, useContext, type ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  type ComponentType,
+  type ReactNode,
+} from 'react';
 import type { Components, Options } from 'react-markdown';
+import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 
@@ -44,9 +50,72 @@ export type ToolHeaderExtraRenderer = (
 
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
+// ---- Background task info (public type for footer renderer) ----
+
+interface WebShellTaskBase {
+  id: string;
+  status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  label: string;
+  description: string;
+  runtimeMs: number;
+  startTime: number;
+  endTime?: number;
+  error?: string;
+}
+
+export interface WebShellAgentTask extends WebShellTaskBase {
+  kind: 'agent';
+  subagentType?: string;
+  isBackgrounded: boolean;
+  prompt?: string;
+}
+
+export interface WebShellShellTask extends WebShellTaskBase {
+  kind: 'shell';
+  command: string;
+  cwd: string;
+  pid?: number;
+  exitCode?: number;
+}
+
+export interface WebShellMonitorTask extends WebShellTaskBase {
+  kind: 'monitor';
+  command: string;
+  pid?: number;
+  exitCode?: number;
+}
+
+export type WebShellTaskInfo =
+  | WebShellAgentTask
+  | WebShellShellTask
+  | WebShellMonitorTask;
+
+// ---- Footer renderer ----
+
+export interface WebShellFooterRenderInfo {
+  connected: boolean;
+  mode: string;
+  model: string;
+  streamingState: DaemonStreamingState;
+  contextUsageRatio: number;
+  activeGoal: { condition: string; setAt: number } | null;
+  tasks: readonly WebShellTaskInfo[];
+
+  onSelectMode: () => void;
+  onSelectModel: () => void;
+  onShowContext: () => void;
+  onOpenSettings: () => void;
+  onOpenTasks: () => void;
+  onReturnToInput: (text?: string) => void;
+  onToggleShortcuts: () => void;
+}
+
+export type FooterRenderer = ComponentType<WebShellFooterRenderInfo>;
+
 export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
