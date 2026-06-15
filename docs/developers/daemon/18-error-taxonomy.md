@@ -156,6 +156,6 @@ flowchart TD
 
 - `packages/cli/src/serve/fs/errors.ts` (`FsErrorKind`, `FsErrorStatus`)
 - `packages/acp-bridge/src/bridgeErrors.ts` (every typed class)
-- `packages/cli/src/serve/status.ts` (`DaemonErrorKind`)
+- `packages/acp-bridge/src/status.ts` (`SERVE_ERROR_KINDS`, `ServeErrorKind`)
 - `packages/cli/src/serve/auth.ts` (auth bodies)
 - Wire reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md).
