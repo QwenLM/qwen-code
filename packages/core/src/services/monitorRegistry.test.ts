@@ -915,4 +915,50 @@ describe('MonitorRegistry', () => {
       expect(cb).not.toHaveBeenCalled();
     });
   });
+
+  describe('notified flag prevents duplicate terminal notifications', () => {
+    it('complete() then cancel() emits only one terminal notification', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+      registry.register(createEntry());
+
+      registry.complete('mon-1', 0);
+      const terminalCalls = callback.mock.calls.filter(
+        (args: unknown[]) =>
+          (args[1] as string).includes('<status>completed</status>') ||
+          (args[1] as string).includes('<status>cancelled</status>'),
+      );
+      expect(terminalCalls).toHaveLength(1);
+    });
+
+    it('cancel({notify:false}) prevents subsequent complete() from emitting', () => {
+      const ac = new AbortController();
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+      registry.register(createEntry({ abortController: ac }));
+
+      registry.cancel('mon-1', { notify: false });
+      registry.complete('mon-1', 0);
+
+      const terminalCalls = callback.mock.calls.filter((args: unknown[]) =>
+        (args[1] as string).includes('<status>'),
+      );
+      expect(terminalCalls).toHaveLength(0);
+    });
+
+    it('idle timeout then cancel emits only one terminal notification', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+      registry.register(createEntry({ idleTimeoutMs: 100 }));
+
+      vi.advanceTimersByTime(100);
+
+      const terminalCalls = callback.mock.calls.filter(
+        (args: unknown[]) =>
+          (args[1] as string).includes('<status>completed</status>') ||
+          (args[1] as string).includes('<status>cancelled</status>'),
+      );
+      expect(terminalCalls).toHaveLength(1);
+    });
+  });
 });

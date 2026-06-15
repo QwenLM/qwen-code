@@ -2548,6 +2548,11 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      meta?: {
+        taskId?: string;
+        kind?: 'monitor' | 'agent' | 'shell';
+        status?: string;
+      };
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
@@ -2609,11 +2614,12 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    registry.setNotificationCallback((displayText, modelText, meta) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        meta: { taskId: meta.agentId, kind: 'agent', status: meta.status },
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -2625,11 +2631,12 @@ export const useGeminiStream = (
   // Register background shell terminal notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundShellRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    registry.setNotificationCallback((displayText, modelText, meta) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        meta: { taskId: meta.shellId, kind: 'shell', status: meta.status },
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -2641,11 +2648,20 @@ export const useGeminiStream = (
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getMonitorRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    registry.setNotificationCallback((displayText, modelText, meta) => {
+      if (meta.status === 'running') {
+        const entry = registry.get(meta.monitorId);
+        if (!entry || entry.status !== 'running') return;
+      }
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        meta: {
+          taskId: meta.monitorId,
+          kind: 'monitor',
+          status: meta.status,
+        },
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -2654,26 +2670,58 @@ export const useGeminiStream = (
     };
   }, [config]);
 
-  // When idle, drain the unified queue one item at a time.
-  // Skip when another submission is in flight (e.g. the teammate
-  // drain effect won this render) — the queue stays intact and
-  // the effect will re-fire when streamingState returns to Idle.
+  // When idle, batch-drain all contiguous same-type notifications from the
+  // front of the queue into a single API call. This reduces token waste: N
+  // notifications that accumulate while the model is busy become 1 roundtrip
+  // instead of N sequential ones. Skip when another submission is in flight
+  // (e.g. the teammate drain effect won this render) — the queue stays
+  // intact and the effect will re-fire when streamingState returns to Idle.
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
       !isSubmittingQueryRef.current &&
       notificationQueueRef.current.length > 0
     ) {
-      const item = notificationQueueRef.current.shift()!;
-      addItem(
-        { type: 'notification' as const, text: item.displayText },
-        Date.now(),
-      );
-      submitQuery(item.modelText, item.sendMessageType, undefined, {
-        notificationDisplayText: item.displayText,
+      const queue = notificationQueueRef.current;
+      const targetType = queue[0]!.sendMessageType;
+
+      // Cron prompts must run as individual turns — each needs its own
+      // slash/shell/@ preprocessing and approval cycle. Only batch
+      // Notification items (which pass through without preprocessing).
+      if (targetType === SendMessageType.Cron) {
+        const item = queue.shift()!;
+        addItem(
+          { type: 'notification' as const, text: item.displayText },
+          Date.now(),
+        );
+        submitQuery(item.modelText, item.sendMessageType, undefined, {
+          notificationDisplayText: item.displayText,
+        });
+        return;
+      }
+
+      // Drain contiguous leading Notification items into one batch.
+      let splitIdx = 0;
+      while (
+        splitIdx < queue.length &&
+        queue[splitIdx]!.sendMessageType === targetType
+      ) {
+        splitIdx++;
+      }
+      const batch = queue.splice(0, splitIdx);
+
+      const now = Date.now();
+      for (const item of batch) {
+        addItem({ type: 'notification' as const, text: item.displayText }, now);
+      }
+
+      const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
+      const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
+      submitQuery(combinedModelText, targetType, undefined, {
+        notificationDisplayText: combinedDisplayText,
       });
     }
-  }, [streamingState, submitQuery, notificationTrigger, addItem]);
+  }, [streamingState, submitQuery, notificationTrigger, addItem, config]);
 
   // ─── Teammate message integration ─────────────────────────
   // Each entry carries the full nonce-tagged envelope (`modelText`,

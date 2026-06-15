@@ -386,10 +386,18 @@ describe('useGeminiStream', () => {
     });
 
     const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
-      .calls[0][0] as (displayText: string, modelText: string) => void;
+      .calls[0][0] as (
+      displayText: string,
+      modelText: string,
+      meta: { shellId: string; status: string; exitCode: number | null },
+    ) => void;
 
     act(() => {
-      callback(displayText, modelText);
+      callback(displayText, modelText, {
+        shellId: 'shell-1',
+        status: 'completed',
+        exitCode: 0,
+      });
     });
 
     await waitFor(() => {
