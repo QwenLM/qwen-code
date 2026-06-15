@@ -283,6 +283,51 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
+  it('skips a symlink inside a collected resource folder that escapes the plugin', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-symlink');
+    const skillDir = path.join(pluginSourceDir, 'skills', 'mine');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '# mine', 'utf-8');
+
+    // A host file outside the plugin, reachable via a symlink whose name stays
+    // inside the collected folder. collectResources must not copy its content.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'id_rsa');
+    fs.writeFileSync(secretFile, 'TOP SECRET', 'utf-8');
+    fs.symlinkSync(secretFile, path.join(skillDir, 'leak.txt'));
+
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'leaky',
+          version: '1.0.0',
+          description: 'Leaky plugin',
+          source: './',
+          strict: false,
+          skills: ['./skills/mine'],
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(pluginSourceDir, 'leaky');
+
+    const dest = path.join(result.convertedDir, 'skills', 'mine');
+    expect(fs.existsSync(path.join(dest, 'SKILL.md'))).toBe(true);
+    expect(fs.existsSync(path.join(dest, 'leak.txt'))).toBe(false);
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
   it('should use all skills from folder when config does not specify skills', async () => {
     // Setup: Create a plugin source with skills but no skills config
     const pluginSourceDir = path.join(testDir, 'plugin-source-default');
@@ -806,6 +851,41 @@ describe('convertClaudePluginStandalone', () => {
     const result = await convertClaudePluginStandalone(testDir);
     // The absolute path was not read, so no servers were folded in.
     expect(result.config.mcpServers?.['leaked']).toBeUndefined();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('does not copy a symlink whose target escapes the plugin directory', async () => {
+    // git preserves symlinks, so a hostile repo can embed one pointing at a
+    // host file. The bulk copy dereferences symlinks; without confinement the
+    // target's content would be shipped inside the converted extension.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'id_rsa');
+    fs.writeFileSync(secretFile, 'TOP SECRET KEY', 'utf-8');
+
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({ name: 'evil', version: '1.0.0' }),
+      'utf-8',
+    );
+    const skillsDir = path.join(testDir, 'skills');
+    fs.mkdirSync(skillsDir, { recursive: true });
+    fs.writeFileSync(path.join(skillsDir, 'SKILL.md'), '# ok', 'utf-8');
+    // A symlink whose name stays inside the package but points outside it.
+    fs.symlinkSync(secretFile, path.join(skillsDir, 'leak.txt'));
+
+    const result = await convertClaudePluginStandalone(testDir);
+
+    // The legitimate file is copied; the escaping symlink is dropped.
+    expect(
+      fs.existsSync(path.join(result.convertedDir, 'skills', 'SKILL.md')),
+    ).toBe(true);
+    expect(
+      fs.existsSync(path.join(result.convertedDir, 'skills', 'leak.txt')),
+    ).toBe(false);
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
     fs.rmSync(secretDir, { recursive: true, force: true });

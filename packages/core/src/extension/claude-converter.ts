@@ -510,7 +510,35 @@ function resolvePluginRelativeFile(
     );
     return null;
   }
+  // The lexical check above is purely string-based; a symlink whose name stays
+  // inside the plugin can still point its target outside it (e.g.
+  // `skills/leak.txt -> ~/.ssh/id_rsa`). Downstream reads/copies follow
+  // symlinks, so re-verify the real path when the target exists.
+  if (fs.existsSync(resolved) && !realPathWithin(resolved, pluginSource)) {
+    debugLogger.warn(
+      `Ignoring path "${relativePath}" in plugin config; it resolves through a symlink outside the plugin directory.`,
+    );
+    return null;
+  }
   return resolved;
+}
+
+/**
+ * True when `target` exists and its real (symlink-resolved) path stays within
+ * `root`'s real path. Both sides are resolved with `fs.realpathSync` so a
+ * symlink inside an untrusted plugin source cannot point the converter at a
+ * file outside the package. Returns false for missing/broken paths.
+ */
+function realPathWithin(target: string, root: string): boolean {
+  try {
+    const realTarget = fs.realpathSync(target);
+    const realRoot = fs.realpathSync(root);
+    return (
+      realTarget === realRoot || realTarget.startsWith(realRoot + path.sep)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -765,6 +793,19 @@ async function collectResources(
 
         // Check if the source is a regular file (skip sockets, FIFOs, directories behind symlinks, etc.)
         try {
+          // A symlink inside the resource folder can point its target outside
+          // the plugin; statSync would follow it and copy the host file. Skip
+          // any symlink whose real target escapes the resource directory.
+          const fileLstat = fs.lstatSync(srcFile);
+          if (
+            fileLstat.isSymbolicLink() &&
+            !realPathWithin(srcFile, resolvedPath)
+          ) {
+            debugLogger.warn(
+              `Skipping symlink that escapes the plugin: ${srcFile}`,
+            );
+            continue;
+          }
           const fileStat = fs.statSync(srcFile);
           if (!fileStat.isFile()) {
             debugLogger.debug(`Skipping non-regular file: ${srcFile}`);
@@ -942,6 +983,14 @@ async function resolvePluginSource(
 
     if (!fs.existsSync(sourcePath)) {
       throw new Error(`Plugin source not found at ${sourcePath}`);
+    }
+
+    // The lexical check is string-only; reject a source that reaches outside
+    // the marketplace dir through a symlink before copying it in.
+    if (!realPathWithin(sourcePath, marketplaceDir)) {
+      throw new Error(
+        `Plugin source "${source}" resolves through a symlink outside the marketplace directory`,
+      );
     }
 
     // If source path equals marketplace dir (source is '.' or ''),

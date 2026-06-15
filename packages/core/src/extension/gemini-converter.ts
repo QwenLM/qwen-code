@@ -116,10 +116,25 @@ export async function convertGeminiExtensionPackage(
 export async function copyDirectory(
   source: string,
   destination: string,
+  confineRoot?: string,
 ): Promise<void> {
   // Create destination directory if it doesn't exist
   if (!fs.existsSync(destination)) {
     fs.mkdirSync(destination, { recursive: true });
+  }
+
+  // Symlinks in an (untrusted) source are dereferenced and their *target*
+  // content is copied below, so a link escaping the package — e.g.
+  // `skills/leak.txt -> ~/.ssh/id_rsa` — would otherwise pull host files into
+  // the output. Pin a confinement root (the package's real path) on the first
+  // call and thread it through recursion to reject escaping symlink targets.
+  let root = confineRoot;
+  if (root === undefined) {
+    try {
+      root = fs.realpathSync(source);
+    } catch {
+      root = path.resolve(source);
+    }
   }
 
   const entries = fs.readdirSync(source, { withFileTypes: true });
@@ -129,14 +144,21 @@ export async function copyDirectory(
     const destPath = path.join(destination, entry.name);
 
     if (entry.isDirectory()) {
-      await copyDirectory(sourcePath, destPath);
+      await copyDirectory(sourcePath, destPath, root);
     } else if (entry.isSymbolicLink()) {
-      // Resolve symlink and copy the target content
+      // Resolve symlink and copy the target content, but only when the target
+      // stays inside the package root.
       try {
         const realPath = fs.realpathSync(sourcePath);
+        if (realPath !== root && !realPath.startsWith(root + path.sep)) {
+          debugLogger.warn(
+            `Skipping symlink that escapes the package: ${sourcePath} -> ${realPath}`,
+          );
+          continue;
+        }
         const targetStat = fs.statSync(realPath);
         if (targetStat.isDirectory()) {
-          await copyDirectory(realPath, destPath);
+          await copyDirectory(realPath, destPath, root);
         } else if (targetStat.isFile()) {
           fs.copyFileSync(realPath, destPath);
         }
