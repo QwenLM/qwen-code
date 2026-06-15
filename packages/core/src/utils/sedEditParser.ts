@@ -6,25 +6,9 @@
 
 import { parse } from 'shell-quote';
 
-const BACKSLASH_PLACEHOLDER = '\x00BACKSLASH\x00';
-const PLUS_PLACEHOLDER = '\x00PLUS\x00';
-const QUESTION_PLACEHOLDER = '\x00QUESTION\x00';
-const PIPE_PLACEHOLDER = '\x00PIPE\x00';
-const LPAREN_PLACEHOLDER = '\x00LPAREN\x00';
-const RPAREN_PLACEHOLDER = '\x00RPAREN\x00';
-const LBRACE_PLACEHOLDER = '\x00LBRACE\x00';
-const RBRACE_PLACEHOLDER = '\x00RBRACE\x00';
 const ESCAPED_AMPERSAND_PLACEHOLDER = '\x00ESCAPED_AMPERSAND\x00';
 const ESCAPED_BACKSLASH_PLACEHOLDER = '\x00ESCAPED_BACKSLASH\x00';
 
-const BACKSLASH_PLACEHOLDER_RE = new RegExp(BACKSLASH_PLACEHOLDER, 'g');
-const PLUS_PLACEHOLDER_RE = new RegExp(PLUS_PLACEHOLDER, 'g');
-const QUESTION_PLACEHOLDER_RE = new RegExp(QUESTION_PLACEHOLDER, 'g');
-const PIPE_PLACEHOLDER_RE = new RegExp(PIPE_PLACEHOLDER, 'g');
-const LPAREN_PLACEHOLDER_RE = new RegExp(LPAREN_PLACEHOLDER, 'g');
-const RPAREN_PLACEHOLDER_RE = new RegExp(RPAREN_PLACEHOLDER, 'g');
-const LBRACE_PLACEHOLDER_RE = new RegExp(LBRACE_PLACEHOLDER, 'g');
-const RBRACE_PLACEHOLDER_RE = new RegExp(RBRACE_PLACEHOLDER, 'g');
 const ESCAPED_AMPERSAND_PLACEHOLDER_RE = new RegExp(
   ESCAPED_AMPERSAND_PLACEHOLDER,
   'g',
@@ -33,6 +17,7 @@ const ESCAPED_BACKSLASH_PLACEHOLDER_RE = new RegExp(
   ESCAPED_BACKSLASH_PLACEHOLDER,
   'g',
 );
+const BRE_OPERATORS = new Set(['+', '?', '|', '(', ')', '{', '}']);
 
 export interface SedEditInfo {
   filePath: string;
@@ -287,36 +272,45 @@ export function applySedSubstitution(
 }
 
 function toJavascriptPattern(sedInfo: SedEditInfo): string {
-  let jsPattern = sedInfo.pattern.replace(/\\\//g, '/');
+  const pattern = unescapeSedDelimiter(sedInfo.pattern);
 
-  if (!sedInfo.extendedRegex) {
-    jsPattern = jsPattern
-      .replace(/\\\\/g, BACKSLASH_PLACEHOLDER)
-      .replace(/\\\+/g, PLUS_PLACEHOLDER)
-      .replace(/\\\?/g, QUESTION_PLACEHOLDER)
-      .replace(/\\\|/g, PIPE_PLACEHOLDER)
-      .replace(/\\\(/g, LPAREN_PLACEHOLDER)
-      .replace(/\\\)/g, RPAREN_PLACEHOLDER)
-      .replace(/\\\{/g, LBRACE_PLACEHOLDER)
-      .replace(/\\\}/g, RBRACE_PLACEHOLDER)
-      .replace(/\+/g, '\\+')
-      .replace(/\?/g, '\\?')
-      .replace(/\|/g, '\\|')
-      .replace(/\(/g, '\\(')
-      .replace(/\)/g, '\\)')
-      .replace(/\{/g, '\\{')
-      .replace(/\}/g, '\\}')
-      .replace(BACKSLASH_PLACEHOLDER_RE, '\\\\')
-      .replace(PLUS_PLACEHOLDER_RE, '+')
-      .replace(QUESTION_PLACEHOLDER_RE, '?')
-      .replace(PIPE_PLACEHOLDER_RE, '|')
-      .replace(LPAREN_PLACEHOLDER_RE, '(')
-      .replace(RPAREN_PLACEHOLDER_RE, ')')
-      .replace(LBRACE_PLACEHOLDER_RE, '{')
-      .replace(RBRACE_PLACEHOLDER_RE, '}');
+  if (sedInfo.extendedRegex) {
+    return pattern;
   }
 
+  let jsPattern = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\' && i + 1 < pattern.length) {
+      const next = pattern[i + 1]!;
+      if (BRE_OPERATORS.has(next)) {
+        jsPattern += next;
+      } else if (next === '\\') {
+        jsPattern += '\\\\';
+      } else {
+        jsPattern += char + next;
+      }
+      i++;
+      continue;
+    }
+
+    jsPattern += BRE_OPERATORS.has(char) ? `\\${char}` : char;
+  }
   return jsPattern;
+}
+
+function unescapeSedDelimiter(pattern: string): string {
+  let result = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\' && pattern[i + 1] === '/') {
+      result += '/';
+      i++;
+      continue;
+    }
+    result += char;
+  }
+  return result;
 }
 
 function getOccurrence(flags: string): number | null {
@@ -372,9 +366,10 @@ function buildReplacement(
     .replace(/\\\\/g, ESCAPED_BACKSLASH_PLACEHOLDER)
     .replace(/\\&/g, ESCAPED_AMPERSAND_PLACEHOLDER);
 
-  prepared = prepared.replace(/\\([1-9])/g, (_match, digit: string) => {
-    return captures[Number(digit) - 1] ?? '';
-  });
+  prepared = prepared.replace(
+    /\\([1-9])/g,
+    (_match, digit: string) => captures[Number(digit) - 1] ?? '',
+  );
 
   return prepared
     .replace(/&/g, match)

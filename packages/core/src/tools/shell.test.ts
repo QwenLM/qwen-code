@@ -35,6 +35,7 @@ import {
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
+import path from 'node:path';
 import { ToolErrorType } from './tool-error.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
@@ -380,6 +381,8 @@ describe('ShellTool', () => {
     };
 
     describe('simulated sed edit', () => {
+      const expectedSedFilePath = path.resolve('/test/dir', 'file.txt');
+
       it('renders a qualifying sed -i command as an edit confirmation', async () => {
         mockFileSystemService.readTextFile.mockResolvedValue({
           content: 'foo\n',
@@ -399,7 +402,7 @@ describe('ShellTool', () => {
         if (details.type !== 'edit') {
           throw new Error('expected edit confirmation');
         }
-        expect(details.filePath).toBe('/test/dir/file.txt');
+        expect(details.filePath).toBe(expectedSedFilePath);
         expect(details.originalContent).toBe('foo\n');
         expect(details.newContent).toBe('bar\n');
         expect(details.hideModify).toBe(true);
@@ -423,10 +426,10 @@ describe('ShellTool', () => {
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(
-          '/test/dir/file.txt',
+          expectedSedFilePath,
         );
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
-          path: '/test/dir/file.txt',
+          path: expectedSedFilePath,
           content: 'bar bar\n',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
@@ -452,7 +455,7 @@ describe('ShellTool', () => {
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
-          path: '/test/dir/file.txt',
+          path: expectedSedFilePath,
           content: 'bar\n',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
@@ -480,7 +483,7 @@ describe('ShellTool', () => {
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
-          path: '/test/dir/file.txt',
+          path: expectedSedFilePath,
           content: 'baz\n',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
