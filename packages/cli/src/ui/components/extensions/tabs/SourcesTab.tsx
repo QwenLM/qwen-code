@@ -22,6 +22,7 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
+import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 
 const debugLogger = createDebugLogger('SOURCES_TAB');
@@ -499,7 +500,7 @@ export const SourcesTab = ({
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
           <Text color={theme.text.primary} bold>
-            {detailSource.name}
+            {stripUnsafeCharacters(detailSource.name)}
           </Text>
           <Text color={theme.text.secondary}>
             {redactUrlCredentials(detailSource.source)}
@@ -528,7 +529,9 @@ export const SourcesTab = ({
                     <Box minWidth={2} flexShrink={0}>
                       <Text color={theme.status.success}>{'●'}</Text>
                     </Box>
-                    <Text color={theme.text.primary}>{p.name}</Text>
+                    <Text color={theme.text.primary}>
+                      {stripUnsafeCharacters(p.name)}
+                    </Text>
                   </Box>
                 ))}
                 {installedHere.length > INSTALLED_PREVIEW_LIMIT ? (

@@ -122,9 +122,14 @@ function isGitUrl(source: string): boolean {
 /** Max time to wait for a single marketplace network request. */
 const MARKETPLACE_FETCH_TIMEOUT_MS = 10000;
 
+/** Max marketplace response body. A marketplace.json is tiny; this guards
+ * against a hostile source streaming unbounded data to exhaust memory. */
+const MARKETPLACE_MAX_BODY_BYTES = 10 * 1024 * 1024;
+
 /**
- * Fetch content from a URL. Resolves to null on non-200, error, or timeout so a
- * slow/unreachable marketplace can never hang discovery indefinitely.
+ * Fetch content from a URL. Resolves to null on non-200, error, timeout, or
+ * oversized body so a slow/unreachable/hostile marketplace can never hang
+ * discovery indefinitely or exhaust process memory.
  */
 function fetchUrl(
   url: string,
@@ -135,8 +140,16 @@ function fetchUrl(
     const done = (value: string | null) => {
       if (settled) return;
       settled = true;
+      clearTimeout(hardDeadline);
       resolve(value);
     };
+    // `req.setTimeout` only fires on socket inactivity and resets on every
+    // chunk, so a server trickling bytes can keep the request alive forever.
+    // Pair it with an absolute wall-clock deadline.
+    const hardDeadline = setTimeout(() => {
+      req.destroy();
+      done(null);
+    }, MARKETPLACE_FETCH_TIMEOUT_MS);
     const req = https.get(url, { headers }, (res) => {
       if (res.statusCode !== 200) {
         res.resume(); // drain so the socket can be freed
@@ -144,7 +157,16 @@ function fetchUrl(
         return;
       }
       const chunks: Buffer[] = [];
-      res.on('data', (chunk) => chunks.push(chunk));
+      let total = 0;
+      res.on('data', (chunk) => {
+        total += chunk.length;
+        if (total > MARKETPLACE_MAX_BODY_BYTES) {
+          req.destroy();
+          done(null);
+          return;
+        }
+        chunks.push(chunk);
+      });
       res.on('end', () => done(Buffer.concat(chunks).toString()));
       res.on('error', () => done(null));
     });

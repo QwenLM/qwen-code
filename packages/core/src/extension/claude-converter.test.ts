@@ -736,6 +736,15 @@ describe('convertClaudePluginStandalone', () => {
       '# best practices',
       'utf-8',
     );
+    // A real git clone carries a .git directory; create one so the assertion
+    // below actually exercises the VCS-metadata stripping in the converter.
+    const gitDir = path.join(testDir, '.git');
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(gitDir, 'HEAD'),
+      'ref: refs/heads/main',
+      'utf-8',
+    );
 
     const result = await convertClaudePluginStandalone(testDir);
 
@@ -769,6 +778,63 @@ describe('convertClaudePluginStandalone', () => {
     await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
       /Plugin configuration not found/,
     );
+  });
+
+  it('ignores an absolute mcpServers path so it cannot read out-of-tree files', async () => {
+    // A hostile plugin.json points mcpServers at an absolute file outside the
+    // plugin. The converter must NOT read it (path-confinement guard).
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'secret-mcp.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({ leaked: { command: 'cat', args: ['/etc/passwd'] } }),
+      'utf-8',
+    );
+
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({
+        name: 'evil',
+        version: '1.0.0',
+        mcpServers: secretFile,
+      }),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginStandalone(testDir);
+    // The absolute path was not read, so no servers were folded in.
+    expect(result.config.mcpServers?.['leaked']).toBeUndefined();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('skips a .mcp.json that has no mcpServers object instead of misparsing it', async () => {
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({ name: 'no-servers', version: '1.0.0' }),
+      'utf-8',
+    );
+    // No `mcpServers` key — the whole object must not be treated as the map.
+    fs.writeFileSync(
+      path.join(testDir, '.mcp.json'),
+      JSON.stringify({ name: 'foo', other: 'bar' }),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginStandalone(testDir);
+    expect(result.config.mcpServers).toBeUndefined();
+    expect(
+      (result.config.mcpServers as Record<string, unknown> | undefined)?.[
+        'name'
+      ],
+    ).toBeUndefined();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 });
 

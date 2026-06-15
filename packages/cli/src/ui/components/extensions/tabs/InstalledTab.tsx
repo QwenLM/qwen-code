@@ -149,6 +149,18 @@ export const InstalledTab = ({
         : undefined;
       const toolRegistry = hasAnyMcp ? config.getToolRegistry() : undefined;
 
+      // Count tools per server in a single pass; buildMcpInfo is called once per
+      // MCP server (top-level + extension children), so re-scanning getAllTools()
+      // inside it would be O(servers × tools).
+      const toolCountByServer = new Map<string, number>();
+      if (toolRegistry) {
+        for (const tool of toolRegistry.getAllTools()) {
+          const sn = (tool as { serverName?: string }).serverName;
+          if (sn)
+            toolCountByServer.set(sn, (toolCountByServer.get(sn) ?? 0) + 1);
+        }
+      }
+
       // Servers that need (re-)authentication: either the connect attempt hit
       // a 401 (runtime signal), or OAuth is declared but no token is stored.
       // Connected servers are skipped — they are evidently authenticated.
@@ -196,12 +208,7 @@ export const InstalledTab = ({
               : serverConfig.url
                 ? 'sse'
                 : 'unknown',
-          toolCount:
-            toolRegistry
-              ?.getAllTools()
-              .filter(
-                (tool) => (tool as { serverName?: string }).serverName === name,
-              ).length ?? 0,
+          toolCount: toolCountByServer.get(name) ?? 0,
         };
       };
 
@@ -383,6 +390,13 @@ export const InstalledTab = ({
       setScrollOffset(idx - visibleCount + 1);
     }
   }, [displayRows, selectedItem, scrollOffset, visibleCount]);
+
+  // O(1) row→index lookup for render, instead of items.indexOf() per visible row.
+  const indexByKey = useMemo(() => {
+    const map = new Map<string, number>();
+    items.forEach((it, i) => map.set(it.key, i));
+    return map;
+  }, [items]);
 
   const goToList = useCallback(() => {
     setView('list');
@@ -708,7 +722,7 @@ export const InstalledTab = ({
           );
         }
         const item = row.item;
-        const globalIndex = items.indexOf(item);
+        const globalIndex = indexByKey.get(item.key) ?? -1;
         const isSelected = globalIndex === selectedIndex;
         const marker = isSelected ? '●' : ' ';
         const isChild = item.kind === 'mcp' && !!item.parentExtension;

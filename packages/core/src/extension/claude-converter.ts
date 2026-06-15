@@ -486,6 +486,34 @@ export async function convertClaudePluginPackage(
 }
 
 /**
+ * Resolves a plugin-relative file reference, refusing absolute paths or any
+ * path that escapes `pluginSource`. Plugin configs come from untrusted sources
+ * (arbitrary git repos / marketplaces), so an absolute or `../`-laden value
+ * could otherwise make the converter read sensitive files outside the plugin.
+ * Returns the confined absolute path, or null when the reference is unsafe.
+ */
+function resolvePluginRelativeFile(
+  pluginSource: string,
+  relativePath: string,
+): string | null {
+  if (path.isAbsolute(relativePath)) {
+    debugLogger.warn(
+      `Ignoring absolute path "${relativePath}" in plugin config; only paths inside the plugin are allowed.`,
+    );
+    return null;
+  }
+  const resolved = path.resolve(pluginSource, relativePath);
+  const base = path.resolve(pluginSource);
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+    debugLogger.warn(
+      `Ignoring path "${relativePath}" in plugin config; it escapes the plugin directory.`,
+    );
+    return null;
+  }
+  return resolved;
+}
+
+/**
  * Builds a converted Qwen extension directory from a resolved Claude plugin
  * source directory and its merged config. Shared by the marketplace-based
  * (`convertClaudePluginPackage`) and standalone (`convertClaudePluginStandalone`)
@@ -497,11 +525,12 @@ async function buildQwenExtensionFromPlugin(
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
   // Resolve MCP servers from a JSON file path if needed.
   if (mergedConfig.mcpServers && typeof mergedConfig.mcpServers === 'string') {
-    const mcpServersPath = path.isAbsolute(mergedConfig.mcpServers)
-      ? mergedConfig.mcpServers
-      : path.join(pluginSource, mergedConfig.mcpServers);
+    const mcpServersPath = resolvePluginRelativeFile(
+      pluginSource,
+      mergedConfig.mcpServers,
+    );
 
-    if (fs.existsSync(mcpServersPath)) {
+    if (mcpServersPath && fs.existsSync(mcpServersPath)) {
       try {
         const mcpContent = fs.readFileSync(mcpServersPath, 'utf-8');
         mergedConfig.mcpServers = JSON.parse(mcpContent) as Record<
@@ -555,11 +584,12 @@ async function buildQwenExtensionFromPlugin(
 
     // Handle hooks from a file path if needed.
     if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
-      const hooksPath = path.isAbsolute(mergedConfig.hooks)
-        ? mergedConfig.hooks
-        : path.join(pluginSource, mergedConfig.hooks);
+      const hooksPath = resolvePluginRelativeFile(
+        pluginSource,
+        mergedConfig.hooks,
+      );
 
-      if (fs.existsSync(hooksPath)) {
+      if (hooksPath && fs.existsSync(hooksPath)) {
         try {
           const hooksContent = fs.readFileSync(hooksPath, 'utf-8');
           const parsedHooks = JSON.parse(hooksContent);
@@ -639,10 +669,20 @@ export async function convertClaudePluginStandalone(
     if (fs.existsSync(mcpJsonPath)) {
       try {
         const parsed = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf-8'));
-        mergedConfig.mcpServers = (parsed?.mcpServers ?? parsed) as Record<
-          string,
-          MCPServerConfig
-        >;
+        if (
+          parsed?.mcpServers &&
+          typeof parsed.mcpServers === 'object' &&
+          !Array.isArray(parsed.mcpServers)
+        ) {
+          mergedConfig.mcpServers = parsed.mcpServers as Record<
+            string,
+            MCPServerConfig
+          >;
+        } else {
+          debugLogger.warn(
+            `.mcp.json at ${mcpJsonPath} has no valid "mcpServers" object; skipping.`,
+          );
+        }
       } catch (error) {
         debugLogger.warn(
           `Failed to parse .mcp.json at ${mcpJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -936,14 +976,28 @@ async function resolvePluginSource(
     const installMetadata: ExtensionInstallMetadata = {
       source: source.url,
       type: 'git',
-      ref: source.ref || source.sha,
+      // Prefer the immutable SHA pin when present; fall back to a named ref.
+      ref: source.sha || source.ref,
       originSource: 'Claude',
     };
     await cloneFromGit(installMetadata, pluginDir);
-    const subDir = path.join(pluginDir, source.path);
+    // `source.path` comes from an untrusted manifest. Confine it to the cloned
+    // repo so a value like "../../.ssh" (or an absolute path) cannot escape.
+    if (!source.path || source.path === '.' || path.isAbsolute(source.path)) {
+      throw new Error(
+        `Invalid plugin subdirectory "${source.path}" for ${source.url}`,
+      );
+    }
+    const subDir = path.resolve(pluginDir, source.path);
+    const repoRoot = path.resolve(pluginDir);
+    if (!subDir.startsWith(repoRoot + path.sep)) {
+      throw new Error(
+        `Plugin subdirectory "${source.path}" escapes the repository root of ${source.url}`,
+      );
+    }
     if (!fs.existsSync(subDir)) {
       throw new Error(
-        `Plugin subdirectory "${source.path}" not found in ${source.url}`,
+        `Plugin subdirectory "${source.path}" not found in ${source.url} (ref: ${source.ref ?? source.sha ?? 'HEAD'})`,
       );
     }
     return subDir;

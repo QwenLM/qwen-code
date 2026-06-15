@@ -150,8 +150,11 @@ export const DiscoverTab = ({
   );
 
   const handleReload = useCallback(() => {
+    // Ignore repeat presses while a refresh is in flight so rapid Ctrl+R
+    // doesn't stack concurrent network fetches across every marketplace.
+    if (loading) return;
     void load({ refresh: true });
-  }, [load]);
+  }, [load, loading]);
 
   useEffect(() => {
     load();
@@ -209,9 +212,21 @@ export const DiscoverTab = ({
       let installed = 0;
       const errors: string[] = [];
       for (const plugin of targets) {
+        let ext;
         try {
           const metadata = await parseInstallSource(plugin.installSource);
-          const ext = await extensionManager.installExtension(metadata);
+          ext = await extensionManager.installExtension(metadata);
+        } catch (error) {
+          errors.push(
+            `${plugin.name}: ${redactUrlCredentials(getErrorMessage(error))}`,
+          );
+          continue;
+        }
+        // The extension is installed on disk now. Recording the scope/enablement
+        // preference below is non-critical: a failure there must not flip a
+        // successful install to "failed" (which would prompt a confusing retry).
+        installed++;
+        try {
           extensionManager.setExtensionScope(ext.name, scope);
           // installExtension auto-enables at User (global) scope. For a
           // workspace-scoped choice, re-scope enablement to this workspace
@@ -226,10 +241,10 @@ export const DiscoverTab = ({
               SettingScope.Workspace,
             );
           }
-          installed++;
-        } catch (error) {
-          errors.push(
-            `${plugin.name}: ${redactUrlCredentials(getErrorMessage(error))}`,
+        } catch (scopeError) {
+          debugLogger.error(
+            'Installed extension but failed to apply scope preference:',
+            scopeError,
           );
         }
       }
@@ -281,6 +296,22 @@ export const DiscoverTab = ({
         onStatus({
           type: 'info',
           text: t('Would open: {{url}}', { url: plugin.homepage }),
+        });
+        return;
+      }
+      // homepage comes from untrusted marketplace metadata; only follow web
+      // links. `open()` would otherwise launch file:// / other schemes in the
+      // OS default handler (e.g. file:///Users/victim/.ssh/id_rsa).
+      let protocol: string;
+      try {
+        protocol = new URL(plugin.homepage).protocol;
+      } catch {
+        protocol = '';
+      }
+      if (protocol !== 'http:' && protocol !== 'https:') {
+        onStatus({
+          type: 'error',
+          text: t('Failed to open {{url}}', { url: plugin.homepage }),
         });
         return;
       }

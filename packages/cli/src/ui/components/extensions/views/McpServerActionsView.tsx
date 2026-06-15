@@ -109,8 +109,11 @@ export const McpServerActionsView = ({
           serverName,
         );
         hasOAuthTokens = credentials !== null;
-      } catch {
-        // ignore token lookup failures
+      } catch (error) {
+        // A broken credential store (e.g. missing libsecret, locked keychain)
+        // leaves hasOAuthTokens false, which can mislabel an authenticated
+        // server as needing auth — log it so that's diagnosable.
+        debugLogger.warn('OAuth token lookup failed for', serverName, error);
       }
 
       return {

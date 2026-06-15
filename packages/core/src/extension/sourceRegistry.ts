@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
@@ -161,6 +162,14 @@ function resolveInstallSource(
   }
   const src = plugin.source;
   if (typeof src === 'string') {
+    // A remote marketplace must not be able to point the installer at an
+    // arbitrary local filesystem path (e.g. "/opt/secret" or "../../etc").
+    if (path.isAbsolute(src) || src.startsWith('.') || src.startsWith('~')) {
+      debugLogger.warn(
+        `Ignoring local path source "${src}" from remote marketplace "${marketplace.source}".`,
+      );
+      return plugin.name;
+    }
     return src.includes(':') ? src : `${src}:${plugin.name}`;
   }
   if (src && src.source === 'github') {
@@ -172,17 +181,37 @@ function resolveInstallSource(
   return plugin.name;
 }
 
+// C0/C1 control chars left behind after escape-sequence stripping.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/**
+ * Strips terminal escape/control sequences from untrusted marketplace text.
+ * Plugin metadata is rendered in the TUI before the user consents to install,
+ * so a hostile source could otherwise embed ANSI/OSC sequences to move the
+ * cursor, clear lines, or spoof UI. Install resolution uses the raw plugin
+ * fields, so sanitizing the display copy here is safe.
+ */
+
+function sanitizeDisplay(text: string): string;
+function sanitizeDisplay(text: string | undefined): string | undefined;
+function sanitizeDisplay(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  // Drop ANSI/VT escape sequences, then any remaining C0/C1 control chars.
+  return stripVTControlCharacters(text).replace(CONTROL_CHARS_RE, '');
+}
+
 function pluginsFromConfig(
   marketplace: ExtensionSource,
   config: ClaudeMarketplaceConfig,
   installedNames: ReadonlySet<string>,
 ): DiscoveredPlugin[] {
   return (config.plugins ?? []).map((plugin) => ({
-    marketplaceName: config.name || marketplace.name,
-    name: plugin.name,
-    description: plugin.description,
+    marketplaceName: sanitizeDisplay(config.name || marketplace.name),
+    name: sanitizeDisplay(plugin.name),
+    description: sanitizeDisplay(plugin.description),
     version: plugin.version,
-    author: plugin.author?.name,
+    author: sanitizeDisplay(plugin.author?.name),
     homepage: plugin.homepage,
     category: plugin.category,
     lastUpdated: pluginLastUpdated(plugin),
