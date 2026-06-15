@@ -484,6 +484,19 @@ export interface AcpSessionBridge {
   ): Promise<{ sessionId: string; answer: string | null }>;
 
   /**
+   * Queue a mid-turn user message for the running turn. The ACP child drains
+   * it between tool batches via the `craft/drainMidTurnQueue` ext-method so
+   * the model sees it before the turn ends. Accepted only while the session
+   * is busy (a prompt is queued or active); an idle session returns
+   * `{ accepted: false }` so the caller falls back to a normal next-turn
+   * prompt. Throws `SessionNotFoundError` for unknown ids.
+   */
+  enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+  ): { accepted: boolean };
+
+  /**
    * Execute a shell command directly on the daemon (no LLM involvement).
    * Streams output through the session's SSE bus and injects the
    * command+result into the LLM's chat history via extMethod.

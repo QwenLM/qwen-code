@@ -21,6 +21,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
+  'mid_turn_message_injected',
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -247,6 +248,18 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * `mid_turn_message_injected` payload. Emitted when the daemon drains
+ * browser-queued mid-turn messages into the running turn (web-shell mid-turn
+ * drain). Consumers move these messages out of their pending queue — so they
+ * aren't resent as the next turn — and render them as sent.
+ */
+export interface DaemonMidTurnMessageInjectedData {
+  sessionId: string;
+  messages: string[];
   [key: string]: unknown;
 }
 
@@ -742,6 +755,10 @@ export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
   'session_metadata_updated',
   DaemonSessionMetadataUpdatedData
 >;
+export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
+  'mid_turn_message_injected',
+  DaemonMidTurnMessageInjectedData
+>;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
   'client_evicted',
   DaemonClientEvictedData
@@ -874,6 +891,7 @@ export type DaemonSessionEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
+  | DaemonMidTurnMessageInjectedEvent
   | DaemonSessionBranchedEvent;
 
 export type DaemonControlEvent =
@@ -1318,6 +1336,10 @@ export function asKnownDaemonEvent(
     case 'session_metadata_updated':
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
+        : undefined;
+    case 'mid_turn_message_injected':
+      return isMidTurnMessageInjectedData(event.data)
+        ? (event as DaemonMidTurnMessageInjectedEvent)
         : undefined;
     case 'client_evicted':
       return isClientEvictedData(event.data)
@@ -1799,9 +1821,13 @@ export function reduceDaemonSessionEvent(
         ...base,
         lastTurnError: event.data,
       };
+    // `mid_turn_message_injected` is a transient UX signal (the browser dedupes
+    // its own pending queue); like these mcp/settings notices it carries no
+    // reduced session-view state.
     case 'mcp_server_added':
     case 'mcp_server_removed':
     case 'settings_reloaded':
+    case 'mid_turn_message_injected':
       return base;
     case 'session_rewound':
       return {
@@ -2230,6 +2256,17 @@ function isSessionMetadataUpdatedData(
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
     isOptionalStringOrNull(value['displayName'])
+  );
+}
+
+function isMidTurnMessageInjectedData(
+  value: unknown,
+): value is DaemonMidTurnMessageInjectedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    Array.isArray(value['messages']) &&
+    value['messages'].every((message) => typeof message === 'string')
   );
 }
 

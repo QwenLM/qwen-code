@@ -11,6 +11,7 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useDaemonMidTurnInjected,
   useSettings,
   useSessionNotices,
   useStreamingState,
@@ -1250,6 +1251,7 @@ export function App({
     (text: string, images?: PromptImage[], onComplete?: () => void) => {
       const trimmed = text.trim();
       if (!trimmed) return true;
+      const hasImages = !!images && images.length > 0;
       const nextPrompt: QueuedPrompt = {
         id: nextQueuedPromptIdRef.current++,
         text: trimmed,
@@ -1258,9 +1260,18 @@ export function App({
       };
       queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
       setQueuedPrompts(queuedPromptsRef.current);
+      // Best-effort: also offer text-only messages to the running turn so the
+      // daemon can drain them mid-turn (text-only because the drain channel
+      // carries plain strings — messages with images stay queued for the next
+      // turn). On success the daemon emits `mid_turn_message_injected`, which
+      // the effect below removes from the queue so it isn't resent. If idle /
+      // unsupported / failed, the message harmlessly stays queued.
+      if (!hasImages) {
+        void sessionActions.enqueueMidTurnMessage(trimmed);
+      }
       return true;
     },
-    [],
+    [sessionActions],
   );
 
   const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
@@ -1286,6 +1297,34 @@ export function App({
     store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
     return true;
   }, [store, t]);
+
+  // When the daemon drains queued messages into the running turn it emits
+  // `mid_turn_message_injected`. Drop the matching (text-only) entries from the
+  // local queue so the idle-time drain doesn't ALSO resend them as the next
+  // turn — the SSE frame is delivered in-order ahead of the turn-complete frame
+  // that flips streamingState to idle, so this runs before that resend fires.
+  const midTurnInjected = useDaemonMidTurnInjected();
+  useEffect(() => {
+    if (!midTurnInjected) return;
+    if (midTurnInjected.sessionId !== connection.sessionId) return;
+    const remaining = [...queuedPromptsRef.current];
+    let changed = false;
+    for (const message of midTurnInjected.messages) {
+      const index = remaining.findIndex(
+        (prompt) =>
+          prompt.text === message &&
+          (!prompt.images || prompt.images.length === 0),
+      );
+      if (index >= 0) {
+        remaining.splice(index, 1);
+        changed = true;
+      }
+    }
+    if (changed) {
+      queuedPromptsRef.current = remaining;
+      setQueuedPrompts(remaining);
+    }
+  }, [midTurnInjected, connection.sessionId]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {

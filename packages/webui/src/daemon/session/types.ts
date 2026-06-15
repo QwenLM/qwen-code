@@ -12,6 +12,7 @@ import type {
   DaemonApprovalModeResult,
   DaemonAvailableCommand,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
@@ -280,6 +281,13 @@ export interface DaemonSessionActions {
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
+  /**
+   * Best-effort: queue a message typed while a turn is running so the daemon
+   * can drain it mid-turn. Resolves `{ accepted: false }` (never throws/raises
+   * a notice) when there is no session, the session is idle, or the push
+   * fails — the caller then keeps the message in its own next-turn queue.
+   */
+  enqueueMidTurnMessage(message: string): Promise<DaemonMidTurnMessageResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
   cancelTask(

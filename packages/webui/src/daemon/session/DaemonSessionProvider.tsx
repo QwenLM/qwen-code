@@ -62,6 +62,10 @@ import {
   parseSidechannelFollowupSuggestion,
   publishSidechannelFollowupSuggestion,
 } from '../followupSidechannel.js';
+import {
+  parseSidechannelMidTurnInjected,
+  publishSidechannelMidTurnInjected,
+} from '../midTurnInjectedSidechannel.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -662,6 +666,13 @@ export function DaemonSessionProvider({
                 parseSidechannelFollowupSuggestion(event);
               if (followupSuggestion) {
                 publishSidechannelFollowupSuggestion(followupSuggestion);
+                continue;
+              }
+              const midTurnInjected = parseSidechannelMidTurnInjected(event);
+              if (midTurnInjected) {
+                // Transient UX signal — consumers drop these from their pending
+                // queue. Not a transcript item, so skip normalization.
+                publishSidechannelMidTurnInjected(midTurnInjected);
                 continue;
               }
               const normalizedUiEvents = normalizeAndFilterEvent(

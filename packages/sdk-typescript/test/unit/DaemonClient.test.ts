@@ -1873,6 +1873,59 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('enqueueMidTurnMessage (web-shell mid-turn drain)', () => {
+    it('POSTs the message and returns accepted:true', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.enqueueMidTurnMessage('s-1', 'also check tests');
+      expect(result).toEqual({ accepted: true });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        message: 'also check tests',
+      });
+    });
+
+    it('returns accepted:false verbatim when the session is idle', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, { accepted: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.enqueueMidTurnMessage('s-1', 'late');
+      expect(result.accepted).toBe(false);
+    });
+
+    it('URL-encodes the session id and forwards client id + abort signal', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ctrl = new AbortController();
+      await client.enqueueMidTurnMessage('s/1', 'hi', {
+        clientId: 'client-1',
+        signal: ctrl.signal,
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/mid-turn-message');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[0]?.signal).toBe(ctrl.signal);
+    });
+
+    it('throws on 404 when the session is unknown', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, {
+          error: 'session not found',
+          code: 'session_not_found',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.enqueueMidTurnMessage('s-1', 'hi'),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
   describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
     it('POSTs the enabled flag and URL-encodes the tool name', async () => {
       const { fetch, calls } = recordingFetch(() =>

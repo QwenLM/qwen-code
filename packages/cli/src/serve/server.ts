@@ -2699,6 +2699,34 @@ export function createServeApp(
     }
   });
 
+  // Queue a user message typed while the session's turn is still running. The
+  // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
+  // model sees it before the turn ends, instead of waiting for the next turn.
+  // Returns `{ accepted }`: `false` when the session is idle, so the browser
+  // keeps the message in its own queue and sends it as a normal next-turn
+  // prompt. Synchronous — the bridge only pushes onto an in-memory queue.
+  app.post('/session/:id/mid-turn-message', mutate(), (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    const message = body['message'];
+    if (typeof message !== 'string' || message.trim().length === 0) {
+      res.status(400).json({
+        error: '`message` is required and must be a non-empty string',
+      });
+      return;
+    }
+    try {
+      const result = bridge.enqueueMidTurnMessage(sessionId, message);
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/mid-turn-message',
+        sessionId,
+      });
+    }
+  });
+
   app.post('/session/:id/shell', mutate({ strict: true }), async (req, res) => {
     const sessionId = req.params['id'];
     if (!sessionShellCommandEnabled) {

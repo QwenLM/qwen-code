@@ -10301,3 +10301,107 @@ describe('close on last client detach', () => {
     await bridge.shutdown();
   });
 });
+
+/**
+ * `enqueueMidTurnMessage` backs the web-shell mid-turn drain: the browser
+ * pushes a message typed during a turn, the ACP child drains it via
+ * `craft/drainMidTurnQueue` (answered by BridgeClient.extMethod). The accept
+ * gate is the exactly-once linchpin — it must reject when the session is idle
+ * so the browser's own next-turn queue stays the single delivery path in the
+ * settle-window race.
+ */
+describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessage)', () => {
+  function hangingPromptFactory(): {
+    factory: ChannelFactory;
+    release: () => void;
+  } {
+    let release: (() => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        promptImpl: async () => {
+          await new Promise<void>((res) => {
+            release = res;
+          });
+          return { stopReason: 'end_turn' };
+        },
+      }).channel;
+    return { factory, release: () => release?.() };
+  }
+
+  it('rejects (accepted:false) when the session is idle', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(bridge.enqueueMidTurnMessage(session.sessionId, 'later')).toEqual({
+      accepted: false,
+    });
+    await bridge.shutdown();
+  });
+
+  it('accepts while a turn is in flight, then rejects again once it settles', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'run tools' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+
+    // Let the FIFO worker pick up the (hanging) prompt before asserting.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'also check tests'),
+    ).toEqual({ accepted: true });
+
+    // Settle the turn → the queue flips back to idle and the undrained copy is
+    // dropped server-side (the browser resends it as the next turn).
+    release();
+    await promptPromise;
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'next time'),
+    ).toEqual({ accepted: false });
+    await bridge.shutdown();
+  });
+
+  it('rejects a whitespace-only message even while busy', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'x' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    expect(bridge.enqueueMidTurnMessage(session.sessionId, '   ')).toEqual({
+      accepted: false,
+    });
+    release();
+    await promptPromise;
+    await bridge.shutdown();
+  });
+
+  it('throws SessionNotFoundError for an unknown session', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    expect(() => bridge.enqueueMidTurnMessage('nope', 'hi')).toThrow(
+      SessionNotFoundError,
+    );
+    await bridge.shutdown();
+  });
+});

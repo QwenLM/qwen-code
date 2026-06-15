@@ -196,10 +196,34 @@ function sliceLineRange(
  * `SessionEntry` is required to provide them — TS enforces the
  * structural match at the callback signature).
  */
+/**
+ * ACP ext-method the spawned `qwen --acp` child calls between tool batches to
+ * pull user messages the browser queued mid-turn. Must match the constant in
+ * `cli/src/acp-integration/session/Session.ts` (the caller). The desktop ACP
+ * client answers the same method from its own in-memory queue; in `qwen serve`
+ * the daemon answers it here, from `SessionEntry.midTurnMessageQueue`.
+ */
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
+/**
+ * SSE frame published when mid-turn messages are actually drained into the
+ * running turn. The browser consumes it to move those messages out of its
+ * pending queue (so they aren't resent as the next turn) and render them as
+ * sent. `data: { sessionId, messages: string[] }`.
+ */
+const MID_TURN_MESSAGE_INJECTED_EVENT = 'mid_turn_message_injected';
+
 export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
   pendingPermissionIds: Set<string>;
+  /**
+   * Mid-turn user messages queued by the browser, drained here when the ACP
+   * child calls the `craft/drainMidTurnQueue` ext-method. Owned by the full
+   * `SessionEntry` in `bridge.ts`; surfaced on this narrowed view so
+   * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
+   */
+  midTurnMessageQueue: string[];
   activePromptOriginatorClientId?: string;
   /**
    * True while the bridge drives a model roundtrip; the
@@ -506,6 +530,50 @@ export class BridgeClient implements Client {
    * call and exits on settle (success or failure).
    */
   private readonly inFlightRestoreIds = new Set<string>();
+
+  /**
+   * Handle child->bridge ACP `extMethod` requests (calls that expect a
+   * response, unlike `extNotification`). The only method served today is
+   * `craft/drainMidTurnQueue`: the ACP child calls it between tool batches to
+   * pull any messages the browser queued mid-turn. We splice the per-session
+   * queue, return them to the child as the response, and — when non-empty —
+   * publish a `mid_turn_message_injected` SSE frame so the browser can move
+   * those messages out of its pending queue and render them as sent. Unknown
+   * methods reject with ACP `methodNotFound` (-32601), matching the SDK's
+   * default for an unimplemented client surface; the child's drain caller
+   * treats that as "drain unsupported" and stops asking.
+   */
+  async extMethod(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
+      throw RequestError.methodNotFound(method);
+    }
+    const sessionId =
+      typeof params['sessionId'] === 'string'
+        ? (params['sessionId'] as string)
+        : undefined;
+    // The drain always carries a sessionId; without one we can't route it on a
+    // multi-session channel (and `resolveEntry(undefined)` would throw there),
+    // so answer with an empty drain rather than poisoning the turn.
+    if (!sessionId) return { messages: [] };
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return { messages: [] };
+    const messages = entry.midTurnMessageQueue.splice(0);
+    if (messages.length > 0) {
+      try {
+        entry.events.publish({
+          type: MID_TURN_MESSAGE_INJECTED_EVENT,
+          data: { sessionId: entry.sessionId, messages },
+        });
+      } catch {
+        // Bus already closed (session tearing down). The child still receives
+        // the messages below; only the browser-side echo is lost.
+      }
+    }
+    return { messages };
+  }
 
   /**
    * Handle child->bridge ACP `extNotification` calls. Six methods are

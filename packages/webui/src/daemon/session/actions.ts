@@ -9,6 +9,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionRecapResult,
   DaemonSessionTaskStatus,
   DaemonTranscriptStore,
@@ -596,6 +597,22 @@ export function createDaemonSessionActions({
           error,
           'btw_session',
         );
+      }
+    },
+
+    async enqueueMidTurnMessage(
+      message: string,
+    ): Promise<DaemonMidTurnMessageResult> {
+      // Best-effort and silent: no session / idle session / transport failure
+      // all resolve `{ accepted: false }` so the caller falls back to its own
+      // next-turn queue. Never raises a user-facing notice — a queued message
+      // typed mid-turn is an optimization, not a user-initiated action.
+      const session = sessionRef.current;
+      if (!session) return { accepted: false };
+      try {
+        return await session.enqueueMidTurnMessage(message);
+      } catch {
+        return { accepted: false };
       }
     },
 

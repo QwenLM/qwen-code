@@ -230,6 +230,19 @@ interface SessionEntry {
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
   /**
+   * Mid-turn user messages pushed by the browser (`POST
+   * /session/:id/mid-turn-message`) while a turn is running. The ACP child
+   * drains these between tool batches via the `craft/drainMidTurnQueue`
+   * ext-method so the model sees them before the turn ends. The queue is
+   * accepted into only while the session is busy (`pendingPromptCount > 0`)
+   * and emptied when the session next goes idle — see the settle handler in
+   * `sendPrompt`. The browser keeps its own copy as the next-turn fallback,
+   * so a message left undrained here is NOT lost: it is dropped server-side
+   * (preventing a stale next-turn re-injection) and resent by the browser as
+   * a fresh prompt.
+   */
+  midTurnMessageQueue: string[];
+  /**
    * Per-session model-change FIFO. Prevents two concurrent
    * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
    * model requests) from racing into `unstable_setSessionModel` and
@@ -2002,6 +2015,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       events,
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
+      midTurnMessageQueue: [],
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
       modelPublishGeneration: 0,
@@ -2941,7 +2955,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         () => undefined,
         () => undefined,
       );
-      result.finally(releasePromptSlot).catch(() => {});
+      result
+        .finally(() => {
+          releasePromptSlot();
+          // Mid-turn messages are scoped to the turn the user typed them
+          // during. Once the session goes fully idle with some still
+          // undrained, drop the server-side copy: the browser still holds
+          // them in its own queue and resends them as the next turn. Leaving
+          // them here would let the NEXT turn's first tool batch inject a
+          // stale message the browser ALSO resends — double delivery. The
+          // `pendingPromptCount === 0` guard keeps queued messages intact
+          // across a back-to-back FIFO of prompts (still "one turn" to the
+          // user) and only clears at the true idle boundary.
+          if (
+            entry.pendingPromptCount === 0 &&
+            entry.midTurnMessageQueue.length > 0
+          ) {
+            entry.midTurnMessageQueue.length = 0;
+          }
+        })
+        .catch(() => {});
       return result;
     },
 
@@ -4030,6 +4063,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId: entry.sessionId,
         recap: response.recap ?? null,
       };
+    },
+
+    enqueueMidTurnMessage(sessionId, message) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const trimmed = message.trim();
+      // Reject empty messages and — critically — messages that arrive while
+      // the session is idle. The browser only pushes here when it believes a
+      // turn is running, but the turn may have settled in the small window
+      // before its turn-complete frame landed. Accepting an idle message
+      // would strand it until the NEXT turn's first tool batch drained it,
+      // by which point the browser has already resent it as a fresh prompt —
+      // double delivery. Rejecting keeps the browser's next-turn fallback the
+      // single delivery path in that race.
+      if (trimmed.length === 0 || entry.pendingPromptCount === 0) {
+        return { accepted: false };
+      }
+      entry.midTurnMessageQueue.push(trimmed);
+      return { accepted: true };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {
