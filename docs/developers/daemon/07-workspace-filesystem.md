@@ -38,26 +38,26 @@ The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST 
 
 ### `FsErrorKind` taxonomy
 
-| Kind                     | Default HTTP | Meaning                                                                                                                                                                                  |
-| ------------------------ | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path_outside_workspace` | 400          | Resolved path is outside the bound workspace.                                                                                                                                            |
-| `symlink_escape`         | 400          | Target is a symlink (rejected per the conservative PR 18 + PR 20 posture).                                                                                                               |
-| `path_not_found`         | 404          | `ENOENT`.                                                                                                                                                                                |
-| `binary_file`            | 422          | Content sniffed binary on a text route.                                                                                                                                                  |
-| `file_too_large`         | 413          | Above `MAX_READ_BYTES` or `MAX_WRITE_BYTES`.                                                                                                                                             |
-| `hash_mismatch`          | 409          | Optimistic-concurrency `expectedSha256` failed.                                                                                                                                          |
-| `file_already_exists`    | 409          | `mode: 'create'` against an existing file.                                                                                                                                               |
-| `text_not_found`         | 422          | `POST /file/edit`'s search string wasn't in the file.                                                                                                                                    |
-| `ambiguous_text_match`   | 422          | Multiple matches when exactly one was required.                                                                                                                                          |
-| `untrusted_workspace`    | 403          | Write attempted in an untrusted workspace.                                                                                                                                               |
-| `permission_denied`      | 403          | OS-level `EACCES` / `EPERM`.                                                                                                                                                             |
+| Kind                     | Default HTTP | Meaning                                                                                                                                                                                       |
+| ------------------------ | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path_outside_workspace` | 400          | Resolved path is outside the bound workspace.                                                                                                                                                 |
+| `symlink_escape`         | 400          | Target is a symlink (rejected per the conservative PR 18 + PR 20 posture).                                                                                                                    |
+| `path_not_found`         | 404          | `ENOENT`.                                                                                                                                                                                     |
+| `binary_file`            | 422          | Content sniffed binary on a text route.                                                                                                                                                       |
+| `file_too_large`         | 413          | Above `MAX_READ_BYTES` or `MAX_WRITE_BYTES`.                                                                                                                                                  |
+| `hash_mismatch`          | 409          | Optimistic-concurrency `expectedSha256` failed.                                                                                                                                               |
+| `file_already_exists`    | 409          | `mode: 'create'` against an existing file.                                                                                                                                                    |
+| `text_not_found`         | 422          | `POST /file/edit`'s search string wasn't in the file.                                                                                                                                         |
+| `ambiguous_text_match`   | 422          | Multiple matches when exactly one was required.                                                                                                                                               |
+| `untrusted_workspace`    | 403          | Write attempted in an untrusted workspace.                                                                                                                                                    |
+| `permission_denied`      | 403          | OS-level `EACCES` / `EPERM`.                                                                                                                                                                  |
 | `io_error`               | 503          | `ENOSPC` / `EIO` / `EBUSY` / `ETXTBSY` / `ENAMETOOLONG` / `EMFILE` / `ENFILE`. **Distinct from `permission_denied`** so monitoring pipelines do not page security responders for "disk full". |
-| `internal_error`         | 500          | Non-errno error that reaches the boundary (`TypeError`, programmer bug).                                                                                                                  |
-| `parse_error`            | 400 / 422    | Request-body parse error (400) or service-level invariant breach (422).                                                                                                                  |
+| `internal_error`         | 500          | Non-errno error that reaches the boundary (`TypeError`, programmer bug).                                                                                                                      |
+| `parse_error`            | 400 / 422    | Request-body parse error (400) or service-level invariant breach (422).                                                                                                                       |
 
 ### `BridgeFileSystem` (the ACP-side adapter)
 
-`packages/acp-bridge/src/bridgeFileSystem.ts:39-97` defines:
+`packages/acp-bridge/src/bridgeFileSystem.ts` defines:
 
 ```ts
 interface BridgeFileSystem {
@@ -79,7 +79,7 @@ The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 1
 
 When the `BridgeFileSystem` adapter throws an `FsError` (`kind: 'untrusted_workspace'` / `'symlink_escape'` / `'file_too_large'` / etc.), the ACP SDK's default RPC error path serializes only `error.message` as a generic `-32603 "Internal error"` — `kind` / `status` / `hint` are stripped. The downstream agent RPC client would then have to regex-match the human-readable message to dispatch typed UI (auth retry vs file picker vs proxy hint).
 
-`BridgeClient.writeTextFile` and `BridgeClient.readTextFile` install a thin guard (`packages/acp-bridge/src/bridgeClient.ts:40-100+`) that catches FsError-shaped throws and rethrows them as ACP `RequestError`:
+`BridgeClient.writeTextFile` and `BridgeClient.readTextFile` install a thin guard (`packages/acp-bridge/src/bridgeClient.ts`) that catches FsError-shaped throws and rethrows them as ACP `RequestError`:
 
 ```ts
 function isFsErrorShape(err: unknown): err is FsErrorShape {
@@ -166,7 +166,7 @@ sequenceDiagram
     participant FSP as node:fs
 
     R->>FS: writeTextAtomic(ctx, path, content, opts)
-    FS->>FS: assertTrustedForIntent('write') → throw untrusted_workspace OR ok
+    FS->>FS: assertTrustedForIntent(trusted, 'write') → throw untrusted_workspace OR ok
     FS->>FS: resolveWithinWorkspace(path)
     FS->>POL: enforceWriteSize(content) → throw file_too_large OR ok
     FS->>FSP: lstat(path) → reject symlink
@@ -236,10 +236,10 @@ flowchart LR
 
 - `packages/cli/src/serve/fs/index.ts` (barrel)
 - `packages/cli/src/serve/fs/paths.ts`
-- `packages/cli/src/serve/fs/policy.ts:1-100+`
-- `packages/cli/src/serve/fs/errors.ts:1-80+`
+- `packages/cli/src/serve/fs/policy.ts`
+- `packages/cli/src/serve/fs/errors.ts`
 - `packages/cli/src/serve/fs/audit.ts`
 - `packages/cli/src/serve/fs/workspaceFileSystem.ts`
-- `packages/cli/src/serve/bridgeFileSystemAdapter.ts:1-60`
-- `packages/acp-bridge/src/bridgeFileSystem.ts:39-97`
+- `packages/cli/src/serve/bridgeFileSystemAdapter.ts`
+- `packages/acp-bridge/src/bridgeFileSystem.ts`
 - HTTP route reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md).

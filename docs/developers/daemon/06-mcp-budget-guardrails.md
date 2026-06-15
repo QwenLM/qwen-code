@@ -2,7 +2,7 @@
 
 ## Overview
 
-`WorkspaceMcpBudget` (`packages/core/src/tools/mcp-workspace-budget.ts:55+`) is the workspace-scoped MCP client budget controller from F2 (#4175 commit 6). It owns the same state machine `McpClientManager` carries inline (slot reservation, 75% hysteresis warning, refused-batch coalescing across a `discoverAllMcpTools*` pass), but lives **once per workspace** inside `McpTransportPool` instead of once per session inside each ACP child's manager. The pool delegates `acquire` and `release` calls here so the cap applies to the **workspace**, not each session.
+`WorkspaceMcpBudget` (`packages/core/src/tools/mcp-workspace-budget.ts`) is the workspace-scoped MCP client budget controller from F2 (#4175 commit 6). It owns the same state machine `McpClientManager` carries inline (slot reservation, 75% hysteresis warning, refused-batch coalescing across a `discoverAllMcpTools*` pass), but lives **once per workspace** inside `McpTransportPool` instead of once per session inside each ACP child's manager. The pool delegates `acquire` and `release` calls here so the cap applies to the **workspace**, not each session.
 
 The legacy `McpClientManager` budget machinery stays for standalone qwen and SDK MCP servers (which bypass the pool per commit 4 fix). Pool mode → `WorkspaceMcpBudget` enforces; standalone / SDK MCP → manager's inline machinery enforces. No double counting because pool-mode discovery never calls the manager's `tryReserveSlot`.
 
@@ -146,7 +146,8 @@ Out-of-pass refusals (e.g. lazy `readResource` spawn that bypasses the bulk pass
 
 ## References
 
-- `packages/core/src/tools/mcp-workspace-budget.ts:1-200+` (entire class)
+- `packages/core/src/tools/mcp-workspace-budget.ts` (entire class)
 - `packages/core/src/tools/mcp-client-manager.ts` (`BudgetExhaustedError`, `McpBudgetEvent`, hysteresis constants)
-- `packages/core/src/tools/mcp-transport-pool.ts:208+` (pool's `acquire` site that calls `tryReserve`)
+- `packages/core/src/tools/mcp-transport-pool.ts` (pool's `acquire` site that calls `tryReserve`)
+- F2 design document (v2.2): [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md) §11 for workspace-level budget and the v2.2 changelog entries about budget and fingerprint follow-ups.
 - F2 design notes: issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) commit 6.

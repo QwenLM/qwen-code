@@ -91,12 +91,12 @@ These are surfaced through the preflight cell's `errorKind` so client UIs render
 
 ## Auth error shapes
 
-| Status | Body                                         | When                                                                                                                                     |
-| ------ | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Status | Body                                         | When                                                                                                                                      |
+| ------ | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `401`  | `{ error: 'Unauthorized' }`                  | Missing / wrong / no-scheme bearer token. Uniform across `missing header` / `wrong scheme` / `wrong token` so probing cannot distinguish. |
-| `401`  | `{ error: '...', code: 'token_required' }`   | Mutation-gate strict route on a no-token loopback daemon. SDKs render "configure --token / --require-auth" hint.                         |
-| `403`  | `{ error: 'Request denied by CORS policy' }` | `denyBrowserOriginCors` rejected an `Origin`-bearing request.                                                                            |
-| `403`  | `{ error: 'Invalid Host header' }`           | `hostAllowlist` rejected the `Host` header (DNS rebinding defense).                                                                      |
+| `401`  | `{ error: '...', code: 'token_required' }`   | Mutation-gate strict route on a no-token loopback daemon. SDKs render "configure --token / --require-auth" hint.                          |
+| `403`  | `{ error: 'Request denied by CORS policy' }` | `denyBrowserOriginCors` rejected an `Origin`-bearing request.                                                                             |
+| `403`  | `{ error: 'Invalid Host header' }`           | `hostAllowlist` rejected the `Host` header (DNS rebinding defense).                                                                       |
 
 See [`12-auth-security.md`](./12-auth-security.md) for the full auth model.
 
@@ -147,8 +147,8 @@ flowchart TD
 
 ## References
 
-- `packages/cli/src/serve/fs/errors.ts:1-80+` (`FsErrorKind`, `FsErrorStatus`)
+- `packages/cli/src/serve/fs/errors.ts` (`FsErrorKind`, `FsErrorStatus`)
 - `packages/acp-bridge/src/bridgeErrors.ts` (every typed class)
 - `packages/cli/src/serve/status.ts` (`DaemonErrorKind`)
-- `packages/cli/src/serve/auth.ts:101-294` (auth bodies)
+- `packages/cli/src/serve/auth.ts` (auth bodies)
 - Wire reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md).

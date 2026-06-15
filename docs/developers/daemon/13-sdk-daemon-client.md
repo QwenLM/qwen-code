@@ -29,7 +29,7 @@ The walkthrough example is at [`../examples/daemon-client-quickstart.md`](../exa
 
 ## Architecture
 
-### `DaemonClient` (`DaemonClient.ts:209-1506`)
+### `DaemonClient` (`DaemonClient.ts`)
 
 Constructor:
 
@@ -66,7 +66,7 @@ Every request goes through `fetchWithTimeout`. Critical details:
 - **`AbortController` + cancellable `setTimeout`** instead of `AbortSignal.timeout()` so fast-resolving requests do not leak pending timers on the event loop. Timer is cleared in `finally`.
 - **Streaming endpoints (`subscribeEvents`) bypass the timeout** — long-lived SSE must not be killed by it.
 
-### `DaemonSessionClient` (`DaemonSessionClient.ts:61-385`)
+### `DaemonSessionClient` (`DaemonSessionClient.ts`)
 
 Binds one session and automatically tracks `lastSeenEventId` so SSE replay and reconnect work without extra caller state.
 
@@ -94,7 +94,7 @@ class DaemonSessionClient {
 
 `events()` proxies `client.subscribeEvents` with `resume: true` by default — it passes the tracked `lastSeenEventId` so reconnects replay from where the previous subscription stopped. Every yielded event bumps `lastSeenEventId`.
 
-### `DaemonAuthFlow` (`DaemonAuthFlow.ts:102-340`)
+### `DaemonAuthFlow` (`DaemonAuthFlow.ts`)
 
 ```ts
 class DaemonAuthFlow {
@@ -113,7 +113,7 @@ interface DaemonAuthFlowHandle {
 
 `awaitCompletion()` polls `GET /workspace/auth/device-flow/:id` at the daemon-supplied `intervalMs` until the flow becomes `authorized`, `failed`, or `cancelled`. It is lazily constructed via `client.auth` so clients that never touch auth incur no allocation cost.
 
-### `parseSseStream` (`sse.ts:70-295`)
+### `parseSseStream` (`sse.ts`)
 
 Turns a `Response.body` (`ReadableStream<Uint8Array>`) into `AsyncIterable<DaemonEvent>`. Handles:
 
@@ -259,10 +259,10 @@ code that does `import { DaemonClient }` is unaffected.
 
 ## References
 
-- `packages/sdk-typescript/src/daemon/DaemonClient.ts:209-1506`
-- `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts:61-385`
-- `packages/sdk-typescript/src/daemon/DaemonAuthFlow.ts:102-340`
-- `packages/sdk-typescript/src/daemon/sse.ts:70-295`
-- `packages/sdk-typescript/src/daemon/events.ts:1-2101`
-- `packages/sdk-typescript/src/daemon/types.ts:1-942`
+- `packages/sdk-typescript/src/daemon/DaemonClient.ts`
+- `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts`
+- `packages/sdk-typescript/src/daemon/DaemonAuthFlow.ts`
+- `packages/sdk-typescript/src/daemon/sse.ts`
+- `packages/sdk-typescript/src/daemon/events.ts`
+- `packages/sdk-typescript/src/daemon/types.ts`
 - End-to-end walkthrough: [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md).

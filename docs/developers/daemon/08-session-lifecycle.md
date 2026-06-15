@@ -22,10 +22,10 @@ This doc explains every session lifecycle transition (create / attach / load / r
 
 | Concern                   | Source                                                       | Notes                                                                                     |
 | ------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| `SessionEntry`            | `packages/acp-bridge/src/bridge.ts:183-285`                  | Per-session struct; see [`03-acp-bridge.md`](./03-acp-bridge.md) for full field listing.  |
-| `BridgeSession` (public)  | `packages/acp-bridge/src/bridgeTypes.ts:49+`                 | `{ sessionId, workspaceCwd, attached, clientId?, createdAt? }` returned to HTTP handlers. |
-| `BridgeSessionState`      | `packages/acp-bridge/src/bridgeTypes.ts:73+`                 | `LoadSessionResponse \| ResumeSessionResponse` cached on the entry as `restoreState`.     |
-| `DaemonSession` (SDK)     | `packages/sdk-typescript/src/daemon/types.ts:113`            | `{ sessionId, workspaceCwd, attached, clientId?, createdAt? }`.                           |
+| `SessionEntry`            | `packages/acp-bridge/src/bridge.ts`                          | Per-session struct; see [`03-acp-bridge.md`](./03-acp-bridge.md) for full field listing.  |
+| `BridgeSession` (public)  | `packages/acp-bridge/src/bridgeTypes.ts`                     | `{ sessionId, workspaceCwd, attached, clientId?, createdAt? }` returned to HTTP handlers. |
+| `BridgeSessionState`      | `packages/acp-bridge/src/bridgeTypes.ts`                     | `LoadSessionResponse \| ResumeSessionResponse` cached on the entry as `restoreState`.     |
+| `DaemonSession` (SDK)     | `packages/sdk-typescript/src/daemon/types.ts`                | `{ sessionId, workspaceCwd, attached, clientId?, createdAt? }`.                           |
 | Client-id validation      | `packages/acp-bridge/src/bridge.ts` (around `spawnOrAttach`) | Pattern `[A-Za-z0-9._:-]{1,128}`; `InvalidClientIdError` if malformed.                    |
 | Session disconnect-reaper | `packages/cli/src/serve/server.ts`                           | Tracks spawn-owner disconnects with `attachCount` + `spawnOwnerWantedKill`.               |
 
@@ -259,8 +259,8 @@ new session arrives.
 
 ## References
 
-- `packages/acp-bridge/src/bridge.ts:183-285` (SessionEntry definition)
-- `packages/acp-bridge/src/bridgeTypes.ts:30-180+` (`HttpAcpBridge`, `BridgeSession`, `BridgeSessionState`)
-- `packages/sdk-typescript/src/daemon/types.ts:113+` (`DaemonSession`)
-- `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts:61-385`
+- `packages/acp-bridge/src/bridge.ts` (SessionEntry definition)
+- `packages/acp-bridge/src/bridgeTypes.ts` (`HttpAcpBridge`, `BridgeSession`, `BridgeSessionState`)
+- `packages/sdk-typescript/src/daemon/types.ts` (`DaemonSession`)
+- `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts`
 - Wire reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md) (route catalogue).

@@ -4,7 +4,7 @@
 
 When the ACP child's agent calls `requestPermission`, the daemon does not simply forward it to one client. Under `sessionScope: 'single'`, every connected client sees the request and any of them may respond. Without mediation, late votes have nowhere to go, two clients can race the same request, and a single rogue client can override the originator.
 
-`MultiClientPermissionMediator` (`packages/acp-bridge/src/permissionMediator.ts:1-1292`) implements the `PermissionMediator` contract (`packages/acp-bridge/src/permission.ts`) and owns all pending and resolved permission state for the bridge. It dispatches votes through one of four policies declared in `PermissionPolicy`:
+`MultiClientPermissionMediator` (`packages/acp-bridge/src/permissionMediator.ts`) implements the `PermissionMediator` contract (`packages/acp-bridge/src/permission.ts`) and owns all pending and resolved permission state for the bridge. It dispatches votes through one of four policies declared in `PermissionPolicy`:
 
 | Policy            | Resolution rule                                                                                                        | Use case                                                                 |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
@@ -47,7 +47,7 @@ interface PermissionMediator {
 }
 ```
 
-`MultiClientPermissionMediator` adds: `peekSessionFor(requestId)`, `pendingCount(sessionId)`, internal audit publisher, etc. `BridgeClient` only depends on the `request()` half (structural sub-typing — see `bridgeClient.ts:30`).
+`MultiClientPermissionMediator` adds: `peekSessionFor(requestId)`, `pendingCount(sessionId)`, internal audit publisher, etc. `BridgeClient` only depends on the `request()` half (structural sub-typing — see `bridgeClient.ts`).
 
 ### `PermissionPolicy` and `PermissionVoteOutcome`
 
@@ -80,7 +80,7 @@ type PermissionResolution =
 1. **`bridge.ts`** rejects wire votes whose `optionId === CANCEL_VOTE_SENTINEL` with `InvalidPermissionOptionError` (a malicious wire client must not be able to inject cancel by lying about an `optionId`).
 2. **`mediator.request`** rejects records whose `allowedOptionIds` contains the sentinel with `CancelSentinelCollisionError` (an agent legitimately publishing `'__cancelled__'` as an option label must not be able to masquerade).
 
-This deliberate cross-policy escape is documented at `permissionMediator.ts:50-57` so a future maintainer does not accidentally remove the bypass.
+This deliberate cross-policy escape is documented at `permissionMediator.ts` so a future maintainer does not accidentally remove the bypass.
 
 ### Pending state
 
@@ -258,7 +258,7 @@ mechanism does not exist in v1.
 
 ## Caveats & Known Limits
 
-- **Cancel sentinel routes BEFORE policy dispatch** by design — a `local-only` daemon and a `consensus` daemon can both be cancelled by any voter who posts `{outcome: 'cancelled'}`. This is documented at `permissionMediator.ts:50-57` and is the agent-side abort path.
+- **Cancel sentinel routes BEFORE policy dispatch** by design — a `local-only` daemon and a `consensus` daemon can both be cancelled by any voter who posts `{outcome: 'cancelled'}`. This is documented at `permissionMediator.ts` and is the agent-side abort path.
 - **`designated` and `consensus` overload `designated_mismatch`** in `PermissionVoteOutcome`. The mediator emits separate audit records but the wire shape is single. Future protocol versions may split the union.
 - **Anonymous voters (no `X-Qwen-Client-Id`)** are accepted under `first-responder` and `local-only` (loopback) only; `designated` and `consensus` reject them.
 - **Cross-policy escape hatch** means cancel cannot be gated by policy. If a deployment needs policy-gated cancel that would be a future contract change — do not paper-over with route-level checks.
@@ -266,9 +266,9 @@ mechanism does not exist in v1.
 
 ## References
 
-- `packages/acp-bridge/src/permission.ts:1-177` (frozen contract)
-- `packages/acp-bridge/src/permissionMediator.ts:1-1292` (implementation; F3 commits 6+7)
-- `packages/acp-bridge/src/bridgeClient.ts:30` (uses structural sub-typing on `PermissionMediator`)
+- `packages/acp-bridge/src/permission.ts` (frozen contract)
+- `packages/acp-bridge/src/permissionMediator.ts` (implementation; F3 commits 6+7)
+- `packages/acp-bridge/src/bridgeClient.ts` (uses structural sub-typing on `PermissionMediator`)
 - `packages/acp-bridge/src/bridgeErrors.ts` (`CancelSentinelCollisionError`, `InvalidPermissionOptionError`, `PermissionForbiddenError`)
-- `packages/cli/src/serve/permissionAudit.ts:1-60` (audit ring + publisher)
+- `packages/cli/src/serve/permissionAudit.ts` (audit ring + publisher)
 - Issue: [#4175](https://github.com/QwenLM/qwen-code/issues/4175) F3 series.

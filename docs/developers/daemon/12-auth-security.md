@@ -294,8 +294,8 @@ sequenceDiagram
 
 ## References
 
-- `packages/cli/src/serve/auth.ts:1-294` (entire file)
-- `packages/cli/src/serve/runQwenServe.ts:341-360` (refuse rules)
+- `packages/cli/src/serve/auth.ts` (entire file)
+- `packages/cli/src/serve/runQwenServe.ts` (refuse rules)
 - `packages/cli/src/serve/loopbackBinds.ts`
 - `packages/cli/src/serve/auth/deviceFlow.ts`
 - `packages/cli/src/serve/auth/qwenDeviceFlowProvider.ts`

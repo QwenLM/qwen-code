@@ -21,20 +21,20 @@ The bridge provides one `HttpAcpBridge` instance, one `AcpChannel` to the ACP ch
 
 ## Architecture
 
-**Public entry**: `createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge` in `packages/acp-bridge/src/bridge.ts:350+`.
+**Public entry**: `createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge` in `packages/acp-bridge/src/bridge.ts`.
 
 **Key types**:
 
-| Type                            | File                           | Role                                                                                                                                                                                                                  |
-| ------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HttpAcpBridge`                 | `bridgeTypes.ts:30-180+`       | Public interface: `spawnOrAttach`, `loadSession`, `resumeSession`, `sendPrompt`, `cancelSession`, `subscribeEvents`, `respondToPermission`, `getWorkspaceMcpStatus`, `restartMcpServer`, `shutdown`, `killAllSync`, … |
-| `BridgeSession`                 | `bridgeTypes.ts:49+`           | `{ sessionId, workspaceCwd, attached, clientId?, createdAt? }` returned to HTTP handlers.                                                                                                                             |
-| `BridgeOptions`                 | `bridgeOptions.ts:88-323`      | Construction-time config (see [Configuration](#configuration)).                                                                                                                                                       |
-| `AcpChannel`                    | `channel.ts:21-50`             | `{ stream, kill(), killSync(), exited }` — one ACP NDJSON channel.                                                                                                                                                    |
-| `ChannelFactory`                | `channel.ts:57-60`             | `(workspaceCwd, childEnvOverrides?) => Promise<AcpChannel>`.                                                                                                                                                          |
-| `BridgeClient`                  | `bridgeClient.ts:1-150+`       | Wraps one ACP `ClientSideConnection`; implements ACP `Client` (`requestPermission`, `readTextFile`, `writeTextFile`, `sessionUpdate`, `extNotification`).                                                             |
-| `EventBus`                      | `eventBus.ts`                  | Per-session in-memory pub/sub. See [`10-event-bus.md`](./10-event-bus.md).                                                                                                                                            |
-| `MultiClientPermissionMediator` | `permissionMediator.ts:1-1292` | Four-policy mediator. See [`04-permission-mediation.md`](./04-permission-mediation.md).                                                                                                                               |
+| Type                            | File                    | Role                                                                                                                                                                                                                  |
+| ------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HttpAcpBridge`                 | `bridgeTypes.ts`        | Public interface: `spawnOrAttach`, `loadSession`, `resumeSession`, `sendPrompt`, `cancelSession`, `subscribeEvents`, `respondToPermission`, `getWorkspaceMcpStatus`, `restartMcpServer`, `shutdown`, `killAllSync`, … |
+| `BridgeSession`                 | `bridgeTypes.ts`        | `{ sessionId, workspaceCwd, attached, clientId?, createdAt? }` returned to HTTP handlers.                                                                                                                             |
+| `BridgeOptions`                 | `bridgeOptions.ts`      | Construction-time config (see [Configuration](#configuration)).                                                                                                                                                       |
+| `AcpChannel`                    | `channel.ts`            | `{ stream, kill(), killSync(), exited }` — one ACP NDJSON channel.                                                                                                                                                    |
+| `ChannelFactory`                | `channel.ts`            | `(workspaceCwd, childEnvOverrides?) => Promise<AcpChannel>`.                                                                                                                                                          |
+| `BridgeClient`                  | `bridgeClient.ts`       | Wraps one ACP `ClientSideConnection`; implements ACP `Client` (`requestPermission`, `readTextFile`, `writeTextFile`, `sessionUpdate`, `extNotification`).                                                             |
+| `EventBus`                      | `eventBus.ts`           | Per-session in-memory pub/sub. See [`10-event-bus.md`](./10-event-bus.md).                                                                                                                                            |
+| `MultiClientPermissionMediator` | `permissionMediator.ts` | Four-policy mediator. See [`04-permission-mediation.md`](./04-permission-mediation.md).                                                                                                                               |
 
 **Internal state (closed over by `createHttpAcpBridge`)**:
 
@@ -170,7 +170,7 @@ sequenceDiagram
 
 ## Channel factory
 
-`AcpChannel` (`channel.ts:21-50`) is the bridge's transport abstraction. Production uses `defaultSpawnChannelFactory` in `spawnChannel.ts`, which runs `qwen --acp` as a subprocess with a stdio pipe pair. Tests inject `inMemoryChannel` to run the agent in-process. The bridge knows nothing about the underlying mechanism — it only needs `{ stream, kill, killSync, exited }`.
+`AcpChannel` (`channel.ts`) is the bridge's transport abstraction. Production uses `defaultSpawnChannelFactory` in `spawnChannel.ts`, which runs `qwen --acp` as a subprocess with a stdio pipe pair. Tests inject `inMemoryChannel` to run the agent in-process. The bridge knows nothing about the underlying mechanism — it only needs `{ stream, kill, killSync, exited }`.
 
 `ChannelFactory` accepts `childEnvOverrides` so each daemon handle can pass its own MCP-budget env vars (`QWEN_SERVE_MCP_CLIENT_BUDGET`, `QWEN_SERVE_MCP_BUDGET_MODE`) without mutating `process.env` (which would race when two embedded daemons run in the same Node process).
 
@@ -192,7 +192,7 @@ sequenceDiagram
 
 ## Configuration
 
-`BridgeOptions` (`bridgeOptions.ts:88-323`):
+`BridgeOptions` (`bridgeOptions.ts`):
 
 | Key                                           | Default                                            | Purpose                                                                                                               |
 | --------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -257,9 +257,9 @@ context threaded through bridge calls; it carries `clientId`,
 
 - `packages/acp-bridge/src/bridge.ts` (esp. `createHttpAcpBridge` at line 350+)
 - `packages/acp-bridge/src/bridgeClient.ts`
-- `packages/acp-bridge/src/bridgeTypes.ts:30-180+`
-- `packages/acp-bridge/src/bridgeOptions.ts:88-323`
-- `packages/acp-bridge/src/channel.ts:1-60`
+- `packages/acp-bridge/src/bridgeTypes.ts`
+- `packages/acp-bridge/src/bridgeOptions.ts`
+- `packages/acp-bridge/src/channel.ts`
 - `packages/acp-bridge/src/spawnChannel.ts`
 - `packages/acp-bridge/src/bridgeErrors.ts`
 - Issues: [#3803](https://github.com/QwenLM/qwen-code/issues/3803), [#4175](https://github.com/QwenLM/qwen-code/issues/4175).

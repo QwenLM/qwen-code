@@ -60,11 +60,11 @@ Handles common cross-cutting concerns: sender gating (allowlist / denylist), gro
 
 ### Per-channel adapters
 
-| Adapter         | File                                                       | Transport                           | Notes                                                                                    |
-| --------------- | ---------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------- |
-| DingTalk        | `packages/channels/dingtalk/src/DingtalkAdapter.ts:79-586` | DingTalk Stream SDK WebSocket       | Sends via `sessionWebhook` POST; media images downloaded via DT API, base64 in envelope. |
-| WeChat (Weixin) | `packages/channels/weixin/src/WeixinAdapter.ts:33-309`     | iLink Bot HTTP long-poll            | Sends via proprietary `sendText` / `sendImage` API; typing indicators.                   |
-| Telegram        | `packages/channels/telegram/src/TelegramAdapter.ts:19-308` | Telegram Bot API long-poll (grammy) | Sends HTML chunks via `sendMessage`.                                                     |
+| Adapter         | File                                                | Transport                           | Notes                                                                                    |
+| --------------- | --------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| DingTalk        | `packages/channels/dingtalk/src/DingtalkAdapter.ts` | DingTalk Stream SDK WebSocket       | Sends via `sessionWebhook` POST; media images downloaded via DT API, base64 in envelope. |
+| WeChat (Weixin) | `packages/channels/weixin/src/WeixinAdapter.ts`     | iLink Bot HTTP long-poll            | Sends via proprietary `sendText` / `sendImage` API; typing indicators.                   |
+| Telegram        | `packages/channels/telegram/src/TelegramAdapter.ts` | Telegram Bot API long-poll (grammy) | Sends HTML chunks via `sendMessage`.                                                     |
 
 Each adapter implements:
 
@@ -161,16 +161,16 @@ sequenceDiagram
 
 ## Configuration
 
-`ChannelConfig` (from `packages/channels/base/src/types.ts:1-121`):
+`ChannelConfig` (from `packages/channels/base/src/types.ts`):
 
-| Knob                                     | Effect                                                           |
-| ---------------------------------------- | ---------------------------------------------------------------- |
+| Knob                                     | Effect                                                                                                    |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), or `'single'` (one shared session per channel). |
-| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                |
-| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                              |
-| `denylist?: string[]`                    | Sender ids denied.                                               |
-| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                               |
-| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                      |
+| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                         |
+| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                       |
+| `denylist?: string[]`                    | Sender ids denied.                                                                                        |
+| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                        |
+| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                               |
 
 Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`).
 
@@ -184,12 +184,12 @@ Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilin
 
 ## References
 
-- `packages/channels/base/src/DaemonChannelBridge.ts:1-179+`
+- `packages/channels/base/src/DaemonChannelBridge.ts`
 - `packages/channels/base/src/ChannelBase.ts`
-- `packages/channels/base/src/types.ts:1-121`
-- `packages/channels/dingtalk/src/DingtalkAdapter.ts:79-586`
-- `packages/channels/weixin/src/WeixinAdapter.ts:33-309`
-- `packages/channels/telegram/src/TelegramAdapter.ts:19-308`
+- `packages/channels/base/src/types.ts`
+- `packages/channels/dingtalk/src/DingtalkAdapter.ts`
+- `packages/channels/weixin/src/WeixinAdapter.ts`
+- `packages/channels/telegram/src/TelegramAdapter.ts`
 - `packages/channels/plugin-example/` (reference plugin scaffold)
 - Channel plugin guide: [`../channel-plugins.md`](../channel-plugins.md).
 - SDK reference: [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md).

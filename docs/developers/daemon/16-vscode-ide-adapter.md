@@ -178,13 +178,13 @@ sequenceDiagram
 
 ## Configuration
 
-| Knob                                                | Where                             | Effect                                                            |
-| --------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------- |
-| `baseUrl`                                           | `connect(options)`                | Daemon URL; must be loopback.                                     |
-| `token`                                             | `connect(options)`                | Bearer token (stamped via SDK).                                   |
-| `workspaceCwd`                                      | `connect(options)`                | Used on `POST /session`; must match the daemon's bound workspace. |
-| `modelServiceId`                                    | `connect(options)` / `setModel()` | Initial model.                                                    |
-| `lastEventId`                                       | `connect(options)`                | Resume cursor (typically restored from host state).               |
+| Knob                                                 | Where                             | Effect                                                            |
+| ---------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------- |
+| `baseUrl`                                            | `connect(options)`                | Daemon URL; must be loopback.                                     |
+| `token`                                              | `connect(options)`                | Bearer token (stamped via SDK).                                   |
+| `workspaceCwd`                                       | `connect(options)`                | Used on `POST /session`; must match the daemon's bound workspace. |
+| `modelServiceId`                                     | `connect(options)` / `setModel()` | Initial model.                                                    |
+| `lastEventId`                                        | `connect(options)`                | Resume cursor (typically restored from host state).               |
 | VS Code setting `qwen.ide.daemonUrl` (or equivalent) | Workspace settings                | Operator-configured daemon URL.                                   |
 
 ## Caveats & Known Limits
@@ -197,9 +197,9 @@ sequenceDiagram
 
 ## References
 
-- `packages/vscode-ide-companion/src/services/daemonIdeConnection.ts:161-628`
-- `packages/vscode-ide-companion/src/services/daemonIdeConnection.ts:144-159` (`createSdkDaemonSessionFactory`)
-- `packages/vscode-ide-companion/src/types/connectionTypes.ts:1-42` (legacy `AcpConnectionState`)
+- `packages/vscode-ide-companion/src/services/daemonIdeConnection.ts`
+- `packages/vscode-ide-companion/src/services/daemonIdeConnection.ts` (`createSdkDaemonSessionFactory`)
+- `packages/vscode-ide-companion/src/types/connectionTypes.ts` (legacy `AcpConnectionState`)
 - `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (webview bridge)
 - `packages/webui/src/adapters/ACPAdapter.ts` (webview ACP-message adapter)
 - Draft design: [`../daemon-client-adapters/ide.md`](../daemon-client-adapters/ide.md)

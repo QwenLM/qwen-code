@@ -10,6 +10,7 @@ It complements, rather than replaces, these existing docs:
 | [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)                             | Protocol implementers | HTTP route catalog, request/response shapes, error codes |
 | [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md) | SDK users             | End-to-end TypeScript walkthrough                        |
 | [`../daemon-client-adapters/`](../daemon-client-adapters/)                           | Adapter authors       | Client adapter design notes                              |
+| [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md)     | F2 maintainers        | Workspace MCP transport pool design v2.2                 |
 
 If you want to **start a daemon and use it**, read `qwen-serve.md` first. If you want to **build a client against the wire format**, read `qwen-serve-protocol.md`. If you want to **understand, extend, or debug the daemon internals**, read this set.
 
@@ -124,7 +125,7 @@ Use these anchors when moving from the docs into the latest `main` code:
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | HTTP routes   | The route catalog lives in `qwen-serve-protocol.md`; this daemon set only references it and explains implementation ownership.                      | [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md), [`20`](./20-quickstart-operations.md)               |
 | Event schema  | `EVENT_SCHEMA_VERSION = 1`; 43 known event types; id-less subscriber synthetic frames; `_meta.serverTimestamp` stamped at SSE write boundary.       | [`09`](./09-event-schema.md), [`10`](./10-event-bus.md)                                                       |
-| Capabilities  | `SERVE_PROTOCOL_VERSION = 'v1'`; 66 registered tags; 10 conditional tags.                                                                           | [`11`](./11-capabilities-versioning.md)                                                                       |
+| Capabilities  | `SERVE_PROTOCOL_VERSION = 'v1'`; 67 registered tags; 10 conditional tags.                                                                           | [`11`](./11-capabilities-versioning.md)                                                                       |
 | Session shell | `POST /session/:id/shell` exists behind `--enable-session-shell`, bearer auth, and session-bound `X-Qwen-Client-Id`; capability tag is conditional. | [`11`](./11-capabilities-versioning.md), [`17`](./17-configuration.md), [`20`](./20-quickstart-operations.md) |
 | Rate limiting | Optional per-tier HTTP rate limit is exposed by CLI flags/env and conditional capability tag.                                                       | [`11`](./11-capabilities-versioning.md), [`17`](./17-configuration.md)                                        |
 

@@ -13,6 +13,7 @@ This doc gives the **system-level picture** that the rest of this documentation 
 ```mermaid
 flowchart LR
     subgraph clients["Clients"]
+        WUI["Web UI<br/>(packages/webui/src/daemon)"]
         TUI["CLI TUI<br/>(packages/cli/src/ui/daemon)"]
         IDE["VS Code IDE<br/>(packages/vscode-ide-companion)"]
         CH["Channel bots<br/>(DingTalk / WeChat / Telegram)"]
@@ -38,6 +39,7 @@ flowchart LR
         MCP2["MCP server B<br/>(websocket)"]
     end
 
+    WUI -- "HTTP+SSE" --> EXP
     TUI -- "HTTP+SSE" --> EXP
     IDE -- "HTTP+SSE (loopback)" --> EXP
     CH -- "HTTP+SSE" --> EXP
@@ -92,9 +94,11 @@ flowchart TB
         EVT["events.ts"]
         SSE["sse.ts"]
         AUTHF["DaemonAuthFlow.ts"]
+        UI["ui/* (#4328 + #4353)<br/>normalizer / transcript / store / render"]
     end
 
     subgraph adapters["Adapters"]
+        WUIP["webui/src/daemon/<br/>DaemonSessionProvider.tsx"]
         TUIA["cli/src/ui/daemon/<br/>DaemonTuiAdapter.ts"]
         CHB["channels/base/<br/>DaemonChannelBridge.ts"]
         DT["channels/dingtalk"]
@@ -119,6 +123,8 @@ flowchart TB
     POOL2 --> WBG
     POOL2 --> SMV
 
+    WUIP --> DSC
+    WUIP --> UI
     TUIA --> DSC
     CHB --> DSC
     DT --> CHB
@@ -318,26 +324,27 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 
 ## Critical files
 
-| Concern              | File                                                                 |
-| -------------------- | -------------------------------------------------------------------- |
-| Bootstrap            | `packages/cli/src/serve/runQwenServe.ts` (308-994)                   |
-| Express app          | `packages/cli/src/serve/server.ts` (261-339)                         |
-| Capability registry  | `packages/cli/src/serve/capabilities.ts` (37-215)                    |
-| Auth middleware      | `packages/cli/src/serve/auth.ts` (1-60)                              |
-| Bridge               | `packages/acp-bridge/src/bridge.ts`                                  |
-| BridgeClient         | `packages/acp-bridge/src/bridgeClient.ts`                            |
-| Permission mediator  | `packages/acp-bridge/src/permissionMediator.ts` (1-1198)             |
-| EventBus             | `packages/acp-bridge/src/eventBus.ts`                                |
-| MCP transport pool   | `packages/core/src/tools/mcp-transport-pool.ts` (104+)               |
-| Workspace MCP budget | `packages/core/src/tools/mcp-workspace-budget.ts`                    |
-| Workspace FS         | `packages/cli/src/serve/fs/`                                         |
-| SDK DaemonClient     | `packages/sdk-typescript/src/daemon/DaemonClient.ts` (209-1506)      |
-| SDK SessionClient    | `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts` (61-385) |
-| Event schema         | `packages/sdk-typescript/src/daemon/events.ts` (13-63)               |
+| Concern              | File                                                        |
+| -------------------- | ----------------------------------------------------------- |
+| Bootstrap            | `packages/cli/src/serve/runQwenServe.ts`                    |
+| Express app          | `packages/cli/src/serve/server.ts`                          |
+| Capability registry  | `packages/cli/src/serve/capabilities.ts`                    |
+| Auth middleware      | `packages/cli/src/serve/auth.ts`                            |
+| Bridge               | `packages/acp-bridge/src/bridge.ts`                         |
+| BridgeClient         | `packages/acp-bridge/src/bridgeClient.ts`                   |
+| Permission mediator  | `packages/acp-bridge/src/permissionMediator.ts`             |
+| EventBus             | `packages/acp-bridge/src/eventBus.ts`                       |
+| MCP transport pool   | `packages/core/src/tools/mcp-transport-pool.ts`             |
+| Workspace MCP budget | `packages/core/src/tools/mcp-workspace-budget.ts`           |
+| Workspace FS         | `packages/cli/src/serve/fs/`                                |
+| SDK DaemonClient     | `packages/sdk-typescript/src/daemon/DaemonClient.ts`        |
+| SDK SessionClient    | `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts` |
+| Event schema         | `packages/sdk-typescript/src/daemon/events.ts`              |
 
 ## References
 
 - Design issues: [#3803](https://github.com/QwenLM/qwen-code/issues/3803) (daemon design), [#4175](https://github.com/QwenLM/qwen-code/issues/4175) (F-series milestones).
 - User guide: [`../../users/qwen-serve.md`](../../users/qwen-serve.md).
 - Wire protocol reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md).
+- F2 design document: [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md).
 - F2 design notes: issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) commits 4-6.

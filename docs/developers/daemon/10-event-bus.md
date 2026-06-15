@@ -19,14 +19,14 @@
 
 ## Architecture
 
-| Constant                               | Value       | Purpose                                                               |
-| -------------------------------------- | ----------- | --------------------------------------------------------------------- |
-| `EVENT_SCHEMA_VERSION`                 | `1`         | Stamped on every `BridgeEvent.v`; bumped on breaking frame changes.   |
-| `DEFAULT_RING_SIZE`                    | `8000`      | Per-session replay ring. Operator override via `--event-ring-size`.   |
-| `DEFAULT_MAX_QUEUED`                   | `256`       | Per-subscriber backlog cap.                                           |
-| `DEFAULT_MAX_SUBSCRIBERS`              | `64`        | Per-session subscriber cap.                                           |
-| `WARN_THRESHOLD_RATIO`                 | `0.75`      | `slow_client_warning` trigger fraction of `maxQueued`.                |
-| `WARN_RESET_RATIO`                     | `0.375`     | Hysteresis re-arm fraction.                                           |
+| Constant                               | Value       | Purpose                                                                                            |
+| -------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------- |
+| `EVENT_SCHEMA_VERSION`                 | `1`         | Stamped on every `BridgeEvent.v`; bumped on breaking frame changes.                                |
+| `DEFAULT_RING_SIZE`                    | `8000`      | Per-session replay ring. Operator override via `--event-ring-size`.                                |
+| `DEFAULT_MAX_QUEUED`                   | `256`       | Per-subscriber backlog cap.                                                                        |
+| `DEFAULT_MAX_SUBSCRIBERS`              | `64`        | Per-session subscriber cap.                                                                        |
+| `WARN_THRESHOLD_RATIO`                 | `0.75`      | `slow_client_warning` trigger fraction of `maxQueued`.                                             |
+| `WARN_RESET_RATIO`                     | `0.375`     | Hysteresis re-arm fraction.                                                                        |
 | `MAX_EVENT_RING_SIZE` (in `bridge.ts`) | `1_000_000` | Soft upper bound on `BridgeOptions.eventRingSize` to catch out-of-memory failures caused by typos. |
 
 ### `BridgeEvent`
@@ -71,16 +71,16 @@ flowchart TD
     P["publish({type, data, originatorClientId?})"] --> C{"bus closed?"}
     C -->|yes| RU["return undefined"]
     C -->|no| AID["assign id = nextId++, v = 1"]
-    AID --> PR["push to ring (shift if &gt; ringSize)"]
+    AID --> PR["push to ring (shift if > ringSize)"]
     PR --> FAN["snapshot subscribers, for each sub:"]
     FAN --> EVCK{"sub.evicted?"}
     EVCK -->|yes| NEXT[next subscriber]
     EVCK -->|no| PUSH["sub.queue.push(event)"]
     PUSH --> OK{"accepted?"}
     OK -->|no| EVICT["mark evicted; force-push client_evicted; queue.close; sub.dispose"]
-    OK -->|yes| WARN{"!warned && liveSize &gt;= warnThreshold?"}
+    OK -->|yes| WARN{"!warned && liveSize >= warnThreshold?"}
     WARN -->|yes| FW["force-push slow_client_warning; warned = true"]
-    WARN -->|no| RES{"warned && liveSize &lt;= warnResetThreshold?"}
+    WARN -->|no| RES{"warned && liveSize <= warnResetThreshold?"}
     RES -->|yes| RA["warned = false (hysteresis re-arm)"]
     RES -->|no| NEXT
 ```
