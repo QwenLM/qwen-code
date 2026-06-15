@@ -1,169 +1,169 @@
 # Typed Daemon Event Schema v1
 
-## 概览
+## Overview
 
-daemon 在 `GET /session/:id/events` 上发的每一帧 SSE 都形如 `{ id, v, type, data, originatorClientId?, _meta? }`，`v: 1` 是当前 `EVENT_SCHEMA_VERSION`。`type` 取自一个封闭的、版本固定的集合 —— `DAEMON_KNOWN_EVENT_TYPE_VALUES`（`packages/sdk-typescript/src/daemon/events.ts`）共 43 种。envelope 的 `_meta` 字段在 SSE 写边界（`server.ts` 的 `formatSseFrame()`）盖上 —— 详见下文 [Envelope 级元数据](#envelope-级元数据)。
+Every SSE frame emitted by the daemon on `GET /session/:id/events` has the shape `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` comes from the closed, version-pinned `DAEMON_KNOWN_EVENT_TYPE_VALUES` set in `packages/sdk-typescript/src/daemon/events.ts`; the current set has 43 known event types. The envelope `_meta` field is stamped at the SSE write boundary by `formatSseFrame()` in `server.ts`; see [Envelope-level metadata](#envelope-level-metadata).
 
-SDK 暴露 `asKnownDaemonEvent(evt)`，对已知 type 返回一个判别式 `KnownDaemonEvent`，对其他 type 返回 `undefined` —— SDK 消费方无需固定 SDK 版本就能处理向前兼容（更新的 daemon 加了新 type 也不会崩，会计入 `unrecognizedKnownEventCount`）。
+The SDK exposes `asKnownDaemonEvent(evt)`. It returns a discriminated `KnownDaemonEvent` for known event types and `undefined` for other types. SDK consumers can therefore handle forward compatibility without requiring a lockstep SDK upgrade when a newer daemon adds an event type; the session reducer records those as `unrecognizedKnownEventCount`.
 
-wire 格式见 [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)，本文是每个事件的 payload 契约。
+The wire format lives in [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md). This page is the payload contract for each event.
 
-## 职责
+## Responsibilities
 
-- 提供事件词汇表的唯一事实来源（`DAEMON_KNOWN_EVENT_TYPE_VALUES`）。
-- 提供每种 type 的 typed envelope（`DaemonEventEnvelope<TType, TData>`）。
-- 提供纯 reducer（`reduceDaemonSessionEvent`、`reduceDaemonAuthEvent`），把事件流投影成 SDK view-state。
-- 通过 `typed_event_schema` 能力 tag 广播（信息性 —— 不广播时 `asKnownDaemonEvent` 仍 fallback 到 `unknown`）。
+- Provide the single source of truth for the event vocabulary (`DAEMON_KNOWN_EVENT_TYPE_VALUES`).
+- Provide a typed envelope for each event type (`DaemonEventEnvelope<TType, TData>`).
+- Provide pure reducers (`reduceDaemonSessionEvent`, `reduceDaemonAuthEvent`) that project an event stream into SDK view state.
+- Broadcast the `typed_event_schema` capability tag as an informational signal. If the tag is absent, `asKnownDaemonEvent` still falls back to `unknown`.
 
-## 事件词汇表（43 种已知 type）
+## Event vocabulary (43 known types)
 
-按域分组。
+Grouped by domain.
 
 ### Core session
 
-| Type                       | 方向         | 触发                                                                     | Payload 关键字段                                                                 |
-| -------------------------- | ------------ | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| `session_update`           | S→C          | 任意 ACP `sessionUpdate` 通知（agent text / thought / tool call / plan） | `sessionUpdate: string, content?: ...`（不透明 ACP shape）                       |
-| `session_metadata_updated` | S→C          | `PATCH /session/:id/metadata`                                            | `sessionId, displayName?`                                                        |
-| `session_died`             | S→C **终态** | `channel.exited` 触发                                                    | `sessionId, reason, exitCode? \| null, signalCode? \| null`                      |
-| `session_closed`           | S→C **终态** | `DELETE /session/:id` 或程序化关闭                                       | `sessionId, reason: 'client_close' \| string, closedBy?`                         |
-| `session_snapshot`         | S→C **合成** | SSE attach / replay 后的快照帧                                           | `sessionId, currentModelId: string \| null, currentApprovalMode: string \| null` |
+| Type                       | Direction      | Trigger                                                                       | Key payload fields                                                               |
+| -------------------------- | -------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `session_update`           | S->C           | Any ACP `sessionUpdate` notification: agent text, thought, tool call, or plan | `sessionUpdate: string, content?: ...` (opaque ACP shape)                        |
+| `session_metadata_updated` | S->C           | `PATCH /session/:id/metadata`                                                 | `sessionId, displayName?`                                                        |
+| `session_died`             | S->C terminal  | `channel.exited`                                                              | `sessionId, reason, exitCode? \| null, signalCode? \| null`                      |
+| `session_closed`           | S->C terminal  | `DELETE /session/:id` or programmatic close                                   | `sessionId, reason: 'client_close' \| string, closedBy?`                         |
+| `session_snapshot`         | S->C synthetic | Snapshot frame after SSE attach / replay                                      | `sessionId, currentModelId: string \| null, currentApprovalMode: string \| null` |
 
-### Subscriber 级合成帧
+### Subscriber-level synthetic frames
 
-| Type                    | 触发                                                                                                                                                                                  | 备注                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `client_evicted`        | EventBus 每订阅者队列溢出。**无 `id`**                                                                                                                                                | `reason: string, droppedAfter?: number`；只对当前订阅者终态，session 还活着                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `slow_client_warning`   | 队列 ≥ 75%（force-push，**无 `id`**）                                                                                                                                                 | `queueSize, maxQueued, lastEventId`；37.5% 滞回 re-arm                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `stream_error`          | `SubscriberLimitExceededError` 或其他路由流错                                                                                                                                         | `error: string`；订阅终态                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `state_resync_required` | `subscribe({lastEventId})` 时 daemon 环里已不再持有 `[lastEventId+1, earliestInRing-1]` 这段间隙，或客户端游标来自上一轮 bus epoch。在剩余 replay 帧**之前**强推。**无 `id`**         | `reason: 'ring_evicted' \| 'epoch_reset' \| string`、`lastDeliveredId: number`、`earliestAvailableId: number`。`ring_evicted` 表示同一 epoch 的 ring 缺口；`epoch_reset` 表示 daemon / EventBus 重建后客户端带了旧 epoch 的高水位。**面向恢复，非终态** —— SSE 流保持打开，replay + live 帧继续；SDK reducer 翻转 `awaitingResync = true`，自动跳过 delta，直到调用方调 `loadSession` 重置。daemon 端实现见 `packages/acp-bridge/src/eventBus.ts`，SDK 端见 `packages/sdk-typescript/src/daemon/events.ts` |
-| `replay_complete`       | `Last-Event-ID` 重放循环结束时强推的 id-less 哨兵；clean-replay 与 ring-evicted（`state_resync_required`）两条路径都发，即使无帧可重放（`data.replayedCount === 0`）也发。**无 `id`** | `replayedCount: number`；消费方据此确定性地撤掉 catch-up 指示，不必靠超时                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Type                    | Trigger                                                                                                                                                                                                                                    | Notes                                                                                                                                                                                                                                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `client_evicted`        | Per-subscriber EventBus queue overflow. **No `id`**                                                                                                                                                                                        | `reason: string, droppedAfter?: number`; terminal only for the current subscriber, while the session remains alive.                                                                                                                                                                                            |
+| `slow_client_warning`   | Queue >= 75%; force-pushed and **has no `id`**                                                                                                                                                                                             | `queueSize, maxQueued, lastEventId`; re-armed after the queue drops below 37.5%.                                                                                                                                                                                                                               |
+| `stream_error`          | `SubscriberLimitExceededError` or another route stream error                                                                                                                                                                               | `error: string`; terminal for the subscription.                                                                                                                                                                                                                                                                |
+| `state_resync_required` | `subscribe({ lastEventId })` detects that the daemon ring no longer holds `[lastEventId + 1, earliestInRing - 1]`, or the client cursor is from a previous bus epoch. Force-pushed **before** remaining replay frames and **has no `id`**. | `reason: 'ring_evicted' \| 'epoch_reset' \| string`, `lastDeliveredId`, `earliestAvailableId`. This is a recovery signal, not terminal: the SSE stream stays open and replay + live frames continue. The SDK reducer sets `awaitingResync = true` and skips deltas until the caller resets with `loadSession`. |
+| `replay_complete`       | Id-less sentinel emitted after the `Last-Event-ID` replay loop finishes, for both clean replay and ring-evicted paths, even when `data.replayedCount === 0`. **No `id`**                                                                   | `replayedCount: number`; lets consumers remove catch-up UI deterministically without a timeout.                                                                                                                                                                                                                |
 
-### Permissions（F3 + base）
+### Permissions (F3 + base)
 
-| Type                          | 方向 | 触发                                   | Payload 关键字段                                                                                                                       |
-| ----------------------------- | ---- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `permission_request`          | S→C  | agent 调 `requestPermission`           | `requestId, sessionId, toolCall, options[]`；envelope 盖 `originatorClientId`（= prompt originator，F3 N3）                            |
-| `permission_resolved`         | S→C  | mediator 已裁决                        | `requestId, outcome`（ACP `PermissionOutcome`）                                                                                        |
-| `permission_already_resolved` | S→C  | 已裁决后投票才到                       | `requestId, sessionId, outcome`                                                                                                        |
-| `permission_partial_vote`     | S→C  | `consensus` 策略记录了一次不裁决的投票 | `requestId, sessionId, votesReceived, votesNeeded (≥1), quorum, optionTallies: Record<string, number>, originatorClientId?`            |
-| `permission_forbidden`        | S→C  | 投票被策略拒绝                         | `requestId, sessionId, clientId?, reason: 'designated_mismatch' \| 'remote_not_allowed', originatorClientId?`；匿名投票者无 `clientId` |
+| Type                          | Direction | Trigger                                            | Key payload fields                                                                                                                               |
+| ----------------------------- | --------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `permission_request`          | S->C      | Agent calls `requestPermission`                    | `requestId, sessionId, toolCall, options[]`; the envelope stamps `originatorClientId` from the prompt originator.                                |
+| `permission_resolved`         | S->C      | Mediator has decided                               | `requestId, outcome` (ACP `PermissionOutcome`)                                                                                                   |
+| `permission_already_resolved` | S->C      | Vote arrives after the request was already decided | `requestId, sessionId, outcome`                                                                                                                  |
+| `permission_partial_vote`     | S->C      | `consensus` policy records a non-final vote        | `requestId, sessionId, votesReceived, votesNeeded (>= 1), quorum, optionTallies: Record<string, number>, originatorClientId?`                    |
+| `permission_forbidden`        | S->C      | Policy rejects a vote                              | `requestId, sessionId, clientId?, reason: 'designated_mismatch' \| 'remote_not_allowed', originatorClientId?`; anonymous voters omit `clientId`. |
 
 ### Models
 
-| Type                  | 方向 | Payload                                      |
-| --------------------- | ---- | -------------------------------------------- |
-| `model_switched`      | S→C  | `sessionId, modelId`                         |
-| `model_switch_failed` | S→C  | `sessionId, requestedModelId, error: string` |
+| Type                  | Direction | Payload                                      |
+| --------------------- | --------- | -------------------------------------------- |
+| `model_switched`      | S->C      | `sessionId, modelId`                         |
+| `model_switch_failed` | S->C      | `sessionId, requestedModelId, error: string` |
 
-### MCP guardrails（PR 14b + F2）
+### MCP guardrails (PR 14b + F2)
 
-| Type                         | 方向 | Payload                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ---------------------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mcp_budget_warning`         | S→C  | `liveCount, reservedCount, budget, thresholdRatio: 0.75, mode: 'warn' \| 'enforce', scope?: 'workspace' \| 'session'`                                                                                                                                                                                                                                                                                                                   |
-| `mcp_child_refused_batch`    | S→C  | `refusedServers: [{name, transport, reason: 'budget_exhausted'}], budget, liveCount, reservedCount, mode: 'enforce', scope?: 'workspace' \| 'session'`                                                                                                                                                                                                                                                                                  |
-| `mcp_server_restarted`       | S→C  | `serverName, durationMs, entryIndex?`（F2 多 entry）                                                                                                                                                                                                                                                                                                                                                                                    |
-| `mcp_server_restart_refused` | S→C  | `serverName, reason: 'budget_would_exceed' \| 'in_flight' \| 'disabled' \| 'restart_failed', entryIndex?, details?`。第 4 个值 `'restart_failed'`（F2 commit 5）携带底层硬失败，`details` 是自由格式字符串，给池模式多 entry restart 用。**封闭集判别**：`MCP_RESTART_REFUSED_REASONS` 拒绝未知 reason，老 SDK reducer 看到加法新值会**默默丢弃**事件（`parseDaemonEvent` 返回 `undefined`）。新 reason 值必须与认识它的 SDK 版本一起发 |
+| Type                         | Direction | Payload                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mcp_budget_warning`         | S->C      | `liveCount, reservedCount, budget, thresholdRatio: 0.75, mode: 'warn' \| 'enforce', scope?: 'workspace' \| 'session'`                                                                                                                                                                                                                                                                                                                             |
+| `mcp_child_refused_batch`    | S->C      | `refusedServers: [{ name, transport, reason: 'budget_exhausted' }], budget, liveCount, reservedCount, mode: 'enforce', scope?: 'workspace' \| 'session'`                                                                                                                                                                                                                                                                                          |
+| `mcp_server_restarted`       | S->C      | `serverName, durationMs, entryIndex?` for F2 multi-entry pool restarts                                                                                                                                                                                                                                                                                                                                                                            |
+| `mcp_server_restart_refused` | S->C      | `serverName, reason: 'budget_would_exceed' \| 'in_flight' \| 'disabled' \| 'restart_failed', entryIndex?, details?`. The fourth value, `restart_failed`, carries an underlying hard failure for pool-mode multi-entry restart. `MCP_RESTART_REFUSED_REASONS` rejects unknown reasons; an older SDK reducer silently drops additive new reason values because `parseDaemonEvent` returns `undefined`. Ship a new reason with an SDK that knows it. |
 
-### Mutation control（Wave 4 PR 16+17）
+### Mutation control (Wave 4 PR 16+17)
 
-| Type                    | 方向 | Payload                                                                               |
-| ----------------------- | ---- | ------------------------------------------------------------------------------------- |
-| `memory_changed`        | S→C  | `scope: 'workspace' \| 'global', filePath, mode: 'append' \| 'replace', bytesWritten` |
-| `agent_changed`         | S→C  | `change: 'created' \| 'updated' \| 'deleted', name, level: 'project' \| 'user'`       |
-| `approval_mode_changed` | S→C  | `sessionId, previous, next, persisted: boolean`                                       |
-| `tool_toggled`          | S→C  | `toolName, enabled`（下次 ACP child spawn 才生效，不会回溯改动已在跑的 session）      |
-| `settings_changed`      | S→C  | workspace settings 写入完成；payload 是开放对象，消费方用 read-after-write 刷新       |
-| `settings_reloaded`     | S→C  | daemon workspace service 重新读取 settings；payload 是开放对象                        |
-| `workspace_initialized` | S→C  | `path, action: 'created' \| 'overwrote' \| 'noop', originatorClientId?`               |
+| Type                    | Direction | Payload                                                                                              |
+| ----------------------- | --------- | ---------------------------------------------------------------------------------------------------- |
+| `memory_changed`        | S->C      | `scope: 'workspace' \| 'global', filePath, mode: 'append' \| 'replace', bytesWritten`                |
+| `agent_changed`         | S->C      | `change: 'created' \| 'updated' \| 'deleted', name, level: 'project' \| 'user'`                      |
+| `approval_mode_changed` | S->C      | `sessionId, previous, next, persisted: boolean`                                                      |
+| `tool_toggled`          | S->C      | `toolName, enabled`; affects the next ACP child spawn and does not mutate already-running sessions.  |
+| `settings_changed`      | S->C      | Workspace settings write completed. Payload is open; consumers should refresh with read-after-write. |
+| `settings_reloaded`     | S->C      | Daemon workspace service reread settings. Payload is open.                                           |
+| `workspace_initialized` | S->C      | `path, action: 'created' \| 'overwrote' \| 'noop', originatorClientId?`                              |
 
-### Auth device flow（PR 21）
+### Auth device flow (PR 21)
 
-这些是 workspace-keyed 不是 session-keyed。session reducer 对它们 no-op；`reduceDaemonAuthEvent` 投到 workspace-level state。
+These events are workspace-keyed, not session-keyed. The session reducer treats them as no-ops; `reduceDaemonAuthEvent` projects them into workspace-level state.
 
-| Type                          | 方向 | Payload                                               |
-| ----------------------------- | ---- | ----------------------------------------------------- |
-| `auth_device_flow_started`    | S→C  | `deviceFlowId, providerId, expiresAt`                 |
-| `auth_device_flow_throttled`  | S→C  | `deviceFlowId, intervalMs`                            |
-| `auth_device_flow_authorized` | S→C  | `deviceFlowId, providerId, expiresAt?, accountAlias?` |
-| `auth_device_flow_failed`     | S→C  | `deviceFlowId, errorKind, hint?`                      |
-| `auth_device_flow_cancelled`  | S→C  | `deviceFlowId`                                        |
+| Type                          | Direction | Payload                                               |
+| ----------------------------- | --------- | ----------------------------------------------------- |
+| `auth_device_flow_started`    | S->C      | `deviceFlowId, providerId, expiresAt`                 |
+| `auth_device_flow_throttled`  | S->C      | `deviceFlowId, intervalMs`                            |
+| `auth_device_flow_authorized` | S->C      | `deviceFlowId, providerId, expiresAt?, accountAlias?` |
+| `auth_device_flow_failed`     | S->C      | `deviceFlowId, errorKind, hint?`                      |
+| `auth_device_flow_cancelled`  | S->C      | `deviceFlowId`                                        |
 
-### MCP runtime mutation（运行时增删 server）
+### MCP runtime mutation
 
-| Type                 | 方向 | 触发                                               | Payload 关键字段                                                             |
-| -------------------- | ---- | -------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `mcp_server_added`   | S→C  | 运行时经 `POST /workspace/mcp/servers` 新增 server | `name, transport, replaced, shadowedSettings, toolCount, originatorClientId` |
-| `mcp_server_removed` | S→C  | 运行时移除 server                                  | `name, wasShadowingSettings, originatorClientId`                             |
+| Type                 | Direction | Trigger                                                       | Key payload fields                                                           |
+| -------------------- | --------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `mcp_server_added`   | S->C      | Server added at runtime through `POST /workspace/mcp/servers` | `name, transport, replaced, shadowedSettings, toolCount, originatorClientId` |
+| `mcp_server_removed` | S->C      | Server removed at runtime                                     | `name, wasShadowingSettings, originatorClientId`                             |
 
-### Turn 生命周期 / 助手推送（assist）
+### Turn lifecycle / assistant pushes
 
-| Type                  | 方向 | 触发                                                                              | Payload 关键字段                                                                                                                                           |
-| --------------------- | ---- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `prompt_cancelled`    | S→C  | prompt 被取消（显式 `cancelSession` 路由 **或** originator SSE 断开）             | envelope 盖 `originatorClientId`（取消方）；语义是「请求取消」而非「确认取消」。多客户端 session 中，peer 订阅者据此知道 prompt 已终止                     |
-| `turn_complete`       | S→C  | 一个 turn 正常结束                                                                | `sessionId, stopReason, promptId?`。**`promptId`** 与 non-blocking prompt（202 响应）关联——SDK 通过匹配 `promptId` 将 SSE 事件与发起的 prompt 绑定         |
-| `turn_error`          | S→C  | turn 出错                                                                         | `sessionId, message, code?, promptId?`。同上 `promptId` 关联机制                                                                                           |
-| `session_rewound`     | S→C  | `POST /session/:id/rewind` 成功回滚                                               | `sessionId, promptId, targetTurnIndex, filesChanged[], filesFailed[], originatorClientId?`                                                                 |
-| `session_branched`    | S→C  | `POST /session/:id/branch` 从既有 session 分支                                    | `sourceSessionId, newSessionId, displayName, originatorClientId?`                                                                                          |
-| `followup_suggestion` | S→C  | end_turn 后 ACP child 生成的 ghost-text 后续建议，经 per-session SSE 转发         | `sessionId, suggestion, promptId`（wire 只带 `getFilterReason()===null` 的建议）。客户端渲染为输入占位符 ghost-text，下次 sendPrompt 时自行失效            |
-| `user_shell_command`  | S→C  | 用户通过 `POST /session/:id/shell` 发起的 shell 命令，扇出给同 session 其他订阅者 | `sessionId, command, shellId, originatorClientId?`。**无 typed `DaemonXxxData` 接口**——`asKnownDaemonEvent` 返回 `undefined`，由 normalizer 层 ad-hoc 解析 |
-| `user_shell_result`   | S→C  | 上述 shell 命令的执行结果                                                         | `sessionId, shellId, exitCode, output, aborted`。同上，无 typed 接口                                                                                       |
+| Type                  | Direction | Trigger                                                                                                             | Key payload fields                                                                                                                                                                                 |
+| --------------------- | --------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt_cancelled`    | S->C      | Prompt was cancelled through explicit `cancelSession` route **or** originator SSE disconnect                        | Envelope stamps `originatorClientId` for the canceling client. This means "cancellation requested", not "cancellation confirmed". Peer subscribers learn that the prompt has ended.                |
+| `turn_complete`       | S->C      | A turn completed successfully                                                                                       | `sessionId, stopReason, promptId?`. `promptId` links to non-blocking prompt responses (`202`). The SDK matches SSE events to the originating prompt through it.                                    |
+| `turn_error`          | S->C      | A turn failed                                                                                                       | `sessionId, message, code?, promptId?`; same `promptId` correlation mechanism.                                                                                                                     |
+| `session_rewound`     | S->C      | `POST /session/:id/rewind` succeeded                                                                                | `sessionId, promptId, targetTurnIndex, filesChanged[], filesFailed[], originatorClientId?`                                                                                                         |
+| `session_branched`    | S->C      | `POST /session/:id/branch` created a branch from an existing session                                                | `sourceSessionId, newSessionId, displayName, originatorClientId?`                                                                                                                                  |
+| `followup_suggestion` | S->C      | ACP child generated ghost-text follow-up suggestions after `end_turn`, forwarded over per-session SSE               | `sessionId, suggestion, promptId`; wire only carries suggestions whose `getFilterReason() === null`. Clients render them as input-placeholder ghost text and invalidate them on next `sendPrompt`. |
+| `user_shell_command`  | S->C      | User started a shell command through `POST /session/:id/shell`; fanned out to other subscribers in the same session | `sessionId, command, shellId, originatorClientId?`. There is no typed `DaemonXxxData` interface yet; `asKnownDaemonEvent` returns `undefined` and the UI normalizer parses it ad hoc.              |
+| `user_shell_result`   | S->C      | Result of the shell command above                                                                                   | `sessionId, shellId, exitCode, output, aborted`. Same ad hoc parsing note as `user_shell_command`.                                                                                                 |
 
-## 架构
+## Architecture
 
-| 关注点                                 | 源                                             | 说明                                                                                    |
-| -------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `EVENT_SCHEMA_VERSION = 1`             | `packages/acp-bridge/src/eventBus.ts`          | 每帧带                                                                                  |
-| `DAEMON_KNOWN_EVENT_TYPE_VALUES`       | `packages/sdk-typescript/src/daemon/events.ts` | 封闭列表（43 种）                                                                       |
-| `DaemonEventEnvelope<TType, TData>`    | `events.ts`                                    | 泛型 envelope                                                                           |
-| `DaemonKnownEventType`                 | `events.ts`                                    | `typeof DAEMON_KNOWN_EVENT_TYPE_VALUES[number]`                                         |
-| 各事件 payload 类型                    | `events.ts`                                    | 多数 type 有 `DaemonXxxData` interface；`user_shell_*` 当前由 UI normalizer ad-hoc 解析 |
-| `asKnownDaemonEvent(evt)`              | `events.ts`                                    | 返回 `KnownDaemonEvent \| undefined`                                                    |
-| `reduceDaemonSessionEvent(state, evt)` | `events.ts`                                    | 投到 `DaemonSessionViewState`                                                           |
-| `reduceDaemonAuthEvent(state, evt)`    | `events.ts`                                    | 投到 `DaemonAuthState`                                                                  |
-| `isWorkspaceScopedBudgetEvent(evt)`    | `events.ts`                                    | 判别 F2 `scope: 'workspace'`                                                            |
+| Concern                                | Source                                         | Notes                                                                                                              |
+| -------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `EVENT_SCHEMA_VERSION = 1`             | `packages/acp-bridge/src/eventBus.ts`          | Sent on every frame.                                                                                               |
+| `DAEMON_KNOWN_EVENT_TYPE_VALUES`       | `packages/sdk-typescript/src/daemon/events.ts` | Closed list with 43 types.                                                                                         |
+| `DaemonEventEnvelope<TType, TData>`    | `events.ts`                                    | Generic envelope.                                                                                                  |
+| `DaemonKnownEventType`                 | `events.ts`                                    | `typeof DAEMON_KNOWN_EVENT_TYPE_VALUES[number]`.                                                                   |
+| Per-event payload types                | `events.ts`                                    | Most event types have a `DaemonXxxData` interface; `user_shell_*` is currently parsed ad hoc by the UI normalizer. |
+| `asKnownDaemonEvent(evt)`              | `events.ts`                                    | Returns `KnownDaemonEvent \| undefined`.                                                                           |
+| `reduceDaemonSessionEvent(state, evt)` | `events.ts`                                    | Projects into `DaemonSessionViewState`.                                                                            |
+| `reduceDaemonAuthEvent(state, evt)`    | `events.ts`                                    | Projects into `DaemonAuthState`.                                                                                   |
+| `isWorkspaceScopedBudgetEvent(evt)`    | `events.ts`                                    | Detects F2 `scope: 'workspace'`.                                                                                   |
 
 ### `DaemonSessionViewState`
 
-`reduceDaemonSessionEvent` 填充，CLI TUI adapter、`DaemonChannelBridge`、VSCode IDE 都消费。关键字段：
+`reduceDaemonSessionEvent` fills this view state. CLI TUI adapter, `DaemonChannelBridge`, and VSCode IDE consume it. Key fields:
 
-- `alive: boolean` — 一旦观察到终态帧（`session_died` / `session_closed` / `client_evicted` / `stream_error`）变 `false`。
-- `currentModelId?: string` — 由 `model_switched`。
-- `displayName?: string` — 由 `session_metadata_updated`。
-- `pendingPermissions: Record<string, DaemonPermissionRequestData>` — 当前打开的请求，按 requestId 索引；`permission_resolved` / `permission_already_resolved` 时清掉。
-- `lastSessionUpdate?: DaemonSessionUpdateData` — 最近的 `session_update`。
-- `lastModelSwitchFailure?: DaemonModelSwitchFailedData` — 由 `model_switch_failed`。
-- `terminalEvent?` — 终态帧原始事件。
-- `streamError?: DaemonStreamErrorData` — 最近的 `stream_error` payload。
-- `unrecognizedKnownEventCount`、`lastUnrecognizedKnownEvent?` — `asKnownDaemonEvent` 识别但 reducer 尚未建专用状态的事件。
-- `droppedPermissionRequestCount`、`lastDroppedPermissionRequestId?` — 结构不合法、无法进入 pending map 的权限请求。
-- `unmatchedPermissionResolutionCount`、`lastUnmatchedPermissionResolutionId?` — 没有匹配 pending request 的权限 resolution。
-- `slowClientWarningCount`、`lastSlowClientWarning?` — 由 `slow_client_warning`。
-- `mcpBudgetWarningCount`、`lastMcpBudgetWarning?` — 由 `mcp_budget_warning`。
-- `mcpChildRefusedBatchCount`、`lastMcpChildRefusedBatch?` — 由 `mcp_child_refused_batch`。
-- `lastWorkspaceMutation?`、`lastWorkspaceMutationType?` — 由 `memory_changed` / `agent_changed`。
-- `approvalMode?`、`approvalModeChangedCount`、`lastApprovalModeChange?` — 由 `approval_mode_changed`。
-- `toolToggleCount`、`lastToolToggle?` — 由 `tool_toggled`。
-- `workspaceInitCount`、`lastWorkspaceInit?` — 由 `workspace_initialized`。
-- `mcpRestartCount`、`lastMcpRestart?` — 由 `mcp_server_restarted`。
-- `mcpRestartRefusedCount`、`lastMcpRestartRefused?` — 由 `mcp_server_restart_refused`。
-- `settings_changed` / `settings_reloaded` — `asKnownDaemonEvent` 识别，session reducer 当前不维护专用 view-state 字段；UI 一般把它们当作刷新 workspace settings 的信号。
-- `permissionVoteProgress: Record<string, DaemonPermissionPartialVoteData>` — consensus 投票进度（F3）。
-- `forbiddenVotes: DaemonPermissionForbiddenData[]`、`forbiddenVoteCount` — 被策略拒绝的投票记录（F3，上限 32）。
-- `awaitingResync: boolean` — `state_resync_required` 时置 `true`；消费方重置 view-state 时清。
-- `resyncRequiredCount`、`lastResyncRequired?` — resync 观测计数。
-- `lastFollowupSuggestion?: DaemonFollowupSuggestionData` — daemon 推送的后续建议。
-- `lastTurnComplete?: DaemonTurnCompleteData` — 最近的 turn 正常结束。
-- `lastTurnError?: DaemonTurnErrorData` — 最近的 turn 错误。
-- `rewindCount`、`lastRewind?`、`lastBranch?` — 最近的 rewind / branch 事件。
+- `alive: boolean` - becomes `false` after a terminal frame (`session_died`, `session_closed`, `client_evicted`, `stream_error`).
+- `currentModelId?: string` - from `model_switched`.
+- `displayName?: string` - from `session_metadata_updated`.
+- `pendingPermissions: Record<string, DaemonPermissionRequestData>` - open requests keyed by `requestId`; cleared by `permission_resolved` / `permission_already_resolved`.
+- `lastSessionUpdate?: DaemonSessionUpdateData` - latest `session_update`.
+- `lastModelSwitchFailure?: DaemonModelSwitchFailedData` - from `model_switch_failed`.
+- `terminalEvent?` - raw terminal event.
+- `streamError?: DaemonStreamErrorData` - latest `stream_error` payload.
+- `unrecognizedKnownEventCount`, `lastUnrecognizedKnownEvent?` - event was recognized by `asKnownDaemonEvent` but the reducer has no dedicated state for it yet.
+- `droppedPermissionRequestCount`, `lastDroppedPermissionRequestId?` - malformed permission request could not enter the pending map.
+- `unmatchedPermissionResolutionCount`, `lastUnmatchedPermissionResolutionId?` - permission resolution had no matching pending request.
+- `slowClientWarningCount`, `lastSlowClientWarning?` - from `slow_client_warning`.
+- `mcpBudgetWarningCount`, `lastMcpBudgetWarning?` - from `mcp_budget_warning`.
+- `mcpChildRefusedBatchCount`, `lastMcpChildRefusedBatch?` - from `mcp_child_refused_batch`.
+- `lastWorkspaceMutation?`, `lastWorkspaceMutationType?` - from `memory_changed` / `agent_changed`.
+- `approvalMode?`, `approvalModeChangedCount`, `lastApprovalModeChange?` - from `approval_mode_changed`.
+- `toolToggleCount`, `lastToolToggle?` - from `tool_toggled`.
+- `workspaceInitCount`, `lastWorkspaceInit?` - from `workspace_initialized`.
+- `mcpRestartCount`, `lastMcpRestart?` - from `mcp_server_restarted`.
+- `mcpRestartRefusedCount`, `lastMcpRestartRefused?` - from `mcp_server_restart_refused`.
+- `settings_changed` / `settings_reloaded` - recognized by `asKnownDaemonEvent`; the session reducer does not maintain dedicated view-state fields, and UIs usually treat them as refresh signals.
+- `permissionVoteProgress: Record<string, DaemonPermissionPartialVoteData>` - consensus voting progress.
+- `forbiddenVotes: DaemonPermissionForbiddenData[]`, `forbiddenVoteCount` - policy-rejected vote records, capped at 32.
+- `awaitingResync: boolean` - set by `state_resync_required`; cleared when consumer resets view state.
+- `resyncRequiredCount`, `lastResyncRequired?` - resync observability.
+- `lastFollowupSuggestion?: DaemonFollowupSuggestionData` - latest follow-up suggestion pushed by daemon.
+- `lastTurnComplete?: DaemonTurnCompleteData` - latest successful turn completion.
+- `lastTurnError?: DaemonTurnErrorData` - latest turn error.
+- `rewindCount`, `lastRewind?`, `lastBranch?` - latest rewind / branch events.
 
 ### `DaemonAuthState`
 
-按 `providerId` 一项，由 `auth_device_flow_*` 驱动。每个 flow 暴露 `{deviceFlowId, status, providerId, expiresAt?, lastThrottleIntervalMs?, lastError?}`。
+One entry per `providerId`, driven by `auth_device_flow_*`. Each flow exposes `{ deviceFlowId, status, providerId, expiresAt?, lastThrottleIntervalMs?, lastError? }`.
 
-## 流程
+## Flow
 
-### Producer 端
+### Producer side
 
 ```mermaid
 flowchart LR
@@ -171,31 +171,30 @@ flowchart LR
     B --> C{"Mapped to event type?"}
     C -->|yes| D["EventBus.publish({type, data, originatorClientId?})"]
     C -->|no| E["No emit (drop or log)"]
-    D --> F["Assigns id + v=1, pushes to ring"]
-    F --> G["Fans to all subscribers"]
+    D --> F["Assign id + v=1, push to ring"]
+    F --> G["Fan out to all subscribers"]
 ```
 
-### Consumer 端（SDK）
+### Consumer side (SDK)
 
 ```mermaid
 flowchart LR
-    A["SSE bytes"] --> B["parseSseStream → DaemonEvent[]"]
+    A["SSE bytes"] --> B["parseSseStream -> DaemonEvent[]"]
     B --> C["asKnownDaemonEvent(evt)"]
     C -->|"KnownDaemonEvent"| D["reduceDaemonSessionEvent(state, evt)"]
     C -->|"auth_device_flow_*"| E["reduceDaemonAuthEvent(state, evt)"]
-    C -->|"undefined"| F["unrecognizedKnownEventCount++ (forward-compat)"]
+    C -->|"undefined"| F["unrecognizedKnownEventCount++<br/>(forward-compat)"]
 ```
 
-## Envelope 级元数据
+## Envelope-level metadata
 
-除了每事件的 `data` payload，daemon 还在 envelope 上盖两个字段：
+Beyond each event's `data` payload, the daemon stamps two envelope-level fields.
 
-### `_meta.serverTimestamp` —— daemon 时钟
+### `_meta.serverTimestamp` - daemon clock
 
-在 `formatSseFrame()`（`packages/cli/src/serve/server.ts`）的 SSE 写边界盖，**不**在 `EventBus.publish`。这样内存里的 `BridgeEvent` 类型不变，内部 daemon 消费方看不到 `_meta`，只有 wire 上的 SSE 帧带。
+`formatSseFrame()` in `packages/cli/src/serve/server.ts` stamps this at the SSE write boundary, **not** inside `EventBus.publish`. The in-memory `BridgeEvent` type stays unchanged; internal daemon consumers do not see `_meta`, while wire SSE frames do.
 
 ```jsonc
-// 盖完之后 wire 上的一帧
 {
   "id": 47,
   "v": 1,
@@ -205,79 +204,77 @@ flowchart LR
 }
 ```
 
-merge 保留任何已有 `_meta` 键（`{...existingMeta, serverTimestamp: Date.now()}`）。**当前 daemon 没有任何生产者写 envelope 级 `_meta`** —— wenshao #4360 review 已确认 `ToolCallEmitter` 的元数据嵌在 `event.data._meta`（ACP `session/update` payload 自己的 `_meta`），不是 envelope。顶层 merge 是向前兼容逃生口。
+The merge preserves any existing `_meta` keys (`{ ...existingMeta, serverTimestamp: Date.now() }`). **No current daemon producer writes envelope-level `_meta`**. The top-level merge is a forward-compatibility escape hatch.
 
-**为什么重要**：多客户端 UI 渲「X 分钟前」或按 emit 时间排序 transcript 块时，老路径用各自本地时钟，跨浏览器 / 标签 / 手机漂几十秒到几分钟。服务端盖戳之后，所有客户端排序一致。
+Why it matters: multi-client UIs that render relative time or sort transcript blocks should use server time instead of each browser/tab/phone local clock. Server stamping keeps ordering consistent across clients.
 
-**SDK 访问**：优先读 envelope 级 `event._meta?.serverTimestamp`；历史兼容路径也可能探 `event.serverTimestamp` / `event.data._meta.serverTimestamp`。不要把 ACP payload 内的 `data._meta` 和 daemon envelope `_meta` 混成同一个字段。
+SDK access: prefer `event._meta?.serverTimestamp`. Compatibility paths may also probe `event.serverTimestamp` or `event.data._meta.serverTimestamp`. Do not mix ACP payload `data._meta` with daemon envelope `_meta`.
 
 ### `originatorClientId`
 
-上文事件表已经标注。带了已注册 `X-Qwen-Client-Id` 的请求触发的事件才有（规则见 [`08-session-lifecycle.md`](./08-session-lifecycle.md)）。
+Events triggered by a request that carried a registered `X-Qwen-Client-Id` may stamp this field. See [`08-session-lifecycle.md`](./08-session-lifecycle.md).
 
-## Tool-call `_meta`（provenance / serverId）
+## Tool-call `_meta` (provenance / serverId)
 
-跟上面 envelope 级 `_meta` 不是同一个：ACP `session/update` payload 自己也带 `_meta`，在 `event.data._meta`。`ToolCallEmitter`（`packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`）在 `emitStart` / `emitResult` / `emitError` 上盖两个字段：
+This is separate from envelope `_meta`: ACP `session/update` payloads can carry their own `_meta` in `event.data._meta`. `ToolCallEmitter` (`packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`) stamps two fields on `emitStart`, `emitResult`, and `emitError`:
 
-| 字段         | 类型                                       | 解析规则（`ToolCallEmitter.resolveToolProvenance`）                                                         |
-| ------------ | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| `provenance` | `'builtin' \| 'mcp' \| 'subagent'`         | 有 `subagentMeta` → `subagent`（最高优先级）；tool 名匹配 `mcp__<server>__<tool>` → `mcp`；其它 → `builtin` |
-| `serverId`   | `string`（仅 `provenance === 'mcp'` 时设） | 从 `mcp__<serverId>__<tool>` 命名启发提取                                                                   |
+| Field        | Type                                      | Resolution rule                                                                                                                   |
+| ------------ | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `provenance` | `'builtin' \| 'mcp' \| 'subagent'`        | `subagentMeta` wins with `subagent`; tool name matching `mcp__<server>__<tool>` maps to `mcp`; everything else maps to `builtin`. |
+| `serverId`   | `string` only when `provenance === 'mcp'` | Extracted heuristically from `mcp__<serverId>__<tool>`.                                                                           |
 
-加上原本就有的 `_meta.toolName`（显示名）。
+The existing `_meta.toolName` display name is preserved. UI uses these fields to render builtin / MCP server / subagent badges without reparsing the tool name.
 
-UI 据此渲染 builtin / MCP server badge / subagent 归属的 tool call，不必再去解析 tool 名字。
+## SDK reducer behavior
 
-## SDK reducer 行为
+`reduceDaemonSessionEvent(state, evt)` in `packages/sdk-typescript/src/daemon/events.ts` projects the stream into `DaemonSessionViewState`. The resync-related fields are:
 
-`reduceDaemonSessionEvent(state, evt)`（`packages/sdk-typescript/src/daemon/events.ts`）把事件流投到 `DaemonSessionViewState`。三个 resync 相关字段：
+- **`awaitingResync: boolean`** - set by `state_resync_required`; caller clears it, typically after `POST /session/:id/load` resets view state.
+- **`resyncRequiredCount: number`** - observability counter.
+- **`lastResyncRequired?: DaemonStateResyncRequiredData`** - latest payload.
 
-- **`awaitingResync: boolean`** —— `state_resync_required` 时置 `true`；调用方代码自己清（典型路径：调 `POST /session/:id/load` 重置 view state）。
-- **`resyncRequiredCount: number`** —— 观测帧计数（病态客户端可能不止一次 resync）。
-- **`lastResyncRequired?: DaemonStateResyncRequiredData`** —— 最近一次 payload。
+While `awaitingResync = true`, the reducer **skips delta application** and only allows the closed `RESYNC_PASSTHROUGH_TYPES` set:
 
-`awaitingResync = true` 期间 reducer **自动跳过** delta 应用，**只放行**封闭的 `RESYNC_PASSTHROUGH_TYPES` 集合：
+| Passthrough type        | Why it is still applied during resync                                          |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| `state_resync_required` | Rare second resync should update `lastResyncRequired` / `resyncRequiredCount`. |
+| `session_died`          | Terminal stream signal must remain visible in resync limbo.                    |
+| `session_closed`        | Same as above.                                                                 |
+| `client_evicted`        | Same as above.                                                                 |
+| `stream_error`          | Same as above.                                                                 |
 
-| 放行 type               | 为什么 resync 期间也要应用                                                   |
-| ----------------------- | ---------------------------------------------------------------------------- |
-| `state_resync_required` | 二次 resync（少见但可能）要更新 `lastResyncRequired` / `resyncRequiredCount` |
-| `session_died`          | 流终态信号即便在 resync limbo 也必须可见                                     |
-| `session_closed`        | 同上                                                                         |
-| `client_evicted`        | 同上                                                                         |
-| `stream_error`          | 同上                                                                         |
+`lastEventId` still advances monotonically through `advanceLastEventId(base)` during resync limbo. After the caller resets and clears `awaitingResync`, subsequent deltas align to the correct cursor.
 
-`lastEventId` 在 resync limbo 期间仍然通过 `advanceLastEventId(base)` 单调推进，调用方重置并清掉 `awaitingResync` 后，后续 delta 对齐到正确游标。
+## State and forward compatibility
 
-## 状态与向前兼容
+- Add a known event type by appending to `DAEMON_KNOWN_EVENT_TYPE_VALUES`. Old SDKs return `undefined` for unrecognized event types through the fallback path and increment `unrecognizedKnownEventCount`; new SDKs rely on the discriminated union.
+- Adding optional fields to an existing payload is safe because payloads are open (`{ [key: string]: unknown }`).
+- Changing an existing payload **shape** is breaking and must bump `EVENT_SCHEMA_VERSION` plus advertise a compatible capability tag such as `typed_event_schema_v2`.
+- `id` is per-session monotonic. Subscriber-level synthetic frames (`client_evicted`, `slow_client_warning`, `stream_error`, `state_resync_required`, `replay_complete`, `session_snapshot`) intentionally have no id so other subscribers do not see gaps.
+- `originatorClientId` lives on the envelope rather than `data`. F3 partial-vote / forbidden payloads also merge it into `data` through `mergeOriginator` so view-state consumers do not need to retain the envelope.
 
-- 新增已知 type → append 到 `DAEMON_KNOWN_EVENT_TYPE_VALUES`。老 SDK 对未识别 type 返回 `undefined`（`asKnownDaemonEvent` 的 fallback），计入 `unrecognizedKnownEventCount`；新 SDK 依赖判别式联合类型。
-- 给已有 payload 加可选字段 → 安全（`{ [key: string]: unknown }` 是开的）。
-- 改已有 payload 的**形状** → break；必须 bump `EVENT_SCHEMA_VERSION` 并依赖 `caps.features.typed_event_schema_v2` 之类的能力 tag 兼容。
-- `id` 是每 session 单调，订阅者级合成帧（`client_evicted`、`slow_client_warning`、`stream_error`、`state_resync_required`、`replay_complete`、`session_snapshot`）刻意无 id，防止其他订阅者看到序号断档。
-- `originatorClientId` 在 envelope 而非 `data`。F3 的 partial-vote / forbidden payload 同时也把它盖到 `data`（`mergeOriginator`），view-state 消费方就不必保留 envelope。
+## Dependencies
 
-## 依赖
+- [`10-event-bus.md`](./10-event-bus.md) - delivery channel.
+- [`11-capabilities-versioning.md`](./11-capabilities-versioning.md) - how SDKs preflight `typed_event_schema`, `mcp_guardrail_events`, and `permission_mediation`.
+- [`04-permission-mediation.md`](./04-permission-mediation.md) - how permission events are produced.
+- [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md) - `asKnownDaemonEvent`, reducers, and view-state shape.
 
-- [`10-event-bus.md`](./10-event-bus.md) — 投递通道。
-- [`11-capabilities-versioning.md`](./11-capabilities-versioning.md) — SDK 怎么 pre-flight `typed_event_schema`、`mcp_guardrail_events`、`permission_mediation` tag。
-- [`04-permission-mediation.md`](./04-permission-mediation.md) — 权限事件怎么产出。
-- [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md) — `asKnownDaemonEvent`、reducer、view-state 形状。
+## Configuration
 
-## 配置
+- Always advertised: `typed_event_schema`, `mcp_guardrail_events`, and `permission_mediation` (with supported policy modes).
+- No env var or flag directly controls the schema itself. `QWEN_SERVE_NO_MCP_POOL=1` changes MCP event `scope` from `'workspace'` to absent / `'session'`.
 
-- 默认广播：`typed_event_schema`（恒）、`mcp_guardrail_events`（恒）、`permission_mediation`（恒，`modes` 列出支持策略）。
-- 没有 env / 参数直接控制 schema 本身；杀手锏 `QWEN_SERVE_NO_MCP_POOL=1` 会让 MCP 事件的 `scope` 字段从 `'workspace'` 变成 缺失 / `'session'`。
+## Caveats and known limits
 
-## 注意 & 已知局限
+- Six synthetic frame types intentionally have no `id`; SDK code must not assume every event has an id.
+- `permission_partial_vote` only appears under `consensus`. `permission_forbidden` appears under `designated`, `consensus`, and `local-only`, but not under `first-responder`.
+- `mcp_child_refused_batch` only appears in `mode: 'enforce'`; `warn` mode never refuses.
+- `auth_device_flow_*` events are not session-keyed. When consuming through `DaemonSessionClient`, use `reduceDaemonAuthEvent` for them rather than the session reducer.
 
-- 六种合成帧故意无 `id`，SDK 代码不能假设每个事件都有 id。
-- `permission_partial_vote` 只在 `consensus` 下出现；`permission_forbidden` 在 `designated` / `consensus` / `local-only` 下出现，**不在** `first-responder` 下出现。
-- `mcp_child_refused_batch` 只在 `mode: 'enforce'` 下出现，`warn` 模式从不拒绝。
-- `auth_device_flow_*` 事件不是 session-keyed；通过 `DaemonSessionClient` 消费时必须走 `reduceDaemonAuthEvent`，不要走 session reducer。
+## References
 
-## 参考
-
-- `packages/sdk-typescript/src/daemon/events.ts`（整文件）
-- `packages/acp-bridge/src/eventBus.ts`（`EVENT_SCHEMA_VERSION`）
-- `packages/cli/src/serve/capabilities.ts`（`typed_event_schema`、`mcp_guardrail_events`、`permission_mediation`）。
-- wire 参考：[`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)。
+- `packages/sdk-typescript/src/daemon/events.ts`
+- `packages/acp-bridge/src/eventBus.ts` (`EVENT_SCHEMA_VERSION`)
+- `packages/cli/src/serve/capabilities.ts` (`typed_event_schema`, `mcp_guardrail_events`, `permission_mediation`)
+- Wire reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)
