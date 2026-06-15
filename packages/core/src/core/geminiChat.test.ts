@@ -4613,7 +4613,7 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
-    it('keeps RETRYABLE_STREAM_TRANSPORT_CODES a subset of the classifier set', () => {
+    it('classifies every allow-listed stream transport code as retryable transport', () => {
       // Drift guard: the stream allow-list is a hand-curated subset of the
       // classifier's transport codes. If a code is renamed/removed there, or
       // a typo is introduced here, this fails instead of silently never

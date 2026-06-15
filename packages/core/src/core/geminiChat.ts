@@ -2178,19 +2178,15 @@ export class GeminiChat {
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
             }
-            if (isRetryableStreamTransportError && streamYieldedChunk) {
-              debugLogger.warn('Transport stream retry skipped', {
+            if (isRetryableStreamTransportError) {
+              // Reached only when the retry above did not fire: either a chunk
+              // was already yielded (replaying would duplicate output) or the
+              // retry budget is exhausted. Either way the error propagates.
+              debugLogger.warn('Transport stream retry not taken', {
                 retryPath: 'stream',
-                retryDecision: 'skipped_after_chunk',
-                attempts: transportStreamRetryCount,
-                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-                errorKind: classification.kind,
-                transportCode: classification.transportCode,
-              });
-            } else if (isRetryableStreamTransportError) {
-              debugLogger.warn('Transport stream retry exhausted', {
-                retryPath: 'stream',
-                retryDecision: 'exhausted',
+                retryDecision: streamYieldedChunk
+                  ? 'skipped_after_chunk'
+                  : 'exhausted',
                 attempts: transportStreamRetryCount,
                 maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
                 errorKind: classification.kind,
