@@ -47,10 +47,8 @@ Qwen Code's built-in tools can be broadly categorized as follows:
 - **[Shell Tool](./shell.md) (`run_shell_command`):** For executing shell commands.
 - **[Monitor Tool](./monitor.md) (`monitor`):** For running long-lived shell commands that stream output back as background task notifications.
 - **[Web Fetch Tool](./web-fetch.md) (`web_fetch`):** For retrieving content from URLs.
-- **[Multi-File Read Tool](./multi-file.md) (`read_many_files`):** A specialized tool for reading content from multiple files or directories, often used by the `@` command.
-- **[Memory Tool](./memory.md) (`save_memory`):** For saving and recalling information across sessions.
 - **[Todo Write Tool](./todo-write.md) (`todo_write`):** For creating and managing structured task lists during coding sessions.
-- **[Task Tool](./task.md) (`task`):** For delegating complex tasks to specialized subagents.
+- **[Agent Tool](./task.md) (`agent`):** For delegating complex tasks to specialized subagents.
 - **[Exit Plan Mode Tool](./exit-plan-mode.md) (`exit_plan_mode`):** For exiting plan mode and proceeding with implementation.
 
 Additionally, these tools incorporate:

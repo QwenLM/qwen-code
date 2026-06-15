@@ -36,6 +36,7 @@ import {
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
@@ -145,9 +146,11 @@ import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 } from './constants.js';
+import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
   clearRuntimeStatus,
   writeRuntimeStatus,
@@ -174,6 +177,8 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
+
+const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
 import {
   ModelsConfig,
@@ -357,15 +362,23 @@ export interface ChatCompressionSettings {
   screenshotTriggerThreshold?: number;
 }
 
+export { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
+
 /**
- * Settings for clearing stale context after idle periods.
+ * Settings for clearing stale or oversized tool-result context.
  * Threshold values of -1 mean "never clear" (disabled).
  */
+
 export interface ClearContextOnIdleSettings {
   /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
   toolResultsThresholdMinutes?: number;
   /** Number of most-recent tool results to preserve. Default 5. */
   toolResultsNumToKeep?: number;
+  /**
+   * Total compactable tool result output chars before clearing old results.
+   * Default 500000. Use -1 to disable.
+   */
+  toolResultsTotalCharsThreshold?: number;
 }
 
 export interface TelemetrySettings {
@@ -809,6 +822,7 @@ export interface ConfigParameters {
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   computerUseEnabled?: boolean;
+  computerUseMaxImageDimension?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -1241,6 +1255,7 @@ export class Config {
   private readonly agentTeamEnabled: boolean = false;
   private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
+  private readonly computerUseMaxImageDimension?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1421,11 +1436,17 @@ export class Config {
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
+    const clearContextOnIdle = params.clearContextOnIdle;
+    const toolResultsThresholdMinutes =
+      clearContextOnIdle?.toolResultsThresholdMinutes ?? 60;
     this.clearContextOnIdle = {
-      toolResultsThresholdMinutes:
-        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
-      toolResultsNumToKeep:
-        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsThresholdMinutes,
+      toolResultsNumToKeep: clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsTotalCharsThreshold:
+        clearContextOnIdle?.toolResultsTotalCharsThreshold ??
+        ((clearContextOnIdle?.toolResultsThresholdMinutes ?? 0) < 0
+          ? -1
+          : DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD),
     };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
@@ -1434,6 +1455,7 @@ export class Config {
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
+    this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -2123,6 +2145,33 @@ export class Config {
     );
   }
 
+  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+    const contextWindowSize =
+      this.getContentGeneratorConfig()?.contextWindowSize ??
+      this.modelsConfig.getGenerationConfig().contextWindowSize ??
+      tokenLimit(this.getModel(), 'input');
+    if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
+      return undefined;
+    }
+
+    const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
+    const thresholdTokens = Math.floor(
+      contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
+    );
+    if (estimatedTokens <= thresholdTokens) {
+      return undefined;
+    }
+
+    return (
+      `Warning: Loaded QWEN.md/context instructions use about ` +
+      `${estimatedTokens.toLocaleString()} tokens, more than ` +
+      `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
+      `model's ${contextWindowSize.toLocaleString()} token context window. ` +
+      `Consider trimming long always-loaded context or moving details into ` +
+      `on-demand files.`
+    );
+  }
+
   private getMemoryDiscoveryDirectories(): string[] {
     if (!this.shouldLoadMemoryFromIncludeDirectories()) {
       return [];
@@ -2277,7 +2326,12 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    return this.warnings;
+    const memoryContextWarning = this.buildMemoryContextWarning(
+      this.getUserMemory(),
+    );
+    return memoryContextWarning
+      ? [...this.warnings, memoryContextWarning]
+      : this.warnings;
   }
 
   getDebugLogger(): DebugLogger {
@@ -3831,6 +3885,16 @@ export class Config {
 
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
+  }
+
+  /**
+   * Configured screenshot longest-edge cap for Computer Use, or `undefined`
+   * to leave cua-driver's built-in default (1568) in place. Resolved together
+   * with the `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION` env override at the point
+   * the driver connects (see `resolveMaxImageDimension`).
+   */
+  getComputerUseMaxImageDimension(): number | undefined {
+    return this.computerUseMaxImageDimension;
   }
 
   /**
