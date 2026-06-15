@@ -66,7 +66,9 @@ export type AuditAction =
   | 'bridge_heartbeat_unknown'
   | 'bridge_stale_deregistered'
   | 'rate_table_parse_failed'
-  | 'rate_table_miss';
+  | 'rate_table_miss'
+  | 'apns_registered'
+  | 'apns_subscription_removed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -122,6 +124,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'bridge_stale_deregistered',
   'rate_table_parse_failed',
   'rate_table_miss',
+  'apns_registered',
+  'apns_subscription_removed',
 ];
 
 export interface AuditEntry {

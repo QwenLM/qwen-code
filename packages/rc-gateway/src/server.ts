@@ -42,6 +42,8 @@ import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
 import { createUsageRoute, type UsageReader } from './routes/usage.js';
 import { createCapabilityRoute } from './routes/capabilities.js';
 import { createClientsManifestRoute } from './routes/clientsManifest.js';
+import { createNativePushRouter } from './routes/nativePush.js';
+import type { ApnsStore } from './nativePush/apnsStore.js';
 import type { AggregateQuery } from './cost/usageStore.js';
 import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
@@ -168,6 +170,12 @@ export interface GatewayDeps {
    * errors. When set, `GET /ui/clients-manifest.json` mounts.
    */
   clientsManifestReadToml?: () => Promise<string | null>;
+  /**
+   * APNs device-token subscriptions for the iOS native shell
+   * (`add-native-mobile-shells`). When set, `/rc/native-push/apns/*` mounts and
+   * token revocation cascade-deletes the token's subscriptions.
+   */
+  apnsStore?: ApnsStore;
 }
 
 export interface GatewayApp {
@@ -313,6 +321,18 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Resolve an asserted sub-actor (bridge "acting for @human") onto rcClient —
   // only honored for bridge-scope tokens. Must follow bearerResolve.
   app.use(resolveSubActor());
+  // APNs registration for the iOS native shell (add-native-mobile-shells).
+  // Gated at SESSION_READ to mirror the webpush router's floor (a notification
+  // channel carries session-read-class payload data, so a zero-scope or guest
+  // SHARE token must not mint one); delete is own-or-owner within that.
+  // Mounted only when an APNs store is wired.
+  if (deps.apnsStore) {
+    app.use(
+      '/rc/native-push/apns',
+      requireScope(SESSION_READ, audit),
+      createNativePushRouter(deps.apnsStore, audit),
+    );
+  }
   app.get(
     '/rc/session/:id/events',
     requireScope(SESSION_READ, audit),
@@ -510,7 +530,25 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.delete(
     '/rc/tokens/:id',
     requireScope(OWNER, audit),
-    createRevokeTokenRoute(deps.store, registry, audit),
+    createRevokeTokenRoute(
+      deps.store,
+      registry,
+      audit,
+      // Cascade APNs subscriptions bound to the revoked token (add-native-mobile
+      // -shells "On token revocation the APNs subscription SHALL be removed").
+      deps.apnsStore
+        ? async (tokenId) => {
+            const removed = await deps.apnsStore!.removeByToken(tokenId);
+            if (removed > 0) {
+              void audit.record({
+                action: 'apns_subscription_removed',
+                target: tokenId,
+                detail: { reason: 'token_revoked', count: removed },
+              });
+            }
+          }
+        : undefined,
+    ),
   );
   app.get(
     '/rc/audit',

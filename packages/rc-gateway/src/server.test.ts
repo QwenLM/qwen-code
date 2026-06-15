@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   writeFileSync,
+  rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +25,7 @@ import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
 import { SnoozeStore } from './routing/snooze.js';
 import { createGatewayApp } from './server.js';
+import { ApnsStore } from './nativePush/apnsStore.js';
 import type { PushNotifier } from './webpush/notifier.js';
 import {
   OWNER,
@@ -1296,5 +1298,115 @@ describe('GET /ui/clients-manifest.json (multi-workspace-client)', () => {
     });
     const r = await fetch(`${url}/ui/clients-manifest.json`);
     expect(r.status).toBe(401);
+  });
+});
+
+describe('APNs registration auth floor (native-mobile-shells)', () => {
+  async function redeemToken(
+    url: string,
+    pairing: PairingService,
+    scopes: string[],
+  ) {
+    const { code } = pairing.mint(scopes);
+    const r = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'x' }),
+    });
+    return ((await r.json()) as { token: string }).token;
+  }
+  const body = {
+    deviceToken: 'dt',
+    bundleId: 'dev.qwen.rc',
+    shellVersion: '1.0.0',
+  };
+
+  it('requires session:read — a zero-scope token is 403', async () => {
+    const apnsDir = mkdtempSync(join(tmpdir(), 'rc-apns-floor-'));
+    const apnsStore = await ApnsStore.open(join(apnsDir, 'apns.json'));
+    const { url, pairing } = await boot(undefined, { apnsStore });
+    const token = await redeemToken(url, pairing, []); // no scopes
+    const r = await fetch(`${url}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    expect(r.status).toBe(403);
+    expect(apnsStore.listAll()).toHaveLength(0);
+    rmSync(apnsDir, { recursive: true, force: true });
+  });
+
+  it('a session:read token can register (201)', async () => {
+    const apnsDir = mkdtempSync(join(tmpdir(), 'rc-apns-ok-'));
+    const apnsStore = await ApnsStore.open(join(apnsDir, 'apns.json'));
+    const { url, pairing } = await boot(undefined, { apnsStore });
+    const token = await redeemToken(url, pairing, [SESSION_READ]);
+    const r = await fetch(`${url}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    expect(r.status).toBe(201);
+    rmSync(apnsDir, { recursive: true, force: true });
+  });
+});
+
+describe('APNs token-revoke cascade (native-mobile-shells)', () => {
+  it('revoking a token removes its APNs subscriptions in the same request', async () => {
+    const apnsDir = mkdtempSync(join(tmpdir(), 'rc-apns-srv-'));
+    const apnsStore = await ApnsStore.open(join(apnsDir, 'apns.json'));
+    const { url, pairing } = await boot(undefined, { apnsStore });
+
+    // Mint+redeem an owner token (to call DELETE /rc/tokens/:id) and a victim.
+    const owner = pairing.mint([OWNER]);
+    const ownerToken = (
+      (await (
+        await fetch(`${url}/rc/pair/redeem`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: owner.code, label: 'owner' }),
+        })
+      ).json()) as { token: string }
+    ).token;
+
+    const victim = pairing.mint([SESSION_READ]);
+    const victimRes = (await (
+      await fetch(`${url}/rc/pair/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: victim.code, label: 'phone' }),
+      })
+    ).json()) as { id: string; token: string };
+
+    // The victim registers an APNs device token.
+    await fetch(`${url}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${victimRes.token}`,
+      },
+      body: JSON.stringify({
+        deviceToken: 'dt',
+        bundleId: 'dev.qwen.rc',
+        shellVersion: '1.0.0',
+      }),
+    });
+    expect(apnsStore.listAll()).toHaveLength(1);
+
+    // Owner revokes the victim token → subscriptions cascade-removed.
+    const del = await fetch(`${url}/rc/tokens/${victimRes.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(del.status).toBe(204);
+    expect(apnsStore.listAll()).toHaveLength(0);
+
+    rmSync(apnsDir, { recursive: true, force: true });
   });
 });

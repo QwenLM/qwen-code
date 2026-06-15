@@ -77,11 +77,19 @@ export function createMintTokenRoute(
   };
 }
 
-/** DELETE /rc/tokens/:id → revoke + evict live streams. */
+/**
+ * DELETE /rc/tokens/:id → revoke + evict live streams. `onTokenRevoked` (when
+ * supplied) runs AFTER the revoke+evict and is awaited before the 204, so a
+ * caller can cascade-delete token-bound resources in the same request (e.g. APNs
+ * subscriptions, add-native-mobile-shells "On token revocation the APNs
+ * subscription SHALL be removed"). The hook must not throw — it is awaited and
+ * an error would surface as a 500; wrap risky work inside it.
+ */
 export function createRevokeTokenRoute(
   store: TokenStore,
   registry: ConnectionRegistry,
   audit?: AuditRecorder,
+  onTokenRevoked?: (tokenId: string) => void | Promise<void>,
 ): RequestHandler {
   return async (req, res) => {
     const id = req.params.id;
@@ -90,6 +98,7 @@ export function createRevokeTokenRoute(
       return;
     }
     registry.evict(id);
+    if (onTokenRevoked) await onTokenRevoked(id);
     void audit?.record({
       action: 'token_revoked',
       actorTokenId: req.rcClient?.id,

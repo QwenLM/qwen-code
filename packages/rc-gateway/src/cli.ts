@@ -30,6 +30,7 @@ import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
+import { ApnsStore } from './nativePush/apnsStore.js';
 import { SnoozeStore } from './routing/snooze.js';
 import {
   loadLayeredRoutingMatcher,
@@ -198,6 +199,13 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const pushStore = await PushStore.open(
     join(homedir(), '.qwen', 'rc', 'push-subscriptions.json'),
   );
+  // APNs device-token subscriptions for the iOS native shell
+  // (add-native-mobile-shells). Always opened so the register/delete endpoints
+  // and the token-revoke cascade are live; the APNs SENDER + capability gating
+  // are wired separately (a registration is harmless storage until then).
+  const apnsStore = await ApnsStore.open(
+    join(homedir(), '.qwen', 'rc', 'apns-subscriptions.json'),
+  );
   const snooze = await SnoozeStore.open(
     join(homedir(), '.qwen', 'rc', 'snooze.state'),
   );
@@ -277,6 +285,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       pairing,
       vapid,
       pushStore,
+      apnsStore,
       snooze,
       routing,
       idleToggles,
