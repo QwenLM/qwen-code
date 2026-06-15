@@ -76,7 +76,7 @@ flowchart TD
     EV["evaluateState() called after every mutation"] --> R["ratio = reservedSlots.size / clientBudget"]
     R --> U{"warnArmed && ratio >= 0.75?"}
     U -->|yes| FIRE["fire mcp_budget_warning; warnArmed = false"]
-    U -->|no| D{"!warnArmed && ratio <= 0.375?"}
+    U -->|no| D{"!warnArmed && ratio < 0.375?"}
     D -->|yes| ARM["warnArmed = true"]
     D -->|no| NOOP[no-op]
 ```
@@ -149,5 +149,4 @@ Out-of-pass refusals (e.g. lazy `readResource` spawn that bypasses the bulk pass
 - `packages/core/src/tools/mcp-workspace-budget.ts:1-200+` (entire class)
 - `packages/core/src/tools/mcp-client-manager.ts` (`BudgetExhaustedError`, `McpBudgetEvent`, hysteresis constants)
 - `packages/core/src/tools/mcp-transport-pool.ts:208+` (pool's `acquire` site that calls `tryReserve`)
-- F2 design doc: [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md) section 11 (workspace-level budget) and the v2.2 changelog fold-ins for W21 / W77 / W88 / W121 / W122 / R3.
 - F2 design notes: issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) commit 6.

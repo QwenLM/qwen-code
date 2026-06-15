@@ -459,8 +459,6 @@ These helpers are internal, but source readers may see them:
 - `McpTransportPool.acquire()` uses `attachPooledSession` and `rollbackReservationOnSpawnFailure` to share fast-path attach, post-spawn attach, and pooled spawn-in-flight catch behavior. Runtime behavior is unchanged; race-window invariants still live at the call sites.
 - `SessionMcpView.applyTools` / `applyPrompts` compile `includeTools` / `excludeTools` once via `compileNameFilter(cfg)` and check each tool with `compiledFilterAccepts(compiled, name)`. Exported `passesSessionFilter` / `passesSessionPromptFilter` use the same compiled path. `excludeTools` is exact-match; `includeTools` strips the first `(...)` suffix so `toolName(args)` matches `toolName`.
 
-The F2 design doc, [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md), covers the transport-pool state machine, reconnect, drain, and descendant sweep in section 6.
-
 ## Caveats & Known Limits
 
 - **HTTP / SSE transports are unpooled** — each acquire mints a fresh entry that lives only as long as its session. Reason: their headers may carry session-specific OAuth state, so pooling would leak credentials across sessions.

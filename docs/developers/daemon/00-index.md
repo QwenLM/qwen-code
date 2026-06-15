@@ -10,7 +10,6 @@ It complements, rather than replaces, these existing docs:
 | [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)                             | Protocol implementers | HTTP route catalog, request/response shapes, error codes |
 | [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md) | SDK users             | End-to-end TypeScript walkthrough                        |
 | [`../daemon-client-adapters/`](../daemon-client-adapters/)                           | Adapter authors       | Client adapter design notes                              |
-| [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md)     | MCP pool maintainers  | Original F2 design rationale and tradeoffs               |
 
 If you want to **start a daemon and use it**, read `qwen-serve.md` first. If you want to **build a client against the wire format**, read `qwen-serve-protocol.md`. If you want to **understand, extend, or debug the daemon internals**, read this set.
 

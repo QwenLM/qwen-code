@@ -140,16 +140,20 @@ Three trust boundaries to keep in mind: the HTTP edge (`serve/auth.ts` middlewar
 sequenceDiagram
     autonumber
     participant C as Client (SDK)
-    participant MW as Middleware<br/>(bearer→host→CORS→mutationGate)
+    participant MW as Middleware<br/>(CORS→host→log→bearer→rate-limit→JSON→telemetry→mutationGate)
     participant R as Route handler
     participant BR as AcpBridge
     participant BC as BridgeClient
     participant CH as ACP child
 
     C->>MW: POST /session/:id/prompt<br/>Authorization: Bearer …<br/>X-Qwen-Client-Id: …
-    MW->>MW: bearerAuth (constant-time compare)
-    MW->>MW: hostAllowlist (DNS rebinding guard)
     MW->>MW: denyBrowserOriginCors
+    MW->>MW: hostAllowlist (DNS rebinding guard)
+    MW->>MW: access-log hook
+    MW->>MW: bearerAuth (constant-time compare)
+    MW->>MW: rateLimit (when enabled)
+    MW->>MW: express.json body parser
+    MW->>MW: daemonTelemetryMiddleware
     MW->>MW: mutationGate (strict on mutating routes)
     MW->>R: req validated
     R->>BR: bridge.sendPrompt(sessionId, body, clientId)
@@ -185,7 +189,7 @@ sequenceDiagram
     Note over EB,SR: If subscriber queue >= maxQueued,<br/>EventBus emits client_evicted terminal frame<br/>and closes subscriber.
 ```
 
-The ring buffer is bounded (`eventRingSize`, default 1024). A reconnecting client whose `Last-Event-ID` is older than the ring's head receives a synthetic catch-up signal and must call `loadSession` / `resumeSession` to rebuild deeper state. Slow clients trigger `slow_client_warning` at 75% queue fill and `client_evicted` at the cap.
+The ring buffer is bounded (`eventRingSize`, default 8000). A reconnecting client whose `Last-Event-ID` is older than the ring's head receives a synthetic catch-up signal and must call `loadSession` / `resumeSession` to rebuild deeper state. Slow clients trigger `slow_client_warning` at 75% queue fill and `client_evicted` at the cap.
 
 ## Workflow 3: Multi-client permission mediation
 
@@ -281,9 +285,6 @@ sequenceDiagram
 
 `releaseSession(sessionId)` uses the reverse `sessionToEntries` index to release every entry the session holds in O(refs). On daemon shutdown, `drainAll()` sets the `draining` flag (refusing new acquires) and waits for every entry to close under a configurable timeout.
 
-The deep design reference for this state machine is
-[`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md).
-
 ## Workflow 5: Lifecycle — startup and graceful shutdown
 
 ```mermaid
@@ -325,7 +326,7 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 | Auth middleware      | `packages/cli/src/serve/auth.ts` (1-60)                              |
 | Bridge               | `packages/acp-bridge/src/bridge.ts`                                  |
 | BridgeClient         | `packages/acp-bridge/src/bridgeClient.ts`                            |
-| Permission mediator  | `packages/acp-bridge/src/permissionMediator.ts` (1-1292)             |
+| Permission mediator  | `packages/acp-bridge/src/permissionMediator.ts` (1-1198)             |
 | EventBus             | `packages/acp-bridge/src/eventBus.ts`                                |
 | MCP transport pool   | `packages/core/src/tools/mcp-transport-pool.ts` (104+)               |
 | Workspace MCP budget | `packages/core/src/tools/mcp-workspace-budget.ts`                    |
