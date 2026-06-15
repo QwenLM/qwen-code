@@ -15,6 +15,7 @@ import {
   type Extension,
   type ExtensionScope,
   SettingScope,
+  checkForExtensionUpdate,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
 import { ExtensionUpdateState } from '../../../state/extensions.js';
@@ -88,8 +89,19 @@ export const ExtensionActionsView = ({
   // Changing scope re-writes enablement settings and can take a moment;
   // surfaced as a loading line so the selection doesn't look ignored.
   const [scopeBusy, setScopeBusy] = useState(false);
+  // Uninstall removes files (and can take a moment); surfaced as a loading
+  // line so the confirm prompt doesn't appear frozen after pressing Enter.
+  const [uninstallBusy, setUninstallBusy] = useState(false);
 
-  const hasUpdate = updateState === ExtensionUpdateState.UPDATE_AVAILABLE;
+  // Result of an in-view "check for updates" (Mark for Update), which takes
+  // precedence over the background-checked state passed in via props so the
+  // "Update Now" action appears immediately after a positive check.
+  const [checkedUpdateState, setCheckedUpdateState] = useState<
+    string | undefined
+  >(undefined);
+  const hasUpdate =
+    (checkedUpdateState ?? updateState) ===
+    ExtensionUpdateState.UPDATE_AVAILABLE;
 
   const settingScopeFor = (s: ExtensionScope) =>
     s === 'user' ? SettingScope.User : SettingScope.Workspace;
@@ -131,13 +143,21 @@ export const ExtensionActionsView = ({
           case 'change-scope':
             setSub('scope-select');
             break;
-          case 'mark-update':
-            await manager.checkForAllExtensionUpdates(() => {});
+          case 'mark-update': {
+            // Check only the selected extension (not every installed one), and
+            // surface the result so "Update Now" can appear right away.
+            const checked = await checkForExtensionUpdate(extension, manager);
+            setCheckedUpdateState(checked);
+            const updateAvailable =
+              (checked as string) === ExtensionUpdateState.UPDATE_AVAILABLE;
             onStatus({
               type: 'info',
-              text: t('Checked "{{name}}" for updates.', { name }),
+              text: updateAvailable
+                ? t('Update available for "{{name}}".', { name })
+                : t('"{{name}}" is already up to date.', { name }),
             });
             break;
+          }
           case 'update':
             await manager.updateExtension(
               extension,
@@ -199,6 +219,7 @@ export const ExtensionActionsView = ({
   const handleUninstall = useCallback(
     async (ext: Extension) => {
       if (!manager) return;
+      setUninstallBusy(true);
       try {
         await manager.uninstallExtension(ext.name, false);
         onStatus({
@@ -208,6 +229,8 @@ export const ExtensionActionsView = ({
         onReload();
       } catch (error) {
         onStatus({ type: 'error', text: getErrorMessage(error) });
+      } finally {
+        setUninstallBusy(false);
       }
       onExit();
     },
@@ -260,6 +283,13 @@ export const ExtensionActionsView = ({
   }
 
   if (sub === 'uninstall-confirm') {
+    if (uninstallBusy) {
+      return (
+        <Text color={theme.text.secondary}>
+          {t('Uninstalling "{{name}}"...', { name: extension.name })}
+        </Text>
+      );
+    }
     return (
       <UninstallConfirmStep
         selectedExtension={extension}
