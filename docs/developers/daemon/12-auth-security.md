@@ -7,8 +7,8 @@
 1. **Bind** — non-loopback bind without a bearer token **refuses to start**.
 2. **Bearer auth** — `bearerAuth` middleware with constant-time SHA-256 compare protects every route except `/health` on loopback (`require_auth` extends this to loopback and `/health` too).
 3. **Host header allowlist** — on loopback, only `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal` (plus port) are accepted; defense against DNS rebinding.
-4. **Origin control** — by default, any request carrying an `Origin` header is `403`'d. When `--allow-origin <pattern>` is configured, the daemon switches to CORS allowlist mode (`allowOriginCors`) and only permits matching origins.
-5. **Per-route mutation gate** — Wave 4 mutating routes can opt-in to "401 even on loopback no-token defaults" with a distinct `code: 'token_required'` error.
+4. **Origin control** — by default, any request carrying an `Origin` header is rejected with 403. When `--allow-origin <pattern>` is configured, the daemon switches to CORS allowlist mode (`allowOriginCors`) and only permits matching origins.
+5. **Per-route mutation gate** — Wave 4 mutating routes can opt in to `401` responses even on loopback when no token is configured, using a distinct `code: 'token_required'` error.
 6. **Device-flow auth** — separate OAuth surface for providers (`POST /workspace/auth/device-flow` + GET/DELETE on `/:id`).
 
 This doc walks through each layer and the explicit invariants the boot path enforces.
@@ -48,7 +48,7 @@ if (parsed.allowAny && !token) {
 }
 ```
 
-All three refusals are boot-loud (visible in stderr / thrown to the embedder),
+All three refusals are explicit boot failures (visible in stderr / thrown to the embedder),
 never silent. The threat model from #3803 explicitly forbids silently letting a
 daemon bind beyond loopback in the open.
 
@@ -142,7 +142,7 @@ The `code: 'token_required'` shape is distinct from `bearerAuth`'s plain `Unauth
 
 ### `/health` exemption
 
-On loopback binds, `/health` is registered **before** the bearer middleware so liveness probes inside the pod don't need to carry the token. Non-loopback binds gate `/health` behind bearer like every other route. `--require-auth` drops the exemption: `/health` requires `Authorization: Bearer <token>` on loopback too.
+On loopback binds, `/health` is registered **before** the bearer middleware so liveness probes inside the pod do not need to carry the token. Non-loopback binds gate `/health` behind bearer like every other route. `--require-auth` drops the exemption: `/health` requires `Authorization: Bearer <token>` on loopback too.
 
 ### v1 client identity (`X-Qwen-Client-Id`) is self-reported
 
@@ -202,11 +202,11 @@ index. Both layers use the sanitizer: `qwenDeviceFlowProvider` sanitizes IdP
 `oauthError`, and the registry's late-poll observer sanitizes provider-controlled
 values interpolated into audit hints (`latePollResult.kind` / `lateErr.name`).
 
-The `auth_device_flow` capability tag is advertised **unconditionally**; the routes themselves return `400 unsupported_provider` if the daemon can't satisfy a specific provider. The supported-providers list is on `/workspace/auth/status` rather than `/capabilities` to keep the descriptor shape uniform.
+The `auth_device_flow` capability tag is advertised **unconditionally**; the routes themselves return `400 unsupported_provider` if the daemon cannot satisfy a specific provider. The supported-providers list is on `/workspace/auth/status` rather than `/capabilities` to keep the descriptor shape uniform.
 
 ## Workflow
 
-### Bearer auth happy path
+### Bearer auth successful request
 
 ```mermaid
 sequenceDiagram
@@ -225,7 +225,7 @@ sequenceDiagram
 
 ### Bearer auth failure modes
 
-All return `401 { error: 'Unauthorized' }` (uniform across `missing header` / `wrong scheme` / `wrong token` so probing can't distinguish).
+All return `401 { error: 'Unauthorized' }` (uniform across `missing header` / `wrong scheme` / `wrong token` so probing cannot distinguish).
 
 ### `--require-auth` shadow
 
@@ -239,7 +239,7 @@ sequenceDiagram
     C->>CAPS: GET /capabilities (no Authorization)
     CAPS->>BA: pass through middleware
     BA-->>C: 401 Unauthorized
-    Note over C,BA: client cannot pre-flight require_auth tag<br/>before authenticating. Discovery surface is the 401 body.
+    Note over C,BA: client cannot preflight require_auth tag<br/>before authenticating. Discovery surface is the 401 body.
 ```
 
 After authenticating, `caps.features.includes('require_auth')` confirms the deployment is hardened.
@@ -286,8 +286,8 @@ sequenceDiagram
 
 ## Caveats & Known Limits
 
-- **`--require-auth` shadows feature pre-flight.** Unauthenticated clients can't discover the `require_auth` tag; their discovery surface is the 401 body itself.
-- **Mutation gate body-parser ordering**: `mutationGate({strict: true})` 401s fire **after** `express.json()` parses the body. Worst case on a saturated loopback listener: `--max-connections × express.json({limit: '10mb'})` ≈ 2.5 GB transient. Loopback-only attack surface, intentionally accepted.
+- **`--require-auth` shadows feature preflight.** Unauthenticated clients cannot discover the `require_auth` tag; their discovery surface is the 401 body itself.
+- **Mutation gate body-parser ordering**: `mutationGate({strict: true})` 401 responses fire **after** `express.json()` parses the body. Worst case on a saturated loopback listener: `--max-connections × express.json({limit: '10mb'})` ≈ 2.5 GB transient. Loopback-only attack surface, intentionally accepted.
 - **Same-origin Origin stripping** in `server.ts` happens _before_ `denyBrowserOriginCors`. If a future change moves the strip elsewhere, the demo page breaks.
 - **Token comparison is over the SHA-256 digest**, not the raw token. Reduces timing leakage by collapsing variable-length token compares to a fixed-size digest compare.
 - The daemon does **not** carry mTLS, request signing, or pair-token proof-of-possession today. `--rate-limit` provides HTTP rate limiting by client-id / IP key; it is not client identity authentication.

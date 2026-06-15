@@ -1,19 +1,19 @@
-# VSCode IDE Daemon Adapter
+# VS Code IDE Daemon Adapter
 
 ## Overview
 
-`packages/vscode-ide-companion/src/services/daemonIdeConnection.ts` is the **VSCode extension's daemon adapter**. It lets the IDE companion talk to a running `qwen serve` daemon over HTTP + SSE instead of launching an in-process `qwen --acp` stdio child (the legacy `AcpConnectionState` path). It is the sibling-transport equivalent of [`14-cli-tui-adapter.md`](./14-cli-tui-adapter.md) for VSCode hosts.
+`packages/vscode-ide-companion/src/services/daemonIdeConnection.ts` is the **VS Code extension's daemon adapter**. It lets the IDE companion connect to a running `qwen serve` daemon over HTTP + SSE instead of launching an in-process `qwen --acp` stdio child (the legacy `AcpConnectionState` path). It is the sibling-transport equivalent of [`14-cli-tui-adapter.md`](./14-cli-tui-adapter.md) for VS Code hosts.
 
-The IDE's chat webview consumes daemon events through this adapter; permission prompts surface as native VSCode quick-pick dialogs.
+The IDE's chat webview consumes daemon events through this adapter; permission prompts surface as native VS Code quick-pick dialogs.
 
 ## Responsibilities
 
 - Construct a `DaemonClient` + `DaemonSessionClient` from a loopback-validated `baseUrl` passed to `connect(options)`.
 - Pump SSE events from the session client into per-callback dispatch (`onSessionUpdate`, `onPermissionRequest`, `onAskUserQuestion`, `onEndTurn`, `onDisconnected`).
-- Enforce a **loopback-only** invariant in `connect(options)` (the IDE should only ever talk to a daemon on the same host).
+- Enforce a **loopback-only** invariant in `connect(options)` (the IDE should only ever connect to a daemon on the same host).
 - Bridge daemon events into webview `postMessage`s so the chat panel stays in sync.
-- Surface permission requests through VSCode's native quick-pick UI.
-- Serialize calls into a queue so a fast double-`connect()` from the host doesn't race.
+- Surface permission requests through VS Code's native quick-pick UI.
+- Serialize calls into a queue so a rapid double-`connect()` from the host does not race.
 
 ## Architecture
 
@@ -57,7 +57,7 @@ In `connectInternal()`:
 const baseUrl = validateDaemonBaseUrl(options.baseUrl);
 ```
 
-This is a **client-side hard constraint** distinct from the daemon's own `hostAllowlist` (see [`12-auth-security.md`](./12-auth-security.md)). The IDE companion will never connect to a remote daemon — even if the operator configured one. Rationale: VSCode's threat model assumes the workspace and the daemon share the same host (filesystem trust, etc.).
+This is a **client-side hard constraint** distinct from the daemon's own `hostAllowlist` (see [`12-auth-security.md`](./12-auth-security.md)). The IDE companion will never connect to a remote daemon — even if the operator configured one. Rationale: VS Code's threat model assumes the workspace and the daemon share the same host, including filesystem trust and related assumptions.
 
 ### `createSdkDaemonSessionFactory()`
 
@@ -85,11 +85,11 @@ exception paths call `onEndTurn('error')`.
 
 ### Webview bridging
 
-The connection class is **transport-only**. The actual VSCode integration lives in `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (and friends). The provider subscribes to the connection's callbacks and translates them into webview `postMessage` calls. The webview itself uses the shared `packages/webui/` component library to render — see Adapter Matrix in [`01-architecture.md`](./01-architecture.md).
+The connection class is **transport-only**. The actual VS Code integration lives in `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (and friends). The provider subscribes to the connection's callbacks and translates them into webview `postMessage` calls. The webview itself uses the shared `packages/webui/` component library to render — see Adapter Matrix in [`01-architecture.md`](./01-architecture.md).
 
 ### Connect serialization
 
-`connect()` uses an internal queue so a fast double-call from the host (e.g. user opens the panel twice during an in-flight handshake) doesn't race. The second call awaits the first; the connection ends up in a single, deterministic state.
+`connect()` uses an internal queue so a rapid double call from the host (e.g. user opens the panel twice during an in-flight handshake) does not race. The second call awaits the first; the connection ends up in a single, deterministic state.
 
 ## Workflow
 
@@ -98,7 +98,7 @@ The connection class is **transport-only**. The actual VSCode integration lives 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant H as VSCode host
+    participant H as VS Code host
     participant C as DaemonIdeConnection
     participant F as createSdkDaemonSessionFactory
     participant SDK as DaemonSessionClient
@@ -173,7 +173,7 @@ sequenceDiagram
 ## Dependencies
 
 - `packages/sdk-typescript/src/daemon/` — `DaemonClient`, `DaemonSessionClient` (the actual transport).
-- VSCode extension API (`vscode.*`) — host APIs, quick-pick, webview.
+- VS Code extension API (`vscode.*`) — host APIs, quick-pick, webview.
 - `packages/webui/src/adapters/ACPAdapter.ts` — webview rendering of ACP-shaped messages relayed via `postMessage`.
 
 ## Configuration
@@ -185,14 +185,14 @@ sequenceDiagram
 | `workspaceCwd`                                      | `connect(options)`                | Used on `POST /session`; must match the daemon's bound workspace. |
 | `modelServiceId`                                    | `connect(options)` / `setModel()` | Initial model.                                                    |
 | `lastEventId`                                       | `connect(options)`                | Resume cursor (typically restored from host state).               |
-| VSCode setting `qwen.ide.daemonUrl` (or equivalent) | Workspace settings                | Operator-configured daemon URL.                                   |
+| VS Code setting `qwen.ide.daemonUrl` (or equivalent) | Workspace settings                | Operator-configured daemon URL.                                   |
 
 ## Caveats & Known Limits
 
 - **Loopback-only — hard refusal in `connect(options)`.** Operators who want to point the IDE at a remote daemon need to use SSH port-forward / local proxy; the adapter will not connect to a non-loopback URL.
 - **The legacy `AcpConnectionState` path is still primary** in the IDE companion (stdio child). This adapter is the sibling-transport for Mode-B migration; see [`../daemon-client-adapters/ide.md`](../daemon-client-adapters/ide.md) for the migration blockers and the planned `BridgeFileSystem` parity work.
-- **No reverse-RPC / editor-affordance surface yet over HTTP.** Features that require the agent to call back into the IDE (e.g. read-only buffer access, diff preview integration) currently live only on the stdio path.
-- **Webview ↔ connection coupling is host-owned**, not in this adapter. Don't push webview-specific logic into `DaemonIdeConnection`.
+- **No reverse RPC or editor-affordance surface yet over HTTP.** Features that require the agent to call back into the IDE (e.g. read-only buffer access, diff preview integration) currently live only on the stdio path.
+- **Webview ↔ connection coupling is host-owned**, not in this adapter. Do not push webview-specific logic into `DaemonIdeConnection`.
 - **`workspaceCwd` mismatch** with the daemon's bound workspace returns `400 workspace_mismatch` — surface this as a clear setup error rather than retrying.
 
 ## References

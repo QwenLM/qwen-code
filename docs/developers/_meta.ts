@@ -10,7 +10,7 @@ export default {
     title: 'Agent SDK',
     type: 'separator',
   },
-  'sdk-typescript': 'Typescript SDK',
+  'sdk-typescript': 'TypeScript SDK',
   'sdk-python': 'Python SDK (alpha)',
   'sdk-java': 'Java SDK (alpha)',
   'Dive Into Qwen Code': {

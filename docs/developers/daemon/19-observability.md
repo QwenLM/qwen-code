@@ -19,7 +19,7 @@
 | `/workspace/mcp`                            | Route -> bridge extMethod                      | Pool, budget, and refusal snapshot.                                                                                                                                                                                                                                                    |
 | `/workspace/skills`, `/workspace/providers` | Routes                                         | ACP-side live snapshots; return empty idle data when no session exists.                                                                                                                                                                                                                |
 | Per-session SSE                             | `GET /session/:id/events`                      | Real-time event stream.                                                                                                                                                                                                                                                                |
-| `/demo` debug console                       | `GET /demo` (`packages/cli/src/serve/demo.ts`) | Browser-accessible single-page console: chat, event log, workspace inspector, and permission UX. On loopback, `http://127.0.0.1:4170/demo` is the fastest end-to-end exercise path without writing SDK code. Registration rules are in [`02-serve-runtime.md`](./02-serve-runtime.md). |
+| `/demo` debug console                       | `GET /demo` (`packages/cli/src/serve/demo.ts`) | Browser-accessible single-page console: chat, event log, workspace inspector, and permission UX. On loopback, `http://127.0.0.1:4170/demo` is the quickest end-to-end validation path without writing SDK code. Registration rules are in [`02-serve-runtime.md`](./02-serve-runtime.md). |
 | `PermissionAuditRing`                       | `permissionAudit.ts`                           | In-memory FIFO of 512 permission decisions.                                                                                                                                                                                                                                            |
 | Mediator `decisionReason` audit             | `permissionMediator.ts`                        | Internal structured record explaining why a permission request resolved the way it did.                                                                                                                                                                                                |
 
@@ -110,7 +110,7 @@ flowchart TD
 
 ## State and lifecycle
 
-- `QWEN_SERVE_DEBUG` is read on every check through `isServeDebugMode()` from `debugMode.ts`; toggling it does not require restart. Boot logs are gone unless the env was set at boot.
+- `QWEN_SERVE_DEBUG` is read on every check through `isServeDebugMode()` from `debugMode.ts`; toggling it does not require restart. Boot logs are not available unless the env was set at boot.
 - `PermissionAuditRing` is bounded at 512 FIFO entries; older records are silently dropped.
 - `DaemonStatusProvider` rebuilds cells per request and does not cache; avoid unnecessary high-frequency polling.
 

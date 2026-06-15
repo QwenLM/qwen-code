@@ -2,7 +2,7 @@
 
 ## Overview
 
-This page collects every knob that affects the `qwen serve` daemon and its adapters: environment variables, CLI flags, `settings.json` keys, and programmatic options. Feature-specific pages link back here when they need cross-cutting configuration details.
+This page collects every setting that affects the `qwen serve` daemon and its adapters: environment variables, CLI flags, `settings.json` keys, and programmatic options. Feature-specific pages link back here when they need cross-cutting configuration details.
 
 ## CLI flags (`qwen serve`)
 
@@ -73,7 +73,7 @@ This page collects every knob that affects the `qwen serve` daemon and its adapt
 
 ## `settings.json` keys
 
-The daemon reads settings once at boot through `loadSettings(boundWorkspace)` inside `runQwenServe`. Malformed settings fall back to defaults through try/catch.
+The daemon reads settings once at boot through `loadSettings(boundWorkspace)` inside `runQwenServe`. Malformed settings fall back to defaults through a try/catch guard.
 
 | Key                         | Type                                                               | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | --------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -116,7 +116,7 @@ The daemon reads settings once at boot through `loadSettings(boundWorkspace)` in
 | `fileSystem`                                                                                                            | `BridgeFileSystem` adapter. See [`07-workspace-filesystem.md`](./07-workspace-filesystem.md). |
 | `permissionPolicy`, `permissionConsensusQuorum`, `permissionAudit`                                                      | Mediator wiring.                                                                              |
 | `statusProvider`                                                                                                        | Daemon-host preflight cells.                                                                  |
-| `childEnvOverrides`                                                                                                     | Per-handle env additions / scrubbing.                                                         |
+| `childEnvOverrides`                                                                                                     | Per-handle environment additions or removals.                                                  |
 | `contextFilename`                                                                                                       | Overrides `getCurrentGeminiMdFilename()`.                                                     |
 | `channelIdleTimeoutMs`                                                                                                  | How long to keep the ACP child alive after the last session closes, in ms; default `0`.       |
 
@@ -132,7 +132,7 @@ The daemon reads settings once at boot through `loadSettings(boundWorkspace)` in
 | `WARN_THRESHOLD_RATIO`            | `eventBus.ts`           | `0.75`            | `slow_client_warning` trigger.                                    |
 | `WARN_RESET_RATIO`                | `eventBus.ts`           | `0.375`           | Hysteresis re-arm threshold.                                      |
 | `DEFAULT_INIT_TIMEOUT_MS`         | `bridge.ts`             | `10_000`          | ACP `initialize` handshake timeout.                               |
-| `MCP_RESTART_TIMEOUT_MS`          | `bridge.ts`             | `300_000`         | Bridge race deadline for `/workspace/mcp/:server/restart`.        |
+| `MCP_RESTART_TIMEOUT_MS`          | `bridge.ts`             | `300_000`         | Bridge timeout for `/workspace/mcp/:server/restart`.               |
 | `DEFAULT_PERMISSION_TIMEOUT_MS`   | `bridge.ts`             | `5 * 60_000`      | Per-permission request wallclock.                                 |
 | `DEFAULT_MAX_PENDING_PER_SESSION` | `bridge.ts`             | `64`              | Aligned with `DEFAULT_MAX_SUBSCRIBERS`.                           |
 | `MAX_RESOLVED_PERMISSION_RECORDS` | `permissionMediator.ts` | `512`             | FIFO for recently resolved permissions.                           |
@@ -144,7 +144,7 @@ The daemon reads settings once at boot through `loadSettings(boundWorkspace)` in
 
 ## Cross-references
 
-- Auth knobs: [`12-auth-security.md`](./12-auth-security.md)
+- Auth settings: [`12-auth-security.md`](./12-auth-security.md)
 - Capabilities and protocol version: [`11-capabilities-versioning.md`](./11-capabilities-versioning.md)
 - Event ring and backpressure tuning: [`10-event-bus.md`](./10-event-bus.md)
 - MCP pool / budget: [`05-mcp-transport-pool.md`](./05-mcp-transport-pool.md) and [`06-mcp-budget-guardrails.md`](./06-mcp-budget-guardrails.md)

@@ -2,41 +2,46 @@
 
 ## Overview
 
-`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into a daemon prompt and the daemon's outbound events into chat-platform messages. Three concrete channels ship today: DingTalk, WeChat (Weixin), and Telegram. They share a base layer (`packages/channels/base/`) plus a `DaemonChannelBridge` that does the session multiplexing + SSE consumption.
+`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into a daemon prompt and the daemon's outbound events into chat platform messages. Three concrete channels ship today: DingTalk, WeChat (Weixin), and Telegram. They share a base layer (`packages/channels/base/`) plus a `DaemonChannelBridge` that handles session multiplexing and SSE consumption.
 
-Each channel maps one chat (or chat group) to one daemon session under a configurable `SessionScope` (`per-sender` / `per-group`/...). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)).
+Each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)).
 
 ## Responsibilities
 
 - Receive inbound messages from the channel's native transport (DingTalk WebSocket stream, WeChat HTTP long-poll, Telegram Bot long-poll).
 - Resolve `(senderId, groupId?)` into a daemon session via `DaemonChannelSessionFactory`.
 - Forward the user message as a daemon prompt and stream the response back as outbound chat messages, possibly chunked.
-- Render permission requests as chat-native prompts when interactive; auto-approve per `ChannelConfig.approvalMode` otherwise.
+- Render permission requests as chat-native prompts when interactive; otherwise auto-approve according to `ChannelConfig.approvalMode`.
 - Apply sender gating (allowlists / denylists), group gating, and content normalization (markdown / HTML per channel).
 
 ## Architecture
 
-### `DaemonChannelBridge` (shared base, `packages/channels/base/src/DaemonChannelBridge.ts:1-179+`)
+### `DaemonChannelBridge` (shared base, `packages/channels/base/src/DaemonChannelBridge.ts`)
 
 ```ts
 class DaemonChannelBridge extends EventEmitter {
   constructor(opts: {
+    cwd: string;
     sessionFactory: DaemonChannelSessionFactory;
-    config: ChannelConfig;
+    modelServiceId?: string;
+    sessionScope?: SessionScope;
   });
-  handleInbound(envelope: Envelope): Promise<void>;
-  shutdown(): Promise<void>;
+  newSession(cwd: string): Promise<string>;
+  loadSession(sessionId: string, cwd: string): Promise<string>;
+  prompt(sessionId: string, text: string, options?): Promise<string>;
+  cancelSession(sessionId: string): Promise<void>;
+  stop(): void;
 }
 ```
 
-Holds a `Map<chatId, ActiveSession>` keyed by the channel's chat id (sender / group). Each entry has:
+Holds daemon session clients keyed by daemon `sessionId`; `ChannelBase` and `SessionRouter` decide which inbound chat target maps to that session. Each attached session has:
 
 - A `DaemonChannelSessionClient` (shape of `DaemonSessionClient` minus channel-irrelevant methods).
 - A live SSE consumer pump.
 - A debounced prompt assembler (for adapters that fragment user input across multiple inbound messages).
 - An auto-approve policy per request.
 
-Events emitted: `permission_request`, `permission_resolved`, `outbound_message`, `stream_error`, `session_died`. Channel adapters wire these into platform-native APIs.
+Events emitted: `textChunk`, `toolCall`, `sessionUpdate`, `permissionRequest`, `permissionResolved`, `modelSwitched`, `modelSwitchFailed`, `sessionDied`, `promptComplete`, and `error`. Channel adapters wire these into platform-native APIs.
 
 ### `ChannelBase` (`packages/channels/base/src/ChannelBase.ts`)
 
@@ -44,10 +49,10 @@ Abstract base every adapter extends:
 
 ```ts
 abstract class ChannelBase {
-  abstract start(): Promise<void>;
-  abstract sendOutbound(target, payload): Promise<void>;
-  handleInbound(envelope: Envelope): Promise<void>; // → bridge.handleInbound
-  shutdown(): Promise<void>;
+  abstract connect(): Promise<void>;
+  abstract sendMessage(chatId: string, text: string): Promise<void>;
+  abstract disconnect(): void;
+  handleInbound(envelope: Envelope): Promise<void>; // → SessionRouter.resolve + bridge.prompt
 }
 ```
 
@@ -95,8 +100,8 @@ sequenceDiagram
     AD->>AD: build Envelope { senderId, groupId?, text, media? }
     AD->>CB: handleInbound(envelope)
     CB->>CB: sender / group gating
-    CB->>BR: handleInbound(envelope)
-    BR->>BR: resolve chatId → ActiveSession (create-or-attach via factory)
+    CB->>CB: SessionRouter.resolve(...) → sessionId
+    CB->>BR: prompt(sessionId, promptText, attachments?)
     BR->>SC: session.prompt({...})
     SC->>D: POST /session/:id/prompt
 ```
@@ -109,13 +114,15 @@ sequenceDiagram
     participant D as Daemon
     participant SC as DaemonChannelSessionClient
     participant BR as DaemonChannelBridge
+    participant CB as ChannelBase
     participant AD as Channel adapter
     participant CH as Channel platform
 
     D-->>SC: SSE: session_update (agent_message_chunk)
     SC-->>BR: DaemonEvent
-    BR->>BR: reduce → outbound chunks (block streaming)
-    BR-->>AD: emit 'outbound_message'
+    BR-->>CB: emit 'textChunk'
+    CB->>CB: assemble response / block streaming
+    CB->>AD: sendMessage(chatId, chunk or full response)
     AD->>CH: sendText / sendMessage / sendChunk
 ```
 
@@ -134,15 +141,15 @@ sequenceDiagram
     alt config.approvalMode == 'auto'
         BR->>SC: session.respondToPermission({...})
     else 'prompt'
-        BR-->>AD: emit 'permission_request' (renders chat-native UI)
+        BR-->>AD: emit 'permissionRequest' (renders chat-native UI)
         AD->>BR: user picks option → respondToPermission
     end
 ```
 
 ## State & Lifecycle
 
-- `DaemonChannelBridge` lives for the lifetime of the channel adapter; sessions inside it live per chat.
-- Each chat session reconnects automatically if SSE drops — `DaemonSessionClient.events()` tracks `lastSeenEventId` so replay is correct.
+- `DaemonChannelBridge` lives for the lifetime of the channel adapter; sessions inside it live according to the configured `SessionScope`.
+- Each active session reconnects automatically if SSE drops — `DaemonSessionClient.events()` tracks `lastSeenEventId` so replay is correct.
 - `shutdown()` closes every active session and the underlying transport (the channel's WebSocket / long-poll).
 - DingTalk's WebSocket stream supports server-push; WeChat's long-poll requires a backoff strategy on idle responses; Telegram's long-poll has a built-in `timeout` parameter.
 
@@ -158,22 +165,22 @@ sequenceDiagram
 
 | Knob                                     | Effect                                                           |
 | ---------------------------------------- | ---------------------------------------------------------------- |
-| `sessionScope`                           | `'per-sender'`, `'per-group'`, `'per-thread'` (channel-defined). |
+| `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), or `'single'` (one shared session per channel). |
 | `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                |
 | `allowlist?: string[]`                   | Sender ids allowed; missing = open.                              |
 | `denylist?: string[]`                    | Sender ids denied.                                               |
-| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming knobs.                                  |
+| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                               |
 | `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                      |
 
 Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`).
 
 ## Caveats & Known Limits
 
-- **Channels don't directly import `@qwen-code/sdk`.** They go through `ChannelBase` → `DaemonChannelBridge` → `DaemonChannelSessionClient` (which the bridge constructs from the SDK). The indirection lets the bridge swap implementations (e.g. a test stub) without channels noticing.
+- **Channels do not directly import `@qwen-code/sdk`.** They go through `ChannelBase` → `DaemonChannelBridge` → `DaemonChannelSessionClient` (which the bridge constructs from the SDK). The indirection lets the bridge swap implementations, such as a test stub, without requiring channel changes.
 - **Permission UX is per-channel.** DingTalk uses markdown buttons; WeChat is text-only; Telegram uses inline keyboards. No common "interactive permission widget" abstraction yet.
-- **Auto-approve is a deployment-side decision**, not a daemon-side one. The daemon's `permission_mediation` policy still applies; auto-approve just means the channel responds without prompting the human. Don't combine `auto` with `enforce`-grade workflows.
+- **Auto-approve is a deployment-side decision**, not a daemon-side one. The daemon's `permission_mediation` policy still applies; auto-approve only means the channel responds without prompting the human. Do not combine `auto` with `enforce`-grade workflows.
 - **Per-channel rate limits / message-size limits are the adapter's job.** `DaemonChannelBridge` only handles chunking; pushing past WeChat's per-message size or Telegram's flood limit is on the adapter.
-- **No DingTalk / WeChat / Telegram reverse-call** — channels are one-way (chat → daemon → chat). The IM platform's native push (e.g. DT card callback) isn't wired into the bridge yet.
+- **No DingTalk / WeChat / Telegram reverse-call** — channels are one-way (chat → daemon → chat). The IM platform's native push path, such as a DingTalk card callback, is not wired into the bridge yet.
 
 ## References
 

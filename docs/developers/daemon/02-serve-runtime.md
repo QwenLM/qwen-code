@@ -2,13 +2,13 @@
 
 ## Overview
 
-`packages/cli/src/serve/` is the boot layer for `qwen serve`. It translates CLI flags into `ServeOptions`, validates boot posture, builds the Express app, wires middleware, registers routes, exposes daemon-host preflight/status providers, maintains the permission audit ring, and owns the two-phase graceful shutdown sequence. HTTP-shaped work lives in this layer; ACP-shaped work lives one layer below in `@qwen-code/acp-bridge` (see [`03-acp-bridge.md`](./03-acp-bridge.md)).
+`packages/cli/src/serve/` is the boot layer for `qwen serve`. It translates CLI flags into `ServeOptions`, validates startup configuration, builds the Express app, wires middleware, registers routes, exposes daemon-host preflight/status providers, maintains the permission audit ring, and owns the two-phase graceful shutdown sequence. HTTP-facing work lives in this layer; ACP-facing work lives one layer below in `@qwen-code/acp-bridge` (see [`03-acp-bridge.md`](./03-acp-bridge.md)).
 
 ## Responsibilities
 
 - Parse and validate `ServeOptions`: listen address, auth, workspace, session / connection caps, MCP budget / pool, CORS, prompt / SSE / session idle timeouts, rate limit, and related toggles.
 - **Canonicalize** the bound workspace exactly once. The same canonical form is shared by `/capabilities`, the `POST /session` fallback, and the bridge.
-- Refuse unsafe or impossible boot postures: non-loopback bind without token, `--require-auth` without token, `--allow-origin '*'` without token, `mcpBudgetMode='enforce'` without a positive `mcpClientBudget`, nonexistent / non-directory `--workspace`, and invalid timeout or rate-limit values.
+- Reject unsafe or invalid startup configurations: non-loopback bind without token, `--require-auth` without token, `--allow-origin '*'` without token, `mcpBudgetMode='enforce'` without a positive `mcpClientBudget`, a nonexistent or non-directory `--workspace`, and invalid timeout or rate-limit values.
 - Construct the `WorkspaceFileSystem` factory, permission audit publisher, `DaemonStatusProvider`, and `acp-bridge`.
 - Build the Express app, wire middleware (`denyBrowserOriginCors` / `allowOriginCors` -> `hostAllowlist` -> access log -> `bearerAuth` -> rate limit -> JSON parser -> telemetry -> per-route `mutationGate`), and mount session, workspace CRUD, file, device-flow auth, permission vote, and ACP HTTP routes.
 - Bind the listening port and register signal handlers.
@@ -30,7 +30,7 @@
 | `hostAllowlist(bind, getPort)`              | On loopback, validate `Host` belongs to `localhost`, `127.0.0.1`, `[::1]`, or `host.docker.internal` plus the actual port. | Defense against DNS rebinding. Comparison is case-insensitive and cached per port.                                |
 | Access-log middleware                       | Records method, path, status, durationMs, sessionId, and clientId to `DaemonLogger` when a request finishes.               | Registered **before** `bearerAuth`, so 401 denials are logged too. Skips `/health` and heartbeat.                 |
 | `bearerAuth(token)`                         | SHA-256 plus `timingSafeEqual` constant-time bearer comparison.                                                            | Open passthrough when no token is configured (loopback dev default). `Bearer` scheme is case-insensitive.         |
-| Rate-limit middleware                       | Optional per-tier token bucket for prompt, mutation, and read routes.                                                      | Registered after `bearerAuth` and before JSON parsing; returns 429 early on hit.                                  |
+| Rate-limit middleware                       | Optional per-tier token bucket for prompt, mutation, and read routes.                                                      | Registered after `bearerAuth` and before JSON parsing; returns 429 before parsing when a bucket is exhausted.     |
 | `express.json({ limit: '10mb' })`           | JSON body parsing.                                                                                                         | Parse errors return 400.                                                                                          |
 | `daemonTelemetryMiddleware`                 | Wraps each HTTP request in an OpenTelemetry span through `withDaemonRequestSpan`.                                          | Attributes include route, sessionId, clientId, and status code.                                                   |
 | `createMutationGate` (per-route)            | Route-level opt-in gate for mutation routes that require token even on loopback.                                           | Returns `401 { code: 'token_required' }`. Not global `app.use`; routes call `mutate({ strict: true })` as needed. |
@@ -139,7 +139,7 @@ See [`17-configuration.md`](./17-configuration.md) for the merged reference.
 
 - Direct `createServeApp` without `deps.fsFactory` or `deps.bridge` defaults to `trusted: false`; agent-side ACP `writeTextFile` rejects as `untrusted_workspace`. The warning is printed once.
 - `denyBrowserOriginCors` rejects **all** requests carrying `Origin`; the demo page works because another middleware strips matching same-origin values first.
-- Body-parser ordering: route calls such as `mutate({ strict: true })` / `mutateGate({strict: true})` return 401 only after `express.json()`. Worst case is `--max-connections × express.json({limit: '10mb'})`, about 2.5 GB transient on a saturated loopback listener, intentionally accepted.
+- Body-parser ordering: routes using `mutate({ strict: true })` return 401 only after `express.json()`. The worst case is `--max-connections × express.json({limit: '10mb'})`, up to about 2.5 GB of transient memory on a saturated loopback listener; this tradeoff is intentional.
 - Multiple daemons in one process must use per-handle `childEnvOverrides`; mutating `process.env` races because `defaultSpawnChannelFactory` snapshots env at spawn time.
 
 ## References

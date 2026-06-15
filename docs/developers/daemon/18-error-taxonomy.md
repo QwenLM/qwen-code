@@ -5,10 +5,10 @@
 The daemon's failure modes are deliberately closed unions so SDK consumers can exhaustively switch and route handlers can shape consistent HTTP responses. This doc catalogues every typed error class / kind across three layers:
 
 1. **`packages/cli/src/serve/`** — boundary errors at the HTTP edge (auth, workspace filesystem, daemon-host preflight).
-2. **`packages/acp-bridge/`** — bridge / mediator errors at the daemon-to-ACP-child seam.
-3. **`packages/sdk-typescript/src/daemon/`** — SDK-side wrapping + structured error fields.
+2. **`packages/acp-bridge/`** — bridge / mediator errors at the daemon-to-ACP-child boundary.
+3. **`packages/sdk-typescript/src/daemon/`** — SDK-side wrapping and structured error fields.
 
-Wire-level error shapes are documented in [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md); this doc adds the cause-and-remediation lens.
+Wire-level error shapes are documented in [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md); this doc adds cause and remediation guidance.
 
 ## Filesystem boundary (`packages/cli/src/serve/fs/errors.ts`)
 
@@ -31,7 +31,7 @@ Wire-level error shapes are documented in [`../qwen-serve-protocol.md`](../qwen-
 | `internal_error`         | 500       | Non-errno error reaches the boundary.                                          | Open a daemon bug.                                                                                                      |
 | `parse_error`            | 400 / 422 | Request body parse error (400) or service-level invariant breach (422).        | Validate request body; check SDK version.                                                                               |
 
-`io_error` vs `permission_denied` distinction is deliberate so monitoring pipelines key on `errorKind` for routing — folding ENOSPC into `permission_denied` pages security oncall for a `df -h` problem.
+The `io_error` vs `permission_denied` distinction is deliberate so monitoring pipelines can route on `errorKind`; folding ENOSPC into `permission_denied` would page security responders for a `df -h` problem.
 
 ## Bridge errors (`packages/acp-bridge/src/bridgeErrors.ts`)
 
@@ -93,14 +93,14 @@ These are surfaced through the preflight cell's `errorKind` so client UIs render
 
 | Status | Body                                         | When                                                                                                                                     |
 | ------ | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `401`  | `{ error: 'Unauthorized' }`                  | Missing / wrong / no-scheme bearer token. Uniform across `missing header` / `wrong scheme` / `wrong token` so probing can't distinguish. |
+| `401`  | `{ error: 'Unauthorized' }`                  | Missing / wrong / no-scheme bearer token. Uniform across `missing header` / `wrong scheme` / `wrong token` so probing cannot distinguish. |
 | `401`  | `{ error: '...', code: 'token_required' }`   | Mutation-gate strict route on a no-token loopback daemon. SDKs render "configure --token / --require-auth" hint.                         |
 | `403`  | `{ error: 'Request denied by CORS policy' }` | `denyBrowserOriginCors` rejected an `Origin`-bearing request.                                                                            |
 | `403`  | `{ error: 'Invalid Host header' }`           | `hostAllowlist` rejected the `Host` header (DNS rebinding defense).                                                                      |
 
 See [`12-auth-security.md`](./12-auth-security.md) for the full auth model.
 
-## Permission outcomes (wire-vs-audit overload)
+## Permission outcomes (wire vs audit overload)
 
 `PermissionResolution` has two terminal kinds:
 
@@ -109,7 +109,7 @@ See [`12-auth-security.md`](./12-auth-security.md) for the full auth model.
 
 ## SDK-side error wrapping
 
-`DaemonClient` returns HTTP errors as rejected Promises with the parsed body as the rejection value. Methods that hit `404` for unknown sessions reject with `{error, sessionId}`; the SDK does not wrap them in a typed class today (callers `instanceof Error` + `.message.includes(...)` matching is discouraged — switch on `err.code` / `err.kind` from the body instead).
+`DaemonClient` returns HTTP errors as rejected Promises with the parsed body as the rejection value. Methods that hit `404` for unknown sessions reject with `{error, sessionId}`; the SDK does not wrap them in a typed class today. Callers should not rely on `instanceof Error` plus `.message.includes(...)` matching; switch on `err.code` or `err.kind` from the body instead.
 
 `parseSseStream` aborts the iterator on 16-MiB buffer overflow (defensive bound).
 
@@ -139,7 +139,7 @@ flowchart TD
 
 ## Caveats & Known Limits
 
-- **`io_error` vs `permission_denied`** are distinct on purpose. Don't conflate.
+- **`io_error` vs `permission_denied`** are distinct on purpose. Do not conflate.
 - **`PermissionForbiddenError` reasons (`designated_mismatch` / `remote_not_allowed`) are overloaded** across the `designated` and `consensus` policies; the audit log distinguishes them precisely but the wire form does not.
 - **`CancelSentinelCollisionError` indicates an agent-side bug**, not a security event — the bridge refuses the request rather than silently letting the sentinel match a real option.
 - **SDK-side typed errors are still evolving.** Callers should route on body fields rather than relying on JS class identity through the wire.

@@ -2,9 +2,9 @@
 
 ## Overview
 
-`packages/acp-bridge/` is the package that owns the seam between the daemon's HTTP layer and the ACP child process. It is consumed by `packages/cli/src/serve/` (the `qwen serve` daemon) and was lifted in #4175 F1 step 3 so future consumers (`channels/base/AcpBridge.ts`, the VSCode IDE companion) can use the same bridge core without reaching into the cli package.
+`packages/acp-bridge/` owns the boundary between the daemon's HTTP layer and the ACP child process. It is consumed by `packages/cli/src/serve/` (the `qwen serve` daemon) and was extracted in #4175 F1 step 3 so future consumers (`channels/base/AcpBridge.ts`, the VS Code IDE companion) can use the same bridge core without reaching into the CLI package.
 
-The bridge gives you: one `HttpAcpBridge` instance, one `AcpChannel` to the ACP child, multiplexed sessions over that channel, per-session `EventBus`es, a `MultiClientPermissionMediator`, a `BridgeFileSystem` adapter, and ACP-shaped helpers (`spawnOrAttach`, `loadSession`, `resumeSession`, `sendPrompt`, `cancelSession`, `respondToPermission`, plus extMethod RPCs for workspace status and MCP restart).
+The bridge provides one `HttpAcpBridge` instance, one `AcpChannel` to the ACP child, multiplexed sessions over that channel, per-session `EventBus`es, a `MultiClientPermissionMediator`, a `BridgeFileSystem` adapter, and ACP-oriented helpers (`spawnOrAttach`, `loadSession`, `resumeSession`, `sendPrompt`, `cancelSession`, `respondToPermission`, plus extMethod RPCs for workspace status and MCP restart).
 
 ## Responsibilities
 
@@ -12,7 +12,7 @@ The bridge gives you: one `HttpAcpBridge` instance, one `AcpChannel` to the ACP 
 - Maintain `aliveChannels` (channel registry) and `byId` (session registry).
 - Multiplex N HTTP-side sessions onto one ACP child via `connection.newSession()`.
 - Serialize per-session prompts through `promptQueue` (ACP enforces one active prompt per session).
-- Per-session FIFO for `setSessionModel` calls so concurrent attaches with different models don't race the agent.
+- Per-session FIFO for `setSessionModel` calls so concurrent attaches with different models do not race the agent.
 - Per-session `EventBus` that drives `GET /session/:id/events` (see [`10-event-bus.md`](./10-event-bus.md)).
 - Permission flow: `BridgeClient.requestPermission` → `MultiClientPermissionMediator.request` → fan-out → vote collection → ACP response (see [`04-permission-mediation.md`](./04-permission-mediation.md)).
 - File I/O: `BridgeFileSystem` adapter for ACP `readTextFile` / `writeTextFile` calls (see [`07-workspace-filesystem.md`](./07-workspace-filesystem.md)).
@@ -49,13 +49,13 @@ The bridge gives you: one `HttpAcpBridge` instance, one `AcpChannel` to the ACP 
 
 **`isDying` invariant**: any teardown path must set `ChannelInfo.isDying = true` synchronously **before** awaiting `channel.kill()`. `ensureChannel` treats a dying channel as absent and spawns a fresh one. Without this flag a concurrent `spawnOrAttach` arriving during the SIGTERM grace window (up to 10s) would attach to a transport about to close and the caller's sessionId would 404 on every follow-up. **Set sites** (must keep in sync): `ensureChannel` (initialize failure + late-shutdown re-check), `doSpawn` (newSession failure on empty channel), `killSession` (last session leaving), `shutdown` (bulk).
 
-**`BkUyD invariant`**: do **not** clear `channelInfo` when setting `isDying = true`. `killAllSync` must still find the channel during the SIGTERM grace window to fire SIGKILL on `process.exit(1)`. `aliveChannels` holds the dying entry until `channel.exited` fires.
+**Review BkUyD invariant**: do **not** clear `channelInfo` when setting `isDying = true`. `killAllSync` must still find the channel during the SIGTERM grace window to fire SIGKILL on `process.exit(1)`. `aliveChannels` holds the dying entry until `channel.exited` fires.
 
-**BridgeClient bounded buffering**: ACP `extNotification` frames arriving on `BridgeClient` for a sessionId not yet in `byId` (because `connection.newSession`'s response hasn't returned, but MCP discovery inside `newSession` already fired budget events) are buffered into an early-events queue bounded by `MAX_EARLY_EVENT_SESSIONS = 64` × `MAX_EARLY_EVENTS_PER_SESSION = 32` × `EARLY_EVENT_TTL_MS = 60_000`. Worst case ~400 KB heap. Without buffering, the first SSE replay-ring slot for a new session would be missing events that fired during its creation.
+**BridgeClient bounded buffering**: ACP `extNotification` frames arriving on `BridgeClient` for a sessionId not yet in `byId` (because `connection.newSession`'s response has not returned, but MCP discovery inside `newSession` already fired budget events) are buffered into an early-events queue bounded by `MAX_EARLY_EVENT_SESSIONS = 64` × `MAX_EARLY_EVENTS_PER_SESSION = 32` × `EARLY_EVENT_TTL_MS = 60_000`. The worst case is roughly 400 KB of heap. Without buffering, the first SSE replay-ring slot for a new session would be missing events that fired during its creation.
 
 ## Workflow
 
-### `spawnOrAttach` (the most-used entry)
+### `spawnOrAttach` (primary entry point)
 
 ```mermaid
 sequenceDiagram
@@ -122,7 +122,7 @@ sequenceDiagram
     E-->>R: result
 ```
 
-Failures at the queue tail are **swallowed** so that a prior prompt's rejection doesn't poison subsequent prompts; the original caller still receives the rejection on its own returned promise. The `transportClosedReject` cached on the session races the prompt promise against `channel.exited` so a crashed child surfaces immediately rather than hanging.
+Failures at the queue tail are **swallowed** so that a prior prompt's rejection does not poison subsequent prompts; the original caller still receives the rejection on its own returned promise. The `transportClosedReject` cached on the session races the prompt promise against `channel.exited` so a crashed child surfaces immediately rather than hanging.
 
 ### Permission flow (high-level)
 
@@ -203,7 +203,7 @@ sequenceDiagram
 | `maxSessions`                                 | `DEFAULT_MAX_SESSIONS = 20`                        | Cap on `byId.size`. `0` / `Infinity` = unlimited; NaN/negative throws.                                                |
 | `eventRingSize`                               | `DEFAULT_RING_SIZE` (from `eventBus.ts`)           | Per-session event ring; soft-capped at `MAX_EVENT_RING_SIZE`.                                                         |
 | `permissionResponseTimeoutMs`                 | `DEFAULT_PERMISSION_TIMEOUT_MS = 5 min`            | Per-request wallclock for the mediator.                                                                               |
-| `maxPendingPermissionsPerSession`             | `DEFAULT_MAX_PENDING_PER_SESSION = 64`             | Backpressure on chatty agents.                                                                                        |
+| `maxPendingPermissionsPerSession`             | `DEFAULT_MAX_PENDING_PER_SESSION = 64`             | Backpressure on high-volume agents.                                                                                   |
 | `childEnvOverrides`                           | `{}`                                               | Per-handle env additions / scrubs for the ACP child.                                                                  |
 | `persistApprovalMode`, `persistDisabledTools` | —                                                  | Settings-write hooks for the Wave-4 mutation routes.                                                                  |
 | `contextFilename`                             | from `settings.json`'s `context.fileName`          | Overrides `getCurrentGeminiMdFilename`.                                                                               |
@@ -248,10 +248,10 @@ context threaded through bridge calls; it carries `clientId`,
 
 ## Caveats & Known Limits
 
-- `MCP_RESTART_TIMEOUT_MS = 300_000` (5 min) — the bridge race deadline for `/workspace/mcp/:server/restart` is intentionally large because `McpClientManager.MAX_DISCOVERY_TIMEOUT_MS` can be up to 5 min for stdio servers. A shorter deadline would produce false timeouts while the ACP child kept reconnecting in the background.
+- `MCP_RESTART_TIMEOUT_MS = 300_000` (5 min) — the bridge timeout for `/workspace/mcp/:server/restart` is intentionally large because `McpClientManager.MAX_DISCOVERY_TIMEOUT_MS` can be up to 5 min for stdio servers. A shorter deadline would produce false timeouts while the ACP child kept reconnecting in the background.
 - `BridgeOptions.eventRingSize > 1_000_000` throws at construction.
 - `connection.unstable_resumeSession` is exposed via the `unstable_session_resume` capability tag with the `unstable_` prefix; the ACP method may still change its shape. Clients must feature-detect.
-- The bridge package is `@qwen-code/acp-bridge` and is consumed via re-export shims in `serve/eventBus.ts`, `serve/status.ts`, `serve/httpAcpBridge.ts` for back-compat with pre-F1 import paths. New code should import directly.
+- The bridge package is `@qwen-code/acp-bridge` and is consumed through re-export shims in `serve/eventBus.ts`, `serve/status.ts`, `serve/httpAcpBridge.ts` for backward compatibility with pre-F1 import paths. New code should import directly.
 
 ## References
 

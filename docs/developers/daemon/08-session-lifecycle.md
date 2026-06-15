@@ -14,7 +14,7 @@ This doc explains every session lifecycle transition (create / attach / load / r
 - Validate `X-Qwen-Client-Id` and reject malformed ids.
 - Track multiple attached clients per session (`clientIds: Map<string, count>`, `attachCount`).
 - Stamp `originatorClientId` on outbound events.
-- Run heartbeats so dashboards know who's still connected.
+- Run heartbeats so dashboards know which clients are still connected.
 - Surface session metadata (`displayName`) that operators set via `PATCH /session/:id/metadata`.
 - Drive terminal frame emission (`session_died`, `session_closed`, `client_evicted`, `stream_error`).
 
@@ -69,7 +69,7 @@ The daemon stamps `originatorClientId` on outbound SSE events when:
 2. The id is currently registered in the session's `clientIds` set, AND
 3. The session has an `activePromptOriginatorClientId` set (inline `sessionUpdate` and `permission_request` inherit the originator from the active prompt).
 
-Anonymous callers (no `X-Qwen-Client-Id`) work fine for `first-responder` policy; `designated` rejects their votes with `permission_forbidden{ reason: 'designated_mismatch' }`; `consensus` rejects with the same `forbidden` reason because the voter isn't in the issue-time `votersAtIssue` snapshot; `local-only` is the only policy that accepts anonymous loopback voters.
+Anonymous callers (no `X-Qwen-Client-Id`) work fine for `first-responder` policy; `designated` rejects their votes with `permission_forbidden{ reason: 'designated_mismatch' }`; `consensus` rejects with the same `forbidden` reason because the voter is not in the issue-time `votersAtIssue` snapshot; `local-only` is the only policy that accepts anonymous loopback voters.
 
 ## Workflow
 
@@ -110,7 +110,7 @@ Both:
 
 ### Heartbeat
 
-`POST /session/:id/heartbeat` updates `sessionLastSeenAt` regardless of `clientId`. If the request carries a registered `X-Qwen-Client-Id`, `clientLastSeenAt.set(clientId, Date.now())` also bumps. Per-`client` eviction is **not** implemented in v1 — revocation lands in F-series Wave 5. The current value of heartbeats is observability for dashboards and for the upcoming revocation policy in PR 24.
+`POST /session/:id/heartbeat` updates `sessionLastSeenAt` regardless of `clientId`. If the request carries a registered `X-Qwen-Client-Id`, `clientLastSeenAt.set(clientId, Date.now())` also updates. Per-client eviction is **not** implemented in v1; revocation is planned for F-series Wave 5. Today, heartbeats provide observability for dashboards and for the upcoming revocation policy in PR 24.
 
 ### Metadata
 
@@ -135,7 +135,7 @@ Pending permissions are resolved as `{kind:'cancelled', reason:'session_closed'}
 
 ### Disconnect-reaper guard
 
-When the spawn-owning client's HTTP response cannot be written (TCP reset mid-handshake), the route calls `killSession({ requireZeroAttaches: true })`. If another client has already attached (`attachCount > 0`), the bail short-circuits and the session lives on. Setting `spawnOwnerWantedKill = true` remembers the intent so a later `detachClient()` that brings `attachCount` back to 0 completes the deferred reap. Without this, a fast-disconnecting spawn owner would tear down a healthy session every other reconnect.
+When the spawn-owning client's HTTP response cannot be written (TCP reset mid-handshake), the route calls `killSession({ requireZeroAttaches: true })`. If another client has already attached (`attachCount > 0`), the guard short-circuits and the session lives on. Setting `spawnOwnerWantedKill = true` remembers the intent so a later `detachClient()` that brings `attachCount` back to 0 completes the deferred reap. Without this, a fast-disconnecting spawn owner would tear down a healthy session every other reconnect.
 
 ## State & Lifecycle
 
@@ -239,8 +239,8 @@ transient signals, and produces O(turns) replay logs instead of O(tokens) logs
 `bridge.preheat()` warms the ACP child process before the first session so that
 the first real session avoids cold-start latency. It pairs with
 `channelIdleTimeoutMs`, which keeps the ACP child alive after the last session
-closes, and skip-relaunch, which reuses an already idle child when a new session
-arrives.
+closes, and skip-relaunch behavior, which reuses an already idle child when a
+new session arrives.
 
 ## Configuration
 

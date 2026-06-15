@@ -1,6 +1,6 @@
 # Shared UI Transcript Layer
 
-> **Current status**: `packages/cli/src/ui/daemon/DaemonTuiAdapter.ts` is still present on `main` as a legacy experimental CLI-side adapter. This document describes the newer SDK-side shared UI transcript layer: reusable daemon event normalization and transcript primitives that any UI host can consume, including Web, TUI, IDE, and IM channels. CLI TUI, channel, and VSCode IDE migrations are follow-up work.
+> **Current status**: `packages/cli/src/ui/daemon/DaemonTuiAdapter.ts` is still present on `main` as a legacy experimental CLI-side adapter. This document describes the newer SDK-side shared UI transcript layer: reusable daemon event normalization and transcript primitives that any UI host can consume, including Web, TUI, IDE, and IM channels. CLI TUI, channel, and VS Code IDE migrations are follow-up work.
 
 ## Overview
 
@@ -11,7 +11,7 @@
 - **Renderers** (`render.ts`, `terminal.ts`, `toolPreview.ts`): transcript blocks to HTML, terminal text, and tool preview strings. Hosts can use or replace them.
 - **Conformance** (`conformance.ts`): cross-host consistency tests used when channel, TUI, and IDE surfaces migrate to these primitives.
 
-The first real consumer is **`packages/webui/src/daemon/`** ([#4328](https://github.com/QwenLM/qwen-code/pull/4328)). Its React `DaemonSessionProvider` and transcript adapter let webui connect directly to daemon HTTP+SSE instead of only rendering host `postMessage` traffic. CLI TUI, channel base, and VSCode IDE can reuse the same layer later; [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) documents the v2 incremental migration guide.
+The first production consumer is **`packages/webui/src/daemon/`** ([#4328](https://github.com/QwenLM/qwen-code/pull/4328)). Its React `DaemonSessionProvider` and transcript adapter let the web UI connect directly to daemon HTTP+SSE instead of only rendering host `postMessage` traffic. CLI TUI, channel base, and VS Code IDE can reuse the same layer later; [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) documents the v2 incremental migration guide.
 
 ## Responsibilities
 
@@ -105,7 +105,7 @@ store.subscribe(() => render(store.getState()));
 store.dispatch(uiEvents); // internally runs the reducer
 ```
 
-webui's `DaemonSessionProvider` builds its React context on top of this store.
+The web UI's `DaemonSessionProvider` builds its React context on top of this store.
 
 ## Flow
 
@@ -134,7 +134,7 @@ Hosts can stop at `(E)` and implement their own reducer, or consume `(G)` and th
 
 ### `packages/webui/src/daemon/`
 
-This landed with [#4328](https://github.com/QwenLM/qwen-code/pull/4328).
+This landed in [#4328](https://github.com/QwenLM/qwen-code/pull/4328).
 
 | File                        | Exports                                                                                                                                                                                                                                                                                                                        |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -142,11 +142,11 @@ This landed with [#4328](https://github.com/QwenLM/qwen-code/pull/4328).
 | `transcriptAdapter.ts`      | Adapts SDK `DaemonTranscriptBlock` into webui `UnifiedMessage`, including markdown streaming chunk merge and tool call summaries                                                                                                                                                                                               |
 | `index.ts`                  | Subpackage barrel                                                                                                                                                                                                                                                                                                              |
 
-webui can now connect directly to daemon HTTP+SSE and render a transcript. The old `ACPAdapter` host `postMessage` path remains available.
+The web UI can now connect directly to daemon HTTP+SSE and render a transcript. The old `ACPAdapter` host `postMessage` path remains available.
 
 ### Later migrations
 
-[`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) provides a v2 incremental guide for web chat and web terminal adapters. It explicitly calls out that **CLI TUI, channel base, and VSCode IDE are not migrated by that PR**; each will move in follow-up PRs and use the conformance suite to preserve rendering parity.
+[`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) provides a v2 incremental guide for web chat and web terminal adapters. It explicitly calls out that **CLI TUI, channel base, and VS Code IDE are not migrated by that PR**; each will move in follow-up PRs and use the conformance suite to preserve rendering parity.
 
 ## Relationship to legacy `DaemonTuiAdapter.ts`
 
@@ -176,10 +176,10 @@ webui can now connect directly to daemon HTTP+SSE and render a transcript. The o
 ## Caveats and known limits
 
 - **`DaemonTuiAdapter.ts` still exists**. It is the CLI package's legacy experimental adapter. New code should prefer SDK `ui/*`: `normalizeDaemonEvent`, `reduceDaemonTranscriptEvents`, and `DaemonTranscriptBlock`.
-- **CLI TUI, channel base, and VSCode IDE are not migrated yet**. They still maintain their own rendering glue. The `docs/developers/daemon-client-adapters/` directory still has `ide.md`, `channel-web.md`, and the historical `tui.md` draft; the newer `web-ui.md` covers the web UI adapter design.
+- **CLI TUI, channel base, and VS Code IDE are not migrated yet**. They still maintain their own rendering logic. The `docs/developers/daemon-client-adapters/` directory still has `ide.md`, `channel-web.md`, and the historical `tui.md` draft; the newer `web-ui.md` covers the web UI adapter design.
 - **`eventId` is the primary ordering key**. `createdAt` remains as a deprecated alias (`clientReceivedAt`). New code should use `selectTranscriptBlocksOrderedByEventId(state)`. `MIGRATION.md` shows the code diff for switching from `createdAt` ordering to `eventId` ordering.
 - **Unknown wire types normalize to `debug`**. They are no longer dropped as in the old adapter. Renderers do not show `debug` by default; hosts must opt in to display it.
-- **Bundle size**: the `ui/*` subpackage is exported as an ESM subpath through `@qwen-code/sdk/daemon` and does not pull in React or DOM dependencies. React glue is only loaded when a webui consumer uses `DaemonSessionProvider`.
+- **Bundle size**: the `ui/*` subpackage is exported as an ESM subpath through `@qwen-code/sdk/daemon` and does not pull in React or DOM dependencies. React integration is only loaded when a web UI consumer uses `DaemonSessionProvider`.
 
 ## References
 

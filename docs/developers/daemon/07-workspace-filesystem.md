@@ -4,8 +4,8 @@
 
 The daemon never lets HTTP routes or ACP-side agent calls touch the host filesystem directly. Every read, write, list, glob, and stat goes through the `WorkspaceFileSystem` boundary (`packages/cli/src/serve/fs/`), which provides:
 
-- **Path resolution** — canonicalize + reject anything escaping the bound workspace, including via symlinks.
-- **Trust gating** — refuse writes when the workspace isn't trusted (`untrusted_workspace`).
+- **Path resolution** — canonicalize paths and reject anything escaping the bound workspace, including via symlinks.
+- **Trust gating** — refuse writes when the workspace is not trusted (`untrusted_workspace`).
 - **Size & content policy** — read cap (`MAX_READ_BYTES = 256 KiB`), write cap (`MAX_WRITE_BYTES = 5 MiB`), binary detection.
 - **Atomicity** — write-then-rename with target mode preservation and `0o600` default for new files.
 - **Audit** — every access / denial emits a structured event for `PermissionAuditRing` / monitoring.
@@ -22,7 +22,7 @@ The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST 
 - Honor `.gitignore` / `.qwenignore` patterns via `shouldIgnore`.
 - Perform atomic write-then-rename with target mode preservation; default new file mode is `0o600`.
 - Emit `fs.access` / `fs.denied` audit events on every operation.
-- Map every failure to a `FsError` with kind + HTTP status; route handlers serialize them uniformly.
+- Map every failure to a `FsError` with kind and HTTP status; route handlers serialize them uniformly.
 
 ## Architecture
 
@@ -51,8 +51,8 @@ The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST 
 | `ambiguous_text_match`   | 422          | Multiple matches when exactly one was required.                                                                                                                                          |
 | `untrusted_workspace`    | 403          | Write attempted in an untrusted workspace.                                                                                                                                               |
 | `permission_denied`      | 403          | OS-level `EACCES` / `EPERM`.                                                                                                                                                             |
-| `io_error`               | 503          | `ENOSPC` / `EIO` / `EBUSY` / `ETXTBSY` / `ENAMETOOLONG` / `EMFILE` / `ENFILE`. **Distinct from `permission_denied`** so monitoring pipelines don't page security oncall for "disk full". |
-| `internal_error`         | 500          | Non-errno reach-the-boundary error (`TypeError`, programmer bug).                                                                                                                        |
+| `io_error`               | 503          | `ENOSPC` / `EIO` / `EBUSY` / `ETXTBSY` / `ENAMETOOLONG` / `EMFILE` / `ENFILE`. **Distinct from `permission_denied`** so monitoring pipelines do not page security responders for "disk full". |
+| `internal_error`         | 500          | Non-errno error that reaches the boundary (`TypeError`, programmer bug).                                                                                                                  |
 | `parse_error`            | 400 / 422    | Request-body parse error (400) or service-level invariant breach (422).                                                                                                                  |
 
 ### `BridgeFileSystem` (the ACP-side adapter)
@@ -66,18 +66,18 @@ interface BridgeFileSystem {
 }
 ```
 
-This is the injection seam for ACP `readTextFile` / `writeTextFile`. Bridge tests + Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridgeFileSystemAdapter.ts`) so agent-side ACP writes pick up the same TOCTOU + symlink + trust-gate + audit gates the HTTP routes use.
+This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridgeFileSystemAdapter.ts`) so agent-side ACP writes pick up the same TOCTOU, symlink, trust-gate, and audit gates the HTTP routes use.
 
 Two defensive gates the adapter MUST replicate (because the inline proxy is fully bypassed when the adapter is injected):
 
 1. **Reject non-regular files** — sockets / pipes / char devices / procfs / sysfs entries can stream unbounded data despite `stats.size === 0`. The inline path throws with `describeStatKind(stats)` in the message.
 2. **Cap buffered size** at `READ_FILE_SIZE_CAP = 100 MiB`. A tiny `{ line: 1, limit: 10 }` request against a 500 MB log would otherwise cost 500 MB of RSS just to return 10 lines.
 
-The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for atomic tmp+rename with mode preservation, `0o600` default, symlink reject inside a per-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
+The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for atomic temporary-file-and-rename writes with mode preservation, `0o600` default, and symlink rejection inside a per-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
 
 ### FsError preservation over the ACP wire
 
-When the `BridgeFileSystem` adapter throws an `FsError` (`kind: 'untrusted_workspace'` / `'symlink_escape'` / `'file_too_large'` / etc.), the ACP SDK's default RPC error path serializes only `error.message` as a generic `-32603 "Internal error"` — `kind` / `status` / `hint` are stripped. The agent's RPC client downstream then has to regex-match the human-readable message to dispatch typed UI (auth retry vs file picker vs proxy hint).
+When the `BridgeFileSystem` adapter throws an `FsError` (`kind: 'untrusted_workspace'` / `'symlink_escape'` / `'file_too_large'` / etc.), the ACP SDK's default RPC error path serializes only `error.message` as a generic `-32603 "Internal error"` — `kind` / `status` / `hint` are stripped. The downstream agent RPC client would then have to regex-match the human-readable message to dispatch typed UI (auth retry vs file picker vs proxy hint).
 
 `BridgeClient.writeTextFile` and `BridgeClient.readTextFile` install a thin guard (`packages/acp-bridge/src/bridgeClient.ts:40-100+`) that catches FsError-shaped throws and rethrows them as ACP `RequestError`:
 
@@ -107,7 +107,7 @@ The agent's RPC client now receives `data.errorKind` (the closed `FsErrorKind` v
 Two design notes:
 
 - **Duck typing over import** — `FsError` lives in `packages/cli/src/serve/fs/errors.ts` while `BridgeClient` lives in `packages/acp-bridge`. A direct `import { FsError }` would invert the dependency. The duck check (`name === 'FsError'` + `kind: string`) mirrors what `mapDomainErrorToErrorKind` (`status.ts`) already does for `TrustGateError` / `SkillError` for the same cross-package bundling reason.
-- **JSON-RPC code stays at -32603** — the bridge can't reliably map `FsError.kind` to a JSON-RPC error code shape, so the structured `data` field carries the semantic information for SDK consumers. The wire status code (`-32603` "internal error") is unchanged; clients route on `data.errorKind`.
+- **JSON-RPC code stays at -32603** — the bridge cannot reliably map `FsError.kind` to a JSON-RPC error code shape, so the structured `data` field carries the semantic information for SDK consumers. The wire status code (`-32603` "internal error") is unchanged; clients route on `data.errorKind`.
 
 ### Trust gate
 
@@ -226,9 +226,9 @@ flowchart LR
 ## Caveats & Known Limits
 
 - **Symlinks are rejected, not followed.** This is a divergence from the pre-F1 inline `BridgeClient.writeTextFile` proxy which resolved symlinks. Agents writing through symlinked dotfiles need to address the resolved path directly.
-- **`io_error` vs `permission_denied` are distinct.** Don't conflate them. Monitoring pipelines key on `errorKind` for alerting — folding ENOSPC into permission_denied would page security oncall for `df -h` problems.
+- **`io_error` vs `permission_denied` are distinct.** Do not conflate them. Monitoring pipelines key on `errorKind` for alerting — folding ENOSPC into permission_denied would page security responders for `df -h` problems.
 - **New file mode defaults to `0o600`, not umask defaults.** The write syscall's `mode` arg bypasses umask. Agents writing public files should explicitly pass a mode override.
-- **`createServeApp` default `trusted: false`** silently rejects ACP writes with `untrusted_workspace` for embedders that don't inject a custom `fsFactory` or `bridge`. A one-time stderr warning fires the first time; further callers see no reminder. See [`02-serve-runtime.md`](./02-serve-runtime.md).
+- **`createServeApp` default `trusted: false`** silently rejects ACP writes with `untrusted_workspace` for embedders that do not inject a custom `fsFactory` or `bridge`. A one-time stderr warning fires the first time; further callers see no reminder. See [`02-serve-runtime.md`](./02-serve-runtime.md).
 - **Read cap is enforced pre-decode.** A file at `MAX_READ_BYTES + 1` is refused even if the request only wants 10 lines — because the underlying `readFileWithLineAndLimit` reads the whole file into memory before slicing.
 - **`BridgeFileSystem` adapter MUST replicate both inline-proxy gates** (non-regular-file refusal + buffered-size cap). The inline path is fully bypassed when the adapter is injected.
 

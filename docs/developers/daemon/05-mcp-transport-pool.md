@@ -2,20 +2,20 @@
 
 ## Overview
 
-`McpTransportPool` (`packages/core/src/tools/mcp-transport-pool.ts:104+`) is the F2 (#4175 commit 5) workspace-scoped pool: N ACP sessions on one daemon share one transport per unique `(serverName + configFingerprint)` tuple, instead of each spawning its own MCP child process. The pool lives **inside the ACP child** (`QwenAgent.mcpPool`), is constructed once at agent startup with the daemon's bootstrap `Config`, and survives session lifecycles — entries reference-count session attaches and drain back to closed under a configurable grace period when ref count hits zero.
+`McpTransportPool` (`packages/core/src/tools/mcp-transport-pool.ts:104+`) is the F2 (#4175 commit 5) workspace-scoped pool: multiple ACP sessions on one daemon share one transport per unique `(serverName + configFingerprint)` tuple, instead of each spawning its own MCP child process. The pool lives **inside the ACP child** (`QwenAgent.mcpPool`), is constructed once at agent startup with the daemon's bootstrap `Config`, and survives session lifecycles. Entries reference-count session attaches and close after a configurable grace period when the reference count reaches zero.
 
-It is the dominant reason a multi-session daemon doesn't fork N copies of every MCP server.
+It is the main mechanism that prevents a multi-session daemon from forking one copy of every MCP server per session.
 
 ## Responsibilities
 
-- Acquire or spawn one MCP transport per `(name + fingerprint)`, deduping concurrent acquires via `spawnInFlight`.
+- Acquire or spawn one MCP transport per `(name + fingerprint)`, deduplicating concurrent acquires via `spawnInFlight`.
 - Release per-session references; arm the entry's drain timer when the last reference detaches.
-- Survive ref-count flap with a hard `MAX_IDLE_MS` cap so a thrashing client can't keep an idle transport alive forever.
+- Survive ref-count churn with a hard `MAX_IDLE_MS` cap so a thrashing client cannot keep an idle transport alive forever.
 - Reference-count sessions in a reverse index (`sessionToEntries`) so `releaseSession(sessionId)` is O(refs) rather than O(entries).
 - Restart entries on demand (`restartByName`) — single-entry returns `{restarted, durationMs}`, multi-entry returns `{entries: RestartResult[]}` (F2 multi-entry contract).
 - Drain the entire pool on daemon shutdown with a configurable timeout; refuse new acquires while draining.
 - Consult `WorkspaceMcpBudget` (see [`06-mcp-budget-guardrails.md`](./06-mcp-budget-guardrails.md)) on `acquire` to enforce per-name reservation caps; release the slot on entry close when no sibling entry holds the same name.
-- Produce per-session filtered tool/prompt snapshots via `SessionMcpView` so a discovery in one session doesn't register tools into other sessions.
+- Produce per-session filtered tool/prompt snapshots via `SessionMcpView` so a discovery in one session does not register tools into other sessions.
 
 ## Architecture
 
@@ -48,7 +48,7 @@ class McpTransportPool {
 - `workspaceContext: WorkspaceContext` (required).
 - `debugMode: boolean`.
 - `sendSdkMcpMessage?` — per-session callback (pool bypasses SDK MCP).
-- `pooledTransports?: ReadonlySet<McpTransportKind>` — default `{stdio, websocket}`. HTTP/SSE transports are intentionally unpooled (each acquire mints a new entry that lives only as long as its session) because their headers can carry session-specific OAuth state.
+- `pooledTransports?: ReadonlySet<McpTransportKind>` — default `{stdio, websocket}`. HTTP/SSE transports stay unpooled by default because their headers can carry session-specific OAuth state, but operators can explicitly opt them into pooling with `QWEN_SERVE_MCP_POOL_TRANSPORTS`.
 - `drainDelayMs?` — default `30_000`.
 - `entryOptions?: (transport) => PoolEntryOptions`.
 - `budget?: WorkspaceMcpBudget`.
@@ -58,13 +58,13 @@ class McpTransportPool {
 | State              | Type                                    | Purpose                                                                                           |
 | ------------------ | --------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `entries`          | `Map<ConnectionId, PoolEntry>`          | Live pool entries keyed by `connectionIdOf(name, fingerprint)`.                                   |
-| `unpooledIds`      | `Set<ConnectionId>`                     | Entries for HTTP/SSE (non-poolable) transports.                                                   |
-| `spawnInFlight`    | `Map<ConnectionId, Promise<PoolEntry>>` | Dedups concurrent cold acquires for the same key.                                                 |
+| `unpooledIds`      | `Set<ConnectionId>`                     | Entries for transports outside the configured `pooledTransports` allowlist.                        |
+| `spawnInFlight`    | `Map<ConnectionId, Promise<PoolEntry>>` | Deduplicates concurrent cold acquires for the same key.                                           |
 | `sessionToEntries` | `Map<string, Set<ConnectionId>>`        | V21-2 reverse index for O(refs) `releaseSession`.                                                 |
-| `draining`         | `boolean`                               | Wenshao C5 drain mutex — once set, all `acquire` calls reject.                                    |
-| `nextIndexByName`  | `Map<string, number>`                   | V21-7 monotonic `entryIndex` per server name (dashboards don't shuffle when a new entry appears). |
+| `draining`         | `boolean`                               | Drain mutex — once set, all `acquire` calls reject.                                               |
+| `nextIndexByName`  | `Map<string, number>`                   | V21-7 monotonic `entryIndex` per server name (dashboards do not reshuffle when a new entry appears). |
 
-### `PoolEntry` (per-entry struct, `mcp-pool-entry.ts`)
+### `PoolEntry` (per-entry structure, `mcp-pool-entry.ts`)
 
 State machine: `spawning → active ⇄ (active ↔ reconnect) → (active → draining on last detach, draining → active on attach OR draining → closed on timer)`.
 
@@ -78,7 +78,7 @@ State machine: `spawning → active ⇄ (active ↔ reconnect) → (active → d
 | `subscriberHandles: Map<string, PooledConnectionImpl>` | Handles returned from `acquire`.                                                |
 | `toolsSnapshot[], promptsSnapshot[]`                   | Canonical pool-level snapshots; re-issued on `toolsChanged` / `promptsChanged`. |
 | `drainTimer?`                                          | Armed when `refs.size === 0`; default 30s. Reset on attach.                     |
-| `maxIdleTimer?`                                        | Armed at FIRST idle; never reset by acquire/release flap. Default 5 min.        |
+| `maxIdleTimer?`                                        | Armed at first idle; never reset by acquire/release churn. Default 5 min.       |
 | `firstIdleAt?`                                         | Watermark for the max-idle hard cap.                                            |
 | `restartInFlight?`                                     | Mutex for `restart()`.                                                          |
 
@@ -168,7 +168,7 @@ sequenceDiagram
 
 `hasNameSibling(name)` (`mcp-transport-pool.ts:181+`) iterates both `entries.values()` and `spawnInFlight.keys()` parsing the latter with `parseConnectionId` (server names can legitimately contain `::`, so `startsWith` would false-positive on a sibling name beginning with `${name}::`).
 
-`releaseSession(sessionId)` reads from `sessionToEntries`, releases all referenced entries in O(refs), then clears the index entry. Used by the bridge's session-close path so we don't iterate the full entry map.
+`releaseSession(sessionId)` reads from `sessionToEntries`, releases all referenced entries in O(refs), then clears the index entry. Used by the bridge's session-close path so it does not iterate the full entry map.
 
 ### `restartByName`
 
@@ -199,7 +199,7 @@ sequenceDiagram
     end
 ```
 
-The pre-flight budget check at the daemon HTTP layer returns `{restarted:false, skipped:true, reason:'budget_would_exceed'}` (Wave-4 PR 17) when the target's slot isn't already reserved AND a restart would push live count over `enforce` budget.
+The preflight budget check at the daemon HTTP layer returns `{restarted:false, skipped:true, reason:'budget_would_exceed'}` (Wave-4 PR 17) when the target's slot is not already reserved and a restart would push live count over `enforce` budget.
 
 ### `drainAll`
 
@@ -224,7 +224,7 @@ sequenceDiagram
 - Pool construction is synchronous; first `acquire` cold-starts a transport.
 - `drainDelayMs` (default 30s) is reset to cancellation on attach.
 - `maxIdleMs` (default 5 min) is **never** reset by attach/detach — it starts ticking at the FIRST idle and only stops when the entry actually closes or attaches before the deadline. Defense against thrashing clients.
-- `nextIndexByName` is monotonic. Old entries keep their assigned index even after newer ones appear, so dashboards reading `entryIndex` don't shuffle.
+- `nextIndexByName` is monotonic. Old entries keep their assigned index even after newer ones appear, so dashboards reading `entryIndex` do not reshuffle.
 - Spawn failure releases the reserved budget slot (V21-4 — without this, a cold spawn that crashed mid-connect would leak the reservation forever).
 
 ## Dependencies
@@ -247,7 +247,7 @@ sequenceDiagram
 
 ### Unpooled entries (HTTP / SSE / SDK-MCP)
 
-Transports outside `pooledTransports` (HTTP, SSE, SDK-MCP) take a separate path: `createUnpooledConnection(name, cfg, sessionId, ...)` (`mcp-transport-pool.ts:855+`) creates a per-session entry with id `${name}::unpooled-${entryIndex}`. Differences from pooled entries:
+Transports outside the configured `pooledTransports` allowlist (HTTP, SSE, and SDK-MCP by default) take a separate path: `createUnpooledConnection(name, cfg, sessionId, ...)` (`mcp-transport-pool.ts:855+`) creates a per-session entry with id `${name}::unpooled-${entryIndex}`. Differences from pooled entries:
 
 - Stored in `entries` AND tracked in `unpooledIds: Set<ConnectionId>` so `release` / `releaseSession` can fast-path the close-on-detach behavior (refs always max out at 1).
 - `McpClient.discover()` is used directly instead of pool replay; `applyTools` / `applyPrompts` are no-ops because the session's registries already hold what was registered (W77 / `skipReplay: true` in `attach()`).
@@ -256,10 +256,10 @@ Transports outside `pooledTransports` (HTTP, SSE, SDK-MCP) take a separate path:
 The W77 race (`cb206da36`): `createUnpooledConnection` stores the entry in `this.entries` BEFORE awaiting `client.connect()` / `client.discover()`, but only indexes `sessionToEntries[sessionId]` AFTER `attach()` succeeds. A concurrent `closeStoredSession()` / `releaseSession(sessionId)` during the connect/discover window saw an empty index, let the unpooled spawn finish, and `attach()` then registered tools/prompts into an already-closed session. The fix:
 
 - `mcp-pool-entry.ts:251`: public `isTerminated(): boolean` probe (`state === 'closed' || state === 'failed'`).
-- `mcp-pool-entry.ts:260`: `markActive()` short-circuits if `isTerminated()` so a torn-down entry can't be resurrected to `'active'`.
+- `mcp-pool-entry.ts:260`: `markActive()` short-circuits if `isTerminated()` so a torn-down entry cannot be resurrected to `'active'`.
 - Callers (the pool's unpooled path) probe `isTerminated()` between the awaits and abort the attach if the parent session went away.
 
-This race was latent today (the W61/W71 per-session `releaseSession` hooks land in F4) but would become live the moment that hook arrived — fix landed early on the F2 line.
+This race was latent at the time (the W61/W71 per-session `releaseSession` hooks land in F4), but would become live the moment that hook arrived. The fix was applied early in the F2 series.
 
 ## `GET /workspace/mcp` pool-aware snapshot fields
 
@@ -461,8 +461,8 @@ These helpers are internal, but source readers may see them:
 
 ## Caveats & Known Limits
 
-- **HTTP / SSE transports are unpooled** — each acquire mints a fresh entry that lives only as long as its session. Reason: their headers may carry session-specific OAuth state, so pooling would leak credentials across sessions.
-- **`maxIdleMs` is a hard cap surviving flap.** A 5-minute idle hard cap means even an aggressively attaching/detaching client can't keep an idle transport pinned past 5 minutes. Operators who want pinned long-lived transports should bump `maxIdleMs` or run the server outside the pool.
+- **HTTP / SSE transports are unpooled by default** — unless operators explicitly include them in `QWEN_SERVE_MCP_POOL_TRANSPORTS`, each acquire mints a fresh entry that lives only as long as its session. Their headers may carry session-specific OAuth state, so pooling them by default would risk leaking credentials across sessions.
+- **`maxIdleMs` is a hard cap that survives attach/detach churn.** A 5-minute idle hard cap means even an aggressively attaching/detaching client cannot keep an idle transport pinned past 5 minutes. Operators who want pinned long-lived transports should increase `maxIdleMs` or run the server outside the pool.
 - **Per-server-name budget slots** mean two pool entries that share a name but differ by fingerprint consume ONE slot together, not two. Subprocess accounting is exposed separately via `pool.getSnapshot().subprocessCount`.
 - **`startsWith` regression** was avoided in `hasNameSibling` because MCP server names can legitimately contain `::` (`mcp-pool-key.test.ts:258`). Always use `parseConnectionId`'s `lastIndexOf('::')` split, never string-prefix matching.
 - **Pool draining is one-way** — `drainAll` sets `draining = true` permanently; a fresh pool is required for further work.

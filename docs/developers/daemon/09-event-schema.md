@@ -125,7 +125,7 @@ These events are workspace-keyed, not session-keyed. The session reducer treats 
 
 ### `DaemonSessionViewState`
 
-`reduceDaemonSessionEvent` fills this view state. CLI TUI adapter, `DaemonChannelBridge`, and VSCode IDE consume it. Key fields:
+`reduceDaemonSessionEvent` fills this view state. CLI TUI adapter, `DaemonChannelBridge`, and VS Code IDE consume it. Key fields:
 
 - `alive: boolean` - becomes `false` after a terminal frame (`session_died`, `session_closed`, `client_evicted`, `stream_error`).
 - `currentModelId?: string` - from `model_switched`.
@@ -241,12 +241,12 @@ While `awaitingResync = true`, the reducer **skips delta application** and only 
 | Passthrough type        | Why it is still applied during resync                                          |
 | ----------------------- | ------------------------------------------------------------------------------ |
 | `state_resync_required` | Rare second resync should update `lastResyncRequired` / `resyncRequiredCount`. |
-| `session_died`          | Terminal stream signal must remain visible in resync limbo.                    |
+| `session_died`          | Terminal stream signal must remain visible during resync.                      |
 | `session_closed`        | Same as above.                                                                 |
 | `client_evicted`        | Same as above.                                                                 |
 | `stream_error`          | Same as above.                                                                 |
 
-`lastEventId` still advances monotonically through `advanceLastEventId(base)` during resync limbo. After the caller resets and clears `awaitingResync`, subsequent deltas align to the correct cursor.
+`lastEventId` still advances monotonically through `advanceLastEventId(base)` during resync. After the caller resets and clears `awaitingResync`, subsequent deltas align to the correct cursor.
 
 `reduceDaemonAuthEvent` projects device-flow events into workspace-level auth
 state entries shaped like
@@ -274,7 +274,7 @@ per-event shapes listed above.
 ## Configuration
 
 - Always advertised: `typed_event_schema`, `mcp_guardrail_events`, and `permission_mediation` (with supported policy modes).
-- No env var or flag directly controls the schema itself. `QWEN_SERVE_NO_MCP_POOL=1` changes MCP event `scope` from `'workspace'` to absent / `'session'`.
+- No env var or flag directly controls the schema itself. `QWEN_SERVE_NO_MCP_POOL=1` changes MCP event `scope` from `'workspace'` to absent or `'session'`.
 
 ## Caveats and known limits
 

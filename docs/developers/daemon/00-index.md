@@ -1,6 +1,6 @@
 # Daemon Developer Documentation
 
-This is the developer-facing technical documentation set for **qwen-code daemon mode**: the `qwen serve` HTTP daemon, the `@qwen-code/acp-bridge` package, the workspace-scoped MCP transport pool, multi-client permission mediation, typed daemon event schema v1, the TypeScript SDK daemon client, and the adapters that talk to the daemon.
+This is the developer-facing technical documentation for **qwen-code daemon mode**: the `qwen serve` HTTP daemon, the `@qwen-code/acp-bridge` package, the workspace-scoped MCP transport pool, multi-client permission mediation, typed daemon event schema v1, the TypeScript SDK daemon client, and the adapters that connect to the daemon.
 
 It complements, rather than replaces, these existing docs:
 
@@ -17,7 +17,7 @@ If you want to **start a daemon and use it**, read `qwen-serve.md` first. If you
 
 Pick the path that matches your goal:
 
-- **I want to start it first**: `20 -> 17 -> 19`.
+- **Start and verify a daemon first**: `20 -> 17 -> 19`.
 - **New contributor**: `01 -> 02 -> 03 -> 08 -> 09 -> 10 -> 11 -> 12`.
 - **Adding a new client adapter**: `01 -> 09 -> 10 -> 13 -> (14 / 15 / 16)`.
 - **Working on the MCP pool or budget**: `01 -> 03 -> 05 -> 06`.
@@ -68,7 +68,7 @@ Pick the path that matches your goal:
 - **DaemonClient** - `packages/sdk-typescript/src/daemon/DaemonClient.ts`. The TypeScript SDK HTTP-level facade over the daemon.
 - **DaemonSessionClient** - `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts`. Session-scoped wrapper that tracks `lastSeenEventId` for SSE replay.
 - **EventBus** - `packages/acp-bridge/src/eventBus.ts`. Per-session in-memory pub/sub with monotonic IDs, a bounded ring, and per-subscriber backpressure.
-- **F1 / F2 / F3 / F4** - internal milestones inside [#4175](https://github.com/QwenLM/qwen-code/issues/4175). F1: bridge lift and `BridgeFileSystem`. F2: workspace-scoped MCP transport pool. F3: multi-client permission mediation. F4: protocol completion and daemon client surfaces.
+- **F1 / F2 / F3 / F4** - internal milestones tracked in [#4175](https://github.com/QwenLM/qwen-code/issues/4175). F1: bridge extraction and `BridgeFileSystem`. F2: workspace-scoped MCP transport pool. F3: multi-client permission mediation. F4: protocol completion and daemon client surfaces.
 - **MCP** - Model Context Protocol. Servers expose tools, resources, and prompts; the daemon ACP child connects to them.
 - **McpTransportPool** - `packages/core/src/tools/mcp-transport-pool.ts`. F2 workspace-scoped pool sharing one MCP transport per server name and config fingerprint.
 - **Mediator policy** - one of `first-responder`, `designated`, `consensus`, or `local-only`. Decides how multi-client permission votes resolve.
@@ -135,7 +135,7 @@ Use these anchors when moving from the docs into the latest `main` code:
 | TypeScript SDK daemon client | `DaemonClient`, `DaemonSessionClient`, `DaemonAuthFlow`, SSE parser, event reducers, feature preflight, and UI transcript exports are documented.            | [`13`](./13-sdk-daemon-client.md)                                                                                                             |
 | Shared UI transcript layer   | SDK `daemon/ui/*` normalizes daemon events into 36 UI semantic event types, reduces them into transcript blocks, and provides renderers/conformance helpers. | [`14`](./14-cli-tui-adapter.md), [`../daemon-ui/README.md`](../daemon-ui/README.md), [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) |
 | Web UI daemon consumer       | `packages/webui/src/daemon/` consumes the SDK transcript store through React providers and adapters.                                                         | [`14`](./14-cli-tui-adapter.md), [`../daemon-client-adapters/web-ui.md`](../daemon-client-adapters/web-ui.md)                                 |
-| CLI TUI / channels / VSCode  | Legacy paths still exist; migration to shared transcript primitives is documented as follow-up work, not completed behavior.                                 | [`14`](./14-cli-tui-adapter.md), [`15`](./15-channel-adapters.md), [`16`](./16-vscode-ide-adapter.md)                                         |
+| CLI TUI / channels / VS Code | Legacy paths still exist; migration to shared transcript primitives is documented as follow-up work, not completed behavior.                                 | [`14`](./14-cli-tui-adapter.md), [`15`](./15-channel-adapters.md), [`16`](./16-vscode-ide-adapter.md)                                         |
 
 ### Reference and operations
 

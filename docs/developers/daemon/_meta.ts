@@ -15,7 +15,7 @@ export default {
   '13-sdk-daemon-client': '13 · TypeScript SDK Client',
   '14-cli-tui-adapter': '14 · Shared UI Transcript Layer',
   '15-channel-adapters': '15 · Channel Adapters',
-  '16-vscode-ide-adapter': '16 · VSCode IDE Adapter',
+  '16-vscode-ide-adapter': '16 · VS Code IDE Adapter',
   '17-configuration': '17 · Configuration Reference',
   '18-error-taxonomy': '18 · Error Taxonomy',
   '19-observability': '19 · Observability & Debugging',

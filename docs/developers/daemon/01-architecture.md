@@ -6,7 +6,7 @@ A `qwen serve` process is **one daemon = one workspace**. It hosts a single Expr
 
 Inside the ACP child, MCP servers are shared workspace-wide through `McpTransportPool` (F2): a single (server-name + config-fingerprint) tuple maps to one MCP transport, regardless of how many sessions discover it. The bridge's `MultiClientPermissionMediator` (F3) coordinates permission votes across all connected clients under one of four policies.
 
-This doc gives the **system-level picture** that every other doc in this set hangs off. Each load-bearing flow is shown as a Mermaid sequence diagram; per-component implementation details live in the other 18 docs.
+This doc gives the **system-level picture** that the rest of this documentation set builds on. Each critical flow is shown as a Mermaid sequence diagram; per-component implementation details live in the other 18 docs.
 
 ## Process topology
 
@@ -14,7 +14,7 @@ This doc gives the **system-level picture** that every other doc in this set han
 flowchart LR
     subgraph clients["Clients"]
         TUI["CLI TUI<br/>(packages/cli/src/ui/daemon)"]
-        IDE["VSCode IDE<br/>(packages/vscode-ide-companion)"]
+        IDE["VS Code IDE<br/>(packages/vscode-ide-companion)"]
         CH["Channel bots<br/>(DingTalk / WeChat / Telegram)"]
         SDK["Any SDK consumer<br/>(packages/sdk-typescript/src/daemon)"]
     end
@@ -55,7 +55,7 @@ flowchart LR
     POOL -- "shared transport" --> MCP2
 ```
 
-The daemon process and the ACP child are connected by an `AcpChannel` (default: a real subprocess pair-of-pipes; `inMemoryChannel` for tests). Everything the daemon does is shaped by this split: HTTP and SSE traffic terminate in the daemon; agent decisions and tool invocations happen in the child; the bridge is the seam.
+The daemon process and the ACP child are connected by an `AcpChannel` (default: a real subprocess stdio pipe pair; `inMemoryChannel` for tests). Everything the daemon does is shaped by this split: HTTP and SSE traffic terminate in the daemon, agent decisions and tool invocations happen in the child, and the bridge connects the two.
 
 ## Package map
 
@@ -132,7 +132,7 @@ flowchart TB
     DC --> AUTHF
 ```
 
-Three trust boundaries to keep in mind: the HTTP edge (`serve/auth.ts` middleware chain), the bridge ↔ ACP-child seam (NDJSON over stdio, no auth — the child trusts the bridge implicitly), and the agent ↔ MCP server seam (the agent may invoke tools that touch the host).
+Three trust boundaries matter: the HTTP edge (`serve/auth.ts` middleware chain), the bridge-to-ACP-child boundary (NDJSON over stdio, no auth; the child trusts the bridge implicitly), and the agent-to-MCP-server boundary (the agent may invoke tools that touch the host).
 
 ## Workflow 1: HTTP request lifecycle
 
@@ -272,7 +272,7 @@ sequenceDiagram
     S->>P: release(id, sessionId)
     P->>E: detach session
     E->>E: arm drain timer (default 30s)
-    Note over E: refs==0 → drain timer fires → close transport<br/>(MAX_IDLE_MS 5min hard cap survives flap)
+    Note over E: refs==0 → drain timer fires → close transport<br/>(MAX_IDLE_MS 5min hard cap survives attach/detach churn)
 
     Note over S,P: Operator restart flow…
     S->>P: restartByName(name, opts?)
@@ -314,7 +314,7 @@ sequenceDiagram
     Note over Op,RQS: Second SIGTERM during shutdown →<br/>bridge.killAllSync() + process.exit(1) (orphan prevention)
 ```
 
-The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE subscribers, and the ACP child's in-flight tool calls all need bounded teardown windows. If anything blocks past those deadlines, the force-close path takes over so a stuck child can't keep the daemon process alive.
+The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE subscribers, and the ACP child's in-flight tool calls all need bounded teardown windows. If anything blocks past those deadlines, the force-close path takes over so a stuck child cannot keep the daemon process alive.
 
 ## Critical files
 

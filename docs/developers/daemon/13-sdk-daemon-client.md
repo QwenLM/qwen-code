@@ -2,7 +2,7 @@
 
 ## Overview
 
-`packages/sdk-typescript/src/daemon/` is the **TypeScript SDK's daemon client**. It is the canonical way to talk to a running `qwen serve` daemon from any TypeScript / JavaScript host (the CLI's own TUI adapter, channel bot backends, the VSCode IDE companion, custom scripts, server-side web BFFs). All other adapters depend on it.
+`packages/sdk-typescript/src/daemon/` is the **TypeScript SDK's daemon client**. It is the canonical way to connect to a running `qwen serve` daemon from any TypeScript / JavaScript host (the CLI's own TUI adapter, channel bot backends, the VS Code IDE companion, custom scripts, and server-side web backends). All other adapters depend on it.
 
 The package layout is intentionally small:
 
@@ -16,7 +16,7 @@ The package layout is intentionally small:
 | `events.ts`              | `asKnownDaemonEvent`, `reduceDaemonSessionEvent`, `reduceDaemonAuthEvent` (see [`09-event-schema.md`](./09-event-schema.md)).  |
 | `types.ts`               | `DaemonCapabilities`, `DaemonSession`, `DaemonEvent`, `PermissionResponse`, `PromptResult`, MCP / agent / memory / auth types. |
 
-The walk-through example is at [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md); this doc is the architecture/contract reference.
+The walkthrough example is at [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md); this doc is the architecture and contract reference.
 
 ## Responsibilities
 
@@ -63,12 +63,12 @@ Every request goes through `fetchWithTimeout`. Critical details:
 - **Body read is inside the timer scope.** Previous implementations cleared the timer when headers arrived; if a proxy stalled mid-body, `await res.json()` could hang past `fetchTimeoutMs`. The current shape passes the body-reading code as a callback so the timer covers both header arrival AND body consumption.
 - **`perCallTimeoutMs`** lets a single call override the client-wide default. The most visible caller is `restartMcpServer`: the SDK uses `MCP_RESTART_DEFAULT_TIMEOUT_MS = 330_000` (5 min 30s). The daemon's own `MCP_RESTART_TIMEOUT_MS` is exactly 300s; if the client matched that value, a restart that completes near 300s could lose the race while the daemon serializes and sends its structured response, causing a false-positive `TimeoutError`. The extra 30s covers serialization, network transfer, and decode on both sides. Callers that need a tighter budget can pass `timeoutMs`; passing `0` disables the timeout.
 - **`AbortSignal.any`** composes caller-supplied signal with the per-call timer signal, so caller cancellation and per-call timeout both abort cleanly.
-- **`AbortController` + cancellable `setTimeout`** instead of `AbortSignal.timeout()` so fast-resolving requests don't leak pending timers on the event loop. Timer is cleared in `finally`.
+- **`AbortController` + cancellable `setTimeout`** instead of `AbortSignal.timeout()` so fast-resolving requests do not leak pending timers on the event loop. Timer is cleared in `finally`.
 - **Streaming endpoints (`subscribeEvents`) bypass the timeout** — long-lived SSE must not be killed by it.
 
 ### `DaemonSessionClient` (`DaemonSessionClient.ts:61-385`)
 
-Binds one session + auto-tracks `lastSeenEventId` so SSE replay/reconnect just works.
+Binds one session and automatically tracks `lastSeenEventId` so SSE replay and reconnect work without extra caller state.
 
 ```ts
 class DaemonSessionClient {
@@ -111,7 +111,7 @@ interface DaemonAuthFlowHandle {
 }
 ```
 
-`awaitCompletion()` polls `GET /workspace/auth/device-flow/:id` at the daemon-supplied `intervalMs` until the flow `authorized` / `failed` / `cancelled`. Lazily constructed via `client.auth` so clients that never touch auth pay no allocation cost.
+`awaitCompletion()` polls `GET /workspace/auth/device-flow/:id` at the daemon-supplied `intervalMs` until the flow becomes `authorized`, `failed`, or `cancelled`. It is lazily constructed via `client.auth` so clients that never touch auth incur no allocation cost.
 
 ### `parseSseStream` (`sse.ts:70-295`)
 
@@ -119,7 +119,7 @@ Turns a `Response.body` (`ReadableStream<Uint8Array>`) into `AsyncIterable<Daemo
 
 - LF and CRLF framing.
 - Buffer overflow cap (16 MiB) — defensive bound against a daemon emitting a single absurdly large frame.
-- AbortSignal wire-up — abort closes the stream + the iterator.
+- AbortSignal wiring — abort closes the stream and the iterator.
 - Comment-only frames and unknown event types (passed through as `DaemonEvent`; SDK consumers narrow downstream via `asKnownDaemonEvent`).
 
 ### Types (`types.ts`)
@@ -212,7 +212,7 @@ sequenceDiagram
 
 - `globalThis.fetch` (Node 18+ built-in, browser, undici, etc.). Injectable per `DaemonClient` for tests.
 - Native `AbortController` / `AbortSignal.any` / `setTimeout`.
-- No transitive dependencies on `@qwen-code/qwen-code-core` or `@qwen-code/acp-bridge` — the SDK package is fully decoupled so external consumers don't pull in the daemon's internals.
+- No transitive dependencies on `@qwen-code/qwen-code-core` or `@qwen-code/acp-bridge` — the SDK package is fully decoupled so external consumers do not pull in the daemon's internals.
 
 ## `ui/*` subpackage ([#4328](https://github.com/QwenLM/qwen-code/pull/4328) + [#4353](https://github.com/QwenLM/qwen-code/pull/4353))
 
@@ -227,7 +227,7 @@ set of primitives that turn daemon events into transcript blocks:
 - Public constants include `DAEMON_PLAN_TOOL_CALL_ID`.
 - `conformance.ts` contains the cross-host consistency test suite.
 
-The first real consumer is `packages/webui/src/daemon/` through React's
+The first production consumer is `packages/webui/src/daemon/` through React's
 `DaemonSessionProvider`. See [`14-cli-tui-adapter.md`](./14-cli-tui-adapter.md)
 for the detailed architecture, glossary, selector table, and relationship to
 the legacy `DaemonTuiAdapter`.
@@ -251,10 +251,10 @@ code that does `import { DaemonClient }` is unaffected.
 ## Caveats & Known Limits
 
 - **`fetchTimeoutMs` is per-call, not connection-level.** Long body reads share the timer. A daemon that streams responses must override per-call or set the timeout to `0`.
-- **SSE is bypass-only for the timeout** — long-lived SSE connections aren't killed by `fetchTimeoutMs`. Use `AbortSignal` for caller-controlled cancellation.
+- **SSE bypasses the fetch timeout** — long-lived SSE connections are not killed by `fetchTimeoutMs`. Use `AbortSignal` for caller-controlled cancellation.
 - **`parseSseStream` buffer cap is 16 MiB** as a defensive bound. A single frame larger than this aborts the iterator (the daemon never legitimately emits such frames).
-- **`asKnownDaemonEvent` returns `undefined` for unrecognized event types.** SDK consumers must handle this branch rather than assuming the union is exhaustive — that's the forward-compat contract. Unrecognized events increment `DaemonSessionViewState.unrecognizedKnownEventCount`.
-- **`client_evicted`, `slow_client_warning`, `stream_error` are not in the replay ring.** Reconnecting after eviction picks up from the daemon's ring; you won't re-see the eviction frame.
+- **`asKnownDaemonEvent` returns `undefined` for unrecognized event types.** SDK consumers must handle this branch rather than assuming the union is exhaustive; that is the forward-compatibility contract. Unrecognized events increment `DaemonSessionViewState.unrecognizedKnownEventCount`.
+- **`client_evicted`, `slow_client_warning`, `stream_error` are not in the replay ring.** Reconnecting after eviction picks up from the daemon's ring; you will not see the eviction frame again.
 - **`DaemonClient` does not auto-retry.** Network failures surface as rejections; reconnect / replay strategy is the caller's responsibility (`DaemonSessionClient.events()` makes replay easy but reconnect is still per-call).
 
 ## References

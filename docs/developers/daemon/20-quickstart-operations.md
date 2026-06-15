@@ -1,6 +1,6 @@
 # Quickstart & Operations
 
-This page focuses on **how to start `qwen serve`, how to verify that it actually works, and what the internal call chain looks like from `qwen serve` to the listening server**. Architecture, components, and wire protocol details live in the other daemon deep-dive pages.
+This page focuses on **how to start `qwen serve`, how to verify that it is working, and what the internal call chain looks like from `qwen serve` to the listening server**. Architecture, components, and wire protocol details live in the other daemon deep-dive pages.
 
 ## 1. Shortest path
 
@@ -27,7 +27,7 @@ qwen serve
 # 2. Explicit workspace + ephemeral port
 qwen serve --workspace /path/to/repo --port 0
 
-# 3. Hardened loopback dev (force bearer even on loopback)
+# 3. Hardened loopback development (force bearer even on loopback)
 QWEN_SERVER_TOKEN=$(openssl rand -hex 32) qwen serve --require-auth
 
 # 4. Expose to LAN (non-loopback requires a token)
@@ -67,7 +67,7 @@ qwen serve --channel-idle-timeout-ms 60000
 QWEN_SERVE_RATE_LIMIT=1 qwen serve
 ```
 
-With the hardened loopback recipe (3), `/demo` is registered after `bearerAuth`. A normal browser navigation would need an auth header, so use curl or an SDK script instead.
+With the hardened loopback recipe (3), `/demo` is registered after `bearerAuth`. A normal browser navigation needs an auth header, so use curl or an SDK script instead.
 
 ## 3. Full startup flags
 
@@ -137,7 +137,7 @@ Boot calls `loadSettings(boundWorkspace)` once:
 
 Settings I/O failure, such as malformed JSON, falls back to defaults. `InvalidPolicyConfigError` is the exception: policy misconfiguration fails boot explicitly.
 
-## 6. Boot refusal scenarios (fail loud)
+## 6. Boot refusal scenarios (explicit failures)
 
 `runQwenServe.ts` intentionally throws instead of falling back in these cases:
 
@@ -150,7 +150,7 @@ Settings I/O failure, such as malformed JSON, falls back to defaults. `InvalidPo
 | `--mcp-client-budget` is not a positive integer                               | `Must be a positive integer`                                                                       |
 | `--mcp-budget-mode=enforce` without budget                                    | `requires a positive mcpClientBudget`                                                              |
 | `--hostname` is written as `localhost:4170`                                   | `looks like a "host:port" combination. Use --port`                                                 |
-| `--hostname [::1]:8080`                                                       | `Invalid --hostname ... brackets indicate an IPv6 literal but the value isn't a clean [addr] form` |
+| `--hostname [::1]:8080`                                                       | `Invalid --hostname ... brackets indicate an IPv6 literal but the value is not a clean [addr] form` |
 | `--max-connections` is `NaN` or negative                                      | `Must be >= 0`                                                                                     |
 | `--event-ring-size > 1_000_000`                                               | Thrown during bridge construction                                                                  |
 | `--allow-origin '*'` without token                                            | `Refusing to start with --allow-origin '*' but no bearer token configured`                         |
@@ -205,7 +205,7 @@ When bearer auth is enabled, add `-H "Authorization: Bearer $QWEN_SERVER_TOKEN"`
 | Launch mode                       | Where `/demo` is registered                                         | Direct browser navigation                         |
 | --------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------- |
 | Loopback without `--require-auth` | `server.ts` loopback pre-auth route branch, **before** `bearerAuth` | Works without token                               |
-| Loopback with `--require-auth`    | `server.ts` post-auth route branch, **after** `bearerAuth`          | Hard to use from a plain browser; use curl or SDK |
+| Loopback with `--require-auth`    | `server.ts` post-auth route branch, **after** `bearerAuth`          | Difficult to use from a plain browser; use curl or SDK |
 | Non-loopback bind                 | `server.ts` post-auth route branch, **after** `bearerAuth`          | Same as above                                     |
 
 CSP is `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'`, plus `X-Frame-Options: DENY`. The page can only fetch `'self'` (the daemon) and cannot load external scripts or styles.

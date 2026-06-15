@@ -2,9 +2,9 @@
 
 ## Overview
 
-When the ACP child's agent calls `requestPermission`, the daemon doesn't just forward it to one client — under `sessionScope: 'single'` every connected client sees the request and any of them might respond. Without a mediator that's chaos: late votes have nowhere to go, two clients can race the same request, a single rogue client can override the originator, etc.
+When the ACP child's agent calls `requestPermission`, the daemon does not simply forward it to one client. Under `sessionScope: 'single'`, every connected client sees the request and any of them may respond. Without mediation, late votes have nowhere to go, two clients can race the same request, and a single rogue client can override the originator.
 
-`MultiClientPermissionMediator` (`packages/acp-bridge/src/permissionMediator.ts:1-1292`) implements the `PermissionMediator` contract (`packages/acp-bridge/src/permission.ts`) and owns ALL pending + resolved permission state for the bridge. It dispatches votes through one of four policies declared in `PermissionPolicy`:
+`MultiClientPermissionMediator` (`packages/acp-bridge/src/permissionMediator.ts:1-1292`) implements the `PermissionMediator` contract (`packages/acp-bridge/src/permission.ts`) and owns all pending and resolved permission state for the bridge. It dispatches votes through one of four policies declared in `PermissionPolicy`:
 
 | Policy            | Resolution rule                                                                                                        | Use case                                                                 |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
@@ -24,7 +24,7 @@ When the ACP child's agent calls `requestPermission`, the daemon doesn't just fo
 ## Responsibilities
 
 - Track every pending request (`request → vote → resolved` lifecycle).
-- Arm and disarm per-request wallclock timeouts (the **N1 invariant**: timeout MUST be armed synchronously inside `request()` so an immediately-cancelled session can't leak a forever-pending closure).
+- Arm and disarm per-request wallclock timeouts (the **N1 invariant**: the timeout must be armed synchronously inside `request()` so an immediately cancelled session cannot leak a permanently pending closure).
 - Dispatch votes through the policy captured at `request()` time (changing daemon policy mid-flight does not affect in-flight requests).
 - Maintain a bounded FIFO (`MAX_RESOLVED_PERMISSION_RECORDS = 512`) of recently-resolved requests so duplicate votes get a structured `already_resolved` rather than `unknown_request`.
 - Emit `permission_partial_vote` (consensus) and `permission_forbidden` (designated / consensus / local-only) on the per-session EventBus.
@@ -80,7 +80,7 @@ type PermissionResolution =
 1. **`bridge.ts`** rejects wire votes whose `optionId === CANCEL_VOTE_SENTINEL` with `InvalidPermissionOptionError` (a malicious wire client must not be able to inject cancel by lying about an `optionId`).
 2. **`mediator.request`** rejects records whose `allowedOptionIds` contains the sentinel with `CancelSentinelCollisionError` (an agent legitimately publishing `'__cancelled__'` as an option label must not be able to masquerade).
 
-This deliberate cross-policy escape is documented at `permissionMediator.ts:50-57` so a future maintainer doesn't "fix" the bypass.
+This deliberate cross-policy escape is documented at `permissionMediator.ts:50-57` so a future maintainer does not accidentally remove the bypass.
 
 ### Pending state
 
@@ -151,12 +151,12 @@ Called on session close, eviction, and bridge shutdown. For every pending entry 
 3. Append an audit record.
 4. Remove from `pending`.
 
-The bridge's session-teardown path always calls `forgetSession` **before** the channel-kill window so pending permissions don't outlive their session.
+The bridge's session-teardown path always calls `forgetSession` **before** the channel-kill window so pending permissions do not outlive their session.
 
 ## State & Lifecycle
 
 - `policy` is captured per-request. Changing daemon-wide policy (future surface) does not affect in-flight requests.
-- `votesAtIssue` (consensus) is captured at `request()` time; clients that arrive AFTER the request can vote, but if their `clientId` isn't already registered with the session at issue time their vote is rejected as `designated_mismatch`. This is overloaded with the `designated` policy's mismatch reason intentionally to keep the contract closed; future versions may split the union if SDK consumers need to distinguish.
+- `votesAtIssue` (consensus) is captured at `request()` time; clients that arrive after the request can vote, but if their `clientId` was not already registered with the session at issue time, their vote is rejected as `designated_mismatch`. This intentionally reuses the `designated` policy's mismatch reason to keep the contract closed; future versions may split the union if SDK consumers need to distinguish.
 - Resolved entries live in the FIFO for at most `MAX_RESOLVED_PERMISSION_RECORDS` (512). After eviction a duplicate vote on the same `requestId` returns `{unknown_request}`.
 - `permission_partial_vote` only fires for `consensus`. Don't depend on it under any other policy.
 - `permission_forbidden` fires for `designated`, `consensus`, and `local-only` — not `first-responder`.
@@ -206,7 +206,7 @@ For **M = 2**, split votes (A selects X, B selects Y) can only be resolved by
 the per-permission timeout: no option reaches unanimity, so the request waits
 until `permissionResponseTimeoutMs` (default 5 min) and resolves as
 `{cancelled, timeout}`. The vote-advance path logs this "unanimity means split
-votes time out" semantic to stderr for operators.
+votes time out" behavior to stderr for operators.
 
 Operators who want first-vote-wins behavior for M = 2 can explicitly set
 `policy.consensusQuorum: 1`. Stricter configurations, such as requiring
