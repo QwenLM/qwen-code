@@ -423,11 +423,11 @@ describe('applyTurnCollapse', () => {
     ]);
     const out = collapseItems(items, { isResponding: true });
     // Every row stays visible; the head carries the seam but is not collapsed.
-    // While live there is no final answer, so the trailing assistant text counts
-    // as a step too (tool group + assistant text = 2).
+    // The streamed answer is provisional (not a step), so only the tool group
+    // counts — a step-less reply stays step-less rather than flashing "1 step".
     expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
     expect(messageRow(out[0]).collapse?.collapsed).toBe(false);
-    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(2);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(1);
   });
 
   it('collapsing the active turn folds to prompt + seam (no stranded line)', () => {
@@ -445,6 +445,55 @@ describe('applyTurnCollapse', () => {
     // the prompt row (carrying the seam) survives.
     expect(rowIds(out)).toEqual(['u1']);
     expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
+  });
+
+  it('keeps a step-less reply step-less while it streams', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: '你好', timestamp: 1_000 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '你好！',
+        timestamp: 1_500,
+        usage: { inputTokens: 100, outputTokens: 20 },
+      },
+    ]);
+    const head = messageRow(collapseItems(items, { isResponding: true })[0])
+      .collapse;
+    // The streamed answer is provisional, not a step → nothing to fold, so no
+    // chevron flashes in then out when the turn completes.
+    expect(head?.hiddenCount).toBe(0);
+  });
+
+  it('marks the active turn live with its prompt timestamp', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'in_progress' }],
+        timestamp: 2_000,
+      },
+    ]);
+    const head = messageRow(collapseItems(items, { isResponding: true })[0])
+      .collapse;
+    expect(head?.liveStartedAt).toBe(1_000);
+  });
+
+  it('does not mark a completed turn live', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'completed' }],
+        timestamp: 2_000,
+      },
+      { id: 'a1', role: 'assistant', content: 'done', timestamp: 3_000 },
+    ]);
+    expect(
+      messageRow(collapseItems(items)[0]).collapse?.liveStartedAt,
+    ).toBeUndefined();
   });
 
   it('collapses earlier turns but leaves the active last turn expanded', () => {

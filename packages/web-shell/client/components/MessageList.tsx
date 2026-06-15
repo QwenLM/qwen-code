@@ -475,17 +475,15 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    // Final answer = last assistant-with-content row in (start, end]. An active
-    // turn has none yet — its latest assistant text is just another streaming
-    // step — so leave it unset; otherwise collapsing the turn would strand that
-    // intermediate line instead of folding down to the prompt + seam.
+    // Final answer = last assistant-with-content row in (start, end]. On an
+    // active turn this is provisional (the latest streamed text), so it is not
+    // counted as a step — keeping a step-less reply step-less — but it is folded
+    // away with everything else when the live turn is collapsed (see below).
     let answerIdx = -1;
-    if (!isActiveTurn) {
-      for (let i = end; i > start; i--) {
-        if (isAssistantAnswer(items[i])) {
-          answerIdx = i;
-          break;
-        }
+    for (let i = end; i > start; i--) {
+      if (isAssistantAnswer(items[i])) {
+        answerIdx = i;
+        break;
       }
     }
 
@@ -549,6 +547,9 @@ export function applyTurnCollapse(
         ...(elapsedMs !== undefined ? { elapsedMs } : {}),
         ...(hasUsage ? { inputTokens, outputTokens } : {}),
         ...(cachedTokens > 0 ? { cachedTokens } : {}),
+        ...(isActiveTurn && promptTs !== undefined
+          ? { liveStartedAt: promptTs }
+          : {}),
       },
     });
 
@@ -559,9 +560,11 @@ export function applyTurnCollapse(
 
     // Collapsed: drop the hideable steps; keep the final answer (its own
     // thinking stripped) and any non-step rows (errors, cancellations, command
-    // output) in their original places.
+    // output) in their original places. On an active turn the "answer" is still
+    // streaming, so fold it away too rather than strand a provisional line.
     for (let i = start + 1; i <= end; i++) {
       const item = items[i];
+      if (i === answerIdx && isActiveTurn) continue;
       if (isHideableStep(item, i === answerIdx)) continue;
       if (
         i === answerIdx &&

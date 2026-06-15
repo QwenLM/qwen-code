@@ -38,14 +38,17 @@
 .collapseRow {
   display: flex;
   align-items: baseline;
-  gap: 4px;
   width: fit-content;
   margin-top: 2px;
   font-size: 12px;
   line-height: 1.2;
 }
 
-/* The sole expand/collapse control — just the chevron glyph. */
+/*
+ * The expand/collapse control: the chevron plus the step count, together, so
+ * the click target is comfortably sized (not a lone glyph). Only this toggles
+ * the turn — the trailing metrics are inert.
+ */
 .collapseToggle {
   flex-shrink: 0;
   background: none;
@@ -53,6 +56,7 @@
   padding: 0;
   color: var(--text-dimmed);
   font: inherit;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -61,8 +65,9 @@
 }
 
 /*
- * Step count · duration · tokens. Inert (no fold affordance) and identical in
- * both states, so toggling never reflows the row.
+ * Duration · tokens. Inert (no fold affordance) and identical collapsed vs
+ * expanded, so toggling never reflows the row. Carries its own leading "·"
+ * separator after the toggle.
  */
 .collapseMeta {
   color: var(--text-dimmed);

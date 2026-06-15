@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { PromptChevron } from '../PromptChevron';
 import { isSafeImageSrc } from './Markdown';
 import { useI18n } from '../../i18n';
@@ -36,27 +36,28 @@ function formatTokenCount(tokens: number): string {
 }
 
 /**
- * Summary shown beside the fold chevron — identical whether the turn is
- * collapsed or expanded, so toggling only flips the chevron glyph and never
- * reflows the row. The step count is always present; duration and
- * `↑input ↓output` tokens join only when measured. e.g.
- * `3 steps · 12.4s · ↑3.1k ↓5.1k`.
+ * Inert metrics shown after the fold toggle: duration and `↑input ↓output`
+ * tokens, each present only when measured. Cached reads are a subset of input,
+ * shown parenthetically on ↑input with their share ("↑3.1k (2.8k cached, 90%)")
+ * so they read as "of which N cached", not an additive figure. e.g.
+ * `12.4s · ↑3.1k (2.8k cached, 90%) ↓5.1k`.
  */
-function collapseMetaText(collapse: TurnCollapseHead, t: Translate): string {
+function metricsText(
+  collapse: TurnCollapseHead,
+  elapsedMs: number | undefined,
+  t: Translate,
+): string {
   const parts: string[] = [];
-  // A step-less turn (nothing to fold) still shows time/tokens, just no count.
-  if (collapse.hiddenCount > 0) {
-    parts.push(t('turn.hiddenSteps', { count: collapse.hiddenCount }));
-  }
-  if (collapse.elapsedMs !== undefined) {
-    parts.push(formatDuration(collapse.elapsedMs));
+  if (elapsedMs !== undefined) {
+    parts.push(formatDuration(elapsedMs));
   }
   if (collapse.inputTokens !== undefined && collapse.outputTokens !== undefined) {
-    // Cached reads are a subset of input — shown parenthetically on ↑input so
-    // it reads as "of which N cached", not an extra additive figure.
+    const cachedTokens = collapse.cachedTokens ?? 0;
     const cached =
-      collapse.cachedTokens && collapse.cachedTokens > 0
-        ? ` (${formatTokenCount(collapse.cachedTokens)} ${t('turn.cached')})`
+      cachedTokens > 0 && collapse.inputTokens > 0
+        ? ` (${formatTokenCount(cachedTokens)} ${t('turn.cached')}, ${Math.round(
+            (cachedTokens / collapse.inputTokens) * 100,
+          )}%)`
         : '';
     parts.push(
       `↑${formatTokenCount(collapse.inputTokens)}${cached} ↓${formatTokenCount(
@@ -67,6 +68,22 @@ function collapseMetaText(collapse: TurnCollapseHead, t: Translate): string {
   return parts.join(' · ');
 }
 
+/**
+ * Wall-clock that re-renders this row once a second while `active`, so a live
+ * turn's elapsed advances smoothly instead of jumping per step. Idle (and for
+ * completed turns) it never ticks. App code, so `Date.now()` is available.
+ */
+function useNowTicker(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+  return now;
+}
+
 export const UserMessage = memo(function UserMessage({
   content,
   images,
@@ -74,6 +91,35 @@ export const UserMessage = memo(function UserMessage({
   onToggleCollapse,
 }: UserMessageProps) {
   const { t } = useI18n();
+
+  // A live turn ticks `now - liveStartedAt`; a completed turn shows its frozen
+  // elapsedMs. The ref clamps the shown value monotonically so it never steps
+  // backward when a live turn settles onto its (timestamp-derived) final figure.
+  const liveStartedAt = collapse?.liveStartedAt;
+  const now = useNowTicker(liveStartedAt !== undefined);
+  const elapsedSeenRef = useRef(0);
+  let displayElapsedMs: number | undefined;
+  if (liveStartedAt !== undefined) {
+    elapsedSeenRef.current = Math.max(
+      elapsedSeenRef.current,
+      Math.max(0, now - liveStartedAt),
+    );
+    displayElapsedMs = elapsedSeenRef.current;
+  } else if (collapse?.elapsedMs !== undefined) {
+    elapsedSeenRef.current = Math.max(
+      elapsedSeenRef.current,
+      collapse.elapsedMs,
+    );
+    displayElapsedMs = elapsedSeenRef.current;
+  } else {
+    displayElapsedMs = undefined;
+  }
+
+  // The chevron and step count toggle together (one comfortably-sized target);
+  // the trailing metrics are inert. A step-less turn has no toggle, just metrics.
+  const hasToggle = !!collapse && collapse.hiddenCount > 0;
+  const metrics = collapse ? metricsText(collapse, displayElapsedMs, t) : '';
+
   return (
     <div
       className={
@@ -105,9 +151,9 @@ export const UserMessage = memo(function UserMessage({
           </div>
         )}
         {content}
-        {collapse && onToggleCollapse && (
+        {collapse && onToggleCollapse && (hasToggle || metrics) && (
           <div className={styles.collapseRow}>
-            {collapse.hiddenCount > 0 && (
+            {hasToggle && (
               <button
                 type="button"
                 className={styles.collapseToggle}
@@ -120,12 +166,16 @@ export const UserMessage = memo(function UserMessage({
                   collapse.collapsed ? t('turn.expand') : t('turn.collapse')
                 }
               >
-                {collapse.collapsed ? '▸' : '▾'}
+                {`${collapse.collapsed ? '▸' : '▾'} ${t('turn.hiddenSteps', {
+                  count: collapse.hiddenCount,
+                })}`}
               </button>
             )}
-            <span className={styles.collapseMeta}>
-              {collapseMetaText(collapse, t)}
-            </span>
+            {metrics && (
+              <span className={styles.collapseMeta}>
+                {hasToggle ? ` · ${metrics}` : metrics}
+              </span>
+            )}
           </div>
         )}
       </div>

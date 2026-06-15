@@ -67,6 +67,13 @@ export interface TurnCollapseHead {
   outputTokens?: number;
   /** Cached-read tokens — a subset of inputTokens, surfaced only when > 0. */
   cachedTokens?: number;
+  /**
+   * Prompt wall-clock (ms) for a still-running turn. Present only while the turn
+   * is active; the row ticks `now - liveStartedAt` once a second so the elapsed
+   * advances smoothly instead of jumping per step. Absent once complete, when
+   * the frozen `elapsedMs` is shown.
+   */
+  liveStartedAt?: number;
 }
 
 export interface ContentBlock {

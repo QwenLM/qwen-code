@@ -119,7 +119,7 @@ describe('UserMessage collapse toggle', () => {
     expect(text).toContain('↓5.1k');
   });
 
-  it('keeps only the chevron clickable; the summary is inert text', () => {
+  it('puts the chevron + step count in the toggle, metrics inert', () => {
     const container = render(
       <UserMessage
         content="hi"
@@ -127,19 +127,23 @@ describe('UserMessage collapse toggle', () => {
           hiddenCount: 5,
           elapsedMs: 12_400,
           inputTokens: 3100,
+          outputTokens: 5100,
         })}
         onToggleCollapse={() => {}}
       />,
     );
     const btn = container.querySelector('button')!;
-    // The button carries only the chevron glyph — never the summary text.
-    expect(btn.textContent).toBe('▸');
+    // The toggle carries the chevron AND the step count (a roomy target)…
+    expect(btn.textContent).toMatch(/^[▸▾] 5 steps$/);
+    // …while the metrics live outside the button, in an inert span.
+    expect(btn.textContent).not.toContain('12.4s');
     const meta = btn.nextElementSibling!;
     expect(meta.tagName).toBe('SPAN');
-    expect(meta.textContent).toContain('5 steps');
+    expect(meta.textContent).toContain('12.4s');
+    expect(meta.textContent).toContain('↑3.1k');
   });
 
-  it('renders identical summary text collapsed vs expanded (no reflow)', () => {
+  it('keeps the toggle + metrics stable collapsed vs expanded (no reflow)', () => {
     const base = {
       hiddenCount: 5,
       elapsedMs: 12_400,
@@ -148,6 +152,8 @@ describe('UserMessage collapse toggle', () => {
     };
     const metaOf = (c: HTMLElement) =>
       c.querySelector('button')!.nextElementSibling!.textContent;
+    const btnOf = (c: HTMLElement) =>
+      c.querySelector('button')!.textContent;
     const collapsed = render(
       <UserMessage
         content="hi"
@@ -162,13 +168,14 @@ describe('UserMessage collapse toggle', () => {
         onToggleCollapse={() => {}}
       />,
     );
-    // Same summary in both states — only the chevron glyph flips.
+    // Inert metrics identical; the toggle differs only by the chevron glyph
+    // (same-width in the mono font), so the row never reflows on toggle.
     expect(metaOf(collapsed)).toBe(metaOf(expanded));
-    expect(collapsed.querySelector('button')!.textContent).toBe('▸');
-    expect(expanded.querySelector('button')!.textContent).toBe('▾');
+    expect(btnOf(collapsed)).toBe('▸ 5 steps');
+    expect(btnOf(expanded)).toBe('▾ 5 steps');
   });
 
-  it('renders just the step count when no metadata is measured', () => {
+  it('renders only the toggle when no metrics are measured', () => {
     const container = render(
       <UserMessage
         content="hi"
@@ -176,12 +183,14 @@ describe('UserMessage collapse toggle', () => {
         onToggleCollapse={() => {}}
       />,
     );
-    const meta = container.querySelector('button')!.nextElementSibling!;
-    expect(meta.textContent).toContain('3 steps');
-    expect(meta.textContent).not.toContain('·');
+    const btn = container.querySelector('button')!;
+    expect(btn.textContent).toContain('3 steps');
+    // No metrics → no inert span and no stray separator.
+    expect(btn.nextElementSibling).toBeNull();
+    expect(container.textContent).not.toContain('·');
   });
 
-  it('shows cached reads parenthetically on input when present', () => {
+  it('shows cached reads parenthetically on input, with their share', () => {
     const container = render(
       <UserMessage
         content="hi"
@@ -193,7 +202,30 @@ describe('UserMessage collapse toggle', () => {
         onToggleCollapse={() => {}}
       />,
     );
-    expect(container.textContent).toContain('↑3.1k (2.8k cached) ↓5.1k');
+    expect(container.textContent).toContain('↑3.1k (2.8k cached, 90%) ↓5.1k');
+  });
+
+  it('ticks elapsed from liveStartedAt on a live turn', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const container = render(
+        <UserMessage
+          content="hi"
+          collapse={head({
+            hiddenCount: 0,
+            liveStartedAt: 7_600,
+            inputTokens: 5,
+            outputTokens: 5,
+          })}
+          onToggleCollapse={() => {}}
+        />,
+      );
+      // now (10_000) − liveStartedAt (7_600) = 2.4s, ticked live.
+      expect(container.textContent).toContain('2.4s');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('omits the cached note when there are no cached reads', () => {
