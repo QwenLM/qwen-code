@@ -9,21 +9,28 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
-import type { Config } from '../config/config.js';
+import * as Diff from 'diff';
+import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
+  FileDiff,
   ToolInvocation,
   ToolResult,
   ToolResultDisplay,
   ToolCallConfirmationDetails,
+  ToolEditConfirmationDetails,
   ToolExecuteConfirmationDetails,
   ToolConfirmationPayload,
-  ToolConfirmationOutcome,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { getErrorMessage } from '../utils/errors.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+  ToolConfirmationOutcome,
+} from './tools.js';
+import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { truncateToolOutput } from '../utils/truncation.js';
 import {
   CommitAttributionService,
@@ -42,7 +49,7 @@ import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
-import { isSubpaths } from '../utils/paths.js';
+import { isSubpaths, makeRelative, shortenPath } from '../utils/paths.js';
 import {
   buildShellExecWarnings,
   getCommandRoot,
@@ -60,6 +67,16 @@ import {
   isShellCommandReadOnlyAST,
   extractCommandRules,
 } from '../utils/shellAstParser.js';
+import {
+  applySedSubstitution,
+  parseSedEditCommand,
+  type SedEditInfo,
+} from '../utils/sedEditParser.js';
+import {
+  detectLineEnding,
+  type ReadTextFileResponse,
+} from '../services/fileSystemService.js';
+import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
 
@@ -1421,15 +1438,202 @@ export interface ShellToolParams {
   directory?: string;
 }
 
+interface PreparedSedEdit {
+  filePath: string;
+  fileName: string;
+  originalContent: string;
+  newContent: string;
+  meta: ReadTextFileResponse['_meta'];
+}
+
+const LEADING_ENV_ASSIGNMENT_RE = /^\s*[A-Za-z_][A-Za-z0-9_]*=/;
+
 export class ShellToolInvocation extends BaseToolInvocation<
   ShellToolParams,
   ToolResult
 > {
+  private preparedSedEdit: PreparedSedEdit | undefined;
+  private confirmedSedNewContent: string | undefined;
+  private sedEditPreviewFailed = false;
+
   constructor(
     private readonly config: Config,
     params: ShellToolParams,
   ) {
     super(params);
+  }
+
+  private getSedEditInfo(): SedEditInfo | null {
+    if (
+      this.params.is_background ||
+      LEADING_ENV_ASSIGNMENT_RE.test(this.params.command)
+    ) {
+      return null;
+    }
+    return parseSedEditCommand(stripShellWrapper(this.params.command));
+  }
+
+  private resolveSedFilePath(filePath: string): string {
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+    const cwd = this.params.directory || this.config.getTargetDir();
+    return path.resolve(cwd, filePath);
+  }
+
+  private async prepareSedEdit(sedInfo: SedEditInfo): Promise<PreparedSedEdit> {
+    const filePath = this.resolveSedFilePath(sedInfo.filePath);
+    const { content, _meta } = await this.config
+      .getFileSystemService()
+      .readTextFile({ path: filePath });
+
+    return {
+      filePath,
+      fileName: path.basename(filePath),
+      originalContent: content,
+      newContent: applySedSubstitution(content, sedInfo),
+      meta: {
+        ..._meta,
+        lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
+      },
+    };
+  }
+
+  private makeSedEditDisplay(edit: PreparedSedEdit): FileDiff {
+    const diffStat = getDiffStat(
+      edit.fileName,
+      edit.originalContent,
+      edit.newContent,
+      edit.newContent,
+    );
+    return {
+      fileDiff: Diff.createPatch(
+        edit.fileName,
+        edit.originalContent,
+        edit.newContent,
+        'Current',
+        'Proposed',
+        DEFAULT_DIFF_OPTIONS,
+      ),
+      fileName: edit.fileName,
+      originalContent: edit.originalContent,
+      newContent: edit.newContent,
+      diffStat,
+    };
+  }
+
+  private sedEditError(
+    message: string,
+    type = ToolErrorType.FILE_WRITE_FAILURE,
+  ): ToolResult {
+    return {
+      llmContent: message,
+      returnDisplay: message,
+      error: {
+        message,
+        type,
+      },
+    };
+  }
+
+  private async executeSedEdit(sedInfo: SedEditInfo): Promise<ToolResult> {
+    let edit: PreparedSedEdit;
+    try {
+      edit = await this.prepareSedEdit(sedInfo);
+    } catch (err) {
+      const filePath = this.resolveSedFilePath(sedInfo.filePath);
+      const message = `Error reading file for sed edit '${filePath}': ${getErrorMessage(err)}`;
+      return this.sedEditError(
+        message,
+        isNodeError(err) && err.code === 'ENOENT'
+          ? ToolErrorType.FILE_NOT_FOUND
+          : ToolErrorType.READ_CONTENT_FAILURE,
+      );
+    }
+
+    if (
+      this.preparedSedEdit?.filePath === edit.filePath &&
+      this.preparedSedEdit.originalContent !== edit.originalContent
+    ) {
+      return this.sedEditError(
+        `File changed since sed edit confirmation: ${edit.filePath}. Please re-read the file and retry.`,
+        ToolErrorType.FILE_CHANGED_SINCE_READ,
+      );
+    }
+
+    if (
+      this.preparedSedEdit?.filePath === edit.filePath &&
+      this.confirmedSedNewContent !== undefined
+    ) {
+      edit = {
+        ...edit,
+        newContent: this.confirmedSedNewContent,
+      };
+    }
+
+    const display = this.makeSedEditDisplay(edit);
+    if (edit.originalContent === edit.newContent) {
+      return {
+        llmContent: `sed edit made no changes to ${edit.filePath}.`,
+        returnDisplay: display,
+      };
+    }
+
+    try {
+      try {
+        await this.config.getFileHistoryService().trackEdit(edit.filePath);
+      } catch {
+        // File history is best-effort; never block shell-compatible edits.
+      }
+
+      await this.config.getFileSystemService().writeTextFile({
+        path: edit.filePath,
+        content: edit.newContent,
+        _meta: edit.meta,
+      });
+
+      try {
+        CommitAttributionService.getInstance().recordEdit(
+          edit.filePath,
+          edit.originalContent,
+          edit.newContent,
+        );
+      } catch {
+        // Attribution is diagnostic metadata; the sed edit already succeeded.
+      }
+
+      try {
+        const postWriteStats = fs.statSync(edit.filePath);
+        if (postWriteStats) {
+          this.config
+            .getFileReadCache()
+            .recordWrite(edit.filePath, postWriteStats);
+        }
+      } catch {
+        // Non-fatal: a future read can refresh the cache from disk.
+      }
+
+      return {
+        llmContent: `sed edit applied to ${edit.filePath}.`,
+        returnDisplay: display,
+      };
+    } catch (err) {
+      let type = ToolErrorType.FILE_WRITE_FAILURE;
+      let message = `Error writing sed edit to file '${edit.filePath}': ${getErrorMessage(err)}`;
+      if (isNodeError(err)) {
+        if (err.code === 'EACCES') {
+          type = ToolErrorType.PERMISSION_DENIED;
+          message = `Permission denied writing sed edit to file: ${edit.filePath} (${err.code})`;
+        } else if (err.code === 'ENOSPC') {
+          type = ToolErrorType.NO_SPACE_LEFT;
+          message = `No space left on device while writing sed edit to file: ${edit.filePath} (${err.code})`;
+        } else if (err.code === 'EISDIR') {
+          type = ToolErrorType.TARGET_IS_DIRECTORY;
+          message = `Sed edit target is a directory, not a file: ${edit.filePath} (${err.code})`;
+        }
+      }
+      return this.sedEditError(message, type);
+    }
   }
 
   getDescription(): string {
@@ -1499,6 +1703,44 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const command = stripShellWrapper(this.params.command);
     const pm = this.config.getPermissionManager?.();
     const cwd = this.params.directory || this.config.getTargetDir();
+    const sedInfo = this.getSedEditInfo();
+
+    if (sedInfo) {
+      try {
+        const edit = await this.prepareSedEdit(sedInfo);
+        this.preparedSedEdit = edit;
+        this.confirmedSedNewContent = undefined;
+        this.sedEditPreviewFailed = false;
+        const display = this.makeSedEditDisplay(edit);
+        const confirmationDetails: ToolEditConfirmationDetails = {
+          type: 'edit',
+          title: `Confirm Sed Edit: ${shortenPath(makeRelative(edit.filePath, this.config.getTargetDir()))}`,
+          fileName: edit.fileName,
+          filePath: edit.filePath,
+          fileDiff: display.fileDiff,
+          originalContent: edit.originalContent,
+          newContent: edit.newContent,
+          hideModify: true,
+          onConfirm: async (
+            outcome: ToolConfirmationOutcome,
+            payload?: ToolConfirmationPayload,
+          ) => {
+            if (payload?.newContent !== undefined) {
+              this.confirmedSedNewContent = payload.newContent;
+            }
+            if (outcome === ToolConfirmationOutcome.ProceedAlways) {
+              this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+            }
+          },
+        };
+        return confirmationDetails;
+      } catch (err) {
+        this.sedEditPreviewFailed = true;
+        debugLogger.warn(
+          `sed edit preview failed, falling back to exec confirmation: ${getErrorMessage(err)}`,
+        );
+      }
+    }
 
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
@@ -1601,6 +1843,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     if (this.params.is_background) {
       return this.executeBackground(signal, shellExecutionConfig);
+    }
+
+    const sedInfo = this.getSedEditInfo();
+    if (sedInfo && !this.sedEditPreviewFailed) {
+      return this.executeSedEdit(sedInfo);
     }
 
     const effectiveTimeout =
