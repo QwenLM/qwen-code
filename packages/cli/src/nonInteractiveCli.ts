@@ -624,9 +624,12 @@ export async function runNonInteractive(
         // originating turn has already completed.
         monitorRegistry.setNotificationCallback(
           (displayText, modelText, meta) => {
-            if (meta.status === 'running') {
-              const entry = monitorRegistry.get?.(meta.monitorId);
-              if (!entry || entry.status !== 'running') return;
+            if (
+              meta.status === 'running' &&
+              typeof monitorRegistry.get === 'function'
+            ) {
+              const entry = monitorRegistry.get(meta.monitorId);
+              if (entry && entry.status !== 'running') return;
             }
 
             const queueItem = {

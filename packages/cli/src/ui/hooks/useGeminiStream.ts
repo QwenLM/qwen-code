@@ -2649,9 +2649,9 @@ export const useGeminiStream = (
   useEffect(() => {
     const registry = config.getMonitorRegistry();
     registry.setNotificationCallback((displayText, modelText, meta) => {
-      if (meta.status === 'running') {
+      if (meta.status === 'running' && typeof registry.get === 'function') {
         const entry = registry.get(meta.monitorId);
-        if (!entry || entry.status !== 'running') return;
+        if (entry && entry.status !== 'running') return;
       }
       notificationQueueRef.current.push({
         displayText,

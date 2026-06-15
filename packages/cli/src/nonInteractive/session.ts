@@ -198,9 +198,9 @@ class Session {
       if (this.isShuttingDown || this.abortController.signal.aborted) {
         return;
       }
-      if (meta.status === 'running') {
-        const entry = registry.get?.(meta.monitorId);
-        if (!entry || entry.status !== 'running') return;
+      if (meta.status === 'running' && typeof registry.get === 'function') {
+        const entry = registry.get(meta.monitorId);
+        if (entry && entry.status !== 'running') return;
       }
       this.enqueueMonitorNotification({
         displayText,
