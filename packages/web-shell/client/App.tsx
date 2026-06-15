@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import {
   useActions,
@@ -121,9 +122,12 @@ import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMess
 import { BtwMessage } from './components/messages/BtwMessage';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
+  computeTodoDetails,
   computeTodoTimeline,
   getFloatingTodos,
+  todoDetailSignature,
   todoTimelineSignature,
+  type TodoDetail,
   type TodoSnapshotDiff,
 } from './utils/todos';
 import { ThemeProvider } from './themeContext';
@@ -154,6 +158,38 @@ export const CompactModeContext = createContext(false);
 export const TodoTimelineContext = createContext<Map<string, TodoSnapshotDiff>>(
   new Map(),
 );
+
+/**
+ * Per-todo timing and resource detail keyed by todoStateKey, consumed by the
+ * expanded todo list so a finished task can reveal when it ran and what it
+ * spent. Empty by default so a row rendered outside the provider (or in tests)
+ * simply shows no expander.
+ */
+export const TodoDetailContext = createContext<Map<string, TodoDetail>>(
+  new Map(),
+);
+
+/**
+ * Provides both todo contexts in one wrapper so the message list stays at a
+ * single nesting level (one provider in the tree, not two).
+ */
+function TodoContextsProvider({
+  timeline,
+  details,
+  children,
+}: {
+  timeline: Map<string, TodoSnapshotDiff>;
+  details: Map<string, TodoDetail>;
+  children: ReactNode;
+}) {
+  return (
+    <TodoTimelineContext.Provider value={timeline}>
+      <TodoDetailContext.Provider value={details}>
+        {children}
+      </TodoDetailContext.Provider>
+    </TodoTimelineContext.Provider>
+  );
+}
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
@@ -702,6 +738,25 @@ export function App({
     const timeline = computeTodoTimeline(messages);
     todoTimelineRef.current = { signature, timeline };
     return timeline;
+  }, [messages]);
+  // Per-todo detail (start/end + token/API/tool spend) is derived entirely from
+  // the transcript: the agent stamps a cumulative-usage snapshot on each todo
+  // update and the web-shell diffs consecutive snapshots, so this works live and
+  // on resume with no polling. Kept referentially stable like the timeline
+  // above (rebuilt only when a relevant snapshot, timestamp, stat, or tool span
+  // changes) so an unrelated streaming tick doesn't re-render every expanded
+  // todo row that consumes TodoDetailContext.
+  const todoDetailRef = useRef<{
+    signature: string;
+    details: Map<string, TodoDetail>;
+  } | null>(null);
+  const todoDetails = useMemo(() => {
+    const signature = todoDetailSignature(messages);
+    const cached = todoDetailRef.current;
+    if (cached && cached.signature === signature) return cached.details;
+    const details = computeTodoDetails(messages);
+    todoDetailRef.current = { signature, details };
+    return details;
   }, [messages]);
   const floatingTodos = useStableArray(
     floatingTodosState.todos,
@@ -2583,7 +2638,10 @@ export function App({
 
           <WebShellCustomizationProvider value={customization}>
             <CompactModeContext.Provider value={compactMode}>
-              <TodoTimelineContext.Provider value={todoTimeline}>
+              <TodoContextsProvider
+                timeline={todoTimeline}
+                details={todoDetails}
+              >
                 <div
                   className={
                     showFloatingTodos
@@ -2716,7 +2774,7 @@ export function App({
                   <StreamingStatus />
                 </div>
                 <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
-              </TodoTimelineContext.Provider>
+              </TodoContextsProvider>
             </CompactModeContext.Provider>
           </WebShellCustomizationProvider>
 

@@ -64,6 +64,58 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('passes the agent-stamped plan stats snapshot through to rawOutput', () => {
+    const events = normalizeDaemonEvent({
+      id: 5,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'plan',
+          entries: [
+            { content: 'Task', status: 'completed', priority: 'medium' },
+          ],
+          _meta: {
+            stats: {
+              promptTokens: 100,
+              cachedTokens: 10,
+              candidateTokens: 20,
+              apiTimeMs: 500,
+            },
+          },
+        },
+      },
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'tool.update',
+      toolName: 'TodoWrite',
+      rawOutput: {
+        entries: [{ content: 'Task', status: 'completed', priority: 'medium' }],
+        stats: {
+          promptTokens: 100,
+          cachedTokens: 10,
+          candidateTokens: 20,
+          apiTimeMs: 500,
+        },
+      },
+    });
+  });
+
+  it('omits stats from a plan rawOutput when the update carries none', () => {
+    const events = normalizeDaemonEvent({
+      id: 6,
+      v: 1,
+      type: 'session_update',
+      data: { update: { sessionUpdate: 'plan', entries: [] } },
+    });
+
+    const rawOutput = (events[0] as { rawOutput: Record<string, unknown> })
+      .rawOutput;
+    expect(rawOutput).toEqual({ entries: [] });
+  });
+
   it('keeps optimistic local user blocks before daemon replies when sorting', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     state = appendLocalUserTranscriptMessage(state, 'hello', { now: 10 });
