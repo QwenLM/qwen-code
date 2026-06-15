@@ -263,6 +263,29 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     steps:
+      # Self-hosted runners reuse the workspace, so an interrupted review can
+      # leave a stale `.qwen/tmp/review-pr-*` worktree or `qwen-review/*` branch
+      # that trips the checkout below. Prune defensively; never fail the job.
+      - name: 'Clean stale review worktrees'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in a
+          # worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to clean"
+            exit 0
+          fi
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          git worktree prune -v || true
+          git for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+            | while read -r stale_ref; do
+                if [ -n "$stale_ref" ]; then
+                  git branch -D "$stale_ref" || true
+                fi
+              done
+          git worktree prune -v || true
+          echo "stale review worktrees cleaned"
+
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
       - name: 'Checkout base branch'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
