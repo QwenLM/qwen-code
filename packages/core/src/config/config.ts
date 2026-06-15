@@ -145,6 +145,7 @@ import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 } from './constants.js';
+import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
@@ -357,15 +358,23 @@ export interface ChatCompressionSettings {
   screenshotTriggerThreshold?: number;
 }
 
+export { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
+
 /**
- * Settings for clearing stale context after idle periods.
+ * Settings for clearing stale or oversized tool-result context.
  * Threshold values of -1 mean "never clear" (disabled).
  */
+
 export interface ClearContextOnIdleSettings {
   /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
   toolResultsThresholdMinutes?: number;
   /** Number of most-recent tool results to preserve. Default 5. */
   toolResultsNumToKeep?: number;
+  /**
+   * Total compactable tool result output chars before clearing old results.
+   * Default 500000. Use -1 to disable.
+   */
+  toolResultsTotalCharsThreshold?: number;
 }
 
 export interface TelemetrySettings {
@@ -1423,11 +1432,17 @@ export class Config {
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
+    const clearContextOnIdle = params.clearContextOnIdle;
+    const toolResultsThresholdMinutes =
+      clearContextOnIdle?.toolResultsThresholdMinutes ?? 60;
     this.clearContextOnIdle = {
-      toolResultsThresholdMinutes:
-        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
-      toolResultsNumToKeep:
-        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsThresholdMinutes,
+      toolResultsNumToKeep: clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsTotalCharsThreshold:
+        clearContextOnIdle?.toolResultsTotalCharsThreshold ??
+        ((clearContextOnIdle?.toolResultsThresholdMinutes ?? 0) < 0
+          ? -1
+          : DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD),
     };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =

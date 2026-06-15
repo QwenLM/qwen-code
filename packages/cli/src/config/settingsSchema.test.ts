@@ -99,6 +99,17 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
     });
 
+    it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
+      const threshold =
+        getSettingsSchema().context.properties.clearContextOnIdle.properties
+          ?.toolResultsTotalCharsThreshold;
+
+      expect(threshold).toBeDefined();
+      expect(threshold?.type).toBe('number');
+      expect(threshold?.default).toBe(500_000);
+      expect(threshold?.requiresRestart).toBe(false);
+    });
+
     it('should have sandboxImage setting under tools', () => {
       expect(getSettingsSchema().tools.properties.sandboxImage).toBeDefined();
       expect(getSettingsSchema().tools.properties.sandboxImage.type).toBe(
