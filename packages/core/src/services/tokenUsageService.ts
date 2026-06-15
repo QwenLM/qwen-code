@@ -262,6 +262,8 @@ function isTokenUsageRecord(value: unknown): value is TokenUsageRecord {
   }
   const record = value as Partial<TokenUsageRecord>;
   return (
+    typeof record.id === 'string' &&
+    typeof record.sessionId === 'string' &&
     typeof record.schemaVersion === 'number' &&
     Number.isInteger(record.schemaVersion) &&
     record.schemaVersion > 0 &&
@@ -467,10 +469,14 @@ function csvEscape(value: string | number | undefined): string {
 }
 
 function groupRows(
+  period: TokenUsagePeriod,
+  value: string,
   groupType: string,
   groups: TokenUsageGroupSummary[],
 ): string[][] {
   return groups.map((group) => [
+    period,
+    value,
     groupType,
     group.key,
     group.model ?? '',
@@ -507,6 +513,8 @@ export function formatTokenUsageSummaryAsCsv(
   ];
   const rows = [
     [
+      summary.period,
+      summary.value,
       'total',
       'total',
       '',
@@ -520,17 +528,25 @@ export function formatTokenUsageSummaryAsCsv(
       String(summary.totals.totalTokens),
       String(summary.totals.apiDurationMs),
     ],
-    ...groupRows('model', summary.byModel),
-    ...groupRows('auth_type', summary.byAuthType),
-    ...groupRows('model_auth_type', summary.byModelAndAuthType),
-    ...groupRows('source', summary.bySource),
+    ...groupRows(summary.period, summary.value, 'model', summary.byModel),
+    ...groupRows(
+      summary.period,
+      summary.value,
+      'auth_type',
+      summary.byAuthType,
+    ),
+    ...groupRows(
+      summary.period,
+      summary.value,
+      'model_auth_type',
+      summary.byModelAndAuthType,
+    ),
+    ...groupRows(summary.period, summary.value, 'source', summary.bySource),
   ];
 
   return [
     header.join(','),
-    ...rows.map((row) =>
-      [summary.period, summary.value, ...row].map(csvEscape).join(','),
-    ),
+    ...rows.map((row) => row.map(csvEscape).join(',')),
   ].join('\n');
 }
 

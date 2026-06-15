@@ -579,6 +579,8 @@ describe('tokenUsageService', () => {
       filePath,
       [
         '{"schemaVersion":1,"id":"ok","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":1,"outputTokens":2,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":3,"apiDurationMs":4}',
+        '{"schemaVersion":1,"timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":100,"outputTokens":100,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":200,"apiDurationMs":4}',
+        '{"schemaVersion":1,"id":"missing-session","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","model":"model-a","authType":"gemini","source":"main","inputTokens":100,"outputTokens":100,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":200,"apiDurationMs":4}',
         '{"schemaVersion":1,"id":"invalid"}',
         'not-json',
       ].join('\n'),
@@ -594,7 +596,7 @@ describe('tokenUsageService', () => {
     expect(summary.totals.requests).toBe(1);
     await vi.waitFor(async () => {
       const log = await readFile(Storage.getDebugLogPath(sessionId), 'utf-8');
-      expect(log).toContain(`Dropped 1/2 invalid record(s) from ${filePath}`);
+      expect(log).toContain(`Dropped 3/4 invalid record(s) from ${filePath}`);
     });
   });
 
@@ -655,6 +657,7 @@ describe('tokenUsageService', () => {
     const csv = formatTokenUsageSummaryAsCsv(
       await queryTokenUsage({ period: 'day', value: '2026-05-25' }),
     );
+    expect(csv).toContain('day,2026-05-25,total,total,,,,1,1,2,0,0,3,100');
     expect(csv).toContain(
       "day,2026-05-25,model,'=cmd|quoted,'=cmd|quoted,,,1,1,2,0,0,3,100",
     );

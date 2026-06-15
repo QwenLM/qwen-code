@@ -196,9 +196,6 @@ function tokenizeArgs(args: string): string[] {
   if (quote !== undefined) {
     throw new Error(t('Unclosed quote in arguments.'));
   }
-  if (quote !== undefined) {
-    throw new Error(t('Unclosed quote in arguments.'));
-  }
   if (current.length > 0) {
     tokens.push(current);
   }
