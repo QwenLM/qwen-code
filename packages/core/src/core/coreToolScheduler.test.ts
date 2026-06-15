@@ -11140,3 +11140,252 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     });
   });
 });
+
+describe('CoreToolScheduler cancellation retry loop detection', () => {
+  const CANCELLATION_STOP_DIRECTIVE = 'CANCELLATION LOOP DETECTED';
+
+  type SchedulerInternals = {
+    toolCalls: ToolCall[];
+    cancellationRetryCounts: Map<string, number>;
+    clearCancellationRetryCountsForTool: (toolName: string) => void;
+    _handleConfirmationResponseInner: (
+      callId: string,
+      toolCall: ToolCall,
+      originalOnConfirm: (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => Promise<void>,
+      outcome: ToolConfirmationOutcome,
+      signal: AbortSignal,
+      payload?: ToolConfirmationPayload,
+    ) => Promise<void>;
+  };
+
+  function createSchedulerForCancellationTest() {
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: {
+        getSessionId: () => 'test-session-id',
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getToolRegistry: () =>
+          ({
+            getTool: () => undefined,
+          }) as unknown as ToolRegistry,
+        getUsageStatisticsEnabled: () => false,
+        getDebugMode: () => false,
+        getChatRecordingService: () => undefined,
+      } as unknown as Config,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const makeWaitingToolCall = (
+      callId: string,
+      toolName: string,
+    ): ToolCall => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Run command',
+        command: 'test',
+        rootCommand: 'test',
+        onConfirm: vi.fn().mockResolvedValue(undefined),
+      };
+      return {
+        status: 'awaiting_approval',
+        request: {
+          callId,
+          name: toolName,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: `prompt-${callId}`,
+        },
+        tool: {},
+        confirmationDetails,
+      } as unknown as ToolCall;
+    };
+
+    const internals = scheduler as unknown as SchedulerInternals;
+    return { internals, makeWaitingToolCall, onToolCallsUpdate };
+  }
+
+  function getCancelledErrorMessageFromUpdates(
+    onToolCallsUpdate: Mock,
+    callId: string,
+  ): string | undefined {
+    const calls = onToolCallsUpdate.mock.calls;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      const toolCalls = calls[i][0] as ToolCall[];
+      for (const call of toolCalls) {
+        if (call.request.callId === callId && call.status === 'cancelled') {
+          for (const part of call.response.responseParts) {
+            if ('functionResponse' in part) {
+              const resp = part.functionResponse as {
+                response?: { error?: string };
+              };
+              if (resp.response?.error) return resp.response.error;
+            }
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+
+  it('should not inject directive on first cancellation', async () => {
+    const { internals, makeWaitingToolCall, onToolCallsUpdate } =
+      createSchedulerForCancellationTest();
+    const toolCall = makeWaitingToolCall('c1', 'run_shell_command');
+    internals.toolCalls = [toolCall];
+
+    await internals._handleConfirmationResponseInner(
+      'c1',
+      toolCall,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+
+    const msg = getCancelledErrorMessageFromUpdates(onToolCallsUpdate, 'c1');
+    expect(msg).toBeDefined();
+    expect(msg).toContain('Operation Cancelled');
+    expect(msg).not.toContain(CANCELLATION_STOP_DIRECTIVE);
+  });
+
+  it('should inject CANCELLATION LOOP DETECTED directive after 2 consecutive cancellations', async () => {
+    const { internals, makeWaitingToolCall, onToolCallsUpdate } =
+      createSchedulerForCancellationTest();
+
+    // First cancellation — no directive
+    const tc1 = makeWaitingToolCall('c1', 'run_shell_command');
+    internals.toolCalls = [tc1];
+    await internals._handleConfirmationResponseInner(
+      'c1',
+      tc1,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+    const msg1 = getCancelledErrorMessageFromUpdates(onToolCallsUpdate, 'c1');
+    expect(msg1).not.toContain(CANCELLATION_STOP_DIRECTIVE);
+
+    // Second cancellation — directive injected
+    const tc2 = makeWaitingToolCall('c2', 'run_shell_command');
+    internals.toolCalls = [tc2];
+    await internals._handleConfirmationResponseInner(
+      'c2',
+      tc2,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+    const msg2 = getCancelledErrorMessageFromUpdates(onToolCallsUpdate, 'c2');
+    expect(msg2).toContain(CANCELLATION_STOP_DIRECTIVE);
+  });
+
+  it('should isolate cancellation counters per tool', async () => {
+    const { internals, makeWaitingToolCall, onToolCallsUpdate } =
+      createSchedulerForCancellationTest();
+
+    // Cancel tool A once
+    const tc1 = makeWaitingToolCall('c1', 'run_shell_command');
+    internals.toolCalls = [tc1];
+    await internals._handleConfirmationResponseInner(
+      'c1',
+      tc1,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+
+    // Cancel tool B once — should NOT get directive (different tool)
+    const tc2 = makeWaitingToolCall('c2', 'write_file');
+    internals.toolCalls = [tc2];
+    await internals._handleConfirmationResponseInner(
+      'c2',
+      tc2,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+
+    const msg2 = getCancelledErrorMessageFromUpdates(onToolCallsUpdate, 'c2');
+    expect(msg2).toBeDefined();
+    expect(msg2).not.toContain(CANCELLATION_STOP_DIRECTIVE);
+  });
+
+  it('should not count abort-signal cancellations toward the threshold', async () => {
+    const { internals, makeWaitingToolCall, onToolCallsUpdate } =
+      createSchedulerForCancellationTest();
+
+    // Abort-signal cancellation (not explicit Cancel outcome).
+    // ProceedOnce with an aborted signal enters the cancel branch via
+    // signal.aborted, but the inner Cancel guard is not triggered.
+    const tc1 = makeWaitingToolCall('c1', 'run_shell_command');
+    internals.toolCalls = [tc1];
+    const ac1 = new AbortController();
+    ac1.abort();
+    await internals._handleConfirmationResponseInner(
+      'c1',
+      tc1,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.ProceedOnce,
+      ac1.signal,
+    );
+
+    // Explicit cancellation — should be count 1, no directive
+    const tc2 = makeWaitingToolCall('c2', 'run_shell_command');
+    internals.toolCalls = [tc2];
+    await internals._handleConfirmationResponseInner(
+      'c2',
+      tc2,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+
+    const msg2 = getCancelledErrorMessageFromUpdates(onToolCallsUpdate, 'c2');
+    expect(msg2).toBeDefined();
+    expect(msg2).not.toContain(CANCELLATION_STOP_DIRECTIVE);
+  });
+
+  it('should clear cancellation counter when tool succeeds via schedule', async () => {
+    const { internals, makeWaitingToolCall, onToolCallsUpdate } =
+      createSchedulerForCancellationTest();
+
+    // Cancel once
+    const tc1 = makeWaitingToolCall('c1', 'run_shell_command');
+    internals.toolCalls = [tc1];
+    await internals._handleConfirmationResponseInner(
+      'c1',
+      tc1,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+    expect(internals.cancellationRetryCounts.get('run_shell_command')).toBe(1);
+
+    // Simulate clearing via success path
+    internals.clearCancellationRetryCountsForTool('run_shell_command');
+    expect(
+      internals.cancellationRetryCounts.get('run_shell_command'),
+    ).toBeUndefined();
+
+    // Cancel again — should be count 1, no directive
+    const tc2 = makeWaitingToolCall('c2', 'run_shell_command');
+    internals.toolCalls = [tc2];
+    await internals._handleConfirmationResponseInner(
+      'c2',
+      tc2,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+
+    const msg2 = getCancelledErrorMessageFromUpdates(onToolCallsUpdate, 'c2');
+    expect(msg2).toBeDefined();
+    expect(msg2).not.toContain(CANCELLATION_STOP_DIRECTIVE);
+  });
+});

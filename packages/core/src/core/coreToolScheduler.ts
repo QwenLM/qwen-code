@@ -782,6 +782,14 @@ const RETRY_LOOP_STOP_DIRECTIVE =
   'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
   'instead of retrying.';
 
+const CANCELLATION_RETRY_LOOP_THRESHOLD = 2;
+
+/** Directive injected when a tool call is repeatedly cancelled by the user. */
+const CANCELLATION_STOP_DIRECTIVE =
+  '\n\n⚠️ CANCELLATION LOOP DETECTED: The user has repeatedly rejected this tool call. ' +
+  'STOP retrying the same approach. Try a fundamentally different approach or explain to the user ' +
+  'why this action is necessary and ask for their guidance.';
+
 const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
@@ -1056,6 +1064,7 @@ export class CoreToolScheduler {
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private validationRetryCounts = new Map<string, number>();
+  private cancellationRetryCounts = new Map<string, number>();
   private autoModeFallbackCallIds = new Set<string>();
   // Tool span lifecycle now spans validating → awaiting_approval → executing
   // → terminal, so we hold the span across method boundaries by callId.
@@ -1155,6 +1164,7 @@ export class CoreToolScheduler {
         case 'success': {
           // Successful execution only resets retry state for this tool
           this.clearRetryCountsForTool(currentCall.request.name);
+          this.clearCancellationRetryCountsForTool(currentCall.request.name);
           const durationMs = existingStartTime
             ? Date.now() - existingStartTime
             : undefined;
@@ -1672,6 +1682,10 @@ export class CoreToolScheduler {
     }
   }
 
+  private clearCancellationRetryCountsForTool(toolName: string): void {
+    this.cancellationRetryCounts.delete(toolName);
+  }
+
   private async _schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -1700,6 +1714,16 @@ export class CoreToolScheduler {
           const toolName = sep === -1 ? key : key.slice(0, sep);
           if (!currentToolNames.has(toolName)) {
             this.validationRetryCounts.delete(key);
+          }
+        }
+      }
+
+      // Prune cancellation counters for tools not in the current batch.
+      if (this.cancellationRetryCounts.size > 0) {
+        const currentToolNames = new Set(requestsToProcess.map((r) => r.name));
+        for (const key of [...this.cancellationRetryCounts.keys()]) {
+          if (!currentToolNames.has(key)) {
+            this.cancellationRetryCounts.delete(key);
           }
         }
       }
@@ -1841,6 +1865,7 @@ export class CoreToolScheduler {
 
         // Reset all validation retry counters for this tool since it passed validation
         this.clearRetryCountsForTool(reqInfo.name);
+        this.clearCancellationRetryCountsForTool(reqInfo.name);
 
         newToolCalls.push({
           status: 'validating',
@@ -2557,8 +2582,20 @@ export class CoreToolScheduler {
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
       // Use custom cancel message from payload if provided, otherwise use default
-      const cancelMessage =
+      let cancelMessage =
         payload?.cancelMessage || 'User did not allow tool call';
+
+      // Track per-tool cancellation retries to detect rejection loops.
+      // Only count explicit user cancellations (not abort-signal cancellations).
+      if (outcome === ToolConfirmationOutcome.Cancel) {
+        const toolName = toolCall.request.name;
+        const count = (this.cancellationRetryCounts.get(toolName) ?? 0) + 1;
+        this.cancellationRetryCounts.set(toolName, count);
+        if (count >= CANCELLATION_RETRY_LOOP_THRESHOLD) {
+          cancelMessage += CANCELLATION_STOP_DIRECTIVE;
+        }
+      }
+
       this.setStatusInternal(callId, 'cancelled', cancelMessage);
       // Tool span is cancelled too — finalize it via setToolSpanCancelled
       // before pulling it out of the map so the status survives end().
