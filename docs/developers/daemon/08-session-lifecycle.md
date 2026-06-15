@@ -101,7 +101,7 @@ sequenceDiagram
 ### Load / resume
 
 `POST /session/:id/load` — replays full ACP history (`session/load` notifications fire before the response returns).
-`POST /session/:id/resume` — restores without replay (`connection.unstable_resumeSession`, exposed under the `unstable_session_resume` capability).
+`POST /session/:id/resume` — restores without replay (`connection.unstable_resumeSession`, exposed under the stable `session_resume` daemon capability; `unstable_session_resume` remains a deprecated alias).
 
 Both:
 
@@ -248,11 +248,11 @@ new session arrives.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
 - `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
 - `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
-- Capability tags: `session_create`, `session_scope_override`, `session_load`, `unstable_session_resume`, `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `non_blocking_prompt`.
+- Capability tags: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `non_blocking_prompt`.
 
 ## Caveats & Known Limits
 
-- `connection.unstable_resumeSession` is unstable — the ACP method may change shape. The capability tag carries the `unstable_` prefix so clients feature-detect rather than pin against v1.
+- `connection.unstable_resumeSession` may still be unstable at the ACP layer, but the daemon advertises the committed v1 route contract with `session_resume`. `unstable_session_resume` is kept only as a deprecated compatibility alias.
 - v1 has **no per-client eviction**; only per-session and per-subscriber termination. Revocation policy is F-series Wave 5 / PR 24.
 - `client_evicted` is per-subscriber, not per-session. A client whose SSE subscriber was evicted can reconnect.
 - Anonymous clients (no `X-Qwen-Client-Id`) cannot vote under `designated` or `consensus` policies.

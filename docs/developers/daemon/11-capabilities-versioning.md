@@ -151,7 +151,7 @@ sequenceDiagram
 - `CAPABILITIES_SCHEMA_VERSION` is the wire envelope shape version, currently `1`. Bump it only for an envelope break.
 - `SERVE_PROTOCOL_VERSION = 'v1'` is the protocol-feature version. Adding features inside v1 is additive; old clients do not see new behavior unless they preflight the new tag. Removing a feature is a v2 break.
 - `EVENT_SCHEMA_VERSION = 1` is the SSE frame `v` field (see [`09-event-schema.md`](./09-event-schema.md)). It is an independent version axis; bumping event schema does not imply bumping protocol version, and vice versa.
-- `unstable_session_resume` intentionally has an `unstable_` prefix because ACP `connection.unstable_resumeSession` may still change shape. Clients should feature-detect it rather than assuming all v1 daemons behave identically.
+- `session_resume` is the stable daemon capability for `POST /session/:id/resume`. `unstable_session_resume` remains advertised as a deprecated alias because the underlying ACP method is still named `connection.unstable_resumeSession`; new clients should feature-detect `session_resume`.
 
 ## Dependencies
 
