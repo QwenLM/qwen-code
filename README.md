@@ -539,12 +539,13 @@ Qwen Code can be configured via `settings.json`, environment variables, and CLI 
 
 The most commonly used top-level fields in `settings.json`:
 
-| Field                        | Description                                                                                          |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `modelProviders`             | Define available models per protocol (`openai`, `anthropic`, `gemini`, `vertex-ai`).                 |
-| `env`                        | Fallback environment variables (e.g. API keys). Lower priority than shell `export` and `.env` files. |
-| `security.auth.selectedType` | The protocol to use on startup (e.g. `openai`).                                                      |
-| `model.name`                 | The default model to use when Qwen Code starts.                                                      |
+| Field                        | Description                                                                                                                                                                      |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `modelProviders`             | Define available models per protocol (`openai`, `anthropic`, `gemini`, `vertex-ai`).                                                                                             |
+| `env`                        | Fallback environment variables (e.g. API keys). Lower priority than shell `export` and `.env` files.                                                                             |
+| `security.auth.selectedType` | The protocol to use on startup (e.g. `openai`).                                                                                                                                  |
+| `model.name`                 | The default model to use when Qwen Code starts.                                                                                                                                  |
+| `visionBridge`               | Opt-in: let a text-only model use images by transcribing them via a vision model. See [Vision Bridge](https://qwenlm.github.io/qwen-code-docs/en/users/features/vision-bridge/). |
 
 > See the [Authentication](#api-key-flexible) section above for complete `settings.json` examples, and the [settings reference](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/) for all available options.
 

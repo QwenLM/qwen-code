@@ -226,6 +226,18 @@ The `extra_body` field allows you to add custom parameters to the request body s
 | ----------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `fastModel` | string | Model used for generating [prompt suggestions](../features/followup-suggestions) and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., `qwen3-coder-flash`) reduces latency and cost. Can also be set via `/model --fast`. | `""`    |
 
+#### visionBridge
+
+Opt-in compatibility layer for text-only primary models. When you send an image to a text-only model, a configured (or auto-selected) vision model transcribes it to text that is then sent to the primary model. Disabled by default. See [Vision Bridge](../features/vision-bridge).
+
+| Setting                       | Type    | Description                                                                                                       | Default |
+| ----------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------- | ------- |
+| `visionBridge.enabled`        | boolean | Convert images to text via a vision model when the primary model is text-only.                                    | `false` |
+| `visionBridge.model`          | string  | Vision model id used to transcribe/describe images. Leave empty to auto-select an image-capable registered model. | `""`    |
+| `visionBridge.maxImages`      | number  | Maximum number of images converted per turn; extras are reported as omitted. Clamped to 1–16.                     | `4`     |
+| `visionBridge.timeoutMs`      | number  | Timeout for the vision model call only (not the whole turn), in milliseconds. Clamped to 1000–120000.             | `30000` |
+| `visionBridge.showTranscript` | boolean | Show the generated transcription so you can catch misreads.                                                       | `true`  |
+
 #### context
 
 | Setting                                                  | Type                       | Description                                                                                                                                                                                                                                                                                                                                                           | Default     |
