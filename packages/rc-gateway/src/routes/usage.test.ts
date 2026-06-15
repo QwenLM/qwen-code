@@ -15,7 +15,7 @@ import { TokenStore } from '../tokenStore.js';
 import { bearerResolve } from '../auth.js';
 import { OWNER, WRITE, expandScopes } from '../scopes.js';
 import { UsageStore, type UsageRowInput } from '../cost/usageStore.js';
-import { createUsageRoute, createCostCapabilityRoute } from './usage.js';
+import { createUsageRoute } from './usage.js';
 
 let server: Server | undefined;
 let store: TokenStore;
@@ -137,43 +137,5 @@ describe('GET /rc/usage', () => {
       headers: { Authorization: `Bearer ${owner.token}` },
     });
     expect(r.status).toBe(400);
-  });
-});
-
-describe('GET /rc/capabilities (cost tracking)', () => {
-  async function mountCaps(): Promise<string> {
-    const app = express();
-    app.use(bearerResolve(store));
-    app.get(
-      '/rc/capabilities',
-      createCostCapabilityRoute({ currencyLabel: () => 'EUR' }),
-    );
-    const s: Server = await new Promise((resolve) => {
-      const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
-    });
-    server = s;
-    return `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
-  }
-
-  it('advertises costTracking with the live currency label', async () => {
-    const owner = await tokenWith([OWNER]);
-    const base = await mountCaps();
-    const r = await fetch(`${base}/rc/capabilities`, {
-      headers: { Authorization: `Bearer ${owner.token}` },
-    });
-    expect(r.status).toBe(200);
-    const body = (await r.json()) as {
-      remoteControl: {
-        costTracking: { enabled: boolean; currencyLabel: string };
-      };
-    };
-    expect(body.remoteControl.costTracking.enabled).toBe(true);
-    expect(body.remoteControl.costTracking.currencyLabel).toBe('EUR');
-  });
-
-  it('401s without a token', async () => {
-    const base = await mountCaps();
-    const r = await fetch(`${base}/rc/capabilities`);
-    expect(r.status).toBe(401);
   });
 });

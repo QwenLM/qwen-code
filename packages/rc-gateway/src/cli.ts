@@ -7,10 +7,20 @@
 import { watch, readFileSync, type FSWatcher } from 'node:fs';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { resolveBindSecurity, BindSecurityError } from './bindSecurity.js';
+import {
+  MdnsConfigError,
+  mdnsDecision,
+  validateMdnsLabel,
+  deriveWorkspaceName,
+  deriveInstanceName,
+  buildTxtRecord,
+  type MdnsSuppressReason,
+} from './mdns/advert.js';
+import { MdnsAdvertiser, type BonjourFactory } from './mdns/advertiser.js';
 import { startDaemon } from './daemonSupervisor.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
@@ -118,6 +128,12 @@ export interface ServeOptions {
   tlsKey?: string;
   /** Assert an upstream TLS terminator → allow a cleartext non-loopback bind. */
   insecureBehindProxy?: boolean;
+  /** Disable mDNS advertisement (`--no-mdns` / `QWEN_RC_NO_MDNS=1`). */
+  noMdns?: boolean;
+  /** Override the advertised TXT `workspace` value (default = cwd basename). */
+  mdnsWorkspaceName?: string;
+  /** Override the mDNS service instance name (default = host-workspace). */
+  mdnsInstanceName?: string;
 }
 
 /** Boot the daemon + gateway and print the owner pairing code. */
@@ -158,6 +174,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       );
     }
     tlsMaterial = { cert, key };
+  }
+  // Validate any mDNS name overrides NOW (before side effects) so a path-traversal
+  // value refuses to start cleanly (add-mdns-discovery: "rejected at startup").
+  if (opts.mdnsWorkspaceName !== undefined) {
+    validateMdnsLabel(opts.mdnsWorkspaceName, 'workspace-name');
+  }
+  if (opts.mdnsInstanceName !== undefined) {
+    validateMdnsLabel(opts.mdnsInstanceName, 'instance-name');
   }
   const handle = await startDaemon({ port: opts.daemonPort ?? 4180 });
   const store = await TokenStore.open(
@@ -238,6 +262,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const usageBroadcaster = new UsageTickBroadcaster();
   let usageIngester: UsageIngester | undefined;
   let rateReloader: { stop(): void; trigger(): void } | undefined;
+  // mDNS advertiser is created after listen() (it needs the bound port); the
+  // capability route reads its live state through this closure.
+  let mdnsAdvertiser: MdnsAdvertiser | undefined;
 
   const { app, notifier, audit, ownerEvents, bridgeRegistry } =
     createGatewayApp({
@@ -253,6 +280,10 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       usageReader: usageStore,
       usageBroadcaster: usageStore ? usageBroadcaster : undefined,
       costCurrencyLabel: () => rates.current().currencyLabel,
+      mdnsStatus: () =>
+        mdnsAdvertiser?.advertising
+          ? { advertising: true, instanceName: mdnsAdvertiser.instanceName }
+          : { advertising: false },
       onPromptAccepted: usageStore
         ? (sid, attr) => {
             sessionAttribution.set(sid, attr);
@@ -492,6 +523,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // orphaning the daemon; here we just hand the buffers to the https server.
   const listener = tlsMaterial ? createHttpsServer(tlsMaterial, app) : app;
   const scheme = bind.mode === 'tls' ? 'https' : 'http';
+  // mDNS advertise/suppress decision (add-mdns-discovery). Only a native-TLS
+  // bind advertises; loopback and insecure-proxy are suppressed (the latter
+  // because the upstream proxy, not this cleartext bind, is the right mDNS
+  // source). The synchronous decision drives the banner; the actual publish is
+  // async (it dynamically loads the optional bonjour-service library).
+  const mdns = mdnsDecision({
+    bindMode: bind.mode,
+    noMdnsFlag: opts.noMdns,
+    envDisabled: process.env.QWEN_RC_NO_MDNS === '1',
+  });
   listener.listen(port, bind.host, () => {
     const { code, expiresAt } = pairing.mint([
       OWNER,
@@ -520,8 +561,53 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}, ${APPROVE}, ${WRITE}])`,
       `redeem: POST /rc/pair/redeem { "code": "${code}", "label": "<name>" }`,
     );
+    banner.push(`mDNS: ${mdnsBannerLine(mdns.reason)}`);
     // eslint-disable-next-line no-console
     console.log(banner.join('\n'));
+    if (mdns.advertise) {
+      // Publish asynchronously: derive names (workspace basename or override),
+      // build the strict TXT record, load the optional library, and register.
+      // A missing library or publish failure disables advertising, never the
+      // gateway. mdnsAdvertiser is set so /rc/capabilities + shutdown see it.
+      const workspace = deriveWorkspaceName(
+        workspaceCwd ?? process.cwd(),
+        opts.mdnsWorkspaceName,
+      );
+      const instanceName = deriveInstanceName(
+        hostname(),
+        workspace,
+        opts.mdnsInstanceName,
+      );
+      const txt = buildTxtRecord({
+        name: instanceName,
+        workspace,
+        tlsRequired: bind.tlsRequired,
+      });
+      void loadBonjourFactory()
+        .then((factory) => {
+          if (!factory) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              'mDNS: advertising skipped — optional bonjour-service dependency not installed',
+            );
+            return;
+          }
+          const adv = new MdnsAdvertiser({ instanceName, port, txt, factory });
+          adv.start();
+          mdnsAdvertiser = adv;
+          // eslint-disable-next-line no-console
+          console.log(
+            `mDNS: advertising "${instanceName}" on ${bind.host}:${port} ` +
+              `(workspace=${workspace}, tlsRequired=${txt.tlsRequired}; use --no-mdns to disable)`,
+          );
+        })
+        .catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `mDNS: advertising failed: ${(err as Error).message ?? err}`,
+          );
+        });
+    }
   });
 
   // Idle suggestions (proposal `add-idle-suggestions`): build the gateway-own
@@ -820,6 +906,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     telegramAbort?.abort();
     discordAbort?.abort();
     matrixAbort?.abort();
+    // mDNS Goodbye (design D4): withdraw the advertisement so a stale record does
+    // not haunt the LAN for the 75-min TTL; bounded to 500 ms.
+    if (mdnsAdvertiser) await mdnsAdvertiser.stop(500);
     if (pump) await pump.stop();
     await handle.stop();
     process.exit(0);
@@ -899,6 +988,47 @@ async function openUsageStore(): Promise<
   }
 }
 
+/** One-line mDNS status for the startup banner (transparency: design open-Q 1). */
+function mdnsBannerLine(reason: MdnsSuppressReason): string {
+  switch (reason) {
+    case 'loopback':
+      return 'suppressed (loopback-only bind)';
+    case 'insecure-proxy':
+      return 'suppressed (insecure-proxy bind — the upstream proxy should advertise)';
+    case 'flag':
+      return 'disabled by --no-mdns';
+    case 'env':
+      return 'disabled by QWEN_RC_NO_MDNS';
+    default:
+      return 'advertising (registering shortly)';
+  }
+}
+
+/**
+ * Dynamically load the OPTIONAL `bonjour-service` library and return a factory
+ * for a fresh instance, or `null` when the dependency is not installed (mDNS is
+ * then simply off — it must never stop the gateway, mirroring the cost-store
+ * loader). Any non-module-not-found error propagates.
+ */
+async function loadBonjourFactory(): Promise<BonjourFactory | null> {
+  try {
+    const mod = await import('bonjour-service');
+    const Bonjour = mod.Bonjour;
+    return () => new Bonjour() as unknown as ReturnType<BonjourFactory>;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    const msg = (err as Error).message ?? '';
+    if (
+      code === 'ERR_MODULE_NOT_FOUND' ||
+      code === 'MODULE_NOT_FOUND' ||
+      /bonjour-service/.test(msg)
+    ) {
+      return null;
+    }
+    throw err;
+  }
+}
+
 /** Prompt the operator for a y/N confirmation on stdin (prune without --yes). */
 async function confirm(question: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -915,7 +1045,8 @@ async function confirm(question: string): Promise<boolean> {
 // Entrypoint: `qwen-rc serve`
 if (process.argv[2] === 'serve') {
   // Flags: --host <h> --tls <cert> --tls-key <key> --insecure-behind-proxy
-  //        --port <n> --daemon-port <n>
+  //        --port <n> --daemon-port <n> --no-mdns --mdns-workspace-name <s>
+  //        --mdns-instance-name <s>
   const argv = process.argv.slice(3);
   const flag = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
@@ -932,11 +1063,14 @@ if (process.argv[2] === 'serve') {
     insecureBehindProxy: argv.includes('--insecure-behind-proxy'),
     gatewayPort: port ? Number(port) : undefined,
     daemonPort: daemonPort ? Number(daemonPort) : undefined,
+    noMdns: argv.includes('--no-mdns'),
+    mdnsWorkspaceName: flag('mdns-workspace-name'),
+    mdnsInstanceName: flag('mdns-instance-name'),
   };
   runServe(serveOpts).catch((err) => {
     // eslint-disable-next-line no-console
     console.error(
-      err instanceof BindSecurityError
+      err instanceof BindSecurityError || err instanceof MdnsConfigError
         ? `qwen-rc serve: ${err.message}`
         : `qwen-rc serve failed: ${err instanceof Error ? (err.stack ?? err.message) : err}`,
     );

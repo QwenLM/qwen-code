@@ -104,30 +104,3 @@ export function createUsageRoute(deps: UsageRouteDeps): RequestHandler {
     res.status(200).json({ rows: out });
   };
 }
-
-/**
- * GET /rc/capabilities — the cost-tracking capability block (add-cost-tracking).
- * The change spec names `GET /capabilities`'s `remoteControl` block; the daemon's
- * /capabilities is un-editable under the fork boundary, so the gateway serves its
- * own `/rc/capabilities`. Any authenticated token; no secrets (the rate-table path
- * is the tilde display form, never the resolved home path).
- */
-export function createCostCapabilityRoute(deps: {
-  currencyLabel: () => string;
-}): RequestHandler {
-  return (req, res) => {
-    if (!req.rcClient) {
-      res.status(401).json({ error: 'Unauthorized', code: 'unauthorized' });
-      return;
-    }
-    res.status(200).json({
-      remoteControl: {
-        costTracking: {
-          enabled: true,
-          currencyLabel: deps.currencyLabel(),
-          rateTablePath: '~/.qwen/rc/model-rates.yaml',
-        },
-      },
-    });
-  };
-}

@@ -39,11 +39,8 @@ import { AuditLog, type AuditRecorder } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
-import {
-  createUsageRoute,
-  createCostCapabilityRoute,
-  type UsageReader,
-} from './routes/usage.js';
+import { createUsageRoute, type UsageReader } from './routes/usage.js';
+import { createCapabilityRoute } from './routes/capabilities.js';
 import type { AggregateQuery } from './cost/usageStore.js';
 import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
@@ -158,6 +155,12 @@ export interface GatewayDeps {
   usageBroadcaster?: UsageTickBroadcaster;
   /** Live currency label for the cost-tracking capability block. */
   costCurrencyLabel?: () => string;
+  /**
+   * mDNS advertising state for the capability surface (`add-mdns-discovery`).
+   * When set, `/rc/capabilities` reports `remoteControl.mdns`. Omitted → the
+   * mdns block is absent (e.g. discovery feature not wired).
+   */
+  mdnsStatus?: () => { advertising: boolean; instanceName?: string };
 }
 
 export interface GatewayApp {
@@ -327,13 +330,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         labelFor: deps.usageLabelFor,
       }),
     );
-    app.get(
-      '/rc/capabilities',
-      createCostCapabilityRoute({
-        currencyLabel: deps.costCurrencyLabel ?? (() => 'USD'),
-      }),
-    );
   }
+  // GET /rc/capabilities — always mounted (mDNS reports here even when cost
+  // tracking is off). costTracking sub-block is present only when a usage store
+  // is wired, so it never claims enabled:true while disabled.
+  app.get(
+    '/rc/capabilities',
+    createCapabilityRoute({
+      costTracking: deps.usageReader
+        ? { currencyLabel: deps.costCurrencyLabel ?? (() => 'USD') }
+        : undefined,
+      mdnsStatus: deps.mdnsStatus,
+    }),
+  );
   app.post(
     '/rc/session/:id/fork',
     requireScope(WRITE, audit),
