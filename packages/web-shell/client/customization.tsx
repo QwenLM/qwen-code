@@ -76,6 +76,7 @@ export interface WebShellComposerApi {
     options?: WebShellComposerTagOptions,
   ): void;
   removeTag(id: string): void;
+  /** Clears text and/or top tags. Inline tags are part of the editor text. */
   clear(options?: { text?: boolean; tags?: boolean }): void;
   submit(input?: WebShellComposerInput): void;
 }

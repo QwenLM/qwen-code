@@ -217,11 +217,7 @@ interface InlineTagDecorationSpec {
 }
 
 const addInlineTagEffect = StateEffect.define<InlineTagRange>({
-  map: (value, changes) => ({
-    ...value,
-    from: changes.mapPos(value.from),
-    to: changes.mapPos(value.to),
-  }),
+  map: (value) => value,
 });
 const removeInlineTagEffect = StateEffect.define<{
   predicate?: (tag: WebShellComposerTag) => boolean;
@@ -346,6 +342,17 @@ const inlineComposerTagField = StateField.define<DecorationSet>({
     EditorView.atomicRanges.of((view) => view.state.field(field)),
   ],
 });
+
+function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
+  const tags: WebShellComposerTag[] = [];
+  view.state
+    .field(inlineComposerTagField)
+    .between(0, view.state.doc.length, (_from, _to, value) => {
+      const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+      if (tag) tags.push(tag);
+    });
+  return tags;
+}
 
 export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   {
@@ -1525,14 +1532,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         const text = insert ? `${insert} ` : '';
         view.dispatch({
           changes: { from: selection.from, to: selection.to, insert: text },
+          effects:
+            ranges.length > 0
+              ? ranges.map((range) => addInlineTagEffect.of(range))
+              : undefined,
           selection: { anchor: selection.from + text.length },
           scrollIntoView: true,
         });
-        if (ranges.length > 0) {
-          view.dispatch({
-            effects: ranges.map((range) => addInlineTagEffect.of(range)),
-          });
-        }
         view.focus();
         return;
       }
@@ -1573,10 +1579,23 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const submit = useCallback((input?: WebShellComposerInput) => {
     const view = viewRef.current;
     if (!view) return;
-    if (input?.tagPlacement === 'inline' && input.tags) {
+    const inlineTags = getInlineComposerTags(view);
+    if (input?.tagPlacement === 'inline') {
       submitTextRef.current(
         view,
-        buildComposerPrompt(input.text ?? '', input.tags),
+        buildComposerPrompt(input.text ?? '', input.tags ?? inlineTags),
+        [],
+      );
+      return;
+    }
+    if (
+      input?.text !== undefined &&
+      input.tags === undefined &&
+      inlineTags.length > 0
+    ) {
+      submitTextRef.current(
+        view,
+        buildComposerPrompt(input.text, inlineTags),
         [],
       );
       return;
@@ -1648,26 +1667,29 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             ? `${inlineText} ${input.text}`
             : inlineText || (input.text ?? '')
           : (input.text ?? '');
+      const effects: StateEffect<unknown>[] = [clearInlineTagsEffect.of()];
+      if (inlineTags.length > 0) {
+        let from = 0;
+        for (const tag of inlineTags) {
+          const text = serializeComposerTag(tag);
+          effects.push(
+            addInlineTagEffect.of({
+              from,
+              to: from + text.length,
+              tag,
+            }),
+          );
+          from += text.length + 1;
+        }
+      }
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: nextText },
-        effects: clearInlineTagsEffect.of(),
+        effects,
         selection: { anchor: nextText.length },
         scrollIntoView: true,
       });
-      if (inlineTags.length > 0) {
-        let from = 0;
-        const effects = inlineTags.map((tag) => {
-          const text = serializeComposerTag(tag);
-          const effect = addInlineTagEffect.of({
-            from,
-            to: from + text.length,
-            tag,
-          });
-          from += text.length + 1;
-          return effect;
-        });
-        view.dispatch({ effects });
-      }
+    } else {
+      view.dispatch({ effects: clearInlineTagsEffect.of() });
     }
     if (input.text !== undefined || input.submit) {
       view.focus();
