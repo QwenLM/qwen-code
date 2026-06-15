@@ -1,3 +1,7 @@
+---
+description: "Qwen Code worktree capability design. Add session and agent-level worktree isolation while preserving Arena workflows."
+---
+
 # Worktree 通用能力设计
 
 ## 问题陈述

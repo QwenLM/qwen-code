@@ -1,3 +1,7 @@
+---
+description: "Start with the Qwen Code DaemonClient TypeScript SDK. Launch qwen serve and drive an agent session from a Node script."
+---
+
 # DaemonClient quickstart (TypeScript)
 
 A minimal end-to-end example: start a `qwen serve` daemon in another terminal, then drive it from a Node script with the SDK's `DaemonClient`. See also: [Daemon mode user guide](../../users/qwen-serve.md) and [HTTP protocol reference](../qwen-serve-protocol.md).

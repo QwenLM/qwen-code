@@ -1,3 +1,7 @@
+---
+description: "Explore common Qwen Code workflows: understanding codebases, building features, debugging issues, code reviews, and automating tasks with best practices."
+---
+
 # Common workflows
 
 > Learn about common workflows with Qwen Code.

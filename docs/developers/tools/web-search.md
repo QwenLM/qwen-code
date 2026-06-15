@@ -1,3 +1,7 @@
+---
+description: "Enable web search in Qwen Code. Connect MCP servers for internet access and enhance your AI coding agent with real-time information."
+---
+
 # Web Search
 
 Qwen Code supports web search capabilities through **MCP (Model Context Protocol)** integrations. Rather than a built-in search tool, web search is provided by connecting to external MCP servers, giving you full flexibility to choose the search service that best fits your needs.

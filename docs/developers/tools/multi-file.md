@@ -1,3 +1,7 @@
+---
+description: "Qwen Code read_many_files tool reference. Read multiple files efficiently in a single operation for faster AI coding context gathering."
+---
+
 # Multi File Read Tool (`read_many_files`)
 
 This document describes the `read_many_files` tool for Qwen Code.

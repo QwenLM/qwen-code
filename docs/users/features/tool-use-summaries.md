@@ -1,3 +1,7 @@
+---
+description: "See what Qwen Code is doing at a glance with Tool-Use Summaries. Auto-generated labels for parallel tool calls make long sessions easier to follow."
+---
+
 # Tool-Use Summaries
 
 Qwen Code can generate a short, git-commit-subject-style label after each tool batch completes, summarizing what the batch accomplished. The label appears inline in the transcript and replaces the generic `Tool × N` header in compact mode.

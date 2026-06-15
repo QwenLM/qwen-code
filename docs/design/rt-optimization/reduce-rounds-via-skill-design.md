@@ -1,3 +1,7 @@
+---
+description: "Qwen Code round-trip optimization via skill design. Reduce agent loop rounds by improving skill and tool interaction patterns."
+---
+
 # Agent Loop 减轮方案：从 Skill 设计入手
 
 > 与 `rt-optimization-design.md` 同目录，互为补充：那份文档讨论**框架机制**层面减轮（D1 跳过末尾总结轮、D2 fast 路由、D4 prevalidate），这份文档主张**减轮的真正杠杆在 skill/tool 设计层**，并提出一条不依赖框架改造、不依赖 cache hit rate 数据的可实施路径。

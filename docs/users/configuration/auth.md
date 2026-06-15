@@ -1,3 +1,7 @@
+---
+description: "Authenticate Qwen Code with API Key, Alibaba Cloud Coding Plan, or OAuth. Set up your AI coding agent in 3 steps and start coding."
+---
+
 # Authentication
 
 Qwen Code supports three authentication methods. Pick the one that matches how you want to run the CLI:

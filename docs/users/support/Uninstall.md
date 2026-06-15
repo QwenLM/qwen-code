@@ -1,3 +1,7 @@
+---
+description: "Completely uninstall Qwen Code from your system. Step-by-step removal guide for npx, npm global, and all associated data."
+---
+
 # Uninstall
 
 Your uninstall method depends on how you installed the CLI.

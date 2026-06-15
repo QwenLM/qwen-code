@@ -1,3 +1,7 @@
+---
+description: "Deploy Qwen Code in production. Understand execution modes, deployment architecture, and how to run the AI coding agent at scale."
+---
+
 # Qwen Code Execution and Deployment
 
 This document describes how to run Qwen Code and explains the deployment architecture that Qwen Code uses.

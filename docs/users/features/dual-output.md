@@ -1,3 +1,7 @@
+---
+description: "Stream Qwen Code events as JSON to IDE extensions, web UIs, and automation tools with Dual Output mode for programmatic integration."
+---
+
 # Dual Output
 
 Dual Output is a sidecar mode for the interactive TUI: while Qwen Code keeps

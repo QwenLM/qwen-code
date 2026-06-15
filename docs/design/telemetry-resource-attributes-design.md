@@ -1,3 +1,7 @@
+---
+description: "Qwen Code telemetry resource attributes design. Add custom resource labels while controlling metric cardinality for production observability."
+---
+
 # Telemetry: Custom Resource Attributes + Metric Cardinality Controls
 
 > 配套 issue: [#4365](https://github.com/QwenLM/qwen-code/issues/4365)

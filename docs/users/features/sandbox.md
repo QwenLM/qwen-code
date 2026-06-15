@@ -1,3 +1,7 @@
+---
+description: "Run Qwen Code safely in a sandbox. Isolate shell commands and file modifications to reduce risk when AI executes code on your system."
+---
+
 # Sandbox
 
 This document explains how to run Qwen Code inside a sandbox to reduce risk when tools execute shell commands or modify files.

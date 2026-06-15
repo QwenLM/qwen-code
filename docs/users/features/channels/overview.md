@@ -1,3 +1,7 @@
+---
+description: "Use Qwen Code from Telegram, WeChat, or DingTalk instead of the terminal. Send messages from your phone and get AI coding help anywhere."
+---
+
 # Channels
 
 Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, or DingTalk, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.

@@ -1,3 +1,7 @@
+---
+description: "Configure MCP servers with Qwen Code. Connect to external tools and data sources through the Model Context Protocol for enhanced AI coding."
+---
+
 # MCP servers with Qwen Code
 
 This document provides a guide to configuring and using Model Context Protocol (MCP) servers with Qwen Code.
