@@ -352,6 +352,10 @@ jobs:
       - name: 'Checkout repo'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
+          # Self-hosted persistent runner: don't leave the (read-only)
+          # GITHUB_TOKEN in .git/config where the untrusted-content agent
+          # could read it.
+          persist-credentials: false
           ref: '${{ github.ref }}'
 
       - name: 'Run product-decision'
@@ -601,6 +605,9 @@ jobs:
         if: "steps.pr_state.outputs.should_review == 'true'"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
+          # Self-hosted persistent runner: keep the GITHUB_TOKEN out of
+          # .git/config (the review agent reads untrusted PR content).
+          persist-credentials: false
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 1
 
@@ -925,6 +932,9 @@ jobs:
         if: "steps.pr_state.outputs.should_test == 'true'"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
+          # Self-hosted persistent runner: keep the GITHUB_TOKEN out of
+          # .git/config (this checks out untrusted PR merge code).
+          persist-credentials: false
           ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
           fetch-depth: 1
 
@@ -1019,6 +1029,7 @@ jobs:
       - name: 'Checkout repo'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
+          persist-credentials: false
           ref: '${{ github.ref }}'
 
       - name: 'Download tmux artifact'
@@ -1108,6 +1119,22 @@ jobs:
           fi
 
           BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
+
+          # Retry wrapper: gh API calls can transiently fail / rate-limit even
+          # on GitHub-hosted runners. Without it a single blip would fail this
+          # step, fire the fallback comment, and leave a half-published state.
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              [ "$attempt" -eq 3 ] && return 1
+              echo "::warning::command failed (attempt ${attempt}/3), retrying..."
+              sleep $((attempt * 10))
+            done
+          }
+
           publish_marker_comment() {
             local marker="$1"
             local body_file="$2"
@@ -1137,30 +1164,32 @@ jobs:
             fi
           }
 
-          publish_marker_comment '<!-- qwen-triage:tmux -->' "$DIR/tmux-comment.md"
-
+          # Validate required outputs up front so we fail closed BEFORE posting
+          # anything, rather than leaving a half-published state.
           APPROVAL_COMMENT="$DIR/approval-comment.md"
           if [ ! -f "$APPROVAL_COMMENT" ]; then
             echo "::error::Approval skill wrote no approval comment body."
             exit 1
           fi
-          publish_marker_comment '<!-- qwen-triage:approval -->' "$APPROVAL_COMMENT"
-
           REVIEW_BODY="$DIR/approval-review.md"
+          if { [ "$REVIEW_ACTION" = "approve" ] || [ "$REVIEW_ACTION" = "request_changes" ]; } \
+            && [ ! -f "$REVIEW_BODY" ]; then
+            echo "::error::Approval skill chose ${REVIEW_ACTION} but wrote no review body."
+            exit 1
+          fi
+
+          # Submit the formal review FIRST — it is the load-bearing action that
+          # sets the PR review state. Posting it before the explanatory comments
+          # means a failed review never leaves a misleading comment behind, and
+          # the job fails closed (fallback-comment runs).
           case "$REVIEW_ACTION" in
             approve)
-              if [ ! -f "$REVIEW_BODY" ]; then
-                echo "::error::Approval skill chose approve but wrote no review body."
-                exit 1
-              fi
-              gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve --body-file "$REVIEW_BODY"
+              retry gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve --body-file "$REVIEW_BODY" \
+                || { echo "::error::Failed to submit approval review after retries"; exit 1; }
               ;;
             request_changes)
-              if [ ! -f "$REVIEW_BODY" ]; then
-                echo "::error::Approval skill chose request_changes but wrote no review body."
-                exit 1
-              fi
-              gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes --body-file "$REVIEW_BODY"
+              retry gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes --body-file "$REVIEW_BODY" \
+                || { echo "::error::Failed to submit request-changes review after retries"; exit 1; }
               ;;
             none|"")
               echo "::notice::Approval decision verdict=${VERDICT}; no formal review action."
@@ -1170,6 +1199,14 @@ jobs:
               exit 1
               ;;
           esac
+
+          # Explanatory comments are best-effort: a comment hiccup must not fail
+          # an approval whose formal review already landed (that would trip the
+          # fallback comment despite a valid, posted decision).
+          retry publish_marker_comment '<!-- qwen-triage:tmux -->' "$DIR/tmux-comment.md" \
+            || echo "::warning::Failed to post tmux comment after retries"
+          retry publish_marker_comment '<!-- qwen-triage:approval -->' "$APPROVAL_COMMENT" \
+            || echo "::warning::Failed to post approval comment after retries"
 
       - name: 'Read verdict from skill output'
         if: 'always()'
