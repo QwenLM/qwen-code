@@ -443,7 +443,7 @@ function mergeSettings(
     systemDefaults,
     user,
     filteredWorkspace,
-    system,
+    tagMcpServerScope(system, 'system'),
   ) as Settings;
 }
 
