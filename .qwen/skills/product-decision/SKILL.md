@@ -33,7 +33,8 @@ Evaluate whether a PR should proceed to code review and testing. This is the fir
 gh pr view "$PR_NUMBER" --repo "$REPO" --json number,title,body,author,labels,additions,deletions,changedFiles,baseRefName,headRefName,isCrossRepository,isDraft,url
 ```
 
-If draft → exit with verdict `skip`.
+If draft → write verdict `skip` and exit without posting a comment. CI filters
+draft PRs before this skill runs; this verdict is for local/manual invocation.
 
 ### 2. Template Check
 
@@ -171,6 +172,7 @@ publish-separation mode; harmless otherwise):
 
 Possible `verdict` values:
 
+- `skip` — draft PR; no comment or review action taken
 - `pass` — direction and approach are acceptable, proceed to review
 - `fail` — template check failed (missing required sections). This is the ONLY case for `fail` — direction and approach concerns never auto-reject
 - `needs_human` — escalated to maintainer. Use for: direction concerns, scope questions, touches sensitive areas (auth/sandbox/model/telemetry/release)

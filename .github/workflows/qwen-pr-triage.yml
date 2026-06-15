@@ -189,8 +189,21 @@ jobs:
             fi
           fi
 
-          # Check if fork
-          IS_FORK=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isCrossRepository --jq '.isCrossRepository')
+          # Check if fork. This is the pipeline entrypoint, so tolerate
+          # transient api.github.com failures instead of killing all stages on
+          # the first blip.
+          IS_FORK=""
+          for attempt in 1 2 3; do
+            if IS_FORK="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isCrossRepository --jq '.isCrossRepository')"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to check fork status after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::gh pr view failed while checking fork status (attempt ${attempt}/3), retrying..."
+            sleep $((attempt * 10))
+          done
 
           # Auto-triggered PRs (opened/synchronize) get a 30-minute delay
           # via environment protection rule to debounce rapid pushes.
