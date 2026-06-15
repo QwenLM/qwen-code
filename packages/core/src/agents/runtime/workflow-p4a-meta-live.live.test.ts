@@ -33,8 +33,8 @@ import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
   type WorkflowAgentDispatch,
-  type WorkflowAgentOpts,
 } from './workflow-orchestrator.js';
+import type { WorkflowAgentOpts } from './workflow-sandbox.js';
 
 const apiKey = process.env['DASHSCOPE_API_KEY'];
 const baseUrl =
@@ -42,7 +42,12 @@ const baseUrl =
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const MODEL = 'qwen3-coder-plus';
 
-const liveDispatch: WorkflowAgentDispatch = async (
+// Inferred return type is Promise<string> so callers can assign directly to
+// `string`. `WorkflowAgentDispatch` widens the return to
+// `string | object` (the schema-mode object shape), which is fine for
+// orchestrator interop because string is a subtype — but `lastText: string`
+// downstream would not accept the wider type.
+const liveDispatch = async (
   prompt: string,
   _opts: WorkflowAgentOpts,
 ): Promise<string> => {
@@ -98,19 +103,18 @@ function formatDisplay(outcome: {
 const describeOrSkip = apiKey ? describe : describe.skip;
 
 describeOrSkip('P4a real-LLM E2E (DashScope qwen3-coder-plus)', () => {
-  it(
-    'A: meta declaration parsed + agent call returns real LLM text',
-    async () => {
-      let agentCalls = 0;
-      let lastText = '';
-      const tap: WorkflowAgentDispatch = async (prompt, opts) => {
-        agentCalls++;
-        lastText = await liveDispatch(prompt, opts);
-        return lastText;
-      };
-      const orch = new WorkflowOrchestrator(tap);
-      const outcome = await orch.run({
-        script: `
+  it('A: meta declaration parsed + agent call returns real LLM text', async () => {
+    let agentCalls = 0;
+    let lastText = '';
+    const tap: WorkflowAgentDispatch = async (prompt, opts) => {
+      agentCalls++;
+      lastText = await liveDispatch(prompt, opts);
+      return lastText;
+    };
+    const orch = new WorkflowOrchestrator(tap);
+    const outcome = await orch.run({
+      args: undefined,
+      script: `
           export const meta = {
             name: 'capitals',
             description: 'Look up capitals via a single agent call',
@@ -121,110 +125,101 @@ describeOrSkip('P4a real-LLM E2E (DashScope qwen3-coder-plus)', () => {
           const answer = await agent('What is the capital of France? Reply with the single city name only.')
           return { answer }
         `,
-      });
-      const display = formatDisplay(outcome);
-      console.log('[A] display:', display);
-      console.log('[A] llm text:', lastText);
+    });
+    const display = formatDisplay(outcome);
+    console.log('[A] display:', display);
+    console.log('[A] llm text:', lastText);
 
-      expect(outcome.meta).toEqual({
-        name: 'capitals',
-        description: 'Look up capitals via a single agent call',
-        whenToUse: 'demo only',
-        phases: [{ title: 'Lookup', detail: 'one agent call' }],
-      });
-      expect(display).toContain('"meta":');
-      expect(display).toContain('"name": "capitals"');
-      expect(display).toContain('"whenToUse": "demo only"');
-      // Adversarial review (HIGH × 3 lenses): toEqual is structural and does
-      // NOT check prototype identity. A regression that returns the vm-realm
-      // `raw` value directly (skipping the host-realm copy at workflow-
-      // sandbox.ts:283-294) would re-open the T1/T8/T14 realm escape via
-      // `outcome.meta.constructor.constructor('return process')()`. Verify the
-      // returned object AND its nested phases array AND phase entries are all
-      // host-realm — the toEqual above doesn't catch any of these.
-      expect(Object.getPrototypeOf(outcome.meta)).toBe(Object.prototype);
-      const metaPhases = (outcome.meta as { phases: object[] }).phases;
-      expect(Object.getPrototypeOf(metaPhases)).toBe(Array.prototype);
-      expect(Object.getPrototypeOf(metaPhases[0])).toBe(Object.prototype);
-      expect(agentCalls).toBe(1);
-      expect(lastText.toLowerCase()).toMatch(/paris/);
-      expect((outcome.result as { answer: string }).answer.toLowerCase()).toMatch(
-        /paris/,
-      );
-    },
-    60_000,
-  );
+    expect(outcome.meta).toEqual({
+      name: 'capitals',
+      description: 'Look up capitals via a single agent call',
+      whenToUse: 'demo only',
+      phases: [{ title: 'Lookup', detail: 'one agent call' }],
+    });
+    expect(display).toContain('"meta":');
+    expect(display).toContain('"name": "capitals"');
+    expect(display).toContain('"whenToUse": "demo only"');
+    // Adversarial review (HIGH × 3 lenses): toEqual is structural and does
+    // NOT check prototype identity. A regression that returns the vm-realm
+    // `raw` value directly (skipping the host-realm copy at workflow-
+    // sandbox.ts:283-294) would re-open the T1/T8/T14 realm escape via
+    // `outcome.meta.constructor.constructor('return process')()`. Verify the
+    // returned object AND its nested phases array AND phase entries are all
+    // host-realm — the toEqual above doesn't catch any of these.
+    expect(Object.getPrototypeOf(outcome.meta)).toBe(Object.prototype);
+    const metaPhases = (outcome.meta as { phases: object[] }).phases;
+    expect(Object.getPrototypeOf(metaPhases)).toBe(Array.prototype);
+    expect(Object.getPrototypeOf(metaPhases[0])).toBe(Object.prototype);
+    expect(agentCalls).toBe(1);
+    expect(lastText.toLowerCase()).toMatch(/paris/);
+    expect((outcome.result as { answer: string }).answer.toLowerCase()).toMatch(
+      /paris/,
+    );
+  }, 60_000);
 
-  it(
-    'B: script with NO meta — outcome.meta is null and display omits meta',
-    async () => {
-      let agentCalls = 0;
-      let lastText = '';
-      const tap: WorkflowAgentDispatch = async (prompt, opts) => {
-        agentCalls++;
-        lastText = await liveDispatch(prompt, opts);
-        return lastText;
-      };
-      const orch = new WorkflowOrchestrator(tap);
-      const outcome = await orch.run({
-        script: `
+  it('B: script with NO meta — outcome.meta is null and display omits meta', async () => {
+    let agentCalls = 0;
+    let lastText = '';
+    const tap: WorkflowAgentDispatch = async (prompt, opts) => {
+      agentCalls++;
+      lastText = await liveDispatch(prompt, opts);
+      return lastText;
+    };
+    const orch = new WorkflowOrchestrator(tap);
+    const outcome = await orch.run({
+      args: undefined,
+      script: `
           phase('Lookup')
           const answer = await agent('What is the capital of Japan? Reply with the single city name only.')
           return { answer }
         `,
-      });
-      const display = formatDisplay(outcome);
-      console.log('[B] display:', display);
-      console.log('[B] llm text:', lastText);
+    });
+    const display = formatDisplay(outcome);
+    console.log('[B] display:', display);
+    console.log('[B] llm text:', lastText);
 
-      expect(outcome.meta).toBeNull();
-      const parsed = JSON.parse(display) as Record<string, unknown>;
-      expect('meta' in parsed).toBe(false);
-      expect(agentCalls).toBe(1);
-      expect(lastText.toLowerCase()).toMatch(/tokyo/);
-    },
-    60_000,
-  );
+    expect(outcome.meta).toBeNull();
+    const parsed = JSON.parse(display) as Record<string, unknown>;
+    expect('meta' in parsed).toBe(false);
+    expect(agentCalls).toBe(1);
+    expect(lastText.toLowerCase()).toMatch(/tokyo/);
+  }, 60_000);
 
-  it(
-    'C: malformed meta (missing name) — throws before any agent call',
-    async () => {
-      let agentCalls = 0;
-      const tap: WorkflowAgentDispatch = async (prompt, opts) => {
-        agentCalls++;
-        return liveDispatch(prompt, opts);
-      };
-      const orch = new WorkflowOrchestrator(tap);
-      await expect(
-        orch.run({
-          script: `
+  it('C: malformed meta (missing name) — throws before any agent call', async () => {
+    let agentCalls = 0;
+    const tap: WorkflowAgentDispatch = async (prompt, opts) => {
+      agentCalls++;
+      return liveDispatch(prompt, opts);
+    };
+    const orch = new WorkflowOrchestrator(tap);
+    await expect(
+      orch.run({
+        args: undefined,
+        script: `
             export const meta = { description: 'missing name field' }
             phase('Lookup')
             const answer = await agent('Should not be called')
             return { answer }
           `,
-        }),
-      ).rejects.toThrow(/meta\.name/i);
-      expect(agentCalls).toBe(0);
-    },
-    20_000,
-  );
+      }),
+    ).rejects.toThrow(/meta\.name/i);
+    expect(agentCalls).toBe(0);
+  }, 20_000);
 
-  it(
-    'D: meta survives on WorkflowExecutionError when body throws',
-    async () => {
-      let agentCalls = 0;
-      let lastText = '';
-      const tap: WorkflowAgentDispatch = async (prompt, opts) => {
-        agentCalls++;
-        lastText = await liveDispatch(prompt, opts);
-        return lastText;
-      };
-      const orch = new WorkflowOrchestrator(tap);
-      let caught: unknown;
-      try {
-        await orch.run({
-          script: `
+  it('D: meta survives on WorkflowExecutionError when body throws', async () => {
+    let agentCalls = 0;
+    let lastText = '';
+    const tap: WorkflowAgentDispatch = async (prompt, opts) => {
+      agentCalls++;
+      lastText = await liveDispatch(prompt, opts);
+      return lastText;
+    };
+    const orch = new WorkflowOrchestrator(tap);
+    let caught: unknown;
+    try {
+      await orch.run({
+        args: undefined,
+        script: `
             export const meta = {
               name: 'throws-after-agent',
               description: 'agent runs then body throws',
@@ -233,37 +228,34 @@ describeOrSkip('P4a real-LLM E2E (DashScope qwen3-coder-plus)', () => {
             const answer = await agent('What is the capital of Italy? Reply with the single city name only.')
             throw new Error('intentional script body failure')
           `,
-        });
-      } catch (e) {
-        caught = e;
-      }
-      console.log('[D] caught:', String(caught));
-      console.log('[D] llm text:', lastText);
-      expect(caught).toBeInstanceOf(WorkflowExecutionError);
-      const err = caught as WorkflowExecutionError;
-      expect(err.meta).toEqual({
-        name: 'throws-after-agent',
-        description: 'agent runs then body throws',
       });
-      expect(err.message).toMatch(/intentional script body failure/);
-      expect(agentCalls).toBe(1);
-      expect(lastText.toLowerCase()).toMatch(/rome/);
-    },
-    60_000,
-  );
+    } catch (e) {
+      caught = e;
+    }
+    console.log('[D] caught:', String(caught));
+    console.log('[D] llm text:', lastText);
+    expect(caught).toBeInstanceOf(WorkflowExecutionError);
+    const err = caught as WorkflowExecutionError;
+    expect(err.meta).toEqual({
+      name: 'throws-after-agent',
+      description: 'agent runs then body throws',
+    });
+    expect(err.message).toMatch(/intentional script body failure/);
+    expect(agentCalls).toBe(1);
+    expect(lastText.toLowerCase()).toMatch(/rome/);
+  }, 60_000);
 
-  it(
-    'E: real-world parallel() fan-out — meta.phases titles match executed phases',
-    async () => {
-      const seen: string[] = [];
-      const tap: WorkflowAgentDispatch = async (prompt, opts) => {
-        const out = await liveDispatch(prompt, opts);
-        seen.push(out);
-        return out;
-      };
-      const orch = new WorkflowOrchestrator(tap);
-      const outcome = await orch.run({
-        script: `
+  it('E: real-world parallel() fan-out — meta.phases titles match executed phases', async () => {
+    const seen: string[] = [];
+    const tap: WorkflowAgentDispatch = async (prompt, opts) => {
+      const out = await liveDispatch(prompt, opts);
+      seen.push(out);
+      return out;
+    };
+    const orch = new WorkflowOrchestrator(tap);
+    const outcome = await orch.run({
+      args: undefined,
+      script: `
           export const meta = {
             name: 'multi-lens-review',
             description: 'Fan out 3 reviewers in parallel, return the verdicts',
@@ -279,50 +271,47 @@ describeOrSkip('P4a real-LLM E2E (DashScope qwen3-coder-plus)', () => {
           ])
           return { verdicts }
         `,
-      });
-      console.log('[E] meta:', JSON.stringify(outcome.meta));
-      console.log('[E] phases:', JSON.stringify(outcome.phases));
-      console.log('[E] result:', JSON.stringify(outcome.result));
-      console.log('[E] seen verdicts:', JSON.stringify(seen));
+    });
+    console.log('[E] meta:', JSON.stringify(outcome.meta));
+    console.log('[E] phases:', JSON.stringify(outcome.phases));
+    console.log('[E] result:', JSON.stringify(outcome.result));
+    console.log('[E] seen verdicts:', JSON.stringify(seen));
 
-      expect(outcome.meta).toEqual({
-        name: 'multi-lens-review',
-        description: 'Fan out 3 reviewers in parallel, return the verdicts',
-        phases: [{ title: 'Review', detail: '3 lenses in parallel' }],
-      });
-      expect(outcome.phases).toEqual(['Review']);
-      // meta.phases[].title must match what actually ran — this catches a
-      // future regression where the meta declaration drifts from the script
-      // body or where extractAndStripMeta returns a stale/leaked binding.
-      const declaredTitles = (
-        outcome.meta as { phases: Array<{ title: string }> }
-      ).phases.map((p) => p.title);
-      expect(declaredTitles).toEqual(outcome.phases);
+    expect(outcome.meta).toEqual({
+      name: 'multi-lens-review',
+      description: 'Fan out 3 reviewers in parallel, return the verdicts',
+      phases: [{ title: 'Review', detail: '3 lenses in parallel' }],
+    });
+    expect(outcome.phases).toEqual(['Review']);
+    // meta.phases[].title must match what actually ran — this catches a
+    // future regression where the meta declaration drifts from the script
+    // body or where extractAndStripMeta returns a stale/leaked binding.
+    const declaredTitles = (
+      outcome.meta as { phases: Array<{ title: string }> }
+    ).phases.map((p) => p.title);
+    expect(declaredTitles).toEqual(outcome.phases);
 
-      const verdicts = (outcome.result as { verdicts: string[] }).verdicts;
-      expect(verdicts).toHaveLength(3);
-      // Position-aligned to the parallel() input order.
-      expect(verdicts[0].toUpperCase()).toContain('RED');
-      expect(verdicts[1].toUpperCase()).toContain('GREEN');
-      expect(verdicts[2].toUpperCase()).toContain('BLUE');
-      expect(seen).toHaveLength(3);
-    },
-    90_000,
-  );
+    const verdicts = (outcome.result as { verdicts: string[] }).verdicts;
+    expect(verdicts).toHaveLength(3);
+    // Position-aligned to the parallel() input order.
+    expect(verdicts[0].toUpperCase()).toContain('RED');
+    expect(verdicts[1].toUpperCase()).toContain('GREEN');
+    expect(verdicts[2].toUpperCase()).toContain('BLUE');
+    expect(seen).toHaveLength(3);
+  }, 90_000);
 
-  it(
-    'F: real-world pipeline() multi-stage — meta.phases declares both, both run',
-    async () => {
-      let translateCalls = 0;
-      let upperCalls = 0;
-      const tap: WorkflowAgentDispatch = async (prompt, opts) => {
-        if (prompt.includes('Translate')) translateCalls++;
-        else if (prompt.includes('uppercase')) upperCalls++;
-        return liveDispatch(prompt, opts);
-      };
-      const orch = new WorkflowOrchestrator(tap);
-      const outcome = await orch.run({
-        script: `
+  it('F: real-world pipeline() multi-stage — meta.phases declares both, both run', async () => {
+    let translateCalls = 0;
+    let upperCalls = 0;
+    const tap: WorkflowAgentDispatch = async (prompt, opts) => {
+      if (prompt.includes('Translate')) translateCalls++;
+      else if (prompt.includes('uppercase')) upperCalls++;
+      return liveDispatch(prompt, opts);
+    };
+    const orch = new WorkflowOrchestrator(tap);
+    const outcome = await orch.run({
+      args: undefined,
+      script: `
           export const meta = {
             name: 'translate-then-shout',
             description: 'Pipeline two stages per item: translate, then uppercase',
@@ -339,36 +328,34 @@ describeOrSkip('P4a real-LLM E2E (DashScope qwen3-coder-plus)', () => {
           )
           return { results }
         `,
-      });
-      console.log('[F] meta:', JSON.stringify(outcome.meta));
-      console.log('[F] phases:', JSON.stringify(outcome.phases));
-      console.log('[F] result:', JSON.stringify(outcome.result));
-      console.log('[F] dispatch counts:', { translateCalls, upperCalls });
+    });
+    console.log('[F] meta:', JSON.stringify(outcome.meta));
+    console.log('[F] phases:', JSON.stringify(outcome.phases));
+    console.log('[F] result:', JSON.stringify(outcome.result));
+    console.log('[F] dispatch counts:', { translateCalls, upperCalls });
 
-      expect(outcome.meta).toEqual({
-        name: 'translate-then-shout',
-        description: 'Pipeline two stages per item: translate, then uppercase',
-        phases: [
-          { title: 'Translate', detail: 'EN -> FR' },
-          { title: 'Shout', detail: 'uppercase' },
-        ],
-      });
-      // Both declared phases were actually exercised in this run.
-      const phaseSet = new Set(outcome.phases);
-      expect(phaseSet.has('Translate')).toBe(true);
-      expect(phaseSet.has('Shout')).toBe(true);
+    expect(outcome.meta).toEqual({
+      name: 'translate-then-shout',
+      description: 'Pipeline two stages per item: translate, then uppercase',
+      phases: [
+        { title: 'Translate', detail: 'EN -> FR' },
+        { title: 'Shout', detail: 'uppercase' },
+      ],
+    });
+    // Both declared phases were actually exercised in this run.
+    const phaseSet = new Set(outcome.phases);
+    expect(phaseSet.has('Translate')).toBe(true);
+    expect(phaseSet.has('Shout')).toBe(true);
 
-      const results = (outcome.result as { results: string[] }).results;
-      expect(results).toHaveLength(2);
-      // Each item flowed through BOTH stages — uppercase final.
-      for (const r of results) {
-        expect(r).toBe(r.toUpperCase());
-        expect(r.length).toBeGreaterThan(0);
-      }
-      // Each input visited each stage exactly once.
-      expect(translateCalls).toBe(2);
-      expect(upperCalls).toBe(2);
-    },
-    120_000,
-  );
+    const results = (outcome.result as { results: string[] }).results;
+    expect(results).toHaveLength(2);
+    // Each item flowed through BOTH stages — uppercase final.
+    for (const r of results) {
+      expect(r).toBe(r.toUpperCase());
+      expect(r.length).toBeGreaterThan(0);
+    }
+    // Each input visited each stage exactly once.
+    expect(translateCalls).toBe(2);
+    expect(upperCalls).toBe(2);
+  }, 120_000);
 });

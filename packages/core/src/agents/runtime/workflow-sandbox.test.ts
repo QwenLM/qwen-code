@@ -177,7 +177,11 @@ describe('extractAndStripMeta', () => {
       whenToUse: 'when the user needs a multi-phase report',
       phases: [
         { title: 'collect' },
-        { title: 'analyse', detail: 'aggregate findings', model: 'qwen3-coder-plus' },
+        {
+          title: 'analyse',
+          detail: 'aggregate findings',
+          model: 'qwen3-coder-plus',
+        },
       ],
     });
   });
@@ -287,6 +291,35 @@ describe('extractAndStripMeta', () => {
       expect(Object.getPrototypeOf(p)).toBe(Object.prototype);
     }
   });
+
+  // P4a Round 3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
+  // value in the meta literal previously crashed the host process. The
+  // synchronous `runInContext` returns normally with a dangling rejection
+  // scheduled for the next tick; validateMeta passes (the field isn't on
+  // the contract surface so it's silently dropped); the workflow even
+  // returns its result; THEN the unhandled rejection terminates the
+  // process under Node's default `--unhandled-rejections=throw`. The fix
+  // is to walk the eval result, neutralise any thenables with a `.catch`
+  // so they no longer trigger the unhandled-rejection handler, and throw
+  // an explicit error so the bad meta is rejected up front.
+  it('throws when meta value is a Promise (dynamic import) — no unhandled rejection crash', () => {
+    const src = `export const meta = { name: 'x', description: 'd', extra: import('node:fs') }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+  });
+
+  it('throws when meta value is a Promise nested inside a phases entry', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'd',
+      phases: [{ title: 't', extra: import('node:fs') }],
+    }
+    return 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+  });
 });
 
 describe('createWorkflowSandbox', () => {
@@ -362,9 +395,7 @@ describe('createWorkflowSandbox', () => {
       dispatch: async () => 'ignored',
     });
     await expect(
-      sandbox.run(
-        `export const meta = { name: 'x' }\nreturn 1`,
-      ),
+      sandbox.run(`export const meta = { name: 'x' }\nreturn 1`),
     ).rejects.toThrow(/^meta\.description must be a non-empty string$/);
   });
 });

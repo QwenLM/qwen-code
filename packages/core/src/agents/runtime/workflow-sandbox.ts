@@ -203,8 +203,54 @@ export function extractAndStripMeta(source: string): {
     );
   }
 
+  // P4a R3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
+  // value in the meta literal would otherwise leave a dangling rejection
+  // behind — `runInContext` returns synchronously with the Promise scheduled
+  // to reject on the next tick, validateMeta drops the non-contract field
+  // silently, and the run completes successfully. Then Node's default
+  // `--unhandled-rejections=throw` terminates the host process, decoupled
+  // from the run that triggered it. Walk `raw`, neutralise any thenables
+  // with `.catch(() => {})` so the rejection is marked handled, and reject
+  // the meta literal up front.
+  rejectThenablesInMeta(raw);
+
   const meta = validateMeta(raw);
   return { stripped, meta };
+}
+
+/**
+ * Recursively scan a vm-eval'd value, marking any thenable as handled
+ * (so its rejection cannot terminate the host on the next tick) and
+ * throwing an explicit "meta values must not be Promises" so the
+ * malformed meta is reported clearly.
+ *
+ * Recurses through plain objects and arrays — `phases[]` entries may
+ * embed an `import()` below the top level.
+ */
+function rejectThenablesInMeta(value: unknown): void {
+  if (value === null || typeof value !== 'object') return;
+  const maybeThen = (value as { then?: unknown }).then;
+  if (typeof maybeThen === 'function') {
+    // Mark handled so Node's unhandled-rejection trap does not later kill
+    // the process. `.catch` on a non-Promise thenable would synchronously
+    // throw if the implementation is non-standard, so swallow defensively.
+    try {
+      (value as Promise<unknown>).catch(() => {});
+    } catch {
+      /* non-standard thenable — already rejecting below */
+    }
+    throw new Error(
+      'extractAndStripMeta: meta values must not be Promises ' +
+        '(no async / dynamic import allowed in meta literal)',
+    );
+  }
+  if (Array.isArray(value)) {
+    for (const v of value) rejectThenablesInMeta(v);
+    return;
+  }
+  for (const v of Object.values(value as Record<string, unknown>)) {
+    rejectThenablesInMeta(v);
+  }
 }
 
 /**
@@ -237,10 +283,7 @@ function validateMeta(value: unknown): WorkflowMeta {
     // Verbatim from upstream Claude Code 2.1.168.
     throw new Error('meta.description must be a non-empty string');
   }
-  if (
-    obj['whenToUse'] !== undefined &&
-    typeof obj['whenToUse'] !== 'string'
-  ) {
+  if (obj['whenToUse'] !== undefined && typeof obj['whenToUse'] !== 'string') {
     throw new Error('meta.whenToUse must be a string');
   }
   let phases:

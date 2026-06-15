@@ -362,6 +362,8 @@ describe('WorkflowTool', () => {
     // display contains both string literals at separate offsets.
     expect(display.indexOf('"declared"')).toBeGreaterThan(-1);
     expect(display.indexOf('"returned"')).toBeGreaterThan(-1);
-    expect(display.indexOf('"declared"')).not.toBe(display.indexOf('"returned"'));
+    expect(display.indexOf('"declared"')).not.toBe(
+      display.indexOf('"returned"'),
+    );
   });
 });
