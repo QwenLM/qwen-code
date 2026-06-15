@@ -71,7 +71,10 @@ if [ -f "$TMUX_RESULTS" ]; then
 EOF
 
   if [ "${QWEN_APPROVAL_EMIT_ONLY:-}" != "1" ]; then
-    EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- qwen-triage:tmux -->")) | .id' | head -1)
+    EXISTING=$(
+      gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate -F per_page=100 \
+        | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:tmux -->"))] | last | .id // empty'
+    )
     if [ -n "$EXISTING" ]; then
       gh api -X PATCH "/repos/$REPO/issues/comments/$EXISTING" -F body=@"$RESULTS_DIR/tmux-comment.md"
     else
@@ -143,7 +146,10 @@ If `QWEN_APPROVAL_EMIT_ONLY=1`, skip this step. Otherwise, before posting,
 check for existing:
 
 ```bash
-EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- qwen-triage:approval -->")) | .id' | head -1)
+EXISTING=$(
+  gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate -F per_page=100 \
+    | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:approval -->"))] | last | .id // empty'
+)
 ```
 
 - If found: PATCH

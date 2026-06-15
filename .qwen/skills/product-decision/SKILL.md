@@ -139,7 +139,10 @@ On approach: <honest assessment — scope feels right / could be simpler / sugge
 Before posting, check for an existing comment with `<!-- qwen-triage:product -->`:
 
 ```bash
-EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- qwen-triage:product -->")) | .id' | head -1)
+EXISTING=$(
+  gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate -F per_page=100 \
+    | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:product -->"))] | last | .id // empty'
+)
 ```
 
 - If found: PATCH the existing comment

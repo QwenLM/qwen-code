@@ -28,8 +28,6 @@ on:
 
 permissions:
   contents: 'read'
-  issues: 'write'
-  pull-requests: 'write'
 
 env:
   # jq program that renders qwen `--output-format stream-json` events into
@@ -320,6 +318,10 @@ jobs:
     # Self-hosted: product-decision reads local Claude Code source on the
     # runner for product-direction reasoning (not available on GitHub-hosted).
     runs-on: ['self-hosted', 'ecs-qwen']
+    permissions:
+      contents: 'read'
+      issues: 'read'
+      pull-requests: 'read'
     outputs:
       verdict: '${{ steps.capture.outputs.verdict }}'
     steps:
@@ -441,6 +443,7 @@ jobs:
             echo "::notice::No product-decision comment to publish"
             exit 0
           fi
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
           ACTION="none"
           if [ -f "$VERDICT_FILE" ]; then
             ACTION="$(jq -r '.review_action // "none"' "$VERDICT_FILE" 2>/dev/null || echo none)"
@@ -450,7 +453,6 @@ jobs:
             # PR, don't stack another one on a re-run. Best-effort — on a query
             # failure we fall through and post (better a duplicate than silently
             # dropping the gate).
-            BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
             ALREADY=""
             if [ -n "$BOT_LOGIN" ]; then
               ALREADY="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json latestReviews \
@@ -463,7 +465,14 @@ jobs:
               echo "::notice::Bot already has a CHANGES_REQUESTED review — skipping duplicate"
             fi
           else
-            EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- qwen-triage:product -->")) | .id' 2>/dev/null | head -1 || true)"
+            EXISTING="$(
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                --method GET \
+                --paginate \
+                -F per_page=100 \
+                | jq -sr --arg bot "$BOT_LOGIN" \
+                  '[.[][] | select(.body | contains("<!-- qwen-triage:product -->")) | select($bot == "" or .user.login == $bot)] | last | .id // empty'
+            )" || EXISTING=""
             if [ -n "$EXISTING" ]; then
               gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY" >/dev/null \
                 || echo "::warning::Failed to update product comment"
@@ -525,8 +534,8 @@ jobs:
     runs-on: ['self-hosted', 'ecs-qwen']
     permissions:
       contents: 'read'
-      pull-requests: 'write'
-      issues: 'write'
+      pull-requests: 'read'
+      issues: 'read'
     outputs:
       verdict: '${{ steps.verdict.outputs.verdict }}'
     steps:
