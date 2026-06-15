@@ -542,10 +542,9 @@ function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
 
 function mapToWebShellTaskInfo(
   task: DaemonSessionTaskStatus,
-): WebShellTaskInfo | null {
+): WebShellTaskInfo {
   const base = {
     id: task.id,
-    status: task.status,
     label: task.label,
     description: task.description,
     runtimeMs: task.runtimeMs,
@@ -559,6 +558,7 @@ function mapToWebShellTaskInfo(
       return {
         ...base,
         kind: 'agent',
+        status: task.status,
         subagentType: task.subagentType,
         isBackgrounded: task.isBackgrounded,
         prompt: task.prompt,
@@ -567,6 +567,7 @@ function mapToWebShellTaskInfo(
       return {
         ...base,
         kind: 'shell',
+        status: task.status,
         command: task.command,
         cwd: task.cwd,
         pid: task.pid,
@@ -576,12 +577,13 @@ function mapToWebShellTaskInfo(
       return {
         ...base,
         kind: 'monitor',
+        status: task.status,
         command: task.command,
         pid: task.pid,
         exitCode: task.exitCode,
       };
     default:
-      return null;
+      return task satisfies never;
   }
 }
 
@@ -649,15 +651,6 @@ function QueuedPromptDisplay({
   );
 }
 
-function FooterRendererWrapper({
-  Component,
-  ...props
-}: {
-  Component: FooterRenderer;
-} & Omit<import('./customization').WebShellFooterRenderInfo, never>) {
-  return <Component {...props} />;
-}
-
 export function App({
   onSessionIdChange,
   theme: providedTheme,
@@ -706,6 +699,7 @@ export function App({
       markdown,
     ],
   );
+  const CustomFooter = renderFooter;
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
@@ -867,12 +861,7 @@ export function App({
     connection.status === 'connected',
   );
   const footerTasks = useMemo(
-    () =>
-      renderFooter
-        ? backgroundTasks
-            .map(mapToWebShellTaskInfo)
-            .filter((t): t is WebShellTaskInfo => t !== null)
-        : [],
+    () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
     [backgroundTasks, renderFooter],
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
@@ -2904,7 +2893,7 @@ export function App({
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
                   sessionName={sessionDisplayName}
-                  dialogOpen={dialogOpen}
+                  dialogOpen={bottomHidden || tasksPanelMessage !== null}
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}
@@ -2934,9 +2923,8 @@ export function App({
               !tasksPanelMessage &&
               (showShortcuts ? (
                 <ShortcutsPanel onClose={handleCloseShortcuts} />
-              ) : renderFooter ? (
-                <FooterRendererWrapper
-                  Component={renderFooter}
+              ) : CustomFooter ? (
+                <CustomFooter
                   connected={connected}
                   mode={currentMode}
                   model={currentModel}
@@ -2949,15 +2937,18 @@ export function App({
                   }
                   activeGoal={activeGoal}
                   tasks={footerTasks}
-                  onSelectMode={() => setApprovalModeInlineOpen((v) => !v)}
-                  onSelectModel={() =>
-                    setModelInlineMode((v) => (v ? null : 'main'))
-                  }
-                  onShowContext={() => showContextUsage('/context', false)}
-                  onOpenSettings={() => setSettingsInlineOpen((v) => !v)}
-                  onOpenTasks={() => openTasksPanel()}
-                  onReturnToInput={handleReturnToEditor}
-                  onToggleShortcuts={handleToggleShortcuts}
+                  availableModes={MODES_CYCLE}
+                  availableModels={(connection.models ?? []).map((m) => ({
+                    id: m.id,
+                    label: m.label,
+                    contextWindow: m.contextWindow,
+                  }))}
+                  onSelectMode={(mode) => handleSetMode(mode)}
+                  onSelectModel={(model) => {
+                    sessionActions.setModel(model).then(() => {
+                      setCurrentModel(model);
+                    });
+                  }}
                 />
               ) : (
                 <StatusBar

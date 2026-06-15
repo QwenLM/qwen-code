@@ -16,5 +16,6 @@ export type {
   WebShellAgentTask,
   WebShellShellTask,
   WebShellMonitorTask,
+  WebShellModelInfo,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';

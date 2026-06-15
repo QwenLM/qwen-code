@@ -54,7 +54,6 @@ export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
 interface WebShellTaskBase {
   id: string;
-  status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
   label: string;
   description: string;
   runtimeMs: number;
@@ -65,6 +64,7 @@ interface WebShellTaskBase {
 
 export interface WebShellAgentTask extends WebShellTaskBase {
   kind: 'agent';
+  status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
   subagentType?: string;
   isBackgrounded: boolean;
   prompt?: string;
@@ -72,6 +72,7 @@ export interface WebShellAgentTask extends WebShellTaskBase {
 
 export interface WebShellShellTask extends WebShellTaskBase {
   kind: 'shell';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
   command: string;
   cwd: string;
   pid?: number;
@@ -80,6 +81,7 @@ export interface WebShellShellTask extends WebShellTaskBase {
 
 export interface WebShellMonitorTask extends WebShellTaskBase {
   kind: 'monitor';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
   command: string;
   pid?: number;
   exitCode?: number;
@@ -89,6 +91,14 @@ export type WebShellTaskInfo =
   | WebShellAgentTask
   | WebShellShellTask
   | WebShellMonitorTask;
+
+// ---- Model info (public type for footer renderer) ----
+
+export interface WebShellModelInfo {
+  id: string;
+  label?: string;
+  contextWindow?: number;
+}
 
 // ---- Footer renderer ----
 
@@ -100,14 +110,11 @@ export interface WebShellFooterRenderInfo {
   contextUsageRatio: number;
   activeGoal: { condition: string; setAt: number } | null;
   tasks: readonly WebShellTaskInfo[];
+  availableModes: readonly string[];
+  availableModels: readonly WebShellModelInfo[];
 
-  onSelectMode: () => void;
-  onSelectModel: () => void;
-  onShowContext: () => void;
-  onOpenSettings: () => void;
-  onOpenTasks: () => void;
-  onReturnToInput: (text?: string) => void;
-  onToggleShortcuts: () => void;
+  onSelectMode: (mode: string) => void;
+  onSelectModel: (model: string) => void;
 }
 
 export type FooterRenderer = ComponentType<WebShellFooterRenderInfo>;
