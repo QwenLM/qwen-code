@@ -10,7 +10,7 @@
       "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
       "@qwen-code/qwen-code-core/*": ["../core/src/*"],
       "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
-      "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*"]
+      "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*.ts"]
     }
   },
   "include": [

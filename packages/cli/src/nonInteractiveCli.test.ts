@@ -424,6 +424,7 @@ describe('runNonInteractive', () => {
       const stripSpy = vi.fn(() => [{ role: 'user', parts: orphanedPrompt }]);
       mockGeminiClient.stripOrphanedUserEntriesFromHistory = stripSpy;
       async function* throwingStream(): AsyncGenerator<ServerGeminiStreamEvent> {
+        yield* ([] as ServerGeminiStreamEvent[]);
         throw new Error('stream failed before first event');
       }
       mockGeminiClient.sendMessageStream.mockReturnValue(throwingStream());

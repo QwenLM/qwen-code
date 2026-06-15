@@ -2131,7 +2131,7 @@ describe('Session', () => {
     it('treats the user-cancel sentinel as cancellation when send rejects with the abort reason', async () => {
       mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
         await session.cancelPendingPrompt();
-        throw 'qwen:user-cancel';
+        return Promise.reject('qwen:user-cancel');
       });
 
       await expect(
