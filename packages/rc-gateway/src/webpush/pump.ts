@@ -37,6 +37,13 @@ export interface SessionEventPumpOptions {
   /** Test hook: called after each event is dispatched to the notifier. */
   onDispatch?: (sessionId: string, event: DaemonEvent) => void;
   /**
+   * Called for EVERY event seen (before policy/notify branches), independent of
+   * push. The subscriber-independent ingestion hook for cost tracking
+   * (`add-cost-tracking`: "subscribe to every emitted session_update"). Must be
+   * total — invoked inside the loop's try, but should never throw.
+   */
+  onEvent?: (sessionId: string, event: DaemonEvent) => void;
+  /**
    * Optional policy enforcer. When set, `permission_request` events are first
    * offered to it; an auto-handled (voted) event is NOT pushed to the notifier.
    */
@@ -83,6 +90,7 @@ export class SessionEventPump {
     s: DaemonSessionSummary,
   ) => string | undefined;
   private readonly onDispatch?: (sessionId: string, event: DaemonEvent) => void;
+  private readonly onEvent?: (sessionId: string, event: DaemonEvent) => void;
   private readonly enforcer?: PolicyEnforcer;
   private readonly onSessionIdle?: (
     sessionId: string,
@@ -102,7 +110,9 @@ export class SessionEventPump {
 
   constructor(
     private readonly daemon: DaemonClient,
-    private readonly notifier: PumpNotifier,
+    // Optional: the pump also runs for cost tracking with no push notifier
+    // (push gated on VAPID; cost tracking is not). notify is guarded below.
+    private readonly notifier: PumpNotifier | undefined,
     opts: SessionEventPumpOptions = {},
   ) {
     this.pollMs = opts.pollMs ?? 5000;
@@ -112,6 +122,7 @@ export class SessionEventPump {
     this.sleep = opts.sleep ?? defaultSleep;
     this.sessionName = opts.sessionName;
     this.onDispatch = opts.onDispatch;
+    this.onEvent = opts.onEvent;
     this.enforcer = opts.enforcer;
     this.onSessionIdle = opts.onSessionIdle;
   }
@@ -215,6 +226,15 @@ export class SessionEventPump {
           // Advance the resume cursor first, before any handling branch, so a
           // reconnect never re-delivers an event we already auto-voted on.
           if (typeof ev.id === 'number') loop.lastEventId = ev.id;
+          // Subscriber-independent ingestion (cost tracking): see EVERY event,
+          // before policy/notify. Guarded so it never breaks the loop.
+          if (this.onEvent) {
+            try {
+              this.onEvent(s.sessionId, ev);
+            } catch {
+              /* ingestion is best-effort; never break the subscribe loop */
+            }
+          }
           // Consult the policy enforcer for permission_request events. An
           // auto-handled (voted) event is suppressed from push; everything else
           // — non-permission events and prompt/fail-safe decisions — still
@@ -229,7 +249,7 @@ export class SessionEventPump {
               continue;
             }
           }
-          await this.notifier.notify(
+          await this.notifier?.notify(
             { type: ev.type, data: ev.data },
             { sessionId: s.sessionId, sessionName: name },
           );

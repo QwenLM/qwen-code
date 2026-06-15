@@ -15,9 +15,16 @@ import type { AuditRecorder } from '../auditLog.js';
  * the daemon's turn and returns its stopReason. A client disconnect aborts the
  * daemon prompt (no response written). The prompt text is NEVER audited.
  */
+/** Records the originator of a session's turn, for cost attribution. */
+export type PromptAcceptedHook = (
+  sessionId: string,
+  attribution: { attributionTokenId: string; subActor: string | null },
+) => void;
+
 export function createPromptRoute(
   daemon: DaemonClient,
   audit?: AuditRecorder,
+  onAccepted?: PromptAcceptedHook,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -31,6 +38,17 @@ export function createPromptRoute(
     } else {
       res.status(400).json({ error: 'Invalid prompt', code: 'invalid_prompt' });
       return;
+    }
+
+    // Capture attribution BEFORE the turn: the usage events the ingester prices
+    // arrive WHILE daemon.prompt() is awaited, so the session→(tokenId,subActor)
+    // mapping must be set first. A bridge sub-actor is attached only on a bridge
+    // token (auth never attaches one otherwise), so it is safe to record.
+    if (onAccepted && req.rcClient?.id) {
+      onAccepted(sessionId, {
+        attributionTokenId: req.rcClient.id,
+        subActor: req.rcClient.subActor ?? null,
+      });
     }
 
     // Abort the (long-lived) daemon turn if the client disconnects. Listen on

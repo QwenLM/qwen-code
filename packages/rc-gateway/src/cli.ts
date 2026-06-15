@@ -41,6 +41,15 @@ import { IdleSessionToggles } from './idle/sessionToggles.js';
 import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
 import {
+  DEFAULT_RATE_TABLE,
+  RateTableHolder,
+  loadRateTableFile,
+  rateTablePath,
+} from './cost/rateTable.js';
+import { UsageIngester, UsageTickCoalescer } from './cost/ingester.js';
+import { SessionAttributionMap } from './cost/sessionAttribution.js';
+import { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
+import {
   resolveSuggestConfig,
   createChatTransport,
 } from './idle/chatTransport.js';
@@ -155,6 +164,24 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       ),
     };
   };
+  // Cost tracking (add-cost-tracking): open the usage store (native sqlite,
+  // dynamically loaded so a missing build disables tracking, not the gateway) and
+  // the rate table (built-in defaults, overlaid by the operator file if it parses).
+  // The ingester is created after the app (it needs `audit`); attribution +
+  // broadcaster exist now so they can be passed into the app deps.
+  const usageStore = await openUsageStore();
+  const rates = new RateTableHolder(DEFAULT_RATE_TABLE);
+  if (usageStore) {
+    try {
+      rates.set(await loadRateTableFile(rateTablePath()));
+    } catch {
+      // No file / malformed at boot → keep the built-in defaults.
+    }
+  }
+  const sessionAttribution = new SessionAttributionMap();
+  const usageBroadcaster = new UsageTickBroadcaster();
+  let usageIngester: UsageIngester | undefined;
+
   const { app, notifier, audit, ownerEvents, bridgeRegistry } =
     createGatewayApp({
       daemon: handle.daemon,
@@ -166,7 +193,34 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       routing,
       idleToggles,
       idleStatus,
+      usageReader: usageStore,
+      onPromptAccepted: usageStore
+        ? (sid, attr) => {
+            sessionAttribution.set(sid, attr);
+            usageIngester?.notePromptBoundary(sid);
+          }
+        : undefined,
     });
+
+  // Now that `audit` exists, build the ingester. usage_tick emissions fan through
+  // the broadcaster (relay registration lands in the next slice; until then they
+  // fan to nobody, harmlessly). Rows are still written + queryable via /rc/usage.
+  if (usageStore) {
+    const coalescer = new UsageTickCoalescer({
+      emit: (tick) => usageBroadcaster.emit(tick),
+    });
+    usageIngester = new UsageIngester({
+      rates,
+      store: usageStore,
+      coalescer,
+      now: () => Date.now(),
+      onRateMiss: (modelServiceId, modelId) =>
+        void audit.record({
+          action: 'rate_table_miss',
+          detail: { modelServiceId, modelId },
+        }),
+    });
+  }
 
   // Bridge staleness reaper: every heartbeat interval, drop bridges that missed
   // ~3 heartbeats and audit each (bridge_stale_deregistered). Unref'd so it never
@@ -470,15 +524,25 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
 
   // Hold the gateway's own daemon subscriptions so push fires with no browser
   // open. Best-effort: start() always resolves, even if the daemon is unhappy.
+  // The session-event pump runs when EITHER push is configured OR cost tracking
+  // is on (cost ingestion must see every session_update, independent of push).
   let pump: SessionEventPump | undefined;
-  if (notifier) {
+  if (notifier || usageIngester) {
     pump = new SessionEventPump(handle.daemon, notifier, {
       enforcer,
       ...(onSessionIdle ? { onSessionIdle } : {}),
+      ...(usageIngester
+        ? {
+            onEvent: (sid, ev) =>
+              usageIngester!.ingest(sid, ev.data, sessionAttribution.get(sid)),
+          }
+        : {}),
     });
     await pump.start();
     // eslint-disable-next-line no-console
-    console.log('push pump: started');
+    console.log(
+      notifier ? 'push pump: started' : 'session pump: started (cost tracking)',
+    );
   }
 
   // End-of-quiet-window digest flush (webpush D4, cycle 75): poll on an unref'd
@@ -696,6 +760,39 @@ async function loadSearchIndexModule(): Promise<
       process.exit(1);
     }
     throw err;
+  }
+}
+
+/**
+ * Open the cost-tracking usage store, or return undefined to DISABLE cost
+ * tracking when the optional native `better-sqlite3` build is absent (unlike
+ * ranked search, a missing dep here must not stop the gateway — cost tracking is
+ * simply off). The store dynamically imports the native dep, so this is the only
+ * place that can throw a module-not-found for it on the serve path.
+ */
+async function openUsageStore(): Promise<
+  import('./cost/usageStore.js').UsageStore | undefined
+> {
+  try {
+    const { UsageStore } = await import('./cost/usageStore.js');
+    return UsageStore.open(join(homedir(), '.qwen', 'rc', 'usage.db'));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    const msg = (err as Error).message ?? '';
+    if (
+      code === 'ERR_MODULE_NOT_FOUND' ||
+      code === 'MODULE_NOT_FOUND' ||
+      /better[-_]sqlite3/.test(msg)
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        'cost tracking disabled: optional better-sqlite3 dependency not built',
+      );
+      return undefined;
+    }
+    // eslint-disable-next-line no-console
+    console.warn('cost tracking disabled: failed to open usage store:', msg);
+    return undefined;
   }
 }
 

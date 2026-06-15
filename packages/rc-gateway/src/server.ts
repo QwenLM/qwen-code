@@ -38,7 +38,9 @@ import { ConnectionRegistry } from './connectionRegistry.js';
 import { AuditLog, type AuditRecorder } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
-import { createPromptRoute } from './routes/prompt.js';
+import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
+import { createUsageRoute, type UsageReader } from './routes/usage.js';
+import type { AggregateQuery } from './cost/usageStore.js';
 import { createForkRoute } from './routes/fork.js';
 import {
   createIdleToggleRoute,
@@ -138,6 +140,15 @@ export interface GatewayDeps {
    * `QWEN_RC_SUBACTOR_CAP` when unset.
    */
   subActorCap?: number;
+  /**
+   * Cost tracking (`add-cost-tracking`). When `usageReader` is set, `GET /rc/usage`
+   * mounts; `onPromptAccepted` (when set) captures per-session attribution on each
+   * accepted prompt. Both omitted → cost tracking disabled (native sqlite absent
+   * or operator opt-out). `usageLabelFor` maps an aggregate key to a display label.
+   */
+  usageReader?: UsageReader;
+  usageLabelFor?: (groupBy: AggregateQuery['groupBy'], key: string) => string;
+  onPromptAccepted?: PromptAcceptedHook;
 }
 
 export interface GatewayApp {
@@ -288,8 +299,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap prompts per chat user
-    createPromptRoute(deps.daemon, audit),
+    createPromptRoute(deps.daemon, audit, deps.onPromptAccepted),
   );
+  // GET /rc/usage (add-cost-tracking) — any authenticated token; the route applies
+  // owner-sees-all / lesser-sees-own scope filtering internally. Mounted only when
+  // a usage store is wired (native sqlite present + cost tracking enabled).
+  if (deps.usageReader) {
+    app.get(
+      '/rc/usage',
+      createUsageRoute({
+        store: deps.usageReader,
+        now: () => Date.now(),
+        labelFor: deps.usageLabelFor,
+      }),
+    );
+  }
   app.post(
     '/rc/session/:id/fork',
     requireScope(WRITE, audit),
