@@ -549,4 +549,61 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(chatRecordingService.getCurrentCustomTitle()).toBe('user-chosen');
     expect(chatRecordingService.getCurrentTitleSource()).toBe('manual');
   });
+
+  it('skips title generation when history has no user message', async () => {
+    /**
+     * This test verifies that auto-title is not triggered when the history
+     * contains only model messages (e.g., initialization context) without
+     * any user message. This prevents titles like "初始化项目上下文" when
+     * the user hasn't sent any message yet.
+     */
+
+    // Simulate tryGenerateSessionTitle returning empty_history because
+    // the history only has model messages (initialization context)
+    tryGenerateSessionTitleMock.mockResolvedValueOnce({
+      ok: false,
+      reason: 'empty_history',
+    });
+
+    // Simulate the first assistant turn completing with initialization context
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: '已加载项目上下文，准备就绪。' }],
+    });
+
+    await flushMicrotasks();
+
+    // Verify: the mock was called and returned empty_history
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledOnce();
+    // Verify: NO title was generated because history had no user message
+    const titleRecord = findCustomTitleRecord();
+    expect(titleRecord).toBeUndefined();
+    expect(chatRecordingService.getCurrentCustomTitle()).toBeUndefined();
+
+    // Now simulate user sends "你好" and gets a response
+    vi.mocked(jsonl.writeLine).mockClear();
+    tryGenerateSessionTitleMock.mockClear();
+
+    // This time, tryGenerateSessionTitle succeeds because history now has user message
+    tryGenerateSessionTitleMock.mockResolvedValueOnce({
+      ok: true,
+      title: '问候会话',
+      modelUsed: 'qwen-turbo',
+    });
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: '你好！有什么可以帮助你的？' }],
+    });
+
+    await flushMicrotasks();
+
+    // Now the title should be generated based on the actual conversation
+    const newTitleRecord = findCustomTitleRecord();
+    expect(newTitleRecord).toBeDefined();
+    expect(
+      (newTitleRecord?.systemPayload as { customTitle?: string })?.customTitle,
+    ).toBe('问候会话');
+    expect(chatRecordingService.getCurrentCustomTitle()).toBe('问候会话');
+  });
 });
