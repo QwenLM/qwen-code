@@ -175,10 +175,18 @@ a deliberate-wrong-argument test that makes the build go red), **not** hand-roll
 `*Like` shapes. The sidecar constructs the adapter (initializing the persistent olm
 store) when `MATRIX_ENABLE_E2EE` is set, and logs honestly.
 
-**Verification ceiling:** the live olm/megolm decrypt/encrypt round-trip is NOT
-exercised — it needs a homeserver, an encrypted room, and a verified device, none
-of which exist in CI. The adapter is therefore **constructed but not started** by
-the sidecar.
+**Live decrypt — now has an env-gated integration test.** The olm/megolm round-trip
+is verified by `crypto.integration.test.ts`: it provisions two throwaway crypto
+users on a real Synapse, has the SENDER create an encrypted room, and asserts the
+bot's `cryptoAdapter` decrypts a message into `onMessage`. It **skips** in the
+default suite and runs only when `QWEN_MATRIX_IT_HS_URL` + `QWEN_MATRIX_IT_REG_SECRET`
+point at a homeserver — stand one up with `integration/matrix/docker-compose.yml`
+(see that README; mind the key-share **ordering** and **unverified-device** gotchas).
+The provisioning HMAC (`synapseRegisterMac`) has its own known-answer unit test.
+
+What's still un-CI-able: only a _public/federated_ homeserver interop and a fully
+_verified_-device path. The sidecar still **constructs but does not start** the
+adapter — see below.
 
 ## Residual integration (the one unverified edge)
 

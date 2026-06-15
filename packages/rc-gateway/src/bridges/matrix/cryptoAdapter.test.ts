@@ -109,6 +109,7 @@ describe('setupMatrixCrypto (boot safety invariants)', () => {
   it('adapter constructed → returned, with the honest residual-integration log', async () => {
     const fake: MatrixCryptoAdapter = {
       isReady: () => false,
+      joinRoom: async () => '!room',
       start: async () => {},
       stop: async () => {},
       sendEncrypted: async () => 'evt',

@@ -62,6 +62,8 @@ export interface DecryptedMatrixMessage {
 export interface MatrixCryptoAdapter {
   /** Crypto ready to decrypt/encrypt (after {@link start}). */
   isReady(): boolean;
+  /** Join a room (so its messages sync + its megolm sessions are received). */
+  joinRoom(roomId: string): Promise<string>;
   /** Prepare crypto for the joined rooms, then begin syncing. */
   start(): Promise<void>;
   /** Stop syncing and release the client. */
@@ -120,6 +122,10 @@ export async function createMatrixCryptoAdapter(
       cryptoStore,
     );
 
+    // matrix-bot-sdk decrypts `m.room.encrypted` events IN PLACE and re-emits the
+    // plaintext as `room.message` (MatrixClient processSync: decrypt → fall through
+    // to the m.room.message emit), so this one handler covers BOTH cleartext and
+    // decrypted encrypted-room messages — no manual decryptRoomEvent needed.
     client.on('room.message', (roomId: string, event: unknown) => {
       const e = event as { sender?: string; content?: { body?: string } };
       if (typeof e.content?.body !== 'string') return;
@@ -132,6 +138,7 @@ export async function createMatrixCryptoAdapter(
 
     return {
       isReady: () => client.crypto?.isReady ?? false,
+      joinRoom: (roomId) => client.joinRoom(roomId),
       start: async () => {
         const joined = await client.getJoinedRooms();
         await client.crypto.prepare(joined);
