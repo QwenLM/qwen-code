@@ -6070,7 +6070,7 @@ Other open files:
       expect(mockCheckNextSpeaker).not.toHaveBeenCalled();
     });
 
-    it('keeps deterministic tool-call checks when skipLoopDetection is true', async () => {
+    it('does not run loop checks when skipLoopDetection is true', async () => {
       // Arrange
       // Ensure config returns true for skipLoopDetection
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
@@ -6106,13 +6106,14 @@ Other open files:
         // consume stream
       }
 
-      expect(ldMock.addAndCheckDeterministicToolCallLoop).toHaveBeenCalledTimes(
-        2,
-      );
+      // Assert - neither detector path runs when skipLoopDetection is true
+      expect(
+        ldMock.addAndCheckDeterministicToolCallLoop,
+      ).not.toHaveBeenCalled();
       expect(ldMock.addAndCheckHeuristicLoops).not.toHaveBeenCalled();
     });
 
-    it('hard-stops identical tool calls even when skipLoopDetection is true', async () => {
+    it('does not hard-stop identical tool calls when skipLoopDetection is true', async () => {
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
 
       mockTurnRunFn.mockReturnValue(
@@ -6141,6 +6142,45 @@ Other open files:
           [{ text: 'repeat a tool' }],
           new AbortController().signal,
           'prompt-id-skip-loop-identical',
+        ),
+      );
+
+      // skipLoopDetection defaults to true, so even repeated identical calls
+      // must not be halted — the documented escape hatch stays effective.
+      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
+        false,
+      );
+    });
+
+    it('hard-stops identical tool calls when loop detection is enabled', async () => {
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(false);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          for (let i = 0; i < 5; i++) {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: `repeat-${i}`,
+                name: 'run_shell_command',
+                args: { command: 'echo repeated' },
+              },
+            };
+          }
+        })(),
+      );
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'repeat a tool' }],
+          new AbortController().signal,
+          'prompt-id-loop-identical',
         ),
       );
 

@@ -2097,11 +2097,20 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
+        // Loop detection is opt-in: `model.skipLoopDetection` defaults to true
+        // (see settingsSchema) to avoid false-positive interruptions. Keep BOTH
+        // the deterministic identical-tool-call check and the heuristic checks
+        // behind this single flag so the documented `model.skipLoopDetection`
+        // escape hatch stays honest (including the non-interactive hint in
+        // nonInteractiveCli.ts). The deterministic split, retry-reset, and
+        // pending-call splice below still apply once detection is enabled.
+        const skipLoopDetection = this.config.getSkipLoopDetection();
         const deterministicToolCallLoop =
+          !skipLoopDetection &&
           this.loopDetector.addAndCheckDeterministicToolCallLoop(event);
         const heuristicLoop =
           !deterministicToolCallLoop &&
-          !this.config.getSkipLoopDetection() &&
+          !skipLoopDetection &&
           this.loopDetector.addAndCheckHeuristicLoops(event);
         if (deterministicToolCallLoop || heuristicLoop) {
           const loopType = this.loopDetector.getLastLoopType();
