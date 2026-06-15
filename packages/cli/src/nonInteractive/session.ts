@@ -200,7 +200,7 @@ class Session {
       }
       if (meta.status === 'running' && typeof registry.get === 'function') {
         const entry = registry.get(meta.monitorId);
-        if (entry && entry.status !== 'running') return;
+        if (!entry || entry.status !== 'running') return;
       }
       this.enqueueMonitorNotification({
         displayText,

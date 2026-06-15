@@ -629,7 +629,7 @@ export async function runNonInteractive(
               typeof monitorRegistry.get === 'function'
             ) {
               const entry = monitorRegistry.get(meta.monitorId);
-              if (entry && entry.status !== 'running') return;
+              if (!entry || entry.status !== 'running') return;
             }
 
             const queueItem = {

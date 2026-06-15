@@ -2548,11 +2548,6 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
-      meta?: {
-        taskId?: string;
-        kind?: 'monitor' | 'agent' | 'shell';
-        status?: string;
-      };
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
@@ -2614,12 +2609,11 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
-    registry.setNotificationCallback((displayText, modelText, meta) => {
+    registry.setNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
-        meta: { taskId: meta.agentId, kind: 'agent', status: meta.status },
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -2631,12 +2625,11 @@ export const useGeminiStream = (
   // Register background shell terminal notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundShellRegistry();
-    registry.setNotificationCallback((displayText, modelText, meta) => {
+    registry.setNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
-        meta: { taskId: meta.shellId, kind: 'shell', status: meta.status },
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -2651,17 +2644,12 @@ export const useGeminiStream = (
     registry.setNotificationCallback((displayText, modelText, meta) => {
       if (meta.status === 'running' && typeof registry.get === 'function') {
         const entry = registry.get(meta.monitorId);
-        if (entry && entry.status !== 'running') return;
+        if (!entry || entry.status !== 'running') return;
       }
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
-        meta: {
-          taskId: meta.monitorId,
-          kind: 'monitor',
-          status: meta.status,
-        },
       });
       setNotificationTrigger((n) => n + 1);
     });
