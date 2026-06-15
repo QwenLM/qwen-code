@@ -173,9 +173,22 @@ or manual REST calls.
 
 ## Submitting PRs
 
-When creating a PR, follow the template at `.github/pull_request_template.md`.
-After the PR is submitted, post a separate comment with the E2E test report if
-applicable.
+Before opening a PR, read `.github/pull_request_template.md` and write the PR
+body to match it section-for-section, then create the PR with `--body-file`
+(never a bare `--body` that skips the template). The template file is the
+authoritative list of required sections — the triage bot (product-decision)
+posts `CHANGES_REQUESTED` and blocks review if any required section is missing,
+so filling it up front avoids a review round-trip. After the PR is submitted,
+post a separate comment with the E2E test report if applicable.
+
+Required sections (headings verbatim; the template file is authoritative):
+
+- **What this PR does** — the change in prose
+- **Why it's needed** — motivation, problem, or user-facing benefit
+- **Reviewer Test Plan** — with **How to verify**, **Evidence (Before & After)**, and **Tested on** (macOS / Windows / Linux)
+- **Risk & Scope** — main risk, out-of-scope items, breaking changes
+- **Linked Issues** — `Closes #N` / `Fixes #N`
+- **中文说明** — full Chinese translation of the English body, inside the `<details>` block
 
 - **PR description**: explain the motivation and changes in prose. Avoid
   referencing file names or function names.

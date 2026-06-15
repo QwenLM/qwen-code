@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Gatekeep and review GitHub issues and pull requests for Qwen Code maintainers. Use for GitHub Action issue triage, PR admission checks, product-direction review, KISS-focused PR review, and staged bilingual GitHub comments.
+description: Gatekeep and review GitHub issues and pull requests for Qwen Code maintainers. For PRs, dispatches to product-decision, review, tmux-testing, and approval-decision stages sequentially. For issues, runs classification and response inline.
 argument-hint: '<number> [--repo owner/repo]'
 allowedTools:
   - run_shell_command
@@ -9,6 +9,7 @@ allowedTools:
   - glob
   - write_file
   - agent
+  - skill
   - enter_worktree
   - exit_worktree
 ---
@@ -49,38 +50,18 @@ gh label list --repo "$REPO" --limit 200
 - Local invocation (no `GITHUB_EVENT_NAME`): run all stages, update prior
   comments in place
 
-Every posted comment must include an invisible marker: `<!-- qwen-triage stage=N -->` where N is the stage number. The guard matches against this marker, not comment headings.
-
-## Format
-
-Bilingual: English first, Chinese in `<details>`. @mention author when blocking.
-
-- **Issue**: one comment, Stage 2 updates it in place. Key-point bullet format.
-- **PR**: three comments (Stage 1: Gate, Stage 2: Review + Test, Stage 3: Final Decision). Key-point bullet format.
-
-## ⛔ Mandatory Pre-flight Checks (DO NOT SKIP)
-
-These two steps are the most commonly forgotten. Execute them before any other action.
-
-### 1. Worktree — ALWAYS create before reading any code
-
-**PR workflow: mandatory.** Issue workflow: skip (no code reading needed).
-
-```
-enter_worktree(name: "triage")
-```
-
-Save the returned `worktreePath`. Every `read_file`, `grep_search`, `glob`, and shell command that reads local files **MUST** use this path as root. `gh` commands (API calls) do NOT need the worktree.
-
-Exception: **tmux real-scenario testing** (Stage 2b) runs in the main working tree — it needs the local build environment.
-
-When triage is complete: `exit_worktree(action: "remove")`
-
-### 2. Tmux screenshots — ALWAYS inline in Stage 2 comment
-
-Stage 2 comment **must contain the actual tmux capture-pane output** pasted inline — not a file path, not "see attached", not a summary. The maintainer reads the comment and makes a decision from it. Without inlined terminal output, the review is incomplete and useless.
+Every posted comment must include an invisible marker. The guard matches against this marker, not comment headings.
 
 ## Workflow
 
 - Issue → read `references/issue-workflow.md`
 - PR → read `references/pr-workflow.md`
+
+The PR workflow dispatches to 4 independent skills:
+
+1. `/product-decision` — template + direction + approach gate
+2. `/review` — multi-agent code review
+3. `tmux-real-user-testing` — real-scenario testing (internal PRs only)
+4. `/approval-decision` — final verdict (approve/reject/escalate)
+
+Each skill is self-contained and posts its own comment with a unique marker.

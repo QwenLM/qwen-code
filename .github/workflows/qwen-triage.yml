@@ -1,38 +1,29 @@
-name: 'Qwen Triage'
+name: 'Qwen Issue Triage'
 
 on:
   issues:
     types: ['opened']
-  pull_request_target:
-    types: ['opened', 'ready_for_review']
   issue_comment:
     types: ['created']
   workflow_dispatch:
     inputs:
       number:
-        description: 'Issue or PR number to triage'
+        description: 'Issue number to triage'
         required: true
         type: 'number'
 
 permissions:
   contents: 'read'
   issues: 'write'
-  pull-requests: 'write'
 
 jobs:
   triage:
     timeout-minutes: 30
     concurrency:
-      group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
-      # Repeat the maintainer /triage check here intentionally: GitHub
-      # evaluates concurrency before the job `if`, so this controls
-      # cancellation, not job eligibility. Other job gates below can diverge.
+      group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.inputs.number }}'
       cancel-in-progress: >-
         ${{
           github.event_name == 'issues' ||
-          (github.event_name == 'pull_request_target' &&
-           github.event.pull_request.head.repo.full_name == github.repository &&
-           github.event.pull_request.draft == false) ||
           github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'issue_comment' &&
            startsWith(github.event.comment.body, '@qwen-code /triage') &&
@@ -41,14 +32,10 @@ jobs:
             github.event.comment.author_association == 'COLLABORATOR'))
         }}
     runs-on: 'ubuntu-latest'
-    # startsWith (not contains) prevents false triggers from comments that
-    # mention the phrase in quoted text or mid-sentence descriptions.
     if: >-
-      github.repository == 'QwenLM/qwen-code' && (
+      github.repository == 'QwenLM/qwen-code' &&
+      !github.event.issue.pull_request && (
         github.event_name == 'issues' ||
-        (github.event_name == 'pull_request_target' &&
-         github.event.pull_request.head.repo.full_name == github.repository &&
-         github.event.pull_request.draft == false) ||
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'issue_comment' &&
          startsWith(github.event.comment.body, '@qwen-code /triage') &&
@@ -64,16 +51,18 @@ jobs:
 
       - name: 'Resolve target number'
         id: 'resolve'
+        env:
+          EVENT_NAME: '${{ github.event_name }}'
+          INPUT_NUMBER: '${{ github.event.inputs.number }}'
+          ISSUE_NUMBER: '${{ github.event.issue.number }}'
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "number=${{ github.event.inputs.number }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "number=$INPUT_NUMBER" >> "$GITHUB_OUTPUT"
           else
-            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            echo "number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 'Run Qwen Triage'
+      - name: 'Run Qwen Issue Triage'
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
         env:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'

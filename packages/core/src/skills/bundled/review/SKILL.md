@@ -159,6 +159,38 @@ Assign severity based on the tool's own categorization:
 
 ## Step 4: Parallel multi-dimensional review
 
+**CI emit-only fallback before parallel agents:** If `QWEN_REVIEW_EMIT_ONLY`
+is set, immediately write a provisional review-unavailable JSON to
+`QWEN_REVIEW_OUTPUT_FILE` **before** launching any `task` tools. This is a
+last-resort gate result for the case where the controller is interrupted while
+starting or waiting for the parallel review agents. Later, if review completes,
+Step 9 MUST overwrite the same file with the real review JSON.
+
+The provisional JSON MUST be a `COMMENT` event whose body contains the hidden
+marker `<!-- qwen-triage:review-unavailable -->`, explains that automated review
+did not complete, and includes `RUN_URL` when that environment variable is set.
+Do not submit this JSON yourself in emit-only mode; CI publishes or updates the
+comment in a separate privileged step.
+
+```bash
+if [ -n "${QWEN_REVIEW_EMIT_ONLY:-}" ]; then
+  FALLBACK_BODY="<!-- qwen-triage:review-unavailable -->
+_Qwen automated review could not complete in this run, so tmux testing and auto-approval are blocked. Human review is required._
+
+Reason: review controller did not produce final review JSON"
+  if [ -n "${RUN_URL:-}" ]; then
+    FALLBACK_BODY="${FALLBACK_BODY}
+
+Workflow logs: ${RUN_URL}"
+  fi
+  OUTPUT_FILE="${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
+  TMP_OUTPUT="${OUTPUT_FILE}.tmp"
+  jq -n --arg body "$FALLBACK_BODY" '{event:"COMMENT", body:$body}' > "$TMP_OUTPUT"
+  mv "$TMP_OUTPUT" "$OUTPUT_FILE"
+  echo "Emit-only: wrote provisional review-unavailable JSON to $OUTPUT_FILE"
+fi
+```
+
 Launch review agents by invoking all `task` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **9 agents** for same-repo reviews (Agent 6 has three persona variants 6a/6b/6c that each count as a separate parallel agent), or **8 agents** (skip Agent 7: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each agent should focus exclusively on its dimension.
 
 **IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste the full diff — give each agent:
@@ -564,27 +596,54 @@ Rules:
 - Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
 - Only ONE comment per unique issue.
 
-Then submit:
+Then submit.
+
+**CI publish-separation mode** — if the environment variable `QWEN_REVIEW_EMIT_ONLY` is set, the review agent must hold no write credential: do NOT call the submit API. Instead copy the review JSON to `QWEN_REVIEW_OUTPUT_FILE` and STOP Step 9 — a separate privileged CI step posts it. This applies to the no-findings case below too. The copied file is read by CI, so do not rely on Step 11 cleanup removing it (it lives outside `.qwen/tmp`).
+
+If Step 4 wrote the provisional review-unavailable JSON, overwriting it here is
+mandatory. A completed review must never leave the provisional JSON in
+`QWEN_REVIEW_OUTPUT_FILE`.
 
 ```bash
-gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
-  --input .qwen/tmp/qwen-review-{target}-review.json
+if [ -n "${QWEN_REVIEW_EMIT_ONLY:-}" ]; then
+  OUTPUT_FILE="${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
+  TMP_OUTPUT="${OUTPUT_FILE}.tmp"
+  cp .qwen/tmp/qwen-review-{target}-review.json "$TMP_OUTPUT"
+  mv "$TMP_OUTPUT" "$OUTPUT_FILE"
+  echo "Emit-only: wrote review JSON to $OUTPUT_FILE (not submitted)"
+else
+  gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
+    --input .qwen/tmp/qwen-review-{target}-review.json
+fi
 ```
 
-If there are **no confirmed findings**, submit a single-line review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body:
+If there are **no confirmed findings**, submit a single-line review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body. **In emit-only mode**, build the same `{commit_id, event, body}` object and write it to `QWEN_REVIEW_OUTPUT_FILE` instead of calling `gh api`:
 
 ```bash
-# downgradeApprove=false (non-self PR, green CI):
-gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
-  -f commit_id="{commit_sha}" \
-  -f event="APPROVE" \
-  -f body="No issues found. LGTM! ✅ _— YOUR_MODEL_ID via Qwen Code /review_"
+EVENT="APPROVE"
+BODY="No issues found. LGTM! ✅ _— YOUR_MODEL_ID via Qwen Code /review_"
 
-# downgradeApprove=true (self-PR, CI failing, or CI still running):
-gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
-  -f commit_id="{commit_sha}" \
-  -f event="COMMENT" \
-  -f body="No review findings. Downgraded from Approve to Comment: <downgradeReasons joined with '; '>. _— YOUR_MODEL_ID via Qwen Code /review_"
+if [ "<downgradeApprove>" = "true" ]; then
+  EVENT="COMMENT"
+  BODY="No review findings. Downgraded from Approve to Comment: <downgradeReasons joined with '; '>. _— YOUR_MODEL_ID via Qwen Code /review_"
+fi
+
+if [ -n "${QWEN_REVIEW_EMIT_ONLY:-}" ]; then
+  OUTPUT_FILE="${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
+  TMP_OUTPUT="${OUTPUT_FILE}.tmp"
+  jq -n \
+    --arg commit_id "{commit_sha}" \
+    --arg event "$EVENT" \
+    --arg body "$BODY" \
+    '{commit_id:$commit_id, event:$event, body:$body}' > "$TMP_OUTPUT"
+  mv "$TMP_OUTPUT" "$OUTPUT_FILE"
+  echo "Emit-only: wrote no-findings review JSON to $OUTPUT_FILE"
+else
+  gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
+    -f commit_id="{commit_sha}" \
+    -f event="$EVENT" \
+    -f body="$BODY"
+fi
 ```
 
 Clean up the JSON file in Step 11.

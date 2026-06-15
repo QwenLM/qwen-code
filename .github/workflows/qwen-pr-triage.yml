@@ -1,0 +1,1440 @@
+name: 'Qwen PR Triage Pipeline'
+
+on:
+  pull_request_target:
+    types: ['opened', 'synchronize', 'reopened', 'ready_for_review', 'review_requested']
+  issue_comment:
+    types: ['created']
+  pull_request_review_comment:
+    types: ['created']
+  pull_request_review:
+    types: ['submitted']
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to triage'
+        required: true
+        type: 'number'
+      skip_product_decision:
+        description: 'Skip product-decision (run review only)'
+        required: false
+        default: false
+        type: 'boolean'
+      timeout_minutes:
+        description: 'Review timeout in minutes (default 90)'
+        required: false
+        default: 90
+        type: 'number'
+
+permissions:
+  contents: 'read'
+
+env:
+  # jq program that renders qwen `--output-format stream-json` events into
+  # readable one-line CI log progress (tool calls + narration + final result)
+  # instead of raw JSON envelopes. Shared by the product-decision / review /
+  # tmux-testing steps via `qwen ... | tee raw.jsonl | "${FMT_CMD[@]}"`, where
+  # FMT_CMD is `jq --unbuffered -Rr "$STREAM_JSON_FMT"` (or `cat` if jq is
+  # absent). Each input line is one JSON message; `fromjson?` skips non-JSON.
+  STREAM_JSON_FMT: |-
+    (fromjson?) as $m
+    | try (
+        if $m.type=="assistant" then ($m.message.content[]?
+          | if .type=="text" and ((.text|length)>0) then "💬 " + (.text|gsub("\n";" ")|.[0:200])
+            elif .type=="tool_use" then "▶ " + (.name // "tool") + "  " + ((.input//{})|tostring|.[0:160])
+            else empty end)
+        elif $m.type=="user" then (($m.message.content)
+          | if type=="array" then (.[]? | select(.type=="tool_result")
+              | "  ↳ " + (if .is_error then "ERROR " else "" end) + ((.content//""|tostring)|gsub("\n";" ")|.[0:140]))
+            else empty end)
+        elif $m.type=="result" then "■ " + ($m.subtype // "done") + (if $m.result then ": " + ($m.result|tostring|gsub("\n";" ")|.[0:300]) else "" end)
+        else empty end
+      ) catch empty
+
+jobs:
+  # ─── Ack: immediate "queued" feedback for explicit comment triggers ──
+  # Restores the old qwen-code-pr-review.yml acknowledgement: when a
+  # maintainer comments `@qwen-code /triage` or `/review`, reply right away
+  # so they know the request was accepted (the pipeline itself may sit in
+  # the debounce queue). Trigger validation (author association, body
+  # prefix, PR open) lives once in resolve's `if`; this job just reacts to
+  # its comment_trigger output — resolve runs in seconds, so the ack is
+  # still effectively immediate.
+  ack-request:
+    needs: ['resolve']
+    if: >-
+      needs.resolve.outputs.should_run == 'true' &&
+      needs.resolve.outputs.comment_trigger == 'true'
+    concurrency:
+      group: 'qwen-pr-triage-ack-${{ needs.resolve.outputs.pr_number }}'
+      cancel-in-progress: false
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: 'write'
+      issues: 'write'
+    steps:
+      - name: 'Post queued acknowledgement'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          ACK_BODY="<!-- qwen-review-ack -->_Qwen triage request accepted. Queued in [workflow run](${RUN_URL})._"
+          EXISTING_ACK_ID="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+          )" || EXISTING_ACK_ID=""
+          if [ -n "$EXISTING_ACK_ID" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ACK_ID}" \
+              -f body="$ACK_BODY" > /dev/null
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$ACK_BODY"
+          fi
+
+  # ─── Resolve PR number and determine trigger type ───────────────────
+  resolve:
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+    outputs:
+      pr_number: '${{ steps.resolve.outputs.pr_number }}'
+      trigger_type: '${{ steps.resolve.outputs.trigger_type }}'
+      is_fork: '${{ steps.resolve.outputs.is_fork }}'
+      should_run: '${{ steps.resolve.outputs.should_run }}'
+      comment_trigger: '${{ steps.resolve.outputs.comment_trigger }}'
+      review_environment: '${{ steps.resolve.outputs.review_environment }}'
+      review_timeout: '${{ steps.resolve.outputs.review_timeout }}'
+    if: >-
+      github.repository == 'QwenLM/qwen-code' && (
+        (github.event_name == 'pull_request_target' &&
+         github.event.pull_request.state == 'open' &&
+         github.event.pull_request.draft == false &&
+         ((github.event.action == 'review_requested' &&
+           github.event.requested_reviewer.login == 'qwen-code-ci-bot') ||
+          (github.event.action != 'review_requested' &&
+           (github.event.pull_request.author_association == 'OWNER' ||
+            github.event.pull_request.author_association == 'MEMBER' ||
+            github.event.pull_request.author_association == 'COLLABORATOR')))) ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request &&
+         github.event.issue.state == 'open' &&
+         (github.event.comment.body == '@qwen-code /triage' ||
+          startsWith(github.event.comment.body, '@qwen-code /triage ') ||
+          startsWith(github.event.comment.body, format('@qwen-code /triage{0}', '\n')) ||
+          github.event.comment.body == '@qwen-code /review' ||
+          startsWith(github.event.comment.body, '@qwen-code /review ') ||
+          startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+         (github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR')) ||
+        (github.event_name == 'pull_request_review_comment' &&
+         github.event.pull_request.state == 'open' &&
+         (github.event.comment.body == '@qwen-code /triage' ||
+          startsWith(github.event.comment.body, '@qwen-code /triage ') ||
+          startsWith(github.event.comment.body, format('@qwen-code /triage{0}', '\n')) ||
+          github.event.comment.body == '@qwen-code /review' ||
+          startsWith(github.event.comment.body, '@qwen-code /review ') ||
+          startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+         (github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR')) ||
+        (github.event_name == 'pull_request_review' &&
+         github.event.pull_request.state == 'open' &&
+         (github.event.review.body == '@qwen-code /triage' ||
+          startsWith(github.event.review.body, '@qwen-code /triage ') ||
+          startsWith(github.event.review.body, format('@qwen-code /triage{0}', '\n')) ||
+          github.event.review.body == '@qwen-code /review' ||
+          startsWith(github.event.review.body, '@qwen-code /review ') ||
+          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
+         (github.event.review.author_association == 'OWNER' ||
+          github.event.review.author_association == 'MEMBER' ||
+          github.event.review.author_association == 'COLLABORATOR'))
+      )
+    steps:
+      - name: 'Resolve context'
+        id: 'resolve'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          PR_ACTION: '${{ github.event.action }}'
+          EVENT_SENDER: '${{ github.event.sender.login }}'
+          INPUT_PR_NUMBER: '${{ github.event.inputs.pr_number }}'
+          INPUT_SKIP_PRODUCT: '${{ github.event.inputs.skip_product_decision }}'
+          INPUT_TIMEOUT: '${{ github.event.inputs.timeout_minutes }}'
+          PR_TARGET_NUMBER: '${{ github.event.pull_request.number }}'
+          ISSUE_NUMBER: '${{ github.event.issue.number }}'
+          COMMENT_BODY: '${{ github.event.comment.body }}'
+          REVIEW_BODY: '${{ github.event.review.body }}'
+        run: |
+          set -euo pipefail
+
+          emit_skip() {
+            {
+              echo "pr_number=${PR_NUMBER:-}"
+              echo "trigger_type=${TRIGGER_TYPE:-skip}"
+              echo "is_fork=false"
+              echo "should_run=false"
+              echo "comment_trigger=false"
+              echo "review_environment="
+              echo "review_timeout=90"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          is_triage_command() {
+            local first_line="${1%%$'\n'*}"
+            [[ "$first_line" == "@qwen-code /triage" || "$first_line" == "@qwen-code /triage "* ]]
+          }
+
+          is_review_command() {
+            local first_line="${1%%$'\n'*}"
+            [[ "$first_line" == "@qwen-code /review" || "$first_line" == "@qwen-code /review "* ]]
+          }
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            PR_NUMBER="$INPUT_PR_NUMBER"
+            if [ "$INPUT_SKIP_PRODUCT" = "true" ]; then
+              TRIGGER_TYPE="review_only"
+            else
+              TRIGGER_TYPE="full"
+            fi
+          elif [ "$EVENT_NAME" = "pull_request_target" ]; then
+            PR_NUMBER="$PR_TARGET_NUMBER"
+            TRIGGER_TYPE="full"
+          elif [ "$EVENT_NAME" = "issue_comment" ]; then
+            PR_NUMBER="$ISSUE_NUMBER"
+            if is_review_command "$COMMENT_BODY"; then
+              TRIGGER_TYPE="review_only"
+            elif is_triage_command "$COMMENT_BODY"; then
+              TRIGGER_TYPE="full"
+            else
+              emit_skip
+            fi
+          elif [ "$EVENT_NAME" = "pull_request_review_comment" ] || [ "$EVENT_NAME" = "pull_request_review" ]; then
+            # Both events carry the PR number directly; the trigger text lives
+            # in comment.body (review thread) or review.body (review summary).
+            PR_NUMBER="$PR_TARGET_NUMBER"
+            BODY="${COMMENT_BODY:-$REVIEW_BODY}"
+            if is_review_command "$BODY"; then
+              TRIGGER_TYPE="review_only"
+            elif is_triage_command "$BODY"; then
+              TRIGGER_TYPE="full"
+            else
+              emit_skip
+            fi
+          fi
+
+          if [ "$EVENT_NAME" = "pull_request_target" ] && [ "$PR_ACTION" = "review_requested" ]; then
+            PERMISSION=""
+            if PERMISSION="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${EVENT_SENDER}/permission" --jq '.permission' 2>/dev/null)"; then
+              case "$PERMISSION" in
+                admin|maintain|write) ;;
+                *)
+                  echo "::notice::Skipping requested review: ${EVENT_SENDER} permission is ${PERMISSION}"
+                  emit_skip
+                  ;;
+              esac
+            else
+              echo "::warning::Failed to check permission for ${EVENT_SENDER}; skipping requested review"
+              emit_skip
+            fi
+          fi
+
+          # Check if fork. This is the pipeline entrypoint, so tolerate
+          # transient api.github.com failures instead of killing all stages on
+          # the first blip.
+          IS_FORK=""
+          for attempt in 1 2 3; do
+            if IS_FORK="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isCrossRepository --jq '.isCrossRepository')"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to check fork status after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::gh pr view failed while checking fork status (attempt ${attempt}/3), retrying..."
+            sleep $((attempt * 10))
+          done
+
+          # Auto-triggered PRs (opened/synchronize) get a 30-minute delay
+          # via environment protection rule to debounce rapid pushes.
+          # Manual triggers skip the delay.
+          if [ "$TRIGGER_TYPE" = "full" ] && [ "$EVENT_NAME" = "pull_request_target" ] &&
+            { [ "$PR_ACTION" = "opened" ] || [ "$PR_ACTION" = "synchronize" ]; }; then
+            REVIEW_ENV="qwen-pr-review-delay"
+          else
+            REVIEW_ENV=""
+          fi
+
+          # Review timeout: workflow_dispatch may override (min 10, so the
+          # inner qwen timeout of N-5 minutes stays sane); default 90.
+          REVIEW_TIMEOUT=90
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] \
+            && [[ "$INPUT_TIMEOUT" =~ ^[0-9]+$ ]] \
+            && [ "$INPUT_TIMEOUT" -ge 10 ]; then
+            REVIEW_TIMEOUT="$INPUT_TIMEOUT"
+          fi
+
+          # Comment-style triggers get an immediate ack reply (ack-request job).
+          # Trigger validation already happened in this job's `if`.
+          case "$EVENT_NAME" in
+            issue_comment|pull_request_review_comment|pull_request_review)
+              COMMENT_TRIGGER=true ;;
+            *)
+              COMMENT_TRIGGER=false ;;
+          esac
+
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "trigger_type=$TRIGGER_TYPE"
+            echo "is_fork=$IS_FORK"
+            echo "should_run=true"
+            echo "comment_trigger=$COMMENT_TRIGGER"
+            echo "review_environment=$REVIEW_ENV"
+            echo "review_timeout=$REVIEW_TIMEOUT"
+          } >> "$GITHUB_OUTPUT"
+
+  # ─── Stage 1: Product Decision ─────────────────────────────────────
+  product-decision:
+    needs: ['resolve']
+    if: >-
+      needs.resolve.outputs.should_run == 'true' &&
+      needs.resolve.outputs.trigger_type == 'full'
+    timeout-minutes: 15
+    concurrency:
+      group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
+      cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
+    # Self-hosted: product-decision reads local Claude Code source on the
+    # runner for product-direction reasoning (not available on GitHub-hosted).
+    runs-on: ['self-hosted', 'ecs-qwen']
+    permissions:
+      contents: 'read'
+      issues: 'read'
+      pull-requests: 'read'
+    outputs:
+      verdict: '${{ steps.capture.outputs.verdict }}'
+    steps:
+      - name: 'Clean stale review worktrees'
+        # The bundled /review skill creates git worktrees under .qwen/tmp/ in
+        # the persistent self-hosted workspace. A leftover one pins its branch,
+        # so actions/checkout cannot clean the repo ("cannot delete branch ...
+        # used by worktree") and falls back to a recreate that then fails with
+        # "not our ref". Prune them before checkout. No-op on a fresh runner
+        # whose workspace has no .git yet.
+        run: |
+          set -uo pipefail
+          WS="${GITHUB_WORKSPACE}"
+          [ -d "$WS/.git" ] || exit 0
+          git -C "$WS" worktree prune 2>/dev/null || true
+          git -C "$WS" worktree list --porcelain 2>/dev/null \
+            | awk '/^worktree /{print $2}' \
+            | while IFS= read -r wt; do
+                case "$wt" in
+                  *"/.qwen/tmp/"*)
+                    git -C "$WS" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+                esac
+              done
+          git -C "$WS" for-each-ref --format='%(refname:short)' refs/heads/qwen-review/ 2>/dev/null \
+            | while IFS= read -r br; do git -C "$WS" branch -D "$br" 2>/dev/null || true; done
+          rm -rf "$WS/.qwen/tmp" 2>/dev/null || true
+
+      - name: 'Checkout repo'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          # Self-hosted persistent runner: don't leave the (read-only)
+          # GITHUB_TOKEN in .git/config where the untrusted-content agent
+          # could read it.
+          persist-credentials: false
+          ref: '${{ github.ref }}'
+
+      - name: 'Run product-decision'
+        id: 'run'
+        env:
+          # Read-only token ONLY: this agent reads untrusted PR content, so it
+          # must never hold a write-capable credential. The write PAT lives in
+          # the "Publish product-decision" step below (no agent). See the review
+          # job for the full analyze/publish split rationale.
+          GH_TOKEN: '${{ secrets.QWEN_REVIEW_READ_TOKEN }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          REPOSITORY: '${{ github.repository }}'
+          # Local Claude Code checkout on the runner — the product-decision
+          # skill reads CHANGELOG + source signals from here for product
+          # direction reasoning. Empty if the runner var is unset (skill
+          # falls back to fetching the remote CHANGELOG).
+          CLAUDE_CODE_SRC: '${{ vars.CLAUDE_CODE_SRC_PATH }}'
+          # runner.temp is emptied per job and is per runner instance, unlike
+          # /tmp which persists across runs and is shared between runner
+          # instances on the same host (stale or cross-PR verdicts).
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
+          # Publish-separation: emit the comment body + verdict (with
+          # review_action) to files instead of posting. The "Publish
+          # product-decision" step posts them with the PAT.
+          QWEN_PRODUCT_EMIT_ONLY: '1'
+        run: |
+          set -euo pipefail
+          # Refuse to run the untrusted-content agent without an explicit
+          # read-only token: an empty GH_TOKEN makes gh fall back to the
+          # runner's stored credentials. Isolate gh config too.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::QWEN_REVIEW_READ_TOKEN is not set; refusing to run the product-decision agent without an explicit read-only token."
+            exit 1
+          fi
+          export GH_CONFIG_DIR="$RUNNER_TEMP/gh-readonly-config"
+          mkdir -p "$GH_CONFIG_DIR"
+
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host proxy_bin
+            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+
+            # qwen currently reads HTTP(S)_PROXY directly and does not apply
+            # NO_PROXY when constructing its proxy agent. Clear proxy env for
+            # qwen itself, while restoring it for child gh/git commands.
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="$RUNNER_TEMP/qwen-network-bin"
+            mkdir -p "$proxy_bin"
+
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+
+            export PATH="$proxy_bin:$PATH"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+
+            echo "qwen_path=$(command -v qwen)"
+            qwen --version
+            echo "openai_host=${openai_host}"
+            echo "qwen_http_proxy=disabled"
+            if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
+              echo "child_git_github_proxy=restored"
+            else
+              echo "child_git_github_proxy=unset"
+            fi
+          }
+
+          configure_qwen_network
+
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
+          fi
+
+          # Readable log formatter; fall back to raw passthrough if jq is absent.
+          FMT_CMD=(jq --unbuffered -Rr "$STREAM_JSON_FMT")
+          command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
+
+          set +e
+          timeout --kill-after=10s 12m "${QWEN_CMD[@]}" \
+            --prompt "/product-decision ${PR_NUMBER} --repo ${REPOSITORY}" \
+            --output-format stream-json \
+            | tee "$RUNNER_TEMP/product-decision-raw.jsonl" \
+            | "${FMT_CMD[@]}"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            echo "::warning::Product decision timed out after 12 minutes"
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            echo "::warning::Product decision exited with code $EXIT_CODE"
+          fi
+          # Propagate: this stage is a gate. Without this, a timed-out,
+          # crashed, or empty-output run could silently wave the PR through.
+          exit "$EXIT_CODE"
+
+      # Publish the product-decision comment / review with the write PAT. No
+      # agent runs here and it only reads files the agent emitted, so untrusted
+      # PR content cannot reach the PAT. Best-effort: posting failures warn but
+      # do not mask the gate verdict (set by the capture step below).
+      - name: 'Publish product-decision'
+        if: 'always()'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
+        run: |
+          set -uo pipefail
+          DIR="$TRIAGE_RESULTS_DIR"
+          BODY="$DIR/product-comment.md"
+          VERDICT_FILE="$DIR/product-decision.json"
+          if [ ! -f "$BODY" ]; then
+            echo "::notice::No product-decision comment to publish"
+            exit 0
+          fi
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
+          ACTION="none"
+          if [ -f "$VERDICT_FILE" ]; then
+            ACTION="$(jq -r '.review_action // "none"' "$VERDICT_FILE" 2>/dev/null || echo none)"
+          fi
+          if [ "$ACTION" = "request_changes" ]; then
+            # Dedup: if the bot already has a CHANGES_REQUESTED review on this
+            # PR, don't stack another one on a re-run. Best-effort — on a query
+            # failure we fall through and post (better a duplicate than silently
+            # dropping the gate).
+            ALREADY=""
+            if [ -n "$BOT_LOGIN" ]; then
+              ALREADY="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json latestReviews \
+                --jq "[.latestReviews[] | select(.author.login == \"$BOT_LOGIN\" and .state == \"CHANGES_REQUESTED\")] | length" 2>/dev/null || echo '')"
+            fi
+            if [ "$ALREADY" = "0" ] || [ -z "$ALREADY" ]; then
+              gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes --body-file "$BODY" \
+                || echo "::warning::Failed to submit request-changes review"
+            else
+              echo "::notice::Bot already has a CHANGES_REQUESTED review — skipping duplicate"
+            fi
+          else
+            EXISTING="$(
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                --method GET \
+                --paginate \
+                -F per_page=100 \
+                | jq -sr --arg bot "$BOT_LOGIN" \
+                  '[.[][] | select(.body | contains("<!-- qwen-triage:product -->")) | select($bot == "" or .user.login == $bot)] | last | .id // empty'
+            )" || EXISTING=""
+            if [ -n "$EXISTING" ]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY" >/dev/null \
+                || echo "::warning::Failed to update product comment"
+            else
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY" >/dev/null \
+                || echo "::warning::Failed to post product comment"
+            fi
+          fi
+
+      - name: 'Read verdict from skill output'
+        if: 'always()'
+        id: 'capture'
+        env:
+          RUN_OUTCOME: '${{ steps.run.outcome }}'
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
+        run: |
+          VERDICT_FILE="$TRIAGE_RESULTS_DIR/product-decision.json"
+          BODY_FILE="$TRIAGE_RESULTS_DIR/product-comment.md"
+          if [ -f "$VERDICT_FILE" ]; then
+            VERDICT=$(jq -r '.verdict // "fail"' "$VERDICT_FILE")
+          else
+            if [ "$RUN_OUTCOME" = "success" ]; then
+              echo "::error::Product-decision agent produced no verdict JSON"
+              exit 1
+            else
+              VERDICT="fail"
+            fi
+          fi
+          if [ "$VERDICT" != "skip" ] && [ ! -f "$BODY_FILE" ]; then
+            echo "::error::Product-decision agent produced verdict=${VERDICT} but no product comment body"
+            exit 1
+          fi
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "::notice::Product decision verdict: $VERDICT"
+
+  # ─── Stage 2: Code Review ───────────────────────────────────────────
+  # Security model (analyze/publish split): the review AGENT runs with only a
+  # read-only token (QWEN_REVIEW_READ_TOKEN) and is told via QWEN_REVIEW_EMIT_ONLY
+  # to write its verdict + inline comments to a JSON file instead of posting.
+  # A separate "Publish review" step (no agent, holds the write-capable PAT)
+  # posts that JSON. So a prompt injection in untrusted PR content cannot reach
+  # the write-capable GitHub PAT — that is the severe credential, and it is now
+  # out of the agent's reach. Deterministic analysis is skipped
+  # (QWEN_REVIEW_SKIP_DETERMINISTIC), so the review itself executes no PR code.
+  # RESIDUAL RISK (accepted / follow-up): OPENAI_API_KEY is still in the agent
+  # env, so an injection could exfiltrate it via egress (e.g. curl). Mitigate
+  # later with an egress allowlist + a spend-limited, rotatable model key.
+  review:
+    needs: ['resolve', 'product-decision']
+    if: >-
+      always() && (
+        (needs.product-decision.result == 'success' &&
+         needs.product-decision.outputs.verdict == 'pass') ||
+        needs.resolve.outputs.trigger_type == 'review_only'
+      )
+    # Default 90; workflow_dispatch can override via the timeout_minutes input.
+    timeout-minutes: "${{ fromJSON(needs.resolve.outputs.review_timeout || '90') }}"
+    # 30-minute wait timer (via environment protection rule) debounces
+    # rapid consecutive pushes. Empty string = no environment = no delay.
+    environment: '${{ needs.resolve.outputs.review_environment }}'
+    concurrency:
+      group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
+      cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
+    runs-on: ['self-hosted', 'ecs-qwen']
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+      issues: 'read'
+    outputs:
+      verdict: '${{ steps.verdict.outputs.verdict }}'
+    steps:
+      # The debounce wait can take a while — the PR may have been closed,
+      # merged, or converted to draft in the meantime. Re-check before
+      # spending a runner slot on it (port of the old delay job's re-check).
+      - name: 'Re-check PR state after debounce'
+        id: 'pr_state'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+        run: |
+          set -euo pipefail
+          # api.github.com can be flaky from the ECS runners — retry with
+          # backoff before giving up, so a transient blip doesn't kill a
+          # review that already waited out the 30-minute debounce.
+          pr_data=""
+          for attempt in 1 2 3; do
+            if pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to read PR state after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::gh pr view failed (attempt ${attempt}/3), retrying..."
+            sleep $((attempt * 15))
+          done
+          IFS=$'\t' read -r state is_draft <<< "$pr_data"
+          if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
+            echo "::notice::Skipping review: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_review=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Clean stale review worktrees'
+        # See product-decision: prune leftover /review worktrees that would
+        # otherwise break the checkout below on persistent self-hosted runners.
+        run: |
+          set -uo pipefail
+          WS="${GITHUB_WORKSPACE}"
+          [ -d "$WS/.git" ] || exit 0
+          git -C "$WS" worktree prune 2>/dev/null || true
+          git -C "$WS" worktree list --porcelain 2>/dev/null \
+            | awk '/^worktree /{print $2}' \
+            | while IFS= read -r wt; do
+                case "$wt" in
+                  *"/.qwen/tmp/"*)
+                    git -C "$WS" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+                esac
+              done
+          git -C "$WS" for-each-ref --format='%(refname:short)' refs/heads/qwen-review/ 2>/dev/null \
+            | while IFS= read -r br; do git -C "$WS" branch -D "$br" 2>/dev/null || true; done
+          rm -rf "$WS/.qwen/tmp" 2>/dev/null || true
+
+      - name: 'Checkout base branch'
+        if: "steps.pr_state.outputs.should_review == 'true'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          # Self-hosted persistent runner: keep the GITHUB_TOKEN out of
+          # .git/config (the review agent reads untrusted PR content).
+          persist-credentials: false
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 1
+
+      - name: 'Run review'
+        if: "steps.pr_state.outputs.should_review == 'true'"
+        id: 'run'
+        env:
+          # Read-only token ONLY: the agent reads untrusted PR content, so it
+          # must never hold a write-capable credential. QWEN_REVIEW_READ_TOKEN
+          # is a zero-scope PAT (authenticated public reads, cannot write).
+          GH_TOKEN: '${{ secrets.QWEN_REVIEW_READ_TOKEN }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          # CI optimizations: skip deterministic analysis (ci.yml already runs it),
+          # limit reverse audit rounds, reduce timeout pressure
+          QWEN_REVIEW_SKIP_DETERMINISTIC: '1'
+          QWEN_REVIEW_MAX_REVERSE_ROUNDS: '1'
+          REVIEW_TIMEOUT_MIN: '${{ needs.resolve.outputs.review_timeout }}'
+          # Publish-separation: emit the review JSON to this file instead of
+          # posting it. The "Publish review" step below posts it with the PAT.
+          QWEN_REVIEW_EMIT_ONLY: '1'
+          QWEN_REVIEW_OUTPUT_FILE: '${{ runner.temp }}/review-result.json'
+        run: |
+          set -euo pipefail
+          # Refuse to run the untrusted-content agent without an explicit
+          # read-only token: an empty GH_TOKEN makes gh fall back to the
+          # runner's stored credentials, which could be a write-capable account
+          # — silently defeating the analyze/publish split. Also isolate gh's
+          # config dir so it cannot read the runner's ambient auth.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::QWEN_REVIEW_READ_TOKEN is not set; refusing to run the review agent without an explicit read-only token."
+            exit 1
+          fi
+          export GH_CONFIG_DIR="$RUNNER_TEMP/gh-readonly-config"
+          mkdir -p "$GH_CONFIG_DIR"
+          REPO="${GITHUB_REPOSITORY}"
+          REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
+          # Leave a 5-minute buffer under the job timeout for the
+          # surrounding steps (checkout, verdict check).
+          INNER_TIMEOUT_MIN=$((REVIEW_TIMEOUT_MIN - 5))
+
+          write_review_unavailable() {
+            local reason="$1"
+            local tmp="${QWEN_REVIEW_OUTPUT_FILE}.tmp"
+            jq -n \
+              --arg reason "$reason" \
+              --arg run_url "$RUN_URL" \
+              '{event:"COMMENT", body:"<!-- qwen-triage:review-unavailable -->\n_Qwen automated review could not complete in this run, so tmux testing and auto-approval are blocked. Human review is required._\n\nReason: \($reason)\n\nWorkflow logs: \($run_url)"}' \
+              > "$tmp"
+            mv "$tmp" "$QWEN_REVIEW_OUTPUT_FILE"
+            echo "::notice::Created review-unavailable gate result: ${reason}"
+          }
+
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host proxy_bin
+            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+
+            # qwen currently reads HTTP(S)_PROXY directly and does not apply
+            # NO_PROXY when constructing its proxy agent. Clear proxy env for
+            # qwen itself, while restoring it for child gh/git commands.
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="$RUNNER_TEMP/qwen-network-bin"
+            mkdir -p "$proxy_bin"
+
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+
+            export PATH="$proxy_bin:$PATH"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+
+            echo "qwen_path=$(command -v qwen)"
+            qwen --version
+            echo "openai_host=${openai_host}"
+            echo "qwen_http_proxy=disabled"
+            if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
+              echo "child_git_github_proxy=restored"
+            else
+              echo "child_git_github_proxy=unset"
+            fi
+          }
+
+          configure_qwen_network
+
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
+          fi
+
+          # Readable log formatter; fall back to raw passthrough if jq is absent.
+          FMT_CMD=(jq --unbuffered -Rr "$STREAM_JSON_FMT")
+          command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
+
+          set +e
+          timeout --kill-after=10s "${INNER_TIMEOUT_MIN}m" "${QWEN_CMD[@]}" \
+            --prompt "/review ${REVIEW_URL} --comment" \
+            --output-format stream-json \
+            | tee "$RUNNER_TEMP/review-raw.jsonl" \
+            | "${FMT_CMD[@]}"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            echo "::warning::Review timed out after ${INNER_TIMEOUT_MIN} minutes"
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            echo "::warning::Review exited with code $EXIT_CODE"
+          fi
+
+          if [ "$EXIT_CODE" -eq 0 ]; then
+            RESULT_LINE="$(grep '"type":"result"' "$RUNNER_TEMP/review-raw.jsonl" | tail -n1 || true)"
+            if [ -z "$RESULT_LINE" ]; then
+              write_review_unavailable "review agent produced no terminal result event"
+              exit 0
+            fi
+            RESULT_IS_ERROR="$(printf '%s' "$RESULT_LINE" | jq -r '.is_error // false' 2>/dev/null || echo true)"
+            RESULT_SUBTYPE="$(printf '%s' "$RESULT_LINE" | jq -r '.subtype // ""' 2>/dev/null || echo "")"
+            RESULT_TEXT="$(printf '%s' "$RESULT_LINE" | jq -r '.result // ""' 2>/dev/null || echo "")"
+            if [ "$RESULT_IS_ERROR" = "true" ] || [ "$RESULT_SUBTYPE" != "success" ]; then
+              write_review_unavailable "review agent ended in error state (subtype=${RESULT_SUBTYPE:-<none>})"
+              exit 0
+            fi
+            case "$RESULT_TEXT" in
+              *"[API Error"*)
+                write_review_unavailable "review agent aborted with an API error before posting comments"
+                exit 0
+                ;;
+            esac
+          fi
+
+          RESULT="$QWEN_REVIEW_OUTPUT_FILE"
+          if [ -f "$RESULT" ]; then
+            RESULT_BODY="$(jq -r '.body // ""' "$RESULT" 2>/dev/null || echo "")"
+            if [[ "$RESULT_BODY" == *"<!-- qwen-triage:review-unavailable -->"* ]]; then
+              ALT_RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
+              if [ -n "${ALT_RESULT:-}" ] && [ -f "$ALT_RESULT" ]; then
+                ALT_BODY="$(jq -r '.body // ""' "$ALT_RESULT" 2>/dev/null || echo "")"
+                if [[ "$ALT_BODY" != *"<!-- qwen-triage:review-unavailable -->"* ]]; then
+                  RESULT="$ALT_RESULT"
+                fi
+              fi
+            fi
+          fi
+          if [ ! -f "$RESULT" ]; then
+            RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
+          fi
+          if [ "$EXIT_CODE" -eq 0 ] && { [ -z "${RESULT:-}" ] || [ ! -f "$RESULT" ]; }; then
+            write_review_unavailable "review agent exited successfully but produced no review JSON"
+            exit 0
+          fi
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            write_review_unavailable "review agent timed out after ${INNER_TIMEOUT_MIN} minutes"
+            exit 0
+          fi
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            write_review_unavailable "review agent exited with code ${EXIT_CODE}"
+            exit 0
+          fi
+          if ! jq -e 'type == "object" and (.event | type == "string" and length > 0)' "$RESULT" >/dev/null 2>&1; then
+            write_review_unavailable "review agent produced invalid review JSON"
+            exit 0
+          fi
+          if [ "$RESULT" != "$QWEN_REVIEW_OUTPUT_FILE" ]; then
+            TMP_RESULT="${QWEN_REVIEW_OUTPUT_FILE}.tmp"
+            cp "$RESULT" "$TMP_RESULT"
+            mv "$TMP_RESULT" "$QWEN_REVIEW_OUTPUT_FILE"
+          fi
+
+      # Publish the review with the write-capable PAT, or update a regular PR
+      # comment for the local review-unavailable gate result above. This step
+      # runs NO agent and reads only local JSON, so untrusted PR content cannot
+      # reach the PAT.
+      - name: 'Publish review'
+        # Explicit success(): publish only when Run review either produced a
+        # real agent result or intentionally synthesized a review-unavailable
+        # gate result. Fatal runner/configuration errors still skip this step
+        # and let fallback-comment surface the workflow failure.
+        if: "success() && steps.pr_state.outputs.should_review == 'true'"
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          REVIEW_FILE: '${{ runner.temp }}/review-result.json'
+        run: |
+          set -euo pipefail
+          RESULT="$REVIEW_FILE"
+          # Fallback to the skill's in-workspace default path if the agent did
+          # not honor QWEN_REVIEW_OUTPUT_FILE.
+          if [ ! -f "$RESULT" ]; then
+            RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
+          fi
+          if [ -z "${RESULT:-}" ] || [ ! -f "$RESULT" ]; then
+            echo "::error::Review stage produced no review JSON; nothing to publish"
+            exit 1
+          fi
+
+          BODY="$(jq -r '.body // ""' "$RESULT" 2>/dev/null || echo "")"
+          if [[ "$BODY" == *"<!-- qwen-triage:review-unavailable -->"* ]]; then
+            echo "::notice::Publishing review-unavailable comment from $RESULT"
+            BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
+            EXISTING_COMMENT_ID=""
+            if [ -n "$BOT_LOGIN" ]; then
+              EXISTING_COMMENT_ID="$(
+                gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                  --method GET \
+                  --paginate \
+                  -F per_page=100 \
+                  | jq -sr --arg bot "$BOT_LOGIN" \
+                    '[.[][] | select(.user.login == $bot and (.body | contains("<!-- qwen-triage:review-unavailable -->")))] | last | .id // empty'
+              )" || EXISTING_COMMENT_ID=""
+            fi
+            if [ -n "$EXISTING_COMMENT_ID" ]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_COMMENT_ID" -f body="$BODY" >/dev/null
+            else
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$BODY" >/dev/null
+            fi
+            exit 0
+          fi
+
+          echo "::notice::Publishing review from $RESULT"
+          for attempt in 1 2 3; do
+            if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --input "$RESULT"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to publish review after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::Publish failed (attempt ${attempt}/3), retrying..."
+            sleep $((attempt * 15))
+          done
+
+      - name: 'Check review verdict'
+        id: 'verdict'
+        env:
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          SHOULD_REVIEW: '${{ steps.pr_state.outputs.should_review }}'
+          REVIEW_FILE: '${{ runner.temp }}/review-result.json'
+        run: |
+          if [ "$SHOULD_REVIEW" != "true" ]; then
+            # PR was closed/merged/drafted during the debounce wait — the
+            # review didn't run, so downstream stages must not act on it.
+            echo "verdict=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The verdict is the `event` the agent wrote into the review JSON
+          # (the same JSON that was just published) — no post-hoc API read of
+          # the bot's review is needed. Fail closed: anything other than an
+          # explicit APPROVE/COMMENT blocks tmux + approval.
+          RESULT="$REVIEW_FILE"
+          if [ ! -f "$RESULT" ]; then
+            RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
+          fi
+          EVENT=""
+          BODY=""
+          if [ -n "${RESULT:-}" ] && [ -f "$RESULT" ]; then
+            EVENT="$(jq -r '.event // ""' "$RESULT" 2>/dev/null || echo "")"
+            BODY="$(jq -r '.body // ""' "$RESULT" 2>/dev/null || echo "")"
+          fi
+
+          if [[ "$BODY" == *"<!-- qwen-triage:review-unavailable -->"* ]]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "::notice::Review unavailable — skipping tmux testing"
+          elif [ "$EVENT" = "APPROVE" ] || [ "$EVENT" = "COMMENT" ]; then
+            echo "verdict=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "::notice::Review event=${EVENT:-<none>} — not a clean pass; skipping tmux testing"
+          fi
+
+  # ─── Stage 2b: Tmux Testing (after review, internal PRs only) ───────
+  # Runs AFTER review — no point testing if code has critical issues.
+  tmux-testing:
+    needs: ['resolve', 'product-decision', 'review']
+    if: >-
+      needs.review.result == 'success' &&
+      needs.review.outputs.verdict == 'pass' &&
+      needs.resolve.outputs.is_fork == 'false'
+    timeout-minutes: 20
+    concurrency:
+      group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
+      cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
+    runs-on: ['self-hosted', 'ecs-qwen']
+    # Minimal permissions — NO write access to repo/PRs
+    permissions:
+      contents: 'read'
+    outputs:
+      verdict: '${{ steps.run.outputs.verdict || steps.skip_verdict.outputs.verdict }}'
+    steps:
+      # Guard: the PR may have been merged or closed while review was running.
+      # refs/pull/N/merge disappears when the PR is not open or has conflicts,
+      # so check before attempting checkout.
+      - name: 'Check PR state before testing'
+        id: 'pr_state'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+        run: |
+          set -euo pipefail
+          pr_data=""
+          for attempt in 1 2 3; do
+            if pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to read PR state before tmux testing after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::gh pr view failed before tmux testing (attempt ${attempt}/3), retrying..."
+            sleep $((attempt * 15))
+          done
+          IFS=$'\t' read -r state is_draft <<< "$pr_data"
+          if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
+            echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
+            echo "should_test=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_test=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Set skipped verdict'
+        if: "steps.pr_state.outputs.should_test != 'true'"
+        id: 'skip_verdict'
+        run: 'echo "verdict=skipped" >> "$GITHUB_OUTPUT"'
+
+      - name: 'Clean stale review worktrees'
+        # See product-decision: prune leftover /review worktrees that would
+        # otherwise break the checkout below on persistent self-hosted runners.
+        run: |
+          set -uo pipefail
+          WS="${GITHUB_WORKSPACE}"
+          [ -d "$WS/.git" ] || exit 0
+          git -C "$WS" worktree prune 2>/dev/null || true
+          git -C "$WS" worktree list --porcelain 2>/dev/null \
+            | awk '/^worktree /{print $2}' \
+            | while IFS= read -r wt; do
+                case "$wt" in
+                  *"/.qwen/tmp/"*)
+                    git -C "$WS" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+                esac
+              done
+          git -C "$WS" for-each-ref --format='%(refname:short)' refs/heads/qwen-review/ 2>/dev/null \
+            | while IFS= read -r br; do git -C "$WS" branch -D "$br" 2>/dev/null || true; done
+          rm -rf "$WS/.qwen/tmp" 2>/dev/null || true
+
+      - name: 'Checkout PR code'
+        if: "steps.pr_state.outputs.should_test == 'true'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          # Self-hosted persistent runner: keep the GITHUB_TOKEN out of
+          # .git/config (this checks out untrusted PR merge code).
+          persist-credentials: false
+          ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
+          fetch-depth: 1
+
+      - name: 'Run tmux testing'
+        if: "steps.pr_state.outputs.should_test == 'true'"
+        id: 'run'
+        env:
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          REPOSITORY: '${{ github.repository }}'
+        run: |
+          set -euo pipefail
+
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host proxy_bin
+            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+
+            # qwen currently reads HTTP(S)_PROXY directly and does not apply
+            # NO_PROXY when constructing its proxy agent. Clear proxy env for
+            # qwen itself, while restoring it for child gh/git commands.
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="$RUNNER_TEMP/qwen-network-bin"
+            mkdir -p "$proxy_bin"
+
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+
+            export PATH="$proxy_bin:$PATH"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+
+            echo "qwen_path=$(command -v qwen)"
+            qwen --version
+            echo "openai_host=${openai_host}"
+            echo "qwen_http_proxy=disabled"
+            if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
+              echo "child_git_github_proxy=restored"
+            else
+              echo "child_git_github_proxy=unset"
+            fi
+          }
+
+          configure_qwen_network
+
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
+          fi
+
+          FMT_CMD=(jq --unbuffered -Rr "$STREAM_JSON_FMT")
+          command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
+
+          mkdir -p "$RUNNER_TEMP/tmux-results"
+          set +e
+          timeout --kill-after=10s 15m "${QWEN_CMD[@]}" \
+            --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
+            --output-format stream-json \
+            | tee "$RUNNER_TEMP/tmux-results/output.jsonl" \
+            | "${FMT_CMD[@]}"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            echo "::warning::Tmux testing timed out after 15 minutes"
+            echo "verdict=timeout" >> "$GITHUB_OUTPUT"
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            echo "::warning::Tmux testing exited with code $EXIT_CODE"
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=pass" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Upload tmux results'
+        if: "always() && steps.pr_state.outputs.should_test == 'true'"
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
+        with:
+          name: 'tmux-testing-results-${{ needs.resolve.outputs.pr_number }}'
+          path: '${{ runner.temp }}/tmux-results/'
+          retention-days: 7
+
+  # ─── Stage 3: Approval Decision ────────────────────────────────────
+  approval-decision:
+    needs: ['resolve', 'product-decision', 'review', 'tmux-testing']
+    # Exactly one stage owns the formal review verdict on every path:
+    #   - template fail      → product-decision posts request-changes, stop
+    #   - needs_human        → product-decision posts escalation comment, stop
+    #   - review fail        → /review posts CHANGES_REQUESTED, stop
+    #   - review pass        → approval-decision posts the final verdict here
+    # So this job only runs when product-decision passed (or was explicitly
+    # skipped via a review_only trigger), review completed with verdict pass,
+    # and tmux-testing produced a real verdict — never alongside an upstream
+    # stage's request-changes or a skipped tmux run.
+    if: >-
+      always() &&
+      needs.resolve.outputs.should_run == 'true' &&
+      needs.resolve.outputs.is_fork == 'false' &&
+      ((needs.product-decision.result == 'success' &&
+        needs.product-decision.outputs.verdict == 'pass') ||
+       needs.resolve.outputs.trigger_type == 'review_only') &&
+      needs.review.result == 'success' &&
+      needs.review.outputs.verdict == 'pass' &&
+      needs.tmux-testing.result == 'success' &&
+      (needs.tmux-testing.outputs.verdict == 'pass' ||
+       needs.tmux-testing.outputs.verdict == 'fail' ||
+       needs.tmux-testing.outputs.verdict == 'timeout')
+    timeout-minutes: 10
+    concurrency:
+      group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
+      cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+      issues: 'read'
+      pull-requests: 'read'
+    steps:
+      - name: 'Checkout repo'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          persist-credentials: false
+          ref: '${{ github.ref }}'
+
+      - name: 'Download tmux artifact'
+        if: "needs.tmux-testing.result == 'success'"
+        uses: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' # v4.3.0
+        with:
+          name: 'tmux-testing-results-${{ needs.resolve.outputs.pr_number }}'
+          path: '${{ runner.temp }}/tmux-results/'
+        continue-on-error: true
+
+      - name: 'Prepare read-only approval auth'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_REVIEW_READ_TOKEN }}'
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::QWEN_REVIEW_READ_TOKEN is not set; refusing to run the approval-decision agent without an explicit read-only token."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/gh-readonly-config"
+
+      - name: 'Run approval-decision'
+        id: 'run'
+        # The qwen exit code is not the source of truth here — the verdict
+        # file is (read in the next step). qwen exits non-zero when it hits
+        # the session-turn limit even after posting the review and writing the
+        # verdict, so let the job continue and let the verdict step arbitrate.
+        continue-on-error: true
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ secrets.QWEN_REVIEW_READ_TOKEN }}'
+          GH_TOKEN: '${{ secrets.QWEN_REVIEW_READ_TOKEN }}'
+          GH_CONFIG_DIR: '${{ runner.temp }}/gh-readonly-config'
+          REPOSITORY: '${{ github.repository }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          PRODUCT_VERDICT: '${{ needs.product-decision.outputs.verdict }}'
+          REVIEW_VERDICT: '${{ needs.review.outputs.verdict }}'
+          TMUX_VERDICT: '${{ needs.tmux-testing.outputs.verdict }}'
+          TMUX_RESULTS_DIR: '${{ runner.temp }}/tmux-results'
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
+          QWEN_APPROVAL_EMIT_ONLY: '1'
+        with:
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          settings_json: |-
+            {
+              "coreTools": [
+                "run_shell_command(gh pr view)",
+                "run_shell_command(gh api)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(cat)",
+                "read_file"
+              ],
+              "sandbox": false,
+              "maxSessionTurns": 30
+            }
+          prompt: '/approval-decision ${{ needs.resolve.outputs.pr_number }} --repo ${{ github.repository }}'
+
+      - name: 'Publish approval-decision'
+        if: 'always()'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::CI_BOT_PAT is not set; cannot publish approval-decision output."
+            exit 1
+          fi
+
+          DIR="$TRIAGE_RESULTS_DIR"
+          VERDICT_FILE="$DIR/approval-decision.json"
+          if [ ! -f "$VERDICT_FILE" ]; then
+            echo "::error::Approval skill wrote no verdict file; failing the stage so fallback-comment runs."
+            exit 1
+          fi
+
+          VERDICT="$(jq -r '.verdict // "fail"' "$VERDICT_FILE")"
+          REVIEW_ACTION="$(jq -r '.review_action // "none"' "$VERDICT_FILE")"
+          if [ "$REVIEW_ACTION" = "none" ]; then
+            case "$VERDICT" in
+              approve) REVIEW_ACTION="approve" ;;
+              request_changes) REVIEW_ACTION="request_changes" ;;
+            esac
+          fi
+
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
+
+          # Retry wrapper: gh API calls can transiently fail / rate-limit even
+          # on GitHub-hosted runners. Without it a single blip would fail this
+          # step, fire the fallback comment, and leave a half-published state.
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              [ "$attempt" -eq 3 ] && return 1
+              echo "::warning::command failed (attempt ${attempt}/3), retrying..."
+              sleep $((attempt * 10))
+            done
+          }
+
+          publish_marker_comment() {
+            local marker="$1"
+            local body_file="$2"
+            if [ ! -f "$body_file" ]; then
+              return 0
+            fi
+            local existing=""
+            if [ -n "$BOT_LOGIN" ]; then
+              existing="$(
+                gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                  --method GET \
+                  --paginate \
+                  -F per_page=100 \
+                  | jq -sr --arg bot "$BOT_LOGIN" --arg marker "$marker" \
+                    '[.[][] | select(.user.login == $bot and (.body | contains($marker)))] | last | .id // empty'
+              )" || existing=""
+            fi
+            if [ -n "$existing" ]; then
+              gh api \
+                --method PATCH \
+                "repos/$GITHUB_REPOSITORY/issues/comments/$existing" \
+                -F body=@"$body_file" > /dev/null
+            else
+              gh api \
+                "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                -F body=@"$body_file" > /dev/null
+            fi
+          }
+
+          # Validate required outputs up front so we fail closed BEFORE posting
+          # anything, rather than leaving a half-published state.
+          APPROVAL_COMMENT="$DIR/approval-comment.md"
+          if [ ! -f "$APPROVAL_COMMENT" ]; then
+            echo "::error::Approval skill wrote no approval comment body."
+            exit 1
+          fi
+          REVIEW_BODY="$DIR/approval-review.md"
+          if { [ "$REVIEW_ACTION" = "approve" ] || [ "$REVIEW_ACTION" = "request_changes" ]; } \
+            && [ ! -f "$REVIEW_BODY" ]; then
+            echo "::error::Approval skill chose ${REVIEW_ACTION} but wrote no review body."
+            exit 1
+          fi
+
+          # Submit the formal review FIRST — it is the load-bearing action that
+          # sets the PR review state. Posting it before the explanatory comments
+          # means a failed review never leaves a misleading comment behind, and
+          # the job fails closed (fallback-comment runs).
+          case "$REVIEW_ACTION" in
+            approve)
+              retry gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve --body-file "$REVIEW_BODY" \
+                || { echo "::error::Failed to submit approval review after retries"; exit 1; }
+              ;;
+            request_changes)
+              retry gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes --body-file "$REVIEW_BODY" \
+                || { echo "::error::Failed to submit request-changes review after retries"; exit 1; }
+              ;;
+            none|"")
+              echo "::notice::Approval decision verdict=${VERDICT}; no formal review action."
+              ;;
+            *)
+              echo "::error::Unknown approval review_action: ${REVIEW_ACTION}"
+              exit 1
+              ;;
+          esac
+
+          # Explanatory comments are best-effort: a comment hiccup must not fail
+          # an approval whose formal review already landed (that would trip the
+          # fallback comment despite a valid, posted decision).
+          retry publish_marker_comment '<!-- qwen-triage:tmux -->' "$DIR/tmux-comment.md" \
+            || echo "::warning::Failed to post tmux comment after retries"
+          retry publish_marker_comment '<!-- qwen-triage:approval -->' "$APPROVAL_COMMENT" \
+            || echo "::warning::Failed to post approval comment after retries"
+
+      - name: 'Read verdict from skill output'
+        if: 'always()'
+        env:
+          RUN_OUTCOME: '${{ steps.run.outcome }}'
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
+        run: |
+          # The verdict file is the source of truth, not the action's exit
+          # code (see continue-on-error above). Succeed when the skill wrote a
+          # verdict — even if qwen then exited non-zero on the turn limit;
+          # fail only when no verdict was produced, so fallback-comment fires.
+          VERDICT_FILE="$TRIAGE_RESULTS_DIR/approval-decision.json"
+          if [ -f "$VERDICT_FILE" ]; then
+            VERDICT=$(jq -r '.verdict // "fail"' "$VERDICT_FILE")
+            echo "::notice::Approval decision verdict: $VERDICT"
+            if [ "$RUN_OUTCOME" != "success" ]; then
+              echo "::warning::approval-decision action exited non-zero (likely the session-turn limit) but the verdict file is present — treating the stage as complete."
+            fi
+          else
+            echo "::error::Approval skill wrote no verdict file (action outcome: ${RUN_OUTCOME}); failing the stage so fallback-comment runs."
+            exit 1
+          fi
+
+  # ─── Fallback: post comment if pipeline fails unexpectedly ─────────
+  fallback-comment:
+    needs: ['resolve', 'product-decision', 'review', 'tmux-testing', 'approval-decision']
+    if: >-
+      failure() &&
+      needs.resolve.outputs.pr_number != ''
+    runs-on: 'ubuntu-latest'
+    permissions:
+      pull-requests: 'write'
+    steps:
+      - name: 'Post failure notice'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "_Qwen triage pipeline did not complete successfully. See [workflow logs]($RUN_URL)._"
