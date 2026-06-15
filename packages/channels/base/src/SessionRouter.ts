@@ -59,6 +59,16 @@ export class SessionRouter {
     }
   }
 
+  /**
+   * Sender-scoped key prefix for by-sender (no chatId) scans. The trailing
+   * ':' delimiter ensures a sender id matches as a whole segment — without it
+   * sender "bob" would also match another sender "bobby"
+   * (key `${channelName}:bobby:${chatId}`).
+   */
+  private senderPrefix(channelName: string, senderId: string): string {
+    return `${channelName}:${senderId}:`;
+  }
+
   async resolve(
     channelName: string,
     senderId: string,
@@ -86,16 +96,14 @@ export class SessionRouter {
   }
 
   hasSession(channelName: string, senderId: string, chatId?: string): boolean {
-    const key = chatId
-      ? this.routingKey(channelName, senderId, chatId)
-      : `${channelName}:${senderId}`;
-    // If chatId is provided, do exact lookup; otherwise prefix-scan for any match.
-    // The trailing ':' delimiter is required so a sender id is matched as a whole
-    // segment — without it `senderId` "bob" would also match another sender
-    // "bobby" (key `${channelName}:bobby:${chatId}`).
-    if (chatId) return this.toSession.has(key);
+    // If chatId is provided, do an exact lookup; otherwise prefix-scan for any
+    // session belonging to this sender on this channel.
+    if (chatId) {
+      return this.toSession.has(this.routingKey(channelName, senderId, chatId));
+    }
+    const prefix = this.senderPrefix(channelName, senderId);
     for (const k of this.toSession.keys()) {
-      if (k.startsWith(`${channelName}:${senderId}:`)) return true;
+      if (k.startsWith(prefix)) return true;
     }
     return false;
   }
@@ -115,10 +123,7 @@ export class SessionRouter {
       if (sessionId) removedIds.push(sessionId);
     } else {
       // No chatId: remove all sessions for this sender on this channel.
-      // The trailing ':' delimiter is required so the prefix matches the whole
-      // sender segment — without it, removing sender "bob" would also tear down
-      // a different sender "bobby" (key `${channelName}:bobby:${chatId}`).
-      const prefix = `${channelName}:${senderId}:`;
+      const prefix = this.senderPrefix(channelName, senderId);
       for (const k of [...this.toSession.keys()]) {
         if (k.startsWith(prefix)) {
           const sessionId = this.deleteByKey(k);
