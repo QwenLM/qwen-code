@@ -319,6 +319,8 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
+  /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
+  collapseCompletedTurns?: boolean;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
@@ -611,6 +613,7 @@ export function App({
   renderToolHeaderExtra,
   renderWelcomeHeader,
   compactThinking = false,
+  collapseCompletedTurns = true,
   virtualScrollThreshold,
   markdown,
   onToast,
@@ -627,9 +630,16 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       compactThinking,
+      collapseCompletedTurns,
       markdown,
     }),
-    [renderToolHeaderExtra, renderWelcomeHeader, compactThinking, markdown],
+    [
+      renderToolHeaderExtra,
+      renderWelcomeHeader,
+      compactThinking,
+      collapseCompletedTurns,
+      markdown,
+    ],
   );
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
@@ -2657,6 +2667,7 @@ export function App({
                     onConfirm={handleConfirm}
                     onShowContextDetail={handleShowContextDetail}
                     catchingUp={connection.catchingUp}
+                    isResponding={streamingState !== 'idle'}
                     workspaceCwd={connection.workspaceCwd || ''}
                     shellOutputMaxLines={shellOutputMaxLines}
                     showRetryHint={showRetryHint}

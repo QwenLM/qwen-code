@@ -1,12 +1,41 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../adapters/types';
 import {
+  applyTurnCollapse,
   findDisplayItemIndex,
+  findTurnIdForIndex,
   getDisplayItemVirtualKey,
   groupParallelAgents,
   shouldUseVirtualScroll,
   VIRTUAL_SCROLL_THRESHOLD,
+  type DisplayItem,
 } from './MessageList';
+
+function messageRow(
+  item: DisplayItem,
+): Extract<DisplayItem, { type: 'message' }> {
+  if (item.type !== 'message') {
+    throw new Error(`expected a message row, got ${item.type}`);
+  }
+  return item;
+}
+
+function makeAnswerWithThinking(id: string): Message {
+  return {
+    id,
+    role: 'assistant',
+    content: 'final answer',
+    thinking: 'pondering',
+  };
+}
+
+function makeSystemMessage(id: string): Message {
+  return { id, role: 'system', content: 'heads up', variant: 'error' };
+}
+
+function makePlanMessage(id: string): Message {
+  return { id, role: 'plan', todos: [] };
+}
 
 function makeAgentToolGroup(
   id: string,
@@ -309,5 +338,285 @@ describe('findDisplayItemIndex', () => {
     expect(items).toHaveLength(1);
     expect(items[0].type).toBe('parallel_agents');
     expect(findDisplayItemIndex(items, 'a2', 'call-a2')).toBe(0);
+  });
+});
+
+function collapseItems(
+  items: DisplayItem[],
+  opts: Partial<{
+    overrides: Map<string, boolean>;
+    isResponding: boolean;
+    pendingApprovalCallId: string | null;
+    enabled: boolean;
+  }> = {},
+): DisplayItem[] {
+  return applyTurnCollapse(items, {
+    overrides: opts.overrides ?? new Map(),
+    isResponding: opts.isResponding ?? false,
+    pendingApprovalCallId: opts.pendingApprovalCallId ?? null,
+    enabled: opts.enabled ?? true,
+  });
+}
+
+function rowIds(items: DisplayItem[]): string[] {
+  return items.map((item) =>
+    item.type === 'message' ? item.message.id : item.key,
+  );
+}
+
+describe('applyTurnCollapse', () => {
+  it('returns the same array reference when disabled', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    expect(collapseItems(items, { enabled: false })).toBe(items);
+  });
+
+  it('returns the same array reference when there are no turns', () => {
+    const items = groupParallelAgents([
+      makeAssistantMessage('a1'),
+      makeMultiToolGroup('g1'),
+    ]);
+    expect(collapseItems(items)).toBe(items);
+  });
+
+  it('collapses a completed turn to prompt + final answer and tags the head', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 'a1']);
+    expect(messageRow(out[0]).collapse).toEqual({
+      turnId: 'u1',
+      collapsed: true,
+      hiddenCount: 1,
+    });
+    expect(messageRow(out[1]).collapse).toBeUndefined();
+  });
+
+  it('keeps every row but still tags the head when the turn is expanded', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items, {
+      overrides: new Map([['u1', true]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
+    expect(messageRow(out[0]).collapse).toEqual({
+      turnId: 'u1',
+      collapsed: false,
+      hiddenCount: 1,
+    });
+  });
+
+  it('never collapses the active turn while responding', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items, { isResponding: true });
+    expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
+    expect(messageRow(out[0]).collapse).toBeUndefined();
+  });
+
+  it('collapses earlier turns but leaves the active last turn open', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+      makeUserMessage('u2'),
+      makeMultiToolGroup('g2'),
+    ]);
+    const out = collapseItems(items, { isResponding: true });
+    expect(rowIds(out)).toEqual(['u1', 'a1', 'u2', 'g2']);
+    expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
+    expect(messageRow(out[2]).collapse).toBeUndefined();
+  });
+
+  it('does not tag a turn with no intermediate steps', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 'a1']);
+    expect(messageRow(out[0]).collapse).toBeUndefined();
+  });
+
+  it('folds a turn with no final answer down to just the prompt', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeMultiToolGroup('g2'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1']);
+    expect(messageRow(out[0]).collapse).toEqual({
+      turnId: 'u1',
+      collapsed: true,
+      hiddenCount: 2,
+    });
+  });
+
+  it("strips the final answer's thinking only while collapsed", () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAnswerWithThinking('a1'),
+    ]);
+    const collapsed = collapseItems(items);
+    expect(rowIds(collapsed)).toEqual(['u1', 'a1']);
+    const collapsedAnswer = messageRow(collapsed[1]).message;
+    expect(collapsedAnswer.role).toBe('assistant');
+    if (collapsedAnswer.role === 'assistant') {
+      expect(collapsedAnswer.thinking).toBeUndefined();
+      expect(collapsedAnswer.content).toBe('final answer');
+    }
+
+    const expanded = collapseItems(items, {
+      overrides: new Map([['u1', true]]),
+    });
+    const expandedAnswer = messageRow(expanded[2]).message;
+    if (expandedAnswer.role === 'assistant') {
+      expect(expandedAnswer.thinking).toBe('pondering');
+    }
+  });
+
+  it('passes through rows that precede the first turn', () => {
+    const items = groupParallelAgents([
+      makeAssistantMessage('pre'),
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['pre', 'u1', 'a1']);
+    expect(messageRow(out[0]).collapse).toBeUndefined();
+    expect(messageRow(out[1]).collapse?.collapsed).toBe(true);
+  });
+
+  it('keeps system rows (errors/output) visible while hiding tool steps', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeSystemMessage('s1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 's1', 'a1']);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(1);
+  });
+
+  it('does not collapse a turn whose only response is a system row', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeSystemMessage('s1'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 's1']);
+    expect(messageRow(out[0]).collapse).toBeUndefined();
+  });
+
+  it('hides mid-turn assistant narration but keeps the final answer', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeAssistantMessage('mid'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 'a1']);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(2);
+  });
+
+  it('hides plan rows', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makePlanMessage('p1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 'a1']);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(1);
+  });
+
+  it('counts a grouped parallel-agents row as one hidden step', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeAgentToolGroup('x1'),
+      makeAgentToolGroup('x2'),
+      makeAssistantMessage('a1'),
+    ]);
+    // x1/x2 collapse into a single parallel_agents row upstream.
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 'a1']);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(1);
+  });
+
+  it('treats an assistant row with undefined content as a non-answer without crashing', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      // Daemon SSE can leave content undefined despite the `string` type.
+      { id: 'x', role: 'assistant', content: undefined as unknown as string },
+    ]);
+    const out = collapseItems(items);
+    // No assistant-with-content → no final answer → fold to just the prompt.
+    expect(rowIds(out)).toEqual(['u1']);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(2);
+  });
+
+  it('force-expands a completed turn that holds a pending approval', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    // call-g1-a belongs to g1's tool group → the turn must stay expanded so
+    // its inline approve/reject UI is reachable.
+    const out = collapseItems(items, { pendingApprovalCallId: 'call-g1-a' });
+    expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
+    expect(messageRow(out[0]).collapse).toBeUndefined();
+  });
+
+  it('still collapses when the pending approval is in a different turn', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items, { pendingApprovalCallId: 'call-other' });
+    expect(rowIds(out)).toEqual(['u1', 'a1']);
+    expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
+  });
+});
+
+describe('findTurnIdForIndex', () => {
+  it('maps each row to the prompt that heads its turn', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeUserMessage('u2'),
+      makeMultiToolGroup('g2'),
+    ]);
+    expect(findTurnIdForIndex(items, 0)).toBe('u1');
+    expect(findTurnIdForIndex(items, 1)).toBe('u1');
+    expect(findTurnIdForIndex(items, 2)).toBe('u2');
+    expect(findTurnIdForIndex(items, 3)).toBe('u2');
+  });
+
+  it('returns null for rows before the first turn', () => {
+    const items = groupParallelAgents([
+      makeAssistantMessage('pre'),
+      makeUserMessage('u1'),
+    ]);
+    expect(findTurnIdForIndex(items, 0)).toBeNull();
   });
 });

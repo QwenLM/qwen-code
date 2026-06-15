@@ -771,6 +771,12 @@ const EN: Messages = {
   'todo.moreAbove': (v) => `... ${v?.count ?? 0} earlier`,
   'todo.showLess': 'Show less',
   'todo.title': 'Current tasks',
+  'turn.collapse': 'Collapse steps',
+  'turn.expand': 'Expand steps',
+  'turn.hiddenSteps': (v) => {
+    const n = v?.count ?? 0;
+    return `${n} step${n === 1 ? '' : 's'}`;
+  },
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
   'tasks.refreshStale': 'Task status may be stale; reconnecting...',
@@ -1584,6 +1590,9 @@ const ZH: Messages = {
   'todo.moreAbove': (v) => `... 前面还有 ${v?.count ?? 0} 项`,
   'todo.showLess': '收起',
   'todo.title': '当前任务',
+  'turn.collapse': '折叠步骤',
+  'turn.expand': '展开步骤',
+  'turn.hiddenSteps': (v) => `${v?.count ?? 0} 步`,
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
   'tasks.refreshStale': '任务状态可能已过期，正在重连...',

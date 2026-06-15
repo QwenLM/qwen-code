@@ -12,9 +12,37 @@
 }
 
 .body {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--msg-body-color);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/*
+ * Per-turn fold toggle, right-aligned on the prompt row but inset by a gutter
+ * so it clears the hover timestamp that MessageTimestamp pins to the row's
+ * top-right corner (position: absolute; right: 4px). The gutter fits a same-day
+ * HH:mm:ss stamp, so the toggle and the timestamp sit side by side instead of
+ * overlapping.
+ */
+.collapseToggle {
+  flex-shrink: 0;
+  align-self: baseline;
+  margin-right: 64px;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  color: var(--text-dimmed);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.collapseToggle:hover {
+  color: var(--text-secondary);
 }
 
 .images {

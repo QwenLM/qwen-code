@@ -37,6 +37,22 @@ export type PlanMessage = DaemonPlanMessage;
 export type SystemMessage = DaemonSystemMessage;
 export type UserShellMessage = DaemonUserShellMessage;
 
+/**
+ * Collapse state attached to a turn's leading user-message row. A "turn" spans
+ * one user message up to (but not including) the next, and when collapsed its
+ * intermediate steps (thinking, tool calls, mid-turn assistant text) are hidden,
+ * leaving only the prompt and the final answer. Carried on the user
+ * `DisplayItem` so the row can render its own expand/collapse toggle.
+ */
+export interface TurnCollapseHead {
+  /** id of the turn's user message; the key used to toggle the turn. */
+  turnId: string;
+  /** whether the turn's intermediate steps are currently hidden. */
+  collapsed: boolean;
+  /** number of display rows hidden behind the toggle while collapsed. */
+  hiddenCount: number;
+}
+
 export interface ContentBlock {
   type: 'text' | 'image';
   text?: string;
