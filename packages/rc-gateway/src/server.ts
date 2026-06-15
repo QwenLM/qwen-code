@@ -42,8 +42,12 @@ import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
 import { createUsageRoute, type UsageReader } from './routes/usage.js';
 import { createCapabilityRoute } from './routes/capabilities.js';
 import { createClientsManifestRoute } from './routes/clientsManifest.js';
-import { createNativePushRouter } from './routes/nativePush.js';
+import {
+  createNativePushRouter,
+  createAssetLinksRoute,
+} from './routes/nativePush.js';
 import type { ApnsStore } from './nativePush/apnsStore.js';
+import type { NativeShellsCapability } from './nativePush/nativeShells.js';
 import type { AggregateQuery } from './cost/usageStore.js';
 import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
@@ -176,6 +180,18 @@ export interface GatewayDeps {
    * token revocation cascade-deletes the token's subscriptions.
    */
   apnsStore?: ApnsStore;
+  /**
+   * `remoteControl.nativeShells` capability block (`add-native-mobile-shells`).
+   * When set, `/rc/capabilities` reports it (`apnsEnabled` reflects a loadable
+   * P-8 key + complete config, resolved live by the caller).
+   */
+  nativeShellsCapability?: () => NativeShellsCapability;
+  /**
+   * Android TWA Digital Asset Links statement, or `null` when no TWA is
+   * configured. When set, the PUBLIC `GET /.well-known/assetlinks.json` mounts;
+   * `null` → 404 (the shell falls back to a Custom Tab).
+   */
+  assetLinks?: () => Array<Record<string, unknown>> | null;
 }
 
 export interface GatewayApp {
@@ -272,6 +288,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
 
   app.get('/rc/health', (_req, res) => res.json({ status: 'ok' }));
+
+  // PUBLIC Android TWA asset-link verification (add-native-mobile-shells).
+  // Unauthenticated by design — Android fetches it before the TWA launches.
+  // Registered before the bearer middleware; 404 when no TWA is configured.
+  if (deps.assetLinks) {
+    app.get(
+      '/.well-known/assetlinks.json',
+      createAssetLinksRoute(deps.assetLinks),
+    );
+  }
 
   app.post(
     '/rc/pair/redeem',
@@ -385,6 +411,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         ? { currencyLabel: deps.costCurrencyLabel ?? (() => 'USD') }
         : undefined,
       mdnsStatus: deps.mdnsStatus,
+      nativeShells: deps.nativeShellsCapability,
     }),
   );
   app.post(

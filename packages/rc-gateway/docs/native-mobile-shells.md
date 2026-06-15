@@ -11,8 +11,8 @@ assigns it:
 | `POST /rc/native-push/apns/register`          | Cycle A ✅        |
 | `DELETE /rc/native-push/apns/register/:id`    | Cycle A ✅        |
 | Token-revoke → APNs cascade                   | Cycle A ✅        |
-| `remoteControl.nativeShells` capability block | Cycle B           |
-| `GET /.well-known/assetlinks.json`            | Cycle B           |
+| `remoteControl.nativeShells` capability block | Cycle B ✅        |
+| `GET /.well-known/assetlinks.json`            | Cycle B ✅        |
 | APNs sender (JWT ES256 + HTTP/2 to Apple)     | Cycle C (ceiling) |
 
 Everything else — the `window.qwen` bridge contract, keystore token storage,
@@ -46,6 +46,46 @@ The spec uses SQL language ("a row in `apns_subscriptions`", "unique on
 with the very feature this one parallels. The uniqueness constraint is enforced by
 the upsert; "table/row" is read as data-model language, not a storage mandate.
 
+## Config + capability + asset links (Cycle B)
+
+Optional `~/.qwen/rc/native-push.yaml` (parsed once at boot, tolerant — a
+missing/invalid file disables both features):
+
+```yaml
+apns:
+  enabled: true
+  keyPath: ~/.qwen/rc/apns/AuthKey_ABC.p8
+  keyId: ABC123
+  teamId: DEF456
+  bundleId: dev.qwen.rc
+  environment: sandbox # or production
+androidTwa:
+  packageName: dev.qwen.rc
+  sha256Fingerprints:
+    - 'AB:CD:EF:...'
+```
+
+`GET /rc/capabilities` → `remoteControl.nativeShells`:
+
+```jsonc
+{
+  "bridgeVersion": 1,
+  "apnsEnabled": false,
+  "supportedPlatforms": ["android-twa", "ios-wkwebview"],
+  "minShellVersion": { "android": "1.0.0", "ios": "1.0.0" },
+}
+```
+
+`apnsEnabled` is true ONLY when `apns.enabled` is set, all four identifiers
+(`keyId`/`teamId`/`bundleId`/`keyPath`) are present, AND the P-8 key file is
+readable — the same honesty rule cost-tracking uses. Key readability is re-checked
+**live per request** (the rest of the config is boot-time), so dropping in the key
+file flips `apnsEnabled` true without a restart.
+
+`GET /.well-known/assetlinks.json` is PUBLIC (Android fetches it pre-launch, no
+token); it serves the asset statement from `androidTwa`, or **404** when no TWA is
+configured (the shell then falls back to a Custom Tab).
+
 ## Cycle split & verification ceiling
 
 - **Cycle A** (this) — store + register/delete endpoints + revoke cascade + audit
@@ -60,6 +100,14 @@ the upsert; "table/row" is read as data-model language, not a storage mandate.
   ceiling** (needs real Apple credentials + a device + HTTP/2 to Apple): it will be
   built **injectable** and unit-tested against a fake transport, with the live send
   documented as unverified — same posture as the matrix-E2EE adapter.
+
+### Note for Cycle C: `apnsEnabled` existence-vs-loadable
+
+Cycle B's `apnsEnabled` uses `existsSync(keyPath)` — presence, not parse-validity
+(the spec scenario only tests a _missing_ key, so this satisfies it). When the
+Cycle C sender parses the P-8 as an ES256 key, `apnsEnabled` should reflect actual
+parse success so a present-but-malformed key reads `false` — the same
+existence-vs-validity fix applied to bind-security's TLS cert (`createSecureContext`).
 
 ### Note for Cycle C: orphaned-device safety
 

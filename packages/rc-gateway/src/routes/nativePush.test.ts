@@ -10,7 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createNativePushRouter } from './nativePush.js';
+import { createNativePushRouter, createAssetLinksRoute } from './nativePush.js';
 import { ApnsStore } from '../nativePush/apnsStore.js';
 
 let dir: string;
@@ -145,6 +145,33 @@ describe('DELETE /rc/native-push/apns/register/:id', () => {
     const r = await fetch(`${base}/rc/native-push/apns/register/nope`, {
       method: 'DELETE',
     });
+    expect(r.status).toBe(404);
+  });
+});
+
+describe('GET /.well-known/assetlinks.json', () => {
+  async function mountLinks(
+    getLinks: () => Array<Record<string, unknown>> | null,
+  ) {
+    const app = express();
+    app.get('/.well-known/assetlinks.json', createAssetLinksRoute(getLinks));
+    const s = app.listen(0);
+    await new Promise((r) => s.once('listening', r));
+    server = s;
+    return `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+  }
+
+  it('serves the asset statement (public, no auth) when configured', async () => {
+    const links = [{ relation: ['x'], target: { namespace: 'android_app' } }];
+    const base = await mountLinks(() => links);
+    const r = await fetch(`${base}/.well-known/assetlinks.json`);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual(links);
+  });
+
+  it('404s when no TWA is configured (shell falls back to Custom Tab)', async () => {
+    const base = await mountLinks(() => null);
+    const r = await fetch(`${base}/.well-known/assetlinks.json`);
     expect(r.status).toBe(404);
   });
 });

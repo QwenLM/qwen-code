@@ -85,6 +85,27 @@ describe('GET /rc/capabilities', () => {
     }
   });
 
+  it('includes the nativeShells block when wired', async () => {
+    const { base, close } = await mount({
+      nativeShells: () => ({
+        bridgeVersion: 1,
+        apnsEnabled: false,
+        supportedPlatforms: ['android-twa', 'ios-wkwebview'],
+        minShellVersion: { android: '1.0.0', ios: '1.0.0' },
+      }),
+    });
+    try {
+      const body = await (await fetch(`${base}/rc/capabilities`)).json();
+      expect(body.remoteControl.nativeShells).toMatchObject({
+        bridgeVersion: 1,
+        apnsEnabled: false,
+        supportedPlatforms: ['android-twa', 'ios-wkwebview'],
+      });
+    } finally {
+      await close();
+    }
+  });
+
   it('omits instanceName when not advertising', async () => {
     const { base, close } = await mount({
       mdnsStatus: () => ({ advertising: false }),

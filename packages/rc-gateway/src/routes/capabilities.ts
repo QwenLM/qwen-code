@@ -6,6 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import { RC_PROTOCOL_VERSION } from '../mdns/advert.js';
+import type { NativeShellsCapability } from '../nativePush/nativeShells.js';
 
 /**
  * GET /rc/capabilities — the gateway's capability surface. The daemon's own
@@ -22,6 +23,7 @@ import { RC_PROTOCOL_VERSION } from '../mdns/advert.js';
 export function createCapabilityRoute(deps: {
   costTracking?: { currencyLabel: () => string };
   mdnsStatus?: () => { advertising: boolean; instanceName?: string };
+  nativeShells?: () => NativeShellsCapability;
 }): RequestHandler {
   return (req, res) => {
     if (!req.rcClient) {
@@ -43,6 +45,9 @@ export function createCapabilityRoute(deps: {
       remoteControl.mdns = m.advertising
         ? { advertising: true, instanceName: m.instanceName }
         : { advertising: false };
+    }
+    if (deps.nativeShells) {
+      remoteControl.nativeShells = deps.nativeShells();
     }
     res.status(200).json({ remoteControl });
   };

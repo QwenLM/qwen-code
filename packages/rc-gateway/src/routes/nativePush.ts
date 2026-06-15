@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import { OWNER } from '../scopes.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { ApnsStore } from '../nativePush/apnsStore.js';
@@ -79,4 +79,24 @@ export function createNativePushRouter(
   });
 
   return router;
+}
+
+/**
+ * GET /.well-known/assetlinks.json (add-native-mobile-shells "Android shell
+ * verified TWA"). PUBLIC + unauthenticated (Android fetches it before the TWA
+ * launches, with no token). `getLinks()` returns the asset statement array, or
+ * `null` when no TWA is configured → 404, on which the shell falls back to a
+ * Custom Tab rather than refusing to launch.
+ */
+export function createAssetLinksRoute(
+  getLinks: () => Array<Record<string, unknown>> | null,
+): RequestHandler {
+  return (_req, res) => {
+    const links = getLinks();
+    if (!links) {
+      res.status(404).json({ error: 'Not found', code: 'not_found' });
+      return;
+    }
+    res.status(200).json(links);
+  };
 }

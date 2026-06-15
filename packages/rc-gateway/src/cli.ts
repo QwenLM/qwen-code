@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { watch, readFileSync, type FSWatcher } from 'node:fs';
+import { watch, readFileSync, existsSync, type FSWatcher } from 'node:fs';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
@@ -31,6 +31,12 @@ import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
 import { ApnsStore } from './nativePush/apnsStore.js';
+import {
+  parseNativePushConfig,
+  buildNativeShellsCapability,
+  resolveApnsEnabled,
+  buildAssetLinks,
+} from './nativePush/nativeShells.js';
 import { SnoozeStore } from './routing/snooze.js';
 import {
   loadLayeredRoutingMatcher,
@@ -206,6 +212,18 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const apnsStore = await ApnsStore.open(
     join(homedir(), '.qwen', 'rc', 'apns-subscriptions.json'),
   );
+  // Native-shell config (add-native-mobile-shells): APNs identifiers + Android
+  // TWA asset-link material. Read once at boot; the P-8 key's presence is
+  // re-checked live per /rc/capabilities request so apnsEnabled tracks the key
+  // file appearing/disappearing without a restart.
+  const nativePushConfig = parseNativePushConfig(
+    await readFile(
+      join(homedir(), '.qwen', 'rc', 'native-push.yaml'),
+      'utf8',
+    ).catch(() => null),
+  );
+  const expandTilde = (p: string): string =>
+    p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
   const snooze = await SnoozeStore.open(
     join(homedir(), '.qwen', 'rc', 'snooze.state'),
   );
@@ -286,6 +304,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       vapid,
       pushStore,
       apnsStore,
+      nativeShellsCapability: () => {
+        const keyPath = nativePushConfig.apns?.keyPath;
+        const keyReadable = !!keyPath && existsSync(expandTilde(keyPath));
+        return buildNativeShellsCapability(
+          resolveApnsEnabled(nativePushConfig, keyReadable),
+        );
+      },
+      assetLinks: () => buildAssetLinks(nativePushConfig),
       snooze,
       routing,
       idleToggles,

@@ -1357,6 +1357,28 @@ describe('APNs registration auth floor (native-mobile-shells)', () => {
   });
 });
 
+describe('GET /.well-known/assetlinks.json is PUBLIC (native-mobile-shells)', () => {
+  const LINKS = [
+    {
+      relation: ['delegate_permission/common.handle_all_urls'],
+      target: { namespace: 'android_app', package_name: 'dev.qwen.rc' },
+    },
+  ];
+
+  it('serves 200 with NO Authorization header when a TWA is configured', async () => {
+    const { url } = await boot(undefined, { assetLinks: () => LINKS });
+    const r = await fetch(`${url}/.well-known/assetlinks.json`); // no bearer
+    expect(r.status).toBe(200); // the point: NOT 401 (mounted before bearerResolve)
+    expect(await r.json()).toEqual(LINKS);
+  });
+
+  it('serves 404 (not 401) with no token when no TWA is configured', async () => {
+    const { url } = await boot(undefined, { assetLinks: () => null });
+    const r = await fetch(`${url}/.well-known/assetlinks.json`);
+    expect(r.status).toBe(404);
+  });
+});
+
 describe('APNs token-revoke cascade (native-mobile-shells)', () => {
   it('revoking a token removes its APNs subscriptions in the same request', async () => {
     const apnsDir = mkdtempSync(join(tmpdir(), 'rc-apns-srv-'));
