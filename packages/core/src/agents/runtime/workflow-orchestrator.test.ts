@@ -274,6 +274,129 @@ describe('WorkflowOrchestrator', () => {
       }),
     ).rejects.toThrow(/agent-crashed/);
   });
+
+  // P4b Round 5 (wenshao): the emitter field on WorkflowRunRequest and
+  // its firing sites (sandbox safePhase, sandbox safeLog, orchestrator
+  // countedDispatch before + after) are the only channel that keeps the
+  // WorkflowRunRegistry record in sync with the live run. If a refactor
+  // drops one of these callback sites — or removes the defensive
+  // try/catch around `agentCompleted` on the rejection path — the UI
+  // would show stale dispatch counts or missing phases with no test
+  // catching it. These three tests pin the contract.
+
+  it('emitter callbacks fire in expected order with expected args', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `mock:${prompt}`,
+    );
+    const events: Array<{ kind: string; payload: unknown }> = [];
+    const emitter = {
+      phaseStarted: (title: string) =>
+        events.push({ kind: 'phase', payload: title }),
+      agentDispatched: (label?: string) =>
+        events.push({ kind: 'dispatched', payload: label }),
+      agentCompleted: (label?: string, error?: string) =>
+        events.push({ kind: 'completed', payload: { label, error } }),
+      logAppended: (line: string) =>
+        events.push({ kind: 'log', payload: line }),
+    };
+    const outcome = await orchestrator.run({
+      script: `
+        phase('Plan');
+        log('starting');
+        await agent('q1', { label: 'first' });
+        phase('Build');
+        await agent('q2', { label: 'second' });
+        return 'ok';
+      `,
+      args: undefined,
+      emitter,
+    });
+
+    expect(outcome.result).toBe('ok');
+    expect(outcome.phases).toEqual(['Plan', 'Build']);
+    // Event ordering: phase('Plan') → log('starting') → dispatch first →
+    // complete first → phase('Build') → dispatch second → complete second.
+    // No barriers between sandbox-side emits (phase/log) and dispatch
+    // emits — the test only pins the relative ordering across the run,
+    // not exact wall-clock interleaving.
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual([
+      'phase',
+      'log',
+      'dispatched',
+      'completed',
+      'phase',
+      'dispatched',
+      'completed',
+    ]);
+    expect(events[0]!.payload).toBe('Plan');
+    expect(events[1]!.payload).toBe('starting');
+    expect(events[2]!.payload).toBe('first');
+    expect(events[3]!.payload).toEqual({ label: 'first', error: undefined });
+    expect(events[4]!.payload).toBe('Build');
+    expect(events[5]!.payload).toBe('second');
+    expect(events[6]!.payload).toEqual({ label: 'second', error: undefined });
+  });
+
+  it('agentCompleted carries the error message on dispatch rejection', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      throw new Error('dispatch-boom');
+    });
+    const completions: Array<{ label?: string; error?: string }> = [];
+    const emitter = {
+      agentCompleted: (label?: string, error?: string) =>
+        completions.push({ label, error }),
+    };
+    await expect(
+      orchestrator.run({
+        script: `await agent("x", { label: "doomed" }); return 0;`,
+        args: undefined,
+        emitter,
+      }),
+    ).rejects.toThrow(/dispatch-boom/);
+
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toEqual({
+      label: 'doomed',
+      error: 'dispatch-boom',
+    });
+  });
+
+  it('emitter subscriber errors do not break the run (defensive try/catch)', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `mock:${prompt}`,
+    );
+    // Every callback throws — should be swallowed so the orchestration
+    // still completes. Without the defensive try/catch around each emit
+    // site, the first thrown subscriber error would surface as the run
+    // failure even though the script body is fine.
+    const emitter = {
+      phaseStarted: () => {
+        throw new Error('phase-subscriber-boom');
+      },
+      agentDispatched: () => {
+        throw new Error('dispatched-subscriber-boom');
+      },
+      agentCompleted: () => {
+        throw new Error('completed-subscriber-boom');
+      },
+      logAppended: () => {
+        throw new Error('log-subscriber-boom');
+      },
+    };
+    const outcome = await orchestrator.run({
+      script: `
+        phase('Plan');
+        log('hello');
+        const a = await agent('q1');
+        return a;
+      `,
+      args: undefined,
+      emitter,
+    });
+    expect(outcome.result).toBe('mock:q1');
+    expect(outcome.phases).toEqual(['Plan']);
+  });
 });
 
 describe('createProductionDispatch', () => {

@@ -8,9 +8,29 @@ import { describe, it, expect } from 'vitest';
 import { WorkflowTool } from './workflow.js';
 import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
 
 function fakeConfig(): Config {
   return {} as unknown as Config;
+}
+
+/**
+ * P4b Round 5 (wenshao): the registry integration path inside
+ * `WorkflowTool.execute()` (register → emitter → complete/fail/cancel)
+ * is not exercised by `fakeConfig()` because optional chaining short-
+ * circuits the missing `getWorkflowRunRegistry()` method. This helper
+ * builds a config with a real `WorkflowRunRegistry` and returns the
+ * registry handle so tests can inspect post-run state.
+ */
+function configWithRegistry(): {
+  config: Config;
+  registry: WorkflowRunRegistry;
+} {
+  const registry = new WorkflowRunRegistry();
+  const config = {
+    getWorkflowRunRegistry: () => registry,
+  } as unknown as Config;
+  return { config, registry };
 }
 
 describe('WorkflowTool', () => {
@@ -365,5 +385,103 @@ describe('WorkflowTool', () => {
     expect(display.indexOf('"declared"')).not.toBe(
       display.indexOf('"returned"'),
     );
+  });
+
+  // P4b Round 5 (wenshao): the registry integration seam — register on
+  // execute() start, emitter wires the live state, complete on success,
+  // fail on caught exception, cancel on signal.aborted — was completely
+  // unexercised by tests using fakeConfig() (optional chaining short-
+  // circuited the missing getWorkflowRunRegistry method, so every call
+  // site resolved to undefined). These three tests pin the contract
+  // against the actual WorkflowRunRegistry instance.
+
+  it('execute() success path registers the run + mirrors meta/phases/result + transitions to completed', async () => {
+    const { config, registry } = configWithRegistry();
+    const tool = new WorkflowTool(config, {
+      dispatch: async () => 'mock-answer',
+    });
+    const invocation = tool.build({
+      script: `
+        export const meta = { name: 'demo', description: 'desc' }
+        phase('Plan')
+        phase('Build')
+        const a = await agent('q1')
+        return { a }
+      `,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+
+    const entries = registry.list();
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    expect(entry.status).toBe('completed');
+    expect(entry.runId).toMatch(/^wf_[a-f0-9]{16}$/);
+    // The tool fast-tracks meta.name → entry.description when the
+    // synthesized default (runId) was used at register time.
+    expect(entry.description).toBe('demo');
+    expect(entry.meta).toEqual({ name: 'demo', description: 'desc' });
+    expect(entry.phases).toEqual(['Plan', 'Build']);
+    expect(entry.currentPhase).toBe('Build');
+    expect(entry.agentsDispatched).toBe(1);
+    expect(entry.agentsCompleted).toBe(1);
+    expect(entry.result).toEqual({ a: 'mock-answer' });
+    expect(entry.error).toBeUndefined();
+    expect(entry.endTime).toBeDefined();
+  });
+
+  it('execute() failure path records the error message + transitions to failed', async () => {
+    const { config, registry } = configWithRegistry();
+    const tool = new WorkflowTool(config, {
+      dispatch: async () => 'unused',
+    });
+    const invocation = tool.build({
+      script: `
+        phase('Plan')
+        throw new Error('intentional script body failure')
+      `,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+
+    const entries = registry.list();
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    expect(entry.status).toBe('failed');
+    expect(entry.error).toMatch(/intentional script body failure/);
+    expect(entry.phases).toEqual(['Plan']);
+    expect(entry.endTime).toBeDefined();
+  });
+
+  it('execute() pre-aborted signal transitions the entry to cancelled (not failed)', async () => {
+    const { config, registry } = configWithRegistry();
+    // Pre-abort so dispatch sees the cancellation immediately. The catch
+    // arm distinguishes user-intent (signal.aborted) from script bugs.
+    const aborter = new AbortController();
+    aborter.abort();
+    const tool = new WorkflowTool(config, {
+      dispatch: async () => {
+        throw new Error('aborted-by-signal');
+      },
+    });
+    const invocation = tool.build({
+      script: `
+        phase('Plan')
+        await agent('q1')
+        return 1
+      `,
+    });
+    const result = await invocation.execute(aborter.signal);
+    expect(result.error).toBeDefined();
+
+    const entries = registry.list();
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    // The fail-vs-cancel branching at workflow.ts catch arm: when
+    // signal.aborted is true at the moment of catch, the registry
+    // records 'cancelled' so the dialog distinguishes user-initiated
+    // stops from script bugs.
+    expect(entry.status).toBe('cancelled');
+    expect(entry.endTime).toBeDefined();
   });
 });
