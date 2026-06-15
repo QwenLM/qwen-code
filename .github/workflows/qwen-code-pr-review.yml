@@ -33,6 +33,11 @@ on:
         required: false
         default: '90'
         type: 'number'
+      diagnostic_proxy_smoke:
+        description: 'Run proxy diagnostics only; do not perform a PR review.'
+        required: false
+        default: false
+        type: 'boolean'
 
 concurrency:
   # PR lifecycle events share a PR-scoped group so new pushes restart the delay.
@@ -352,6 +357,91 @@ jobs:
             fail "qwen CLI is required on the review runner."
           fi
           qwen --version
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] &&
+             [ "${{ github.event.inputs.diagnostic_proxy_smoke || 'false' }}" = "true" ]; then
+            echo "Running Qwen proxy smoke diagnostics only." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "runner=${RUNNER_NAME:-unknown}" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "qwen_path=$(command -v qwen)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+            node -e 'const keys = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"]; for (const key of keys) { const value = process.env[key]; if (!value) continue; let safe = "<set>"; try { const url = new URL(value); if (url.username || url.password) { url.username = "<redacted>"; url.password = ""; } safe = url.toString(); } catch { if (key.toLowerCase().includes("no_proxy")) safe = value; } console.log(`${key}=${safe}`); }' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+
+            MODEL_ARGS=()
+            if [ -n "${OPENAI_MODEL:-}" ]; then
+              MODEL_ARGS=(--model "$OPENAI_MODEL")
+            fi
+
+            OPENAI_HOST="$(
+              node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)'
+            )"
+            echo "openai_host=${OPENAI_HOST}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+            SMOKE_ROOT="${RUNNER_TEMP:-/tmp}/qwen-proxy-smoke"
+            rm -rf "$SMOKE_ROOT"
+            mkdir -p "$SMOKE_ROOT"
+
+            run_smoke() {
+              local label="$1"
+              shift
+              local log_path="${RUNNER_TEMP:-/tmp}/qwen-proxy-smoke-${label}.jsonl"
+              rm -f "$log_path"
+
+              echo "::group::qwen proxy smoke: ${label}"
+              set +e
+              timeout --kill-after=10s 90s "$@" qwen \
+                --auth-type openai \
+                --approval-mode yolo \
+                "${MODEL_ARGS[@]}" \
+                --prompt "Reply exactly: OK" \
+                --output-format stream-json \
+                | tee "$log_path"
+              local pipeline_status=("${PIPESTATUS[@]}")
+              set -e
+
+              local qwen_status="${pipeline_status[0]}"
+              local tee_status="${pipeline_status[1]}"
+              local result_text=""
+              if [ -s "$log_path" ]; then
+                result_text="$(
+                  grep '"type":"result"' "$log_path" \
+                    | tail -n1 \
+                    | jq -r '.result // ""' 2>/dev/null \
+                    | tr '\n' ' ' \
+                    | cut -c1-160
+                )" || result_text=""
+              fi
+              echo "summary label=${label} qwen_status=${qwen_status} tee_status=${tee_status} result=${result_text}"
+              echo "smoke ${label}: qwen_status=${qwen_status}, tee_status=${tee_status}, result=${result_text}" >> "$GITHUB_STEP_SUMMARY"
+              echo "::endgroup::"
+            }
+
+            run_smoke current-env env \
+              QWEN_HOME="${SMOKE_ROOT}/current-env"
+
+            run_smoke without-proxy-env env \
+              -u HTTPS_PROXY \
+              -u https_proxy \
+              -u HTTP_PROXY \
+              -u http_proxy \
+              QWEN_HOME="${SMOKE_ROOT}/without-proxy-env"
+
+            run_smoke fake-proxy-env env \
+              HTTPS_PROXY="http://127.0.0.1:9" \
+              https_proxy="http://127.0.0.1:9" \
+              HTTP_PROXY="http://127.0.0.1:9" \
+              http_proxy="http://127.0.0.1:9" \
+              NO_PROXY="" \
+              no_proxy="" \
+              QWEN_HOME="${SMOKE_ROOT}/fake-proxy-env"
+
+            run_smoke no-proxy-openai-host env \
+              NO_PROXY="${NO_PROXY:+$NO_PROXY,}${OPENAI_HOST}" \
+              no_proxy="${no_proxy:+$no_proxy,}${OPENAI_HOST}" \
+              QWEN_HOME="${SMOKE_ROOT}/no-proxy-openai-host"
+
+            exit 0
+          fi
 
           case "$TIMEOUT_MINUTES" in
             ''|*[!0-9]*)
