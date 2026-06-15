@@ -182,12 +182,17 @@ the sidecar.
 
 ## Residual integration (the one unverified edge)
 
-- **Routing decrypted events into dispatch.** The SDK client runs its own `/sync`
-  loop; the runner runs a separate fetch `/sync` loop. Reconciling the two (or
-  letting the SDK client subsume the fetch loop for crypto-enabled deployments) and
-  feeding `onMessage` into the existing tested dispatch is the remaining wiring.
-  Until then the adapter initializes the store and is construct-checked, but live
-  encrypted-room messages are not yet delivered to sessions.
+- **Routing decrypted events into dispatch — seam built + unit-tested.**
+  `MatrixBridge.dispatchDecryptedMessage({roomId, sender, body})` normalizes a
+  decrypted message (computing `isBot` from the bot MXID) and routes it through the
+  SAME `handleMessage` dispatch as the cleartext `/sync` path; tests assert a
+  decrypted prompt reaches a bound session, the bot's own message never echoes, and
+  an unbound room is ignored. **What remains** is the live connection: the SDK
+  client runs its own `/sync` loop while the runner runs a separate fetch `/sync`
+  loop, so connecting a _started_ adapter's `onMessage` to `dispatchDecryptedMessage`
+  requires reconciling the two loops (or letting the SDK client subsume the fetch
+  loop for crypto deployments) — a production architecture decision left open. Until
+  then the seam is verified but not driven by a live adapter.
 - **`olmStorePresent` on a bridge healthz** (spec "Healthz reflects olm store
   status") — the in-process bridge has no HTTP listener; `olmStorePresent` is built
   and tested and ready to surface when a bridge healthz endpoint is added.

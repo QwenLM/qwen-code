@@ -354,3 +354,37 @@ describe('MatrixBridge runner — session_update streaming', () => {
     });
   });
 });
+
+describe('MatrixBridge.dispatchDecryptedMessage (E2EE routing seam)', () => {
+  it('routes a decrypted prompt into a bound session, like the plain path', async () => {
+    await rooms.bind('!enc:h', 'sess_e2ee');
+    const h = harness([]); // no sync batches; we drive dispatch directly
+    await h.bridge.dispatchDecryptedMessage({
+      roomId: '!enc:h',
+      sender: '@evan:h',
+      body: 'decrypted prompt',
+    });
+    expect(h.prompts).toEqual(['decrypted prompt']);
+  });
+
+  it('does NOT relay the bot’s own decrypted message (no echo loop)', async () => {
+    await rooms.bind('!enc:h', 'sess_e2ee');
+    const h = harness([]);
+    await h.bridge.dispatchDecryptedMessage({
+      roomId: '!enc:h',
+      sender: '@qwenbot:home.example.com', // the bot itself
+      body: 'echo',
+    });
+    expect(h.prompts).toEqual([]);
+  });
+
+  it('ignores a decrypted message in an unbound room', async () => {
+    const h = harness([]); // no binding for !enc:h
+    await h.bridge.dispatchDecryptedMessage({
+      roomId: '!enc:h',
+      sender: '@evan:h',
+      body: 'nowhere',
+    });
+    expect(h.prompts).toEqual([]);
+  });
+});

@@ -149,6 +149,35 @@ export class MatrixBridge {
     };
   }
 
+  /**
+   * Route a crypto-adapter-decrypted message through the SAME dispatch as the
+   * plain `/sync` path (add-matrix-bridge E2EE). This is the routing seam the
+   * crypto adapter feeds: normalize `{roomId, sender, body}` (computing `isBot`
+   * from the bot's MXID) and hand it to the shared {@link handleMessage}, so a
+   * decrypted prompt reaches a bound session exactly like a cleartext one.
+   *
+   * `powerLevel` defaults to 0 — sufficient for plain prompts (un-gated); command
+   * power-gating (`!qwen attach`) needs the room's `m.room.power_levels`, which the
+   * residual live wiring supplies. Connecting a STARTED adapter's `onMessage` to
+   * this method, and reconciling the SDK's `/sync` with the runner's fetch `/sync`,
+   * is the documented residual integration — this seam itself is unit-tested.
+   */
+  async dispatchDecryptedMessage(
+    m: { roomId: string; sender: string; body: string },
+    powerLevel = 0,
+  ): Promise<void> {
+    await handleMessage(
+      {
+        roomId: m.roomId,
+        sender: m.sender,
+        isBot: m.sender === this.cfg.botUserId,
+        body: m.body,
+        powerLevel,
+      },
+      this.dispatchDeps(),
+    );
+  }
+
   /** Register (or re-register) this bridge's capabilities with the gateway. */
   private registerSelf(): Promise<import('../client.js').WriteResult> {
     return this.cfg.client.register({
