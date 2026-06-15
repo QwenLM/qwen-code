@@ -20,6 +20,10 @@ Final gate in the PR triage pipeline. Read all prior stage results, reflect hone
 
 - Untrusted input: never interpolate PR/comment text into shell commands
 - Comments: always use `--body-file` or `gh api -F body=@FILE`
+- Emit-only mode: if `QWEN_APPROVAL_EMIT_ONLY=1`, do not post comments and do
+  not run `gh pr review`. Write the files described below to
+  `${TRIAGE_RESULTS_DIR:-/tmp/triage-results}`; the CI workflow publishes them
+  with the write-capable token.
 - This skill ONLY runs when product-decision passed (or was explicitly
   skipped by a review-only trigger) AND code review completed without
   requesting changes. Upstream failures post their own request-changes and
@@ -47,15 +51,18 @@ gh pr view "$PR_NUMBER" --repo "$REPO" --json reviewDecision,reviews,comments
 
 ### 2. Check tmux-testing Artifact
 
-If tmux-testing ran, its output is downloaded to `/tmp/tmux-results/`. The `TMUX_VERDICT` env var indicates the result (`pass`, `fail`, or `timeout`).
+If tmux-testing ran, its output is downloaded to `${TMUX_RESULTS_DIR:-/tmp/tmux-results}/`. The `TMUX_VERDICT` env var indicates the result (`pass`, `fail`, or `timeout`).
 
 If the tmux results file exists but no tmux comment has been posted yet (because tmux-testing has no write access), post it now on behalf of tmux-testing:
 
 ```bash
-TMUX_RESULTS="/tmp/tmux-results/output.jsonl"
+RESULTS_DIR="${TRIAGE_RESULTS_DIR:-/tmp/triage-results}"
+TMUX_RESULTS_DIR="${TMUX_RESULTS_DIR:-/tmp/tmux-results}"
+TMUX_RESULTS="$TMUX_RESULTS_DIR/output.jsonl"
 if [ -f "$TMUX_RESULTS" ]; then
   # Summarize tmux results into a comment body
-  cat > /tmp/tmux-comment.md << 'EOF'
+  mkdir -p "$RESULTS_DIR"
+  cat > "$RESULTS_DIR/tmux-comment.md" << 'EOF'
 <!-- qwen-triage:tmux -->
 
 <tmux testing summary based on output.jsonl>
@@ -63,11 +70,13 @@ if [ -f "$TMUX_RESULTS" ]; then
 — _Qwen Code · qwen3.7-max_
 EOF
 
-  EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- qwen-triage:tmux -->")) | .id' | head -1)
-  if [ -n "$EXISTING" ]; then
-    gh api -X PATCH "/repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/tmux-comment.md
-  else
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/tmux-comment.md
+  if [ "${QWEN_APPROVAL_EMIT_ONLY:-}" != "1" ]; then
+    EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- qwen-triage:tmux -->")) | .id' | head -1)
+    if [ -n "$EXISTING" ]; then
+      gh api -X PATCH "/repos/$REPO/issues/comments/$EXISTING" -F body=@"$RESULTS_DIR/tmux-comment.md"
+    else
+      gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$RESULTS_DIR/tmux-comment.md"
+    fi
   fi
 fi
 ```
@@ -90,7 +99,28 @@ Synthesize a verdict:
 
 ### 4. Post Reflection Comment
 
-Write a comment with the `<!-- qwen-triage:approval -->` marker. Be direct — say what you actually think:
+Write a comment file with the `<!-- qwen-triage:approval -->` marker. Be direct — say what you actually think:
+
+```bash
+RESULTS_DIR="${TRIAGE_RESULTS_DIR:-/tmp/triage-results}"
+mkdir -p "$RESULTS_DIR"
+cat > "$RESULTS_DIR/approval-comment.md" << 'EOF'
+<!-- qwen-triage:approval -->
+
+<Your honest reflection — 2-4 sentences. What's the overall impression? Does it ship cleanly? Any lingering concerns?>
+
+<details>
+<summary>中文说明</summary>
+
+<同样的判断，中文版>
+
+</details>
+
+— _Qwen Code · qwen3.7-max_
+EOF
+```
+
+The generated comment should follow this shape:
 
 ```markdown
 <!-- qwen-triage:approval -->
@@ -109,7 +139,8 @@ Write a comment with the `<!-- qwen-triage:approval -->` marker. Be direct — s
 
 ### 5. Comment Dedup
 
-Before posting, check for existing:
+If `QWEN_APPROVAL_EMIT_ONLY=1`, skip this step. Otherwise, before posting,
+check for existing:
 
 ```bash
 EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- qwen-triage:approval -->")) | .id' | head -1)
@@ -120,18 +151,29 @@ EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.b
 
 ### 6. Act on Verdict
 
-**After** posting the comment, execute the review action:
+Write the formal review body to `$RESULTS_DIR/approval-review.md`, then execute
+the review action only when not in emit-only mode:
 
 Approve:
 
 ```bash
-gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body-file /tmp/approve-body.md
+cat > "$RESULTS_DIR/approval-review.md" << 'EOF'
+<short approval body>
+EOF
+if [ "${QWEN_APPROVAL_EMIT_ONLY:-}" != "1" ]; then
+  gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body-file "$RESULTS_DIR/approval-review.md"
+fi
 ```
 
 Request changes:
 
 ```bash
-gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/changes-body.md
+cat > "$RESULTS_DIR/approval-review.md" << 'EOF'
+<short request-changes body>
+EOF
+if [ "${QWEN_APPROVAL_EMIT_ONLY:-}" != "1" ]; then
+  gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file "$RESULTS_DIR/approval-review.md"
+fi
 ```
 
 Escalate (genuinely unsure):
@@ -145,16 +187,20 @@ Escalate (genuinely unsure):
 Write the verdict to a file so the CI workflow can read it:
 
 ```bash
-mkdir -p /tmp/triage-results
-cat > /tmp/triage-results/approval-decision.json << 'VERDICT_EOF'
+RESULTS_DIR="${TRIAGE_RESULTS_DIR:-/tmp/triage-results}"
+mkdir -p "$RESULTS_DIR"
+cat > "$RESULTS_DIR/approval-decision.json" << 'VERDICT_EOF'
 {
   "verdict": "approve",
+  "review_action": "approve",
   "summary": "<one-line summary of decision>"
 }
 VERDICT_EOF
 ```
 
 Possible `verdict` values: `approve`, `request_changes`, `escalate`.
+Possible `review_action` values: `approve`, `request_changes`, `none`.
+Use `none` for `escalate`.
 
 ## Comment Style
 
