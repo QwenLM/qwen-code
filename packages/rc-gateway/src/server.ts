@@ -39,8 +39,13 @@ import { AuditLog, type AuditRecorder } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
-import { createUsageRoute, type UsageReader } from './routes/usage.js';
+import {
+  createUsageRoute,
+  createCostCapabilityRoute,
+  type UsageReader,
+} from './routes/usage.js';
 import type { AggregateQuery } from './cost/usageStore.js';
+import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
 import {
   createIdleToggleRoute,
@@ -149,6 +154,10 @@ export interface GatewayDeps {
   usageReader?: UsageReader;
   usageLabelFor?: (groupBy: AggregateQuery['groupBy'], key: string) => string;
   onPromptAccepted?: PromptAcceptedHook;
+  /** Per-session usage_tick fan-out; the events relay registers per subscriber. */
+  usageBroadcaster?: UsageTickBroadcaster;
+  /** Live currency label for the cost-tracking capability block. */
+  costCurrencyLabel?: () => string;
 }
 
 export interface GatewayApp {
@@ -281,7 +290,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/session/:id/events',
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
-    createSessionEventsRoute(deps.daemon, registry, audit),
+    createSessionEventsRoute(
+      deps.daemon,
+      registry,
+      audit,
+      deps.usageBroadcaster,
+    ),
   );
   app.post(
     '/rc/session/:id/permission/:requestId',
@@ -311,6 +325,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         store: deps.usageReader,
         now: () => Date.now(),
         labelFor: deps.usageLabelFor,
+      }),
+    );
+    app.get(
+      '/rc/capabilities',
+      createCostCapabilityRoute({
+        currencyLabel: deps.costCurrencyLabel ?? (() => 'USD'),
       }),
     );
   }

@@ -8,6 +8,8 @@ import type { RequestHandler, Response } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { ConnectionRegistry } from '../connectionRegistry.js';
 import type { AuditRecorder } from '../auditLog.js';
+import type { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
+import type { UsageTick } from '../cost/ingester.js';
 import { computeBridgeHints } from '../bridges/hints.js';
 import { BRIDGE } from '../scopes.js';
 
@@ -21,6 +23,7 @@ export function createSessionEventsRoute(
   daemon: DaemonClient,
   registry: ConnectionRegistry,
   audit?: AuditRecorder,
+  usageBroadcaster?: UsageTickBroadcaster,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -44,6 +47,7 @@ export function createSessionEventsRoute(
     req.on('close', () => abort.abort());
 
     let attached = false;
+    let unregisterUsage = (): void => {};
     try {
       const iterator = daemon.subscribeEvents(sessionId, {
         lastEventId: Number.isFinite(lastEventId) ? lastEventId : undefined,
@@ -64,6 +68,14 @@ export function createSessionEventsRoute(
         shareLabel,
         detail: { kind },
       });
+      // Inject coalesced usage_tick frames for this session (add-cost-tracking):
+      // the ingester pushes ticks to the broadcaster on its 500ms timer (an await
+      // boundary, never mid-frame), so a single synchronous write here can't
+      // interleave with writeFrame's writes.
+      unregisterUsage =
+        usageBroadcaster?.register(sessionId, (tick) =>
+          writeUsageTick(res, tick),
+        ) ?? (() => {});
       if (!first.done) writeFrame(res, first.value);
       for await (const ev of iterator) {
         writeFrame(res, ev);
@@ -81,6 +93,7 @@ export function createSessionEventsRoute(
         res.end();
       }
     } finally {
+      unregisterUsage();
       unregister();
       if (attached) {
         void audit?.record({
@@ -102,6 +115,15 @@ function writeFrame(
 ): void {
   if (ev.id !== undefined) res.write(`id: ${ev.id}\n`);
   res.write(`data: ${JSON.stringify(enrich(ev))}\n\n`);
+}
+
+/**
+ * Write a synthetic `usage_tick` frame (no `id:` — it is gateway-injected, not a
+ * daemon event, so it must never advance the client's Last-Event-ID cursor). A
+ * single write; fired only on the coalescer's timer, never mid-daemon-frame.
+ */
+function writeUsageTick(res: Response, tick: UsageTick): void {
+  res.write(`data: ${JSON.stringify({ type: 'usage_tick', data: tick })}\n\n`);
 }
 
 /**

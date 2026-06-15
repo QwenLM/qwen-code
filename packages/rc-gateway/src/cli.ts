@@ -194,6 +194,8 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       idleToggles,
       idleStatus,
       usageReader: usageStore,
+      usageBroadcaster: usageStore ? usageBroadcaster : undefined,
+      costCurrencyLabel: () => rates.current().currencyLabel,
       onPromptAccepted: usageStore
         ? (sid, attr) => {
             sessionAttribution.set(sid, attr);

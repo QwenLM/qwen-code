@@ -48,11 +48,20 @@ environment (the rc-gateway e2e routes prompts but never runs a model turn).
 (`inputTokens`/`outputTokens`/`cacheReadInputTokens`) and reads the model id
 defensively; a shape mismatch would yield unpriced/zero rows, not a crash.
 
+## Live usage_tick + capability
+
+After writing a row the ingester pushes a coalesced `usage_tick` (≤1 per 500 ms
+per session) to a per-session broadcaster; each `/rc/session/:id/events` relay
+registers as a listener and injects a `{ type: "usage_tick", data: { sessionId,
+costCentsSessionTotal, costCentsPromptTotal, tokensInTotal, tokensOutTotal } }`
+frame onto its SSE stream — with **no `id:`** so it never advances the client's
+Last-Event-ID cursor. `GET /rc/capabilities` advertises
+`remoteControl.costTracking { enabled, currencyLabel, rateTablePath }` (the
+gateway's `/rc`-prefixed surface, since the daemon's `/capabilities` is
+un-editable under the fork boundary).
+
 ## Not yet wired (follow-up slice)
 
-- **`usage_tick` SSE delivery** — the ingester already pushes coalesced ticks to a
-  per-session broadcaster; registering each `/rc/session/:id/events` relay as a
-  listener (so subscribers receive the running total live) is the next slice.
-- **Capability advertisement** (`remoteControl.costTracking`), the `qwen-rc usage`
-  / `usage prune` CLI, and rate-table hot-reload file-watch wiring (the debounced
-  reloader is built and tested; only the `~/.qwen/rc` watch dispatch remains).
+- The `qwen-rc usage` / `usage prune` operator CLI.
+- Rate-table hot-reload file-watch wiring (the debounced reloader is built and
+  tested; only the `~/.qwen/rc` watch dispatch for `model-rates.yaml` remains).

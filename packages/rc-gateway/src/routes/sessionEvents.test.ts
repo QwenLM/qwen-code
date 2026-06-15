@@ -11,6 +11,7 @@ import type { AddressInfo } from 'node:net';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { createSessionEventsRoute } from './sessionEvents.js';
+import { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { TokenStore } from '../tokenStore.js';
@@ -85,6 +86,51 @@ describe('session-events proxy', () => {
     const frames = await readFrames(res);
     expect(frames.map((f) => f.id)).toEqual(['1', '2']);
     expect(frames[0].data).toContain('"text":"one"');
+  });
+
+  it('injects a usage_tick frame to the session subscriber', async () => {
+    const broadcaster = new UsageTickBroadcaster();
+    stub = await startStubDaemon({
+      frames: [{ id: 1, type: 'session_update', data: { text: 'one' } }],
+      holdOpenMs: 500,
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const app = express();
+    app.get(
+      '/rc/session/:id/events',
+      createSessionEventsRoute(
+        daemon,
+        new ConnectionRegistry(),
+        undefined,
+        broadcaster,
+      ),
+    );
+    const server: Server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    gateway = server;
+    const { port } = server.address() as AddressInfo;
+
+    const resP = fetch(`http://127.0.0.1:${port}/rc/session/sess-1/events`);
+    // Wait for the relay to register its tick listener, then emit one.
+    const start = Date.now();
+    while (broadcaster.listenerCount('sess-1') === 0) {
+      if (Date.now() - start > 2000) throw new Error('relay never registered');
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    broadcaster.emit({
+      sessionId: 'sess-1',
+      costCentsSessionTotal: 15,
+      costCentsPromptTotal: 3,
+      tokensInTotal: 100,
+      tokensOutTotal: 50,
+    });
+    const res = await resP;
+    const frames = await readFrames(res);
+    const tick = frames.find((f) => f.data.includes('usage_tick'));
+    expect(tick).toBeDefined();
+    expect(tick!.id).toBeUndefined(); // synthetic — must not advance the cursor
+    expect(tick!.data).toContain('"costCentsSessionTotal":15');
   });
 
   it('enriches a permission_request frame with bridgeHints; leaves others untouched', async () => {
