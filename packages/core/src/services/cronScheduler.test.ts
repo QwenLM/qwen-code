@@ -445,10 +445,10 @@ describe('CronScheduler', () => {
       expect(scheduler.scheduleWakeup(3600, 'p').wasClamped).toBe(false);
     });
 
-    it('flags in-range fractional input that rounding changed as clamped', () => {
+    it('rounds in-range fractional input without marking it clamped', () => {
       const w = scheduler.scheduleWakeup(60.4, 'p');
       expect(w.clampedDelaySeconds).toBe(60);
-      expect(w.wasClamped).toBe(true);
+      expect(w.wasClamped).toBe(false);
     });
 
     it('falls back to the default heartbeat for non-finite delays', () => {

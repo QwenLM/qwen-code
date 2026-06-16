@@ -9,6 +9,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { clampWakeupSeconds } from '../services/cronScheduler.js';
 import { getErrorMessage } from '../utils/errors.js';
 
 export interface LoopWakeupParams {
@@ -33,7 +34,12 @@ class LoopWakeupInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return `${this.params.delaySeconds}s: ${this.params.prompt}`;
+    const clamped = clampWakeupSeconds(this.params.delaySeconds);
+    const prefix =
+      clamped === this.params.delaySeconds
+        ? `${clamped}s`
+        : `${clamped}s (requested ${formatRequested(this.params.delaySeconds)})`;
+    return `${prefix}: ${this.params.prompt}`;
   }
 
   /**

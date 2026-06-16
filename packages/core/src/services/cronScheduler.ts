@@ -151,7 +151,7 @@ function generateId(): string {
   return id;
 }
 
-function clampWakeupSeconds(delaySeconds: number): number {
+export function clampWakeupSeconds(delaySeconds: number): number {
   if (!Number.isFinite(delaySeconds)) return WAKEUP_DEFAULT_SECONDS;
   return Math.min(
     WAKEUP_MAX_SECONDS,
@@ -276,11 +276,10 @@ export class CronScheduler {
     wasClamped: boolean;
   } {
     const clampedDelaySeconds = clampWakeupSeconds(delaySeconds);
-    // True whenever the stored delay differs from what was asked — covers
-    // non-finite (→ default heartbeat), out-of-range, and in-range fractional
-    // input that rounding changed. Comparing the result (rather than
-    // re-checking the bounds) keeps the flag honest about the rounding case.
-    const wasClamped = clampedDelaySeconds !== delaySeconds;
+    const wasClamped =
+      !Number.isFinite(delaySeconds) ||
+      delaySeconds < WAKEUP_MIN_SECONDS ||
+      delaySeconds > WAKEUP_MAX_SECONDS;
     const id = generateId();
     const now = Date.now();
     const fireAtMs = now + clampedDelaySeconds * 1000;
