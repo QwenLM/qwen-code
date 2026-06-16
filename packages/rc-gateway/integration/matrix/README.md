@@ -12,7 +12,7 @@ a known-answer unit test, and the decrypted-message → dispatch routing seam
 (`MatrixBridge.dispatchDecryptedMessage`) is unit-tested. This test adds the live
 olm/megolm round-trip.
 
-## 1. Stand up Synapse (on the pkix Docker host)
+## 1. Stand up Synapse (any Docker host)
 
 ```bash
 cd packages/rc-gateway/integration/matrix
@@ -37,7 +37,7 @@ docker compose up -d
 From `packages/rc-gateway`:
 
 ```bash
-export QWEN_MATRIX_IT_HS_URL="http://<pkix-host>:8008"
+export QWEN_MATRIX_IT_HS_URL="http://<homeserver-host>:8008"
 export QWEN_MATRIX_IT_REG_SECRET="<value from ./data/homeserver.yaml>"  # registration_shared_secret
 npx vitest run src/bridges/matrix/crypto.integration.test.ts
 ```

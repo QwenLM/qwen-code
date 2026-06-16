@@ -9,7 +9,7 @@
  * ceiling). It is ENV-GATED and skips cleanly in the default suite — it runs only
  * against a real Synapse, which the operator stands up in Docker (see
  * `integration/matrix/README.md`). Set:
- *   QWEN_MATRIX_IT_HS_URL     e.g. http://synapse.pkix.local:8008
+ *   QWEN_MATRIX_IT_HS_URL     e.g. http://localhost:8008
  *   QWEN_MATRIX_IT_REG_SECRET the homeserver's registration_shared_secret
  *
  * Flow: provision two throwaway crypto users (bot + sender); the SENDER creates an

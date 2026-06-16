@@ -1,5 +1,5 @@
 # Synapse homeserver for the Matrix E2EE live-decrypt integration test.
-# Bring up on the pkix host, then run the env-gated test (see README.md).
+# Bring up on any Docker host, then run the env-gated test (see README.md).
 #
 # This is a THROWAWAY test homeserver — federation off, open shared-secret
 # registration for ephemeral test accounts. Do not expose it publicly.
