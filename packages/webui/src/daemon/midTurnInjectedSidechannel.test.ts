@@ -135,4 +135,37 @@ describe('mid-turn injected sidechannel pub/sub', () => {
       { sessionId: 's-1', messages: ['b'] },
     ]);
   });
+
+  it('compare-and-swap clear preserves a batch appended after the snapshot', () => {
+    // Models the render→effect race: the consumer reconciles `snapshot`, but a
+    // new frame appends before its clear runs. A snapshot-scoped clear must NOT
+    // wipe the new batch (else it is resent next turn = double delivery).
+    publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['a'] });
+    const snapshot = getSidechannelMidTurnInjected();
+    publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['b'] }); // races in
+
+    clearSidechannelMidTurnInjected(snapshot); // stale ref ⇒ no-op
+    expect(getSidechannelMidTurnInjected()).toEqual([
+      { sessionId: 's-1', messages: ['a'] },
+      { sessionId: 's-1', messages: ['b'] },
+    ]);
+
+    // Clearing with the CURRENT ref succeeds.
+    clearSidechannelMidTurnInjected(getSidechannelMidTurnInjected());
+    expect(getSidechannelMidTurnInjected()).toEqual([]);
+  });
+
+  it('caps the buffer, evicting oldest batches past the limit', () => {
+    for (let i = 0; i < 70; i++) {
+      publishSidechannelMidTurnInjected({
+        sessionId: 's-1',
+        messages: [`m${i}`],
+      });
+    }
+    const buf = getSidechannelMidTurnInjected();
+    expect(buf).toHaveLength(64); // MAX_PENDING_BATCHES
+    // Oldest (m0..m5) evicted; newest retained.
+    expect(buf[0].messages).toEqual(['m6']);
+    expect(buf[buf.length - 1].messages).toEqual(['m69']);
+  });
 });

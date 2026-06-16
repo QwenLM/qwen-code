@@ -19,6 +19,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
+import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
 import type { MidTurnQueueEntry } from './bridgeTypes.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
@@ -197,14 +198,8 @@ function sliceLineRange(
  * `SessionEntry` is required to provide them — TS enforces the
  * structural match at the callback signature).
  */
-/**
- * ACP ext-method the spawned `qwen --acp` child calls between tool batches to
- * pull user messages the browser queued mid-turn. Must match the constant in
- * `cli/src/acp-integration/session/Session.ts` (the caller). The desktop ACP
- * client answers the same method from its own in-memory queue; in `qwen serve`
- * the daemon answers it here, from `SessionEntry.midTurnMessageQueue`.
- */
-const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+// `MID_TURN_QUEUE_DRAIN_METHOD` is imported from `./bridgeTypes.js` (the single
+// source of truth shared with the child-side caller in `Session.ts`).
 
 /**
  * SSE frame published when mid-turn messages are actually drained into the

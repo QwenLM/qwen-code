@@ -10618,4 +10618,75 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await prompt;
     await bridge.shutdown();
   });
+
+  it('rejects past MAX_MID_TURN_QUEUE_DEPTH (20) — the DoS bound', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    // First 20 accepted, 21st rejected (browser keeps it for the next turn).
+    for (let i = 0; i < 20; i++) {
+      expect(bridge.enqueueMidTurnMessage(session.sessionId, `m${i}`)).toEqual({
+        accepted: true,
+      });
+    }
+    expect(bridge.enqueueMidTurnMessage(session.sessionId, 'overflow')).toEqual(
+      { accepted: false },
+    );
+
+    release();
+    await promptPromise;
+    await bridge.shutdown();
+  });
+
+  it('trims the message before queuing (drain returns the trimmed text)', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, '   hello   '),
+    ).toEqual({ accepted: true });
+    const drained = await handle.agentConnection.extMethod(
+      'craft/drainMidTurnQueue',
+      { sessionId: session.sessionId },
+    );
+    expect(drained).toEqual({ messages: ['hello'] });
+
+    release?.();
+    await prompt;
+    await bridge.shutdown();
+  });
 });

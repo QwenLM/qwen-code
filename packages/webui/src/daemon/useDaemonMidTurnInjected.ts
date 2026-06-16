@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useSyncExternalStore } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 import type { DaemonMidTurnMessageInjectedData } from '@qwen-code/sdk/daemon';
 import {
   clearSidechannelMidTurnInjected,
@@ -21,9 +21,11 @@ export interface UseDaemonMidTurnInjectedResult {
    */
   batches: readonly DaemonMidTurnMessageInjectedData[];
   /**
-   * Clear the buffer once the batches have been reconciled. Safe to call from
-   * the effect body: it is synchronous, so no new frame can append between the
-   * read and the clear. Stable reference.
+   * Clear the batches that were reconciled. Compare-and-swap: it only clears if
+   * the buffer still holds exactly the `batches` snapshot returned above. A
+   * frame that appended between the render snapshot and the (async) effect that
+   * calls this is therefore preserved, not wiped — it is reconciled on the next
+   * effect run instead of being lost (which would resend it next turn).
    */
   consume: () => void;
 }
@@ -39,5 +41,14 @@ export function useDaemonMidTurnInjected(): UseDaemonMidTurnInjectedResult {
     getSidechannelMidTurnInjected,
     getSidechannelMidTurnInjected,
   );
-  return { batches, consume: clearSidechannelMidTurnInjected };
+  // Compare-and-swap on the exact snapshot we reconciled, so a frame that
+  // appended between this render and the consuming effect survives. `batches` is
+  // reference-stable between store changes (useSyncExternalStore), so the
+  // `[batches]` dep keeps `consume` stable too — a new snapshot is what makes a
+  // new closure, which is exactly when the consuming effect should re-run.
+  const consume = useCallback(
+    () => clearSidechannelMidTurnInjected(batches),
+    [batches],
+  );
+  return { batches, consume };
 }

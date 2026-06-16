@@ -295,7 +295,10 @@ export interface DaemonSessionActions {
    * a notice) when there is no session, the session is idle, or the push
    * fails — the caller then keeps the message in its own next-turn queue.
    */
-  enqueueMidTurnMessage(message: string): Promise<DaemonMidTurnMessageResult>;
+  enqueueMidTurnMessage(
+    message: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonMidTurnMessageResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
   cancelTask(

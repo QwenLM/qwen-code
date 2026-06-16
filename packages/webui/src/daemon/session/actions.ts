@@ -602,15 +602,18 @@ export function createDaemonSessionActions({
 
     async enqueueMidTurnMessage(
       message: string,
+      opts?: { signal?: AbortSignal },
     ): Promise<DaemonMidTurnMessageResult> {
-      // Best-effort and silent: no session / idle session / transport failure
-      // all resolve `{ accepted: false }` so the caller falls back to its own
-      // next-turn queue. Never raises a user-facing notice — a queued message
-      // typed mid-turn is an optimization, not a user-initiated action.
+      // Best-effort and silent: no session / idle session / transport failure /
+      // abort all resolve `{ accepted: false }` so the caller falls back to its
+      // own next-turn queue. Never raises a user-facing notice — a queued
+      // message typed mid-turn is an optimization, not a user-initiated action.
+      // `opts.signal` lets the caller abort a still-in-flight push when the turn
+      // it was meant for settles, so a late arrival can't land in the next turn.
       const session = sessionRef.current;
       if (!session) return { accepted: false };
       try {
-        return await session.enqueueMidTurnMessage(message);
+        return await session.enqueueMidTurnMessage(message, opts);
       } catch {
         return { accepted: false };
       }

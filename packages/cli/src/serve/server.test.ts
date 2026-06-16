@@ -272,6 +272,15 @@ interface FakeBridgeOpts {
    * validator returns 400. Defaults to an empty set.
    */
   knownClientIds?: Iterable<string>;
+  /**
+   * Drives the `POST /session/:id/mid-turn-message` route. Default accepts.
+   * Throw (e.g. `SessionNotFoundError`) to exercise the error branch.
+   */
+  enqueueMidTurnImpl?: (
+    sessionId: string,
+    message: string,
+    context?: BridgeClientRequestContext,
+  ) => { accepted: boolean };
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
   loadImpl?: (
     req: BridgeRestoreSessionRequest,
@@ -458,6 +467,11 @@ interface FakeBridge extends AcpSessionBridge {
     opts?: { requireZeroAttaches?: boolean };
   }>;
   detachCalls: Array<{ sessionId: string; clientId?: string }>;
+  enqueueMidTurnCalls: Array<{
+    sessionId: string;
+    message: string;
+    context?: BridgeClientRequestContext;
+  }>;
   permissionVotes: Array<{
     requestId: string;
     response: RequestPermissionResponse;
@@ -567,6 +581,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
   const detachCalls: FakeBridge['detachCalls'] = [];
+  const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
+  const enqueueMidTurnImpl =
+    opts.enqueueMidTurnImpl ?? (() => ({ accepted: true }));
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
@@ -889,6 +906,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     cancelCalls,
     killCalls,
     detachCalls,
+    enqueueMidTurnCalls,
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
@@ -1110,6 +1128,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     async generateSessionBtw(sessionId, _question, _signal, _context) {
       return { sessionId, answer: 'mock btw answer' };
+    },
+    enqueueMidTurnMessage(sessionId, message, context) {
+      enqueueMidTurnCalls.push({
+        sessionId,
+        message,
+        ...(context ? { context } : {}),
+      });
+      return enqueueMidTurnImpl(sessionId, message, context);
     },
     async executeShellCommand(sessionId, command, signal, context) {
       shellCalls.push({
@@ -2457,6 +2483,110 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ cleared: false });
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
+    });
+  });
+
+  describe('POST /session/:id/mid-turn-message', () => {
+    const midTurnPost = (
+      app: ReturnType<typeof createServeApp>,
+      sessionId: string,
+      body: Record<string, unknown>,
+      clientId?: string,
+    ) => {
+      const r = request(app)
+        .post(`/session/${sessionId}/mid-turn-message`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      if (clientId !== undefined) r.set('X-Qwen-Client-Id', clientId);
+      return r.send(body);
+    };
+    const midTurnApp = (bridge: FakeBridge) =>
+      createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+    it('200 { accepted: true } and forwards the trimmed message + client id', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(
+        midTurnApp(bridge),
+        's-1',
+        { message: '  hello  ' },
+        'client-9',
+      );
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: true });
+      // Trimmed before enqueue, and the client id is forwarded for the bridge's
+      // ownership check + originator stamping.
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'hello',
+          context: { clientId: 'client-9' },
+        },
+      ]);
+    });
+
+    it('200 { accepted: false } when the bridge rejects (idle session)', async () => {
+      const bridge = fakeBridge({
+        enqueueMidTurnImpl: () => ({ accepted: false }),
+      });
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'later',
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: false });
+    });
+
+    it('400 when `message` is missing', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {});
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('400 when `message` is whitespace-only', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: '   ',
+      });
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('400 when the trimmed message exceeds the 16 KB cap', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'x'.repeat(16 * 1024 + 1),
+      });
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('maps a bridge SessionNotFoundError to 404', async () => {
+      const bridge = fakeBridge({
+        enqueueMidTurnImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const res = await midTurnPost(midTurnApp(bridge), 'missing', {
+        message: 'hi',
+      });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('400 on a malformed X-Qwen-Client-Id (never reaches the bridge)', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(
+        midTurnApp(bridge),
+        's-1',
+        { message: 'hi' },
+        'bad client id with spaces',
+      );
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
     });
   });
 

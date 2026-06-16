@@ -184,6 +184,18 @@ export interface BridgeHeartbeatState {
 }
 
 /**
+ * ACP ext-method the spawned `qwen --acp` child calls between tool batches to
+ * pull user messages the browser queued mid-turn. The child-side caller
+ * (`cli/src/acp-integration/session/Session.ts`) and the daemon-side answerer
+ * (`bridgeClient.ts`) both import THIS single definition, so a rename can't
+ * silently desync them into a runtime `-32601 methodNotFound` (which would
+ * latch the drain off for the session). The desktop ACP client answers the same
+ * method from its own in-memory queue; in `qwen serve` the daemon answers it
+ * from `SessionEntry.midTurnMessageQueue`.
+ */
+export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
+/**
  * One queued mid-turn message. `originatorClientId` is the trusted client id
  * that pushed it (from `resolveTrustedClientId`), carried so the drain's SSE
  * echo can be routed/filtered to that client only — a peer attached to the

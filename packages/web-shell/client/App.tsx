@@ -775,6 +775,11 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
+  // Scopes the best-effort mid-turn enqueue POST(s) to the turn they were typed
+  // in. Aborted when the turn settles so a slow/late push can't arrive during a
+  // SUBSEQUENT turn (e.g. the browser's own next-turn resend of the same text)
+  // and get injected there — cross-turn double delivery.
+  const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -1268,12 +1273,34 @@ export function App({
       // the effect below removes from the queue so it isn't resent. If idle /
       // unsupported / failed, the message harmlessly stays queued.
       if (!hasImages) {
-        void sessionActions.enqueueMidTurnMessage(trimmed);
+        // One controller per turn: all mid-turn pushes typed during the same
+        // turn share it, and the settle effect aborts it so a late arrival
+        // can't land in the next turn. An aborted push resolves
+        // `{ accepted: false }`, so the message simply stays queued and is
+        // resent next turn — exactly-once preserved.
+        let abort = midTurnEnqueueAbortRef.current;
+        if (!abort) {
+          abort = new AbortController();
+          midTurnEnqueueAbortRef.current = abort;
+        }
+        void sessionActions.enqueueMidTurnMessage(trimmed, {
+          signal: abort.signal,
+        });
       }
       return true;
     },
     [sessionActions],
   );
+
+  // When the turn settles, abort any still-in-flight mid-turn push so it can't
+  // arrive during the next turn and be injected twice (see midTurnEnqueueAbortRef).
+  // The aborted push resolves `{ accepted: false }`; the message is already in
+  // queuedPrompts and follows the normal next-turn path.
+  useEffect(() => {
+    if (streamingState !== 'idle') return;
+    midTurnEnqueueAbortRef.current?.abort();
+    midTurnEnqueueAbortRef.current = null;
+  }, [streamingState]);
 
   const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
     const [nextPrompt, ...rest] = queuedPromptsRef.current;

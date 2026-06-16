@@ -2980,6 +2980,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             entry.pendingPromptCount === 0 &&
             entry.midTurnMessageQueue.length > 0
           ) {
+            // One line when we actually drop something — makes the
+            // "queued-but-never-drained, browser will resend" path visible.
+            writeStderrLine(
+              `[mid-turn] session=${entry.sessionId} dropped ${entry.midTurnMessageQueue.length} undrained message(s) at idle; browser resends next turn`,
+            );
             entry.midTurnMessageQueue.length = 0;
           }
         })
@@ -4083,7 +4088,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // client attached to another session can't push into this turn. Returns
       // the trusted id (or undefined for anonymous callers) — recorded as the
       // message's originator so the drain's SSE echo only dedupes that client.
-      const originatorClientId = resolveTrustedClientId(entry, context?.clientId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
       const trimmed = message.trim();
       // Reject empty messages and — critically — messages that arrive while
       // the session is idle. The browser only pushes here when it believes a
@@ -4094,12 +4102,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // double delivery. Rejecting keeps the browser's next-turn fallback the
       // single delivery path in that race.
       if (trimmed.length === 0 || entry.pendingPromptCount === 0) {
+        // Rejects are low-volume (the browser only pushes when it believes a
+        // turn is running) but the silent path made "why wasn't my mid-turn
+        // message injected?" undiagnosable. Empty is a client bug; idle is the
+        // settle-window race the browser recovers from via its next-turn queue.
+        writeStderrLine(
+          `[mid-turn] session=${entry.sessionId} rejected: ${
+            trimmed.length === 0 ? 'empty message' : 'session idle'
+          }; browser keeps it for next turn`,
+        );
         return { accepted: false };
       }
       // Bound queue depth (see MAX_MID_TURN_QUEUE_DEPTH). Full → reject so the
       // browser keeps the message in its own queue for the next turn rather than
       // pinning it here unboundedly when the turn has no drain point.
       if (entry.midTurnMessageQueue.length >= MAX_MID_TURN_QUEUE_DEPTH) {
+        writeStderrLine(
+          `[mid-turn] session=${entry.sessionId} rejected: queue full (depth ${entry.midTurnMessageQueue.length} >= ${MAX_MID_TURN_QUEUE_DEPTH}); browser keeps it for next turn`,
+        );
         return { accepted: false };
       }
       entry.midTurnMessageQueue.push({ text: trimmed, originatorClientId });

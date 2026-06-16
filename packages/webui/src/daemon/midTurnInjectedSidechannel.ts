@@ -30,6 +30,11 @@ const listeners = new Set<() => void>();
 // and calls `clearSidechannelMidTurnInjected`. `EMPTY` is a shared frozen ref so
 // the empty snapshot is reference-stable for `useSyncExternalStore`.
 const EMPTY: readonly DaemonMidTurnMessageInjectedData[] = Object.freeze([]);
+// Safety cap so an orphaned buffer (consumer unmounted or session switched
+// without ever consuming) can't grow without bound. Past the cap the OLDEST
+// batch is evicted: under that much un-reconciled backlog the consumer is gone,
+// so there is no pending queue left to double-deliver into.
+const MAX_PENDING_BATCHES = 64;
 let pending: readonly DaemonMidTurnMessageInjectedData[] = EMPTY;
 
 export function getSidechannelMidTurnInjected(): readonly DaemonMidTurnMessageInjectedData[] {
@@ -50,7 +55,7 @@ export function publishSidechannelMidTurnInjected(
 ): void {
   // Append (new array ref so `useSyncExternalStore` re-fires). Copy the batch so
   // a later mutation of the source can't change what the consumer reconciles.
-  pending = [
+  const appended = [
     ...pending,
     {
       sessionId: data.sessionId,
@@ -60,10 +65,28 @@ export function publishSidechannelMidTurnInjected(
         : {}),
     },
   ];
+  pending =
+    appended.length > MAX_PENDING_BATCHES
+      ? appended.slice(appended.length - MAX_PENDING_BATCHES)
+      : appended;
   notifyMidTurnInjectedListeners();
 }
 
-export function clearSidechannelMidTurnInjected(): void {
+/**
+ * Clear the buffer. Pass `expected` (the exact snapshot the consumer just
+ * reconciled) for a compare-and-swap clear: `useDaemonMidTurnInjected` reads
+ * `pending` during render and reconciles it in an async effect, so a new frame
+ * can append in the window between the read and the effect. Clearing
+ * unconditionally would wipe that newly-arrived batch before it is reconciled —
+ * its messages stay in the browser's pending queue and are resent next turn (the
+ * double delivery this feature exists to prevent). When a frame arrived,
+ * `pending !== expected`, so we no-op and leave it for the next reconcile.
+ * Omitting `expected` clears unconditionally (e.g. test teardown).
+ */
+export function clearSidechannelMidTurnInjected(
+  expected?: readonly DaemonMidTurnMessageInjectedData[],
+): void {
+  if (expected !== undefined && pending !== expected) return;
   if (pending.length === 0) return;
   pending = EMPTY;
   notifyMidTurnInjectedListeners();
