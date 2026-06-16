@@ -6,12 +6,12 @@
 
 /**
  * Owner-managed bans of individual chat users (`add-bridge-protocol`): an owner
- * can block one `subActor` (e.g. `telegram:evan`) WITHOUT revoking the bridge's
+ * can block one `subActor` (e.g. `telegram:alice`) WITHOUT revoking the bridge's
  * token — every other user on that bridge keeps working. A banned sub-actor's
  * writes (prompts/votes) are rejected 403.
  *
  * Keyed by the sub-actor id alone. Because sub-actor ids are service-namespaced
- * (`telegram:evan`, `discord:123`), the id is already effectively bridge-scoped,
+ * (`telegram:alice`, `discord:123`), the id is already effectively bridge-scoped,
  * so a single key honors the spec's "from a specific bridge" intent without
  * threading a token→bridge-id lookup into the hot write path. The ban ROUTE
  * still takes the bridge `:id` for audit context.

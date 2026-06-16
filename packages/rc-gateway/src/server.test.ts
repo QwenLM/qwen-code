@@ -612,7 +612,7 @@ describe('gateway app', () => {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${bridgeToken}`,
-        'X-RC-SubActor': 'telegram:evan',
+        'X-RC-SubActor': 'telegram:alice',
       },
       body: JSON.stringify({ prompt: 'hi' }),
     });
@@ -621,7 +621,7 @@ describe('gateway app', () => {
       r.some((x) => x.action === 'prompt_sent'),
     );
     const sent = rows.find((x) => x.action === 'prompt_sent');
-    expect(sent?.subActor).toBe('telegram:evan');
+    expect(sent?.subActor).toBe('telegram:alice');
   });
 
   it('mints an invite (OWNER) and a bridge token redeems it (sole bind path)', async () => {

@@ -76,7 +76,7 @@ describe('extractSync — messages + power levels', () => {
               events: [
                 {
                   type: 'm.room.power_levels',
-                  content: { users: { '@evan:h': 50 }, users_default: 0 },
+                  content: { users: { '@alice:h': 50 }, users_default: 0 },
                 },
               ],
             },
@@ -84,7 +84,7 @@ describe('extractSync — messages + power levels', () => {
               events: [
                 {
                   type: 'm.room.message',
-                  sender: '@evan:h',
+                  sender: '@alice:h',
                   content: { msgtype: 'm.text', body: '!qwen attach sess' },
                 },
                 {
@@ -101,7 +101,7 @@ describe('extractSync — messages + power levels', () => {
     const out = extractSync(sync, ctx());
     expect(out.messages).toHaveLength(2);
     expect(out.messages[0]).toMatchObject({
-      sender: '@evan:h',
+      sender: '@alice:h',
       body: '!qwen attach sess',
       powerLevel: 50,
       isBot: false,
@@ -144,7 +144,7 @@ describe('extractSync — messages + power levels', () => {
                 events: [
                   {
                     type: 'm.room.power_levels',
-                    content: { users: { '@evan:h': 100 } },
+                    content: { users: { '@alice:h': 100 } },
                   },
                 ],
               },
@@ -154,7 +154,7 @@ describe('extractSync — messages + power levels', () => {
       },
       c,
     );
-    // A later sync with no power_levels event still sees @evan as 100.
+    // A later sync with no power_levels event still sees @alice as 100.
     const out = extractSync(
       {
         rooms: {
@@ -164,7 +164,7 @@ describe('extractSync — messages + power levels', () => {
                 events: [
                   {
                     type: 'm.room.message',
-                    sender: '@evan:h',
+                    sender: '@alice:h',
                     content: { msgtype: 'm.text', body: 'hi' },
                   },
                 ],
@@ -187,7 +187,7 @@ describe('extractSync — messages + power levels', () => {
               events: [
                 {
                   type: 'm.room.message',
-                  sender: '@evan:h',
+                  sender: '@alice:h',
                   content: { msgtype: 'm.image', body: 'pic.png' },
                 },
               ],
@@ -210,7 +210,7 @@ describe('extractSync — reactions', () => {
               events: [
                 {
                   type: 'm.reaction',
-                  sender: '@evan:h',
+                  sender: '@alice:h',
                   content: {
                     'm.relates_to': {
                       rel_type: 'm.annotation',
@@ -229,7 +229,7 @@ describe('extractSync — reactions', () => {
     expect(out.reactions).toEqual([
       {
         roomId: '!r:h',
-        sender: '@evan:h',
+        sender: '@alice:h',
         targetEventId: '$m_42',
         key: '\u{1F44D}',
       },
@@ -267,7 +267,7 @@ describe('extractSync — encryption detection', () => {
               events: [
                 {
                   type: 'm.room.encrypted',
-                  sender: '@evan:h',
+                  sender: '@alice:h',
                   content: { ciphertext: 'xxx' },
                 },
               ],

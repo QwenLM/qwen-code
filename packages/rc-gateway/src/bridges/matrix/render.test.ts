@@ -17,8 +17,8 @@ import {
 
 describe('matrix render — sub-actor identity', () => {
   it('carries the fully-qualified MXID verbatim (never stripped)', () => {
-    expect(subActorOf('@evan:home.example.com')).toBe(
-      'matrix:@evan:home.example.com',
+    expect(subActorOf('@alice:home.example.com')).toBe(
+      'matrix:@alice:home.example.com',
     );
     // Federated user: homeserver suffix must survive.
     expect(subActorOf('@alice:other-server.org')).toBe(

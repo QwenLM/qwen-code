@@ -449,14 +449,14 @@ describe('sub-actor ban routes', () => {
     const ban = await fetch(`${banBase}/rc/bridges/telegram/ban`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ subActor: 'telegram:evan' }),
+      body: JSON.stringify({ subActor: 'telegram:alice' }),
     });
     expect(ban.status).toBe(200);
-    expect(bans.isBanned('telegram:evan')).toBe(true);
+    expect(bans.isBanned('telegram:alice')).toBe(true);
     const list = await (await fetch(`${banBase}/rc/bridges/bans`)).json();
-    expect(list.banned).toEqual(['telegram:evan']);
+    expect(list.banned).toEqual(['telegram:alice']);
     const rec = banAudit.calls.find((c) => c.action === 'sub_actor_banned');
-    expect(rec?.subActor).toBe('telegram:evan');
+    expect(rec?.subActor).toBe('telegram:alice');
     expect(rec?.target).toBe('telegram');
   });
 
@@ -470,15 +470,15 @@ describe('sub-actor ban routes', () => {
   });
 
   it('lifts a ban (204) and 404s lifting an unknown one', async () => {
-    bans.ban('telegram:evan');
+    bans.ban('telegram:alice');
     const lift = await fetch(
-      `${banBase}/rc/bridges/telegram/ban/telegram:evan`,
+      `${banBase}/rc/bridges/telegram/ban/telegram:alice`,
       { method: 'DELETE' },
     );
     expect(lift.status).toBe(204);
-    expect(bans.isBanned('telegram:evan')).toBe(false);
+    expect(bans.isBanned('telegram:alice')).toBe(false);
     const again = await fetch(
-      `${banBase}/rc/bridges/telegram/ban/telegram:evan`,
+      `${banBase}/rc/bridges/telegram/ban/telegram:alice`,
       { method: 'DELETE' },
     );
     expect(again.status).toBe(404);

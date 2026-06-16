@@ -255,13 +255,13 @@ function subReq(
 
 describe('parseSubActor', () => {
   it('accepts a well-formed <svc>:<id>', () => {
-    expect(parseSubActor('telegram:evan')).toBe('telegram:evan');
+    expect(parseSubActor('telegram:alice')).toBe('telegram:alice');
     expect(parseSubActor('discord:123456789')).toBe('discord:123456789');
     expect(parseSubActor('  matrix:@a.b_c  ')).toBe('matrix:@a.b_c'); // trimmed
   });
   it('accepts fully-qualified + extended-grammar MXIDs', () => {
-    expect(parseSubActor('matrix:@evan:home.example.com')).toBe(
-      'matrix:@evan:home.example.com',
+    expect(parseSubActor('matrix:@alice:home.example.com')).toBe(
+      'matrix:@alice:home.example.com',
     );
     // Extended MXID localpart chars (/ = +) are legal and must not be rejected.
     expect(parseSubActor('matrix:@user=foo:home.example.com')).toBe(
@@ -271,8 +271,8 @@ describe('parseSubActor', () => {
       'matrix:@a/b+c:srv.org',
     );
     // A homeserver with an explicit port (the `:` is already allowed).
-    expect(parseSubActor('matrix:@evan:home.example.com:8448')).toBe(
-      'matrix:@evan:home.example.com:8448',
+    expect(parseSubActor('matrix:@alice:home.example.com:8448')).toBe(
+      'matrix:@alice:home.example.com:8448',
     );
   });
   it('rejects empty / whitespace / overlong', () => {
@@ -291,17 +291,17 @@ describe('parseSubActor', () => {
 
 describe('resolveSubActor middleware', () => {
   it('attaches subActor for a BRIDGE token with a valid header', () => {
-    const req = subReq([BRIDGE, SESSION_READ], 'telegram:evan');
+    const req = subReq([BRIDGE, SESSION_READ], 'telegram:alice');
     let called = false;
     resolveSubActor()(req, fakeRes(), () => {
       called = true;
     });
     expect(called).toBe(true);
-    expect(req.rcClient?.subActor).toBe('telegram:evan');
+    expect(req.rcClient?.subActor).toBe('telegram:alice');
   });
 
   it('IGNORES the header for a non-bridge token (no attribution spoofing)', () => {
-    const req = subReq([APPROVE, WRITE, SESSION_READ], 'telegram:evan');
+    const req = subReq([APPROVE, WRITE, SESSION_READ], 'telegram:alice');
     resolveSubActor()(req, fakeRes(), () => {});
     expect(req.rcClient?.subActor).toBeUndefined();
   });
@@ -313,7 +313,7 @@ describe('resolveSubActor middleware', () => {
   });
 
   it('is a no-op (and calls next) when unauthenticated', () => {
-    const req = subReq(undefined, 'telegram:evan');
+    const req = subReq(undefined, 'telegram:alice');
     let called = false;
     resolveSubActor()(req, fakeRes(), () => {
       called = true;
@@ -355,7 +355,7 @@ describe('enforceSubActorRateLimit middleware', () => {
     const run = () => {
       const res = fakeRes();
       let called = false;
-      mw(bridgeReq('telegram:evan'), res, () => {
+      mw(bridgeReq('telegram:alice'), res, () => {
         called = true;
       });
       return { res, called };
@@ -373,7 +373,7 @@ describe('enforceSubActorRateLimit middleware', () => {
       (c) => c.action === 'sub_actor_rate_limited',
     );
     expect(rows).toHaveLength(1);
-    expect(rows[0].subActor).toBe('telegram:evan');
+    expect(rows[0].subActor).toBe('telegram:alice');
     expect(rows[0].target).toBe('s1');
   });
 });
@@ -388,10 +388,10 @@ describe('enforceSubActorBan middleware', () => {
 
   it('403s a banned sub-actor', () => {
     const bans = new SubActorBanStore();
-    bans.ban('telegram:evan');
+    bans.ban('telegram:alice');
     const res = fakeRes();
     let called = false;
-    enforceSubActorBan(bans)(bridgeReq('telegram:evan'), res, () => {
+    enforceSubActorBan(bans)(bridgeReq('telegram:alice'), res, () => {
       called = true;
     });
     expect(called).toBe(false);
@@ -403,7 +403,7 @@ describe('enforceSubActorBan middleware', () => {
     const bans = new SubActorBanStore();
     bans.ban('telegram:troll');
     let a = false;
-    enforceSubActorBan(bans)(bridgeReq('telegram:evan'), fakeRes(), () => {
+    enforceSubActorBan(bans)(bridgeReq('telegram:alice'), fakeRes(), () => {
       a = true;
     });
     expect(a).toBe(true);

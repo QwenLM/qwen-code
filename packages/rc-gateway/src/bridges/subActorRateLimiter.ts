@@ -27,7 +27,7 @@ export interface SubActorLimitResult {
  * Per-sub-actor rolling-window write limiter (`add-bridge-protocol`): a bridge
  * fans in N external humans, so one rude chat user must not saturate the
  * per-session FIFO with prompts/votes. Keyed by the asserted sub-actor id
- * (`telegram:evan`), independent of the bridge token. In-memory; a restart
+ * (`telegram:alice`), independent of the bridge token. In-memory; a restart
  * resets counters (FAIL-OPEN — a glitch must never WEDGE a real user, at worst
  * it lets a small burst through). Pure/total (no I/O, never throws). Mirrors the
  * push rate limiter's rolling-window + firstDrop shape, in the bridge domain.

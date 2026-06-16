@@ -146,7 +146,7 @@ describe('MatrixBridge runner — sync loop', () => {
     await rooms.bind('!r:h', 'sess_q');
     const h = harness([
       // initial sync (since=undefined) carries a message — must NOT be replayed.
-      { next_batch: 's1', ...textMsg('!r:h', '@evan:h', 'old history') },
+      { next_batch: 's1', ...textMsg('!r:h', '@alice:h', 'old history') },
     ]);
     await h.bridge.start(h.ac.signal);
     expect(h.prompts).toEqual([]);
@@ -156,7 +156,7 @@ describe('MatrixBridge runner — sync loop', () => {
     await rooms.bind('!r:h', 'sess_q');
     const h = harness([
       { next_batch: 's1' }, // initial (skipped)
-      { next_batch: 's2', ...textMsg('!r:h', '@evan:h', 'run the tests') },
+      { next_batch: 's2', ...textMsg('!r:h', '@alice:h', 'run the tests') },
     ]);
     await h.bridge.start(h.ac.signal);
     expect(h.prompts).toEqual(['run the tests']);
@@ -361,7 +361,7 @@ describe('MatrixBridge.dispatchDecryptedMessage (E2EE routing seam)', () => {
     const h = harness([]); // no sync batches; we drive dispatch directly
     await h.bridge.dispatchDecryptedMessage({
       roomId: '!enc:h',
-      sender: '@evan:h',
+      sender: '@alice:h',
       body: 'decrypted prompt',
     });
     expect(h.prompts).toEqual(['decrypted prompt']);
@@ -382,7 +382,7 @@ describe('MatrixBridge.dispatchDecryptedMessage (E2EE routing seam)', () => {
     const h = harness([]); // no binding for !enc:h
     await h.bridge.dispatchDecryptedMessage({
       roomId: '!enc:h',
-      sender: '@evan:h',
+      sender: '@alice:h',
       body: 'nowhere',
     });
     expect(h.prompts).toEqual([]);

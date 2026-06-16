@@ -10,12 +10,12 @@ import { SubActorBanStore } from './subActorBans.js';
 describe('SubActorBanStore', () => {
   it('bans, reports, lists, and lifts', () => {
     const s = new SubActorBanStore();
-    expect(s.isBanned('telegram:evan')).toBe(false);
-    s.ban('telegram:evan');
-    expect(s.isBanned('telegram:evan')).toBe(true);
-    expect(s.list()).toEqual(['telegram:evan']);
-    expect(s.lift('telegram:evan')).toBe(true);
-    expect(s.isBanned('telegram:evan')).toBe(false);
+    expect(s.isBanned('telegram:alice')).toBe(false);
+    s.ban('telegram:alice');
+    expect(s.isBanned('telegram:alice')).toBe(true);
+    expect(s.list()).toEqual(['telegram:alice']);
+    expect(s.lift('telegram:alice')).toBe(true);
+    expect(s.isBanned('telegram:alice')).toBe(false);
   });
 
   it('ban is idempotent; lift of an unknown sub-actor returns false', () => {

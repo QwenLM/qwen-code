@@ -16,7 +16,7 @@ import './types.js';
 const SUB_ACTOR_MAX = 128;
 /**
  * A sub-actor id must start alphanumeric and use only a safe id charset
- * (`<svc>:<user-id>` shapes like `telegram:evan`, `discord:12345`,
+ * (`<svc>:<user-id>` shapes like `telegram:alice`, `discord:12345`,
  * `matrix:@user=foo:home.example.com`). The charset deliberately EXCLUDES
  * whitespace and control characters so an asserted value can never inject a
  * newline into a JSONL audit line or smuggle markup into a client that renders

@@ -108,22 +108,22 @@ describe('BridgeClient (loopback contract)', () => {
   });
 
   it('sendPrompt carries the bearer AND X-RC-SubActor + the prompt body', async () => {
-    const r = await client().sendPrompt('s1', 'do it', 'telegram:evan');
+    const r = await client().sendPrompt('s1', 'do it', 'telegram:alice');
     expect(r.ok).toBe(true);
     expect(captured[0]).toMatchObject({
       method: 'POST',
       path: '/rc/session/s1/prompt',
       auth: 'Bearer qwk_test',
-      subActor: 'telegram:evan',
+      subActor: 'telegram:alice',
       body: { prompt: 'do it' },
     });
   });
 
   it('vote POSTs the permission route with outcome + sub-actor', async () => {
-    await client().vote('s1', 'r1', 'allow_once', 'telegram:evan', 'opt-a');
+    await client().vote('s1', 'r1', 'allow_once', 'telegram:alice', 'opt-a');
     expect(captured[0]).toMatchObject({
       path: '/rc/session/s1/permission/r1',
-      subActor: 'telegram:evan',
+      subActor: 'telegram:alice',
       body: { outcome: 'allow_once', optionId: 'opt-a' },
     });
   });

@@ -17,7 +17,7 @@ describe('SubActorRateLimiter', () => {
     const rl = new SubActorRateLimiter();
     const r = [];
     for (let i = 0; i < 4; i++)
-      r.push(rl.tryConsume('telegram:evan', 3, T0 + i));
+      r.push(rl.tryConsume('telegram:alice', 3, T0 + i));
     expect(r.slice(0, 3).every((x) => x.allowed)).toBe(true);
     expect(r[3].allowed).toBe(false);
   });

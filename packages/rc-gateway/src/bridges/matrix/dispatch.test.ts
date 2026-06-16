@@ -98,7 +98,7 @@ function deps(over: Partial<MatrixDispatchDeps> = {}) {
 
 const msg = (over: Record<string, unknown> = {}) => ({
   roomId: '!abc:home.example.com',
-  sender: '@evan:home.example.com',
+  sender: '@alice:home.example.com',
   isBot: false,
   body: 'hi',
   powerLevel: 0,
@@ -123,7 +123,7 @@ describe('matrix dispatch — message → prompt', () => {
       {
         sessionId: 'sess_xyz',
         prompt: 'run the tests',
-        subActor: 'matrix:@evan:home.example.com',
+        subActor: 'matrix:@alice:home.example.com',
       },
     ]);
   });
@@ -137,7 +137,7 @@ describe('matrix dispatch — message → prompt', () => {
 
     f.setPromptResult({ ok: false, status: 403 });
     await handleMessage(
-      msg({ body: 'x', sender: '@evan:home.example.com' }),
+      msg({ body: 'x', sender: '@alice:home.example.com' }),
       f.deps,
     );
     expect(turns).toEqual(['sess_xyz']); // 403 → no boundary
@@ -158,14 +158,14 @@ describe('matrix dispatch — message → prompt', () => {
 
   it('drops a banned sender; caches a 403', async () => {
     await rooms.bind('!abc:home.example.com', 'sess_xyz');
-    const banned = deps({ bans: new Set(['matrix:@evan:home.example.com']) });
+    const banned = deps({ bans: new Set(['matrix:@alice:home.example.com']) });
     await handleMessage(msg(), banned.deps);
     expect(banned.prompts).toHaveLength(0);
 
     const f = deps();
     f.setPromptResult({ ok: false, status: 403 });
     await handleMessage(msg(), f.deps);
-    expect(f.deps.bans.has('matrix:@evan:home.example.com')).toBe(true);
+    expect(f.deps.bans.has('matrix:@alice:home.example.com')).toBe(true);
   });
 
   it('posts a room "slow down" reply on a 429', async () => {
@@ -252,7 +252,7 @@ describe('matrix dispatch — !qwen commands + power-level gate', () => {
 describe('matrix dispatch — reaction → vote', () => {
   const react = (over: Record<string, unknown> = {}) => ({
     roomId: '!abc:home.example.com',
-    sender: '@evan:home.example.com',
+    sender: '@alice:home.example.com',
     targetEventId: '$m_42',
     key: '\u{1F44D}',
     ...over,
@@ -269,7 +269,7 @@ describe('matrix dispatch — reaction → vote', () => {
         sessionId: 'sess_xyz',
         requestId: 'req_xyz',
         outcome: 'allow_once',
-        subActor: 'matrix:@evan:home.example.com',
+        subActor: 'matrix:@alice:home.example.com',
       },
     ]);
   });
@@ -304,7 +304,7 @@ describe('matrix dispatch — reaction → vote', () => {
     ]);
     const f = deps({
       tracked,
-      bans: new Set(['matrix:@evan:home.example.com']),
+      bans: new Set(['matrix:@alice:home.example.com']),
     });
     await handleReaction(react(), f.deps);
     expect(f.votes).toHaveLength(0);
@@ -318,6 +318,6 @@ describe('matrix dispatch — reaction → vote', () => {
     const f = deps({ tracked });
     f.setVoteResult({ ok: false, status: 403 });
     await handleReaction(react(), f.deps);
-    expect(f.deps.bans.has('matrix:@evan:home.example.com')).toBe(true);
+    expect(f.deps.bans.has('matrix:@alice:home.example.com')).toBe(true);
   });
 });

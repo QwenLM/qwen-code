@@ -55,8 +55,8 @@ describe('validateMdnsLabel', () => {
 
 describe('deriveWorkspaceName', () => {
   it('uses the cwd basename by default (never a full path)', () => {
-    expect(deriveWorkspaceName('/home/evan/projects/secret')).toBe('secret');
-    const v = deriveWorkspaceName('/home/evan/projects/secret');
+    expect(deriveWorkspaceName('/home/user/projects/secret')).toBe('secret');
+    const v = deriveWorkspaceName('/home/user/projects/secret');
     expect(v).not.toContain('/');
   });
 

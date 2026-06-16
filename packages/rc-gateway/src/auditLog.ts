@@ -144,7 +144,7 @@ export interface AuditEntry {
   /** The operator-chosen share label, denormalized so it survives token expiry. */
   shareLabel?: string;
   /**
-   * The underlying human a BRIDGE token acted on behalf of (e.g. `telegram:evan`),
+   * The underlying human a BRIDGE token acted on behalf of (e.g. `telegram:alice`),
    * asserted via `X-RC-SubActor` and resolved only for bridge tokens. Lets the
    * audit answer "who actually pressed the button", not just "which bridge".
    * Flows onto the `/rc/events` SSE frame automatically (the frame serializes the
