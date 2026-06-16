@@ -480,10 +480,11 @@ function inspectMcpBudget(
   if (
     clientCount !== undefined &&
     clientBudget !== undefined &&
-    clientBudget > 0 &&
-    clientCount / clientBudget >= 0.75
+    clientBudget > 0
   ) {
-    return 'warning';
+    const ratio = clientCount / clientBudget;
+    if (ratio >= 1) return 'exhausted';
+    if (ratio >= 0.75) return 'warning';
   }
   return undefined;
 }
@@ -527,7 +528,10 @@ function visitStatusContainers(
     'servers',
     'budgets',
     'skills',
+    'tools',
     'providers',
+    'hooks',
+    'extensions',
   ]) {
     const value = data[key];
     if (!Array.isArray(value)) continue;
