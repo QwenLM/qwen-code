@@ -434,6 +434,7 @@ describe('gemini.tsx main function', () => {
       getProjectRoot: () => '/',
       getOutputFormat: () => OutputFormat.TEXT,
       getWarnings: () => (initialized ? ['late memory warning'] : []),
+      isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getContentGeneratorConfig: () => undefined,
       getUsageStatisticsEnabled: () => true,
