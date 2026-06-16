@@ -142,18 +142,11 @@ async function runAgentWithRetry(
   signal: AbortSignal,
 ): Promise<GateAgentResult | null> {
   for (let attempt = 1; attempt <= MAX_AGENT_RETRIES; attempt++) {
-    // Check if the parent signal is already aborted before starting.
-    // Note: This check is for genuine user-initiated cancellations.
-    // Transient parent-side aborts (e.g., stream errors) should not
-    // prevent retries since runGateAgent now isolates the gate agent
-    // from parent signal propagation.
-    if (signal.aborted) {
-      debugLogger.warn(
-        `Gate agent skipped on attempt ${attempt}: parent signal already aborted`,
-      );
-      // If the signal is aborted, don't retry — the user/session is gone
-      return null;
-    }
+    // Note: We deliberately do NOT check signal.aborted here.
+    // The gate agent is signal-isolated (see runGateAgent), so parent-side
+    // aborts are typically transient (stream errors, round cleanup). The
+    // gate agent has its own 5-minute timeout as the safety net. If the
+    // parent is truly gone, the caller will discard the result anyway.
     try {
       return await runGateAgent(config, bundle, signal);
     } catch (error) {
@@ -167,11 +160,30 @@ async function runAgentWithRetry(
         );
         return null;
       }
-      // Add a small delay between retries to allow transient issues to settle
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Abort-aware delay: wait 1s between retries, but bail out early
+      // if the parent signal is aborted during the wait.
+      await abortableSleep(1000, signal);
     }
   }
   return null;
+}
+
+/**
+ * Sleep for `ms` milliseconds, but return early if `signal` is aborted.
+ */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 // ── Finding id assignment ──────────────────────────────────────────────

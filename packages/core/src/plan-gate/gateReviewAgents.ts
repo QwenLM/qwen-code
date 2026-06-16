@@ -15,10 +15,11 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('GATE_REVIEW_AGENTS');
 
 /**
- * Timeout for the gate agent in milliseconds. The gate agent should complete
- * within a reasonable time (typically 1-2 minutes for a plan review).
+ * Timeout for the gate agent in milliseconds. The gate agent typically
+ * completes within 1–2 minutes; this 5-minute ceiling accounts for the
+ * runConfig.max_time_minutes limit and provides a safety net against hangs.
  */
-const GATE_AGENT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes, matching runConfig.max_time_minutes
+const GATE_AGENT_TIMEOUT_MS = 5 * 60 * 1000;
 
 // ── Gate agent prompt ──────────────────────────────────────────────────
 
@@ -113,8 +114,9 @@ export function formatEvidence(bundle: EvidenceBundle): string {
  * Signal isolation: The gate agent creates its own independent AbortController
  * with a timeout, rather than directly inheriting the parent's signal. This
  * prevents transient parent-side issues (stream errors, round cleanup) from
- * cascading into the gate agent. The parent signal is only monitored for
- * genuine user-initiated cancellations.
+ * cascading into the gate agent. The parent signal is only pre-checked before
+ * starting — it is NOT monitored during execution. If the parent is already
+ * aborted when this function is called, it throws immediately.
  *
  * Returns the parsed `GateAgentResult`, or throws on unrecoverable failure.
  */
