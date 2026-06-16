@@ -37,6 +37,14 @@ const MAX_RECURRING_JITTER_MS = 15 * 60 * 1000;
 const MAX_ONESHOT_JITTER_MS = 90 * 1000;
 const LOCK_PROBE_INTERVAL_MS = 5000;
 const FILE_DEBOUNCE_MS = 300;
+// Loop wakeups (self-paced /loop) align with Claude Code's ScheduleWakeup:
+// the requested delay is clamped to [60, 3600] seconds, with a 1200s default
+// heartbeat for non-finite input. Unlike cron jobs the fire time is exact
+// (second resolution, not minute-rounded) and lives in a separate map — not
+// subject to MAX_JOBS, never durable.
+const WAKEUP_MIN_SECONDS = 60;
+const WAKEUP_MAX_SECONDS = 3600;
+const WAKEUP_DEFAULT_SECONDS = 1200;
 
 export interface CronJob {
   id: string;
@@ -51,6 +59,18 @@ export interface CronJob {
   durable?: boolean;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
+}
+
+/**
+ * A second-resolution, session-only one-shot wakeup used by self-paced
+ * `/loop` (loop_wakeup). Kept separate from cron jobs: never persisted,
+ * never counted against MAX_JOBS, fired at an exact ms (not minute-rounded).
+ */
+export interface SessionWakeup {
+  id: string;
+  fireAtMs: number;
+  prompt: string;
+  createdAt: number;
 }
 
 /**
@@ -131,9 +151,36 @@ function generateId(): string {
   return id;
 }
 
+function clampWakeupSeconds(delaySeconds: number): number {
+  if (!Number.isFinite(delaySeconds)) return WAKEUP_DEFAULT_SECONDS;
+  return Math.min(
+    WAKEUP_MAX_SECONDS,
+    Math.max(WAKEUP_MIN_SECONDS, Math.round(delaySeconds)),
+  );
+}
+
+/**
+ * Maps a wakeup onto the minimal CronJob shape onFire consumers read (they
+ * only use `prompt`). cronExpr `@wakeup` marks its origin.
+ */
+function wakeupToJob(wakeup: SessionWakeup): CronJob {
+  return {
+    id: wakeup.id,
+    cronExpr: '@wakeup',
+    prompt: wakeup.prompt,
+    recurring: false,
+    createdAt: wakeup.createdAt,
+    expiresAt: Infinity,
+    jitterMs: 0,
+  };
+}
+
 export class CronScheduler {
   // All jobs — session-only and durable — live in this one map.
   private jobs = new Map<string, CronJob>();
+  // Loop wakeups live separately: second-resolution, never durable, never
+  // counted against MAX_JOBS. Delivered through the same onFire as cron.
+  private wakeups = new Map<string, SessionWakeup>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private onFire: ((job: CronJob) => void) | null = null;
 
@@ -209,6 +256,54 @@ export class CronScheduler {
   }
 
   /**
+   * Schedules a second-resolution, session-only one-shot wakeup for
+   * self-paced `/loop`. Clamps `delaySeconds` to [60, 3600]; non-finite
+   * input falls back to the default heartbeat. The fire time is exact (not
+   * minute-rounded) and is not subject to MAX_JOBS. Returns the scheduling
+   * outcome for the model (mirrors ScheduleWakeup's output).
+   */
+  scheduleWakeup(
+    delaySeconds: number,
+    prompt: string,
+  ): {
+    id: string;
+    scheduledFor: string;
+    clampedDelaySeconds: number;
+    wasClamped: boolean;
+  } {
+    const clampedDelaySeconds = clampWakeupSeconds(delaySeconds);
+    const wasClamped =
+      !Number.isFinite(delaySeconds) ||
+      delaySeconds < WAKEUP_MIN_SECONDS ||
+      delaySeconds > WAKEUP_MAX_SECONDS;
+    const id = generateId();
+    const now = Date.now();
+    const fireAtMs = now + clampedDelaySeconds * 1000;
+    this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
+    return {
+      id,
+      scheduledFor: new Date(fireAtMs).toISOString(),
+      clampedDelaySeconds,
+      wasClamped,
+    };
+  }
+
+  /** Cancels a single pending wakeup. Returns true if it existed. */
+  cancelWakeup(id: string): boolean {
+    return this.wakeups.delete(id);
+  }
+
+  /**
+   * Cancels every pending wakeup; returns how many were cancelled. The
+   * primitive behind a future loop-scoped "cancel all wakeups on abort".
+   */
+  cancelAllWakeups(): number {
+    const count = this.wakeups.size;
+    this.wakeups.clear();
+    return count;
+  }
+
+  /**
    * Creates a durable cron job: registered like any other job, and
    * persisted under ~/.qwen (per-project) so it survives restarts.
    * Throws if the job can't be persisted.
@@ -280,7 +375,10 @@ export class CronScheduler {
    * design and never fire without lock ownership, so they must not pin it.
    */
   get sessionSize(): number {
-    let count = 0;
+    // Pending wakeups count: a self-paced loop must hold the headless
+    // process open until its wakeup fires (and re-arms), mirroring CC's
+    // "call to keep alive / omit to end".
+    let count = this.wakeups.size;
     for (const job of this.jobs.values()) {
       if (!job.durable) count++;
     }
@@ -791,7 +889,7 @@ export class CronScheduler {
    * install fireable tasks at any time, even while the map is empty).
    */
   get hasPendingWork(): boolean {
-    return this.jobs.size > 0 || this.durableEnabled;
+    return this.jobs.size > 0 || this.wakeups.size > 0 || this.durableEnabled;
   }
 
   /**
@@ -806,7 +904,7 @@ export class CronScheduler {
    * that are due. Exported for testing.
    */
   tick(now?: Date): void {
-    if (this.jobs.size === 0) return;
+    if (this.jobs.size === 0 && this.wakeups.size === 0) return;
     const currentDate = now ?? new Date();
     const currentMs = currentDate.getTime();
 
@@ -843,6 +941,15 @@ export class CronScheduler {
             ),
         ),
       );
+    }
+
+    // Fire due wakeups (second-resolution, one-shot). Delivered through the
+    // same onFire channel as cron jobs so interactive, headless, and ACP
+    // consumers handle them identically, then removed immediately.
+    for (const wakeup of [...this.wakeups.values()]) {
+      if (wakeup.fireAtMs > currentMs) continue;
+      this.wakeups.delete(wakeup.id);
+      if (this.onFire) this.onFire(wakeupToJob(wakeup));
     }
   }
 
@@ -935,6 +1042,7 @@ export class CronScheduler {
   destroy(): void {
     this.stop();
     this.jobs.clear();
+    this.wakeups.clear();
     this.pendingRemoval.clear();
     this.pendingAdd.clear();
   }
