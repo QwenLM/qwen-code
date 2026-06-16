@@ -598,24 +598,28 @@ jobs:
             gh release create "${create_args[@]}"
           fi
 
-          feed_title="Qwen Code Desktop latest"
-          feed_notes="Auto-update feed for ${RELEASE_TAG}. See https://github.com/${GH_REPO}/releases/tag/${RELEASE_TAG}."
-          feed_upload_args=("$UPDATE_FEED_TAG" "${assets[@]}" --clobber)
-          if gh release view "$UPDATE_FEED_TAG" >/dev/null 2>&1; then
-            gh release edit "$UPDATE_FEED_TAG" \
-              --draft=false \
-              --prerelease=false \
-              --latest=false \
-              --target "$RELEASE_TARGET" \
-              --title "$feed_title" \
-              --notes "$feed_notes"
-            gh release upload "${feed_upload_args[@]}"
+          if [ "$RELEASE_DRAFT" = "true" ] || [ "$RELEASE_PRERELEASE" = "true" ]; then
+            echo "Skipping $UPDATE_FEED_TAG update for draft or prerelease desktop release."
           else
-            gh release create "$UPDATE_FEED_TAG" "${assets[@]}" \
-              --latest=false \
-              --target "$RELEASE_TARGET" \
-              --title "$feed_title" \
-              --notes "$feed_notes"
+            feed_title="Qwen Code Desktop latest"
+            feed_notes="Auto-update feed for ${RELEASE_TAG}. See https://github.com/${GH_REPO}/releases/tag/${RELEASE_TAG}."
+            feed_upload_args=("$UPDATE_FEED_TAG" "${assets[@]}" --clobber)
+            if gh release view "$UPDATE_FEED_TAG" >/dev/null 2>&1; then
+              gh release edit "$UPDATE_FEED_TAG" \
+                --draft=false \
+                --prerelease=false \
+                --latest=false \
+                --target "$RELEASE_TARGET" \
+                --title "$feed_title" \
+                --notes "$feed_notes"
+              gh release upload "${feed_upload_args[@]}"
+            else
+              gh release create "$UPDATE_FEED_TAG" "${assets[@]}" \
+                --latest=false \
+                --target "$RELEASE_TARGET" \
+                --title "$feed_title" \
+                --notes "$feed_notes"
+            fi
           fi
 
   sync-version:
