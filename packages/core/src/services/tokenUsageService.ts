@@ -459,9 +459,11 @@ export async function queryTokenUsage(
 
 function csvEscape(value: string | number | undefined): string {
   const stringValue = value === undefined ? '' : String(value);
-  const sanitized = /^[=+\-@\t\r\n]/.test(stringValue)
-    ? `'${stringValue}`
-    : stringValue;
+  const trimmed = stringValue.trimStart();
+  const sanitized =
+    /^[=+\-@]/.test(trimmed) || /^[\t\r\n]/.test(stringValue)
+      ? `'${stringValue}`
+      : stringValue;
   if (/[",\n\r]/.test(sanitized)) {
     return `"${sanitized.replace(/"/g, '""')}"`;
   }

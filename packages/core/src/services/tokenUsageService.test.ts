@@ -130,6 +130,40 @@ describe('tokenUsageService', () => {
     expect(record).not.toHaveProperty('response_text');
   });
 
+  it('uses current local date when API timestamps are missing or invalid', () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const invalidTimestampEvent = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    invalidTimestampEvent['event.timestamp'] = 'not-a-date';
+    const missingTimestampEvent = createEvent('model-b', 'prompt-2', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    Reflect.deleteProperty(missingTimestampEvent, 'event.timestamp');
+
+    const invalidTimestampRecord = apiResponseEventToTokenUsageRecord(
+      config,
+      invalidTimestampEvent,
+    );
+    const missingTimestampRecord = apiResponseEventToTokenUsageRecord(
+      config,
+      missingTimestampEvent,
+    );
+
+    expect(invalidTimestampRecord.localDate).toBe('2026-05-25');
+    expect(invalidTimestampRecord.localMonth).toBe('2026-05');
+    expect(missingTimestampRecord.timestamp).toBe('2026-05-25T10:00:00.000Z');
+    expect(missingTimestampRecord.localDate).toBe('2026-05-25');
+    expect(missingTimestampRecord.localMonth).toBe('2026-05');
+  });
+
   it('persists API usage to monthly JSONL and aggregates daily totals', async () => {
     const config = makeFakeConfig({
       sessionId: 'session-1',
@@ -663,6 +697,76 @@ describe('tokenUsageService', () => {
     );
     expect(csv).toContain(
       'day,2026-05-25,auth_type,"auth""quoted",,"auth""quoted",,1,1,2,0,0,3,100',
+    );
+  });
+
+  it('escapes formula-like CSV fields after leading whitespace', () => {
+    const group = (key: string) => ({
+      key,
+      model: key,
+      requests: 1,
+      inputTokens: 1,
+      outputTokens: 2,
+      cachedTokens: 0,
+      thoughtsTokens: 0,
+      totalTokens: 3,
+      apiDurationMs: 100,
+    });
+    const csv = formatTokenUsageSummaryAsCsv({
+      period: 'day',
+      value: '2026-05-25',
+      generatedAt: '2026-05-25T10:00:00.000Z',
+      totals: {
+        requests: 9,
+        inputTokens: 9,
+        outputTokens: 18,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 27,
+        apiDurationMs: 900,
+      },
+      byModel: [
+        '=SUM(A1)',
+        ' =SUM(A1)',
+        '+SUM(A1)',
+        ' +SUM(A1)',
+        '-SUM(A1)',
+        ' -SUM(A1)',
+        '@SUM(A1)',
+        ' @SUM(A1)',
+        '\tSUM(A1)',
+      ].map(group),
+      byAuthType: [],
+      byModelAndAuthType: [],
+      bySource: [],
+    });
+
+    expect(csv).toContain(
+      "day,2026-05-25,model,'=SUM(A1),'=SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,' =SUM(A1),' =SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,'+SUM(A1),'+SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,' +SUM(A1),' +SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,'-SUM(A1),'-SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,' -SUM(A1),' -SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,'@SUM(A1),'@SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,' @SUM(A1),' @SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,'\tSUM(A1),'\tSUM(A1),,,1,1,2,0,0,3,100",
     );
   });
 
