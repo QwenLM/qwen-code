@@ -2608,6 +2608,24 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(bridge.enqueueMidTurnCalls).toEqual([]);
     });
+
+    it('maps a bridge InvalidClientIdError to 400 invalid_client_id', async () => {
+      // Well-formed but unbound client id: the bridge's ownership check throws,
+      // and `sendBridgeError` maps it like the sibling routes.
+      const bridge = fakeBridge({
+        enqueueMidTurnImpl: (sid) => {
+          throw new InvalidClientIdError(sid, 'rogue');
+        },
+      });
+      const res = await midTurnPost(
+        midTurnApp(bridge),
+        's-1',
+        { message: 'hi' },
+        'rogue',
+      );
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+    });
   });
 
   describe('host allowlist (loopback bind)', () => {
@@ -6386,13 +6404,9 @@ describe('createServeApp', () => {
 
   describe('GET /daemon/status', () => {
     it('requires bearer auth when a token is configured', async () => {
-      const app = createServeApp(
-        { ...baseOpts, token: 'secret' },
-        undefined,
-        {
-          bridge: fakeBridge(),
-        },
-      );
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge: fakeBridge(),
+      });
 
       const noAuth = await request(app)
         .get('/daemon/status')

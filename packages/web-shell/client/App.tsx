@@ -1298,7 +1298,14 @@ export function App({
   // queuedPrompts and follows the normal next-turn path.
   useEffect(() => {
     if (streamingState !== 'idle') return;
-    midTurnEnqueueAbortRef.current?.abort();
+    const ctrl = midTurnEnqueueAbortRef.current;
+    if (!ctrl) return;
+    // A controller exists ⇒ at least one mid-turn push was issued this turn.
+    // Cancel it so a still-in-flight push can't land in the next turn (a
+    // completed one makes this a no-op). Debug-only, mirrors the server-side
+    // mid-turn observability.
+    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
+    ctrl.abort();
     midTurnEnqueueAbortRef.current = null;
   }, [streamingState]);
 
@@ -1345,6 +1352,19 @@ export function App({
     // omitting this would skip every batch — leaving our own messages in the
     // queue to be resent next turn (double delivery). A peer on the same
     // session keeps its own coincidentally-equal entry.
+    if (
+      connection.clientId === undefined &&
+      midTurnInjectedBatches.some(
+        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
+      )
+    ) {
+      // Edge: stamped batches but no client id yet (older daemon / reconnect
+      // timing). Dedupe skips them, so they may be resent next turn — make it
+      // diagnosable rather than a silent double-delivery.
+      console.debug(
+        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
+      );
+    }
     const next = removeInjectedFromQueue(
       queuedPromptsRef.current,
       midTurnInjectedBatches,

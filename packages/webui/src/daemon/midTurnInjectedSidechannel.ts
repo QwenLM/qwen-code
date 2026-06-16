@@ -65,10 +65,17 @@ export function publishSidechannelMidTurnInjected(
         : {}),
     },
   ];
-  pending =
-    appended.length > MAX_PENDING_BATCHES
-      ? appended.slice(appended.length - MAX_PENDING_BATCHES)
-      : appended;
+  if (appended.length > MAX_PENDING_BATCHES) {
+    const dropped = appended.length - MAX_PENDING_BATCHES;
+    // Eviction means an orphaned consumer (unmounted / never reconciled) — make
+    // the silent drop visible, mirroring the server-side mid-turn observability.
+    console.debug(
+      `[mid-turn] sidechannel buffer over ${MAX_PENDING_BATCHES}; evicting ${dropped} oldest batch(es)`,
+    );
+    pending = appended.slice(dropped);
+  } else {
+    pending = appended;
+  }
   notifyMidTurnInjectedListeners();
 }
 

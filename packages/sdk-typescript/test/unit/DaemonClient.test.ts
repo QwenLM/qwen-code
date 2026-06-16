@@ -1879,7 +1879,10 @@ describe('DaemonClient', () => {
         jsonResponse(200, { accepted: true }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      const result = await client.enqueueMidTurnMessage('s-1', 'also check tests');
+      const result = await client.enqueueMidTurnMessage(
+        's-1',
+        'also check tests',
+      );
       expect(result).toEqual({ accepted: true });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
       expect(calls[0]?.method).toBe('POST');
@@ -1897,7 +1900,7 @@ describe('DaemonClient', () => {
       expect(result.accepted).toBe(false);
     });
 
-    it('URL-encodes the session id and forwards client id + abort signal', async () => {
+    it('URL-encodes the session id, forwards client id, and propagates the abort signal', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { accepted: true }),
       );
@@ -1907,9 +1910,40 @@ describe('DaemonClient', () => {
         clientId: 'client-1',
         signal: ctrl.signal,
       });
-      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/mid-turn-message');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/mid-turn-message',
+      );
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
-      expect(calls[0]?.signal).toBe(ctrl.signal);
+      // `fetchWithTimeout` composes the caller signal with its timeout
+      // controller, so the forwarded signal is not identical to `ctrl.signal`,
+      // but aborting the caller's signal must still propagate to the request
+      // (this is what cancels a late mid-turn push at turn settle).
+      const forwarded = calls[0]?.signal;
+      expect(forwarded).toBeDefined();
+      expect(forwarded?.aborted).toBe(false);
+      ctrl.abort();
+      expect(forwarded?.aborted).toBe(true);
+    });
+
+    it('times out a hung daemon instead of hanging forever', async () => {
+      // Regression guard for the `fetchWithTimeout` switch: a daemon that never
+      // responds must reject (not wedge the void-ed caller in actions.ts). The
+      // mock honours the abort signal like a real fetch, so the timeout's abort
+      // settles it; before the switch this would hang on `transport.fetch`.
+      const fetch = ((_url: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        })) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 20,
+      });
+      await expect(
+        client.enqueueMidTurnMessage('s-1', 'hi'),
+      ).rejects.toBeDefined();
     });
 
     it('throws on 404 when the session is unknown', async () => {

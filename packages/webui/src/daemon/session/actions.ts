@@ -614,7 +614,18 @@ export function createDaemonSessionActions({
       if (!session) return { accepted: false };
       try {
         return await session.enqueueMidTurnMessage(message, opts);
-      } catch {
+      } catch (err) {
+        // An abort is the designed settle-time cancel (the message stays in the
+        // browser queue for the next turn), not a failure — stay silent. Any
+        // OTHER error (daemon down, 4xx/5xx, network, timeout) silently disables
+        // mid-turn drain for every client, so surface it at debug for DevTools
+        // without raising a user-facing notice.
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          console.debug(
+            '[enqueueMidTurnMessage] push failed; kept for next turn',
+            err,
+          );
+        }
         return { accepted: false };
       }
     },

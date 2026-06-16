@@ -267,6 +267,12 @@ export interface DaemonMidTurnMessageInjectedData {
    * OWN pending queue — a peer attached to the same session must not drop a
    * coincidentally-equal entry it didn't queue. Absent for anonymous pushes.
    *
+   * CONTRACT: a consumer that dedupes on this event MUST compare this id against
+   * its own client id and skip frames originated by a different client. The
+   * daemon broadcasts the frame to every SSE subscriber on the session and does
+   * NOT route by originator, so a consumer that dedupes unconditionally will drop
+   * another client's coincidentally-equal pending message (double delivery).
+   *
    * IMPORTANT — wire location: unlike the permission/settings events (which the
    * session reducer's `mergeOriginator` step copies from the envelope INTO
    * `data`), this event is NOT reduced, so the daemon leaves the id ONLY on the

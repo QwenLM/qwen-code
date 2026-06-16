@@ -1489,7 +1489,11 @@ export class DaemonClient {
     message: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonMidTurnMessageResult> {
-    const res = await this.transport.fetch(
+    // Route through `fetchWithTimeout` like every other method so a hung daemon
+    // can't wedge this promise forever (the caller in `actions.ts` awaits it).
+    // The helper composes any caller `signal` (the turn-scoped abort) WITH its
+    // timeout controller, so the mid-turn-settle abort still propagates.
+    return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/mid-turn-message`,
       {
         method: 'POST',
@@ -1500,11 +1504,16 @@ export class DaemonClient {
         body: JSON.stringify({ message }),
         signal: opts?.signal,
       },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/mid-turn-message',
+          );
+        }
+        return (await res.json()) as DaemonMidTurnMessageResult;
+      },
     );
-    if (!res.ok) {
-      throw await this.failOnError(res, 'POST /session/:id/mid-turn-message');
-    }
-    return (await res.json()) as DaemonMidTurnMessageResult;
   }
 
   /**
