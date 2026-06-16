@@ -56,6 +56,7 @@ import type {
   BackendRewindResult,
   ChatOptions,
   BackendHostRuntimeContext,
+  MidTurnMessageMetadata,
   PermissionRequestType,
   SdkMcpServerConfig,
 } from './backend/types.ts';
@@ -1624,6 +1625,13 @@ function permissionTypeForKind(
   }
 }
 
+interface QueuedMidTurnMessage {
+  message: string;
+  attachments?: FileAttachment[];
+  messageId?: string;
+  optimisticMessageId?: string;
+}
+
 export class QwenAgent extends BaseAgent {
   protected backendName = 'Qwen Code';
 
@@ -1671,7 +1679,7 @@ export class QwenAgent extends BaseAgent {
   private toolNames = new Map<string, string>();
   private toolInputs = new Map<string, Record<string, unknown>>();
   private activeParentToolUseIds = new Set<string>();
-  private midTurnMessageQueue: string[] = [];
+  private midTurnMessageQueue: QueuedMidTurnMessage[] = [];
 
   constructor(config: BackendConfig) {
     super(config, config.model || '');
@@ -1937,11 +1945,26 @@ export class QwenAgent extends BaseAgent {
     }
   }
 
-  enqueueMidTurnMessage(message: string): boolean {
+  enqueueMidTurnMessage(
+    message: string,
+    attachments?: FileAttachment[],
+    metadata?: MidTurnMessageMetadata,
+  ): boolean {
     const trimmed = message.trim();
-    if (!trimmed || !this._isProcessing || this.abortReason) return false;
+    if (
+      (!trimmed && !attachments?.length) ||
+      !this._isProcessing ||
+      this.abortReason
+    ) {
+      return false;
+    }
 
-    this.midTurnMessageQueue.push(trimmed);
+    this.midTurnMessageQueue.push({
+      message: trimmed,
+      attachments,
+      messageId: metadata?.messageId,
+      optimisticMessageId: metadata?.optimisticMessageId,
+    });
     this.debug(
       `Queued mid-turn user message for Qwen ACP injection (${this.midTurnMessageQueue.length} pending)`,
     );
@@ -2788,14 +2811,34 @@ export class QwenAgent extends BaseAgent {
       return {};
     }
 
-    const messages = this.midTurnMessageQueue.splice(0);
-    if (messages.length > 0) {
+    const entries = this.midTurnMessageQueue.splice(0);
+    if (entries.length > 0) {
       this.debug(
-        `Drained ${messages.length} mid-turn user message(s) to Qwen ACP`,
+        `Drained ${entries.length} mid-turn user message(s) to Qwen ACP`,
       );
-      this.config.onMidTurnMessagesDrained?.(messages);
+      const messageIds = entries
+        .map((entry) => entry.messageId)
+        .filter((messageId): messageId is string => !!messageId);
+      if (messageIds.length > 0) {
+        this.config.onMidTurnMessagesDrained?.(messageIds);
+      }
     }
-    return { messages };
+
+    const hasAttachments = entries.some(
+      (entry) => entry.attachments && entry.attachments.length > 0,
+    );
+    if (!hasAttachments) {
+      return { messages: entries.map((entry) => entry.message) };
+    }
+
+    return {
+      items: entries.map((entry) => ({
+        content: this.buildPromptBlocks(entry.message, entry.attachments, {
+          includeContext: false,
+        }),
+        displayText: entry.message || '[User message with attachments]',
+      })),
+    };
   }
 
   private getAcpConnection(): ClientSideConnection {
@@ -3447,13 +3490,15 @@ export class QwenAgent extends BaseAgent {
   private buildPromptBlocks(
     message: string,
     attachments?: FileAttachment[],
+    options?: { includeContext?: boolean },
   ): ContentBlock[] {
-    if (isSlashCommandPrompt(message, attachments)) {
+    const includeContext = options?.includeContext ?? true;
+    if (includeContext && isSlashCommandPrompt(message, attachments)) {
       return [{ type: 'text', text: message.trim() }];
     }
 
     const textParts: string[] = [];
-    const context = INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS
+    const context = includeContext && INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS
       ? this.buildCraftContext()
       : '';
 

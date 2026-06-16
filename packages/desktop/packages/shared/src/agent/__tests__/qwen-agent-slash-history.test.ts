@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentEvent, Message } from '@craft-agent/core/types';
 import { QwenAgent } from '../qwen-agent.ts';
+import type { FileAttachment } from '../../utils/files.ts';
 
 type QwenAgentConfig = ConstructorParameters<typeof QwenAgent>[0];
 
@@ -39,6 +40,8 @@ type QwenHistoryInternals = {
 type QwenPromptBlock = {
   type: string;
   text?: string;
+  data?: string;
+  mimeType?: string;
   resource?: {
     uri?: string;
     mimeType?: string | null;
@@ -48,7 +51,10 @@ type QwenPromptBlock = {
 };
 
 type QwenPromptInternals = {
-  buildPromptBlocks: (message: string) => QwenPromptBlock[];
+  buildPromptBlocks: (
+    message: string,
+    attachments?: FileAttachment[],
+  ) => QwenPromptBlock[];
 };
 
 type QwenAvailableCommandsInternals = {
@@ -221,7 +227,11 @@ describe('QwenAgent slash command history', () => {
     internals.qwenSessionId = 'sdk-session-qwen';
     internals._isProcessing = true;
 
-    expect(agent.enqueueMidTurnMessage('please also inspect tests')).toBe(true);
+    expect(
+      agent.enqueueMidTurnMessage('please also inspect tests', undefined, {
+        messageId: 'queued-1',
+      }),
+    ).toBe(true);
 
     await expect(
       internals.handleExtMethod('craft/drainMidTurnQueue', {
@@ -235,11 +245,13 @@ describe('QwenAgent slash command history', () => {
     ).resolves.toEqual({
       messages: ['please also inspect tests'],
     });
-    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
-      'please also inspect tests',
-    ]);
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['queued-1']);
 
-    expect(agent.enqueueMidTurnMessage('and summarize findings')).toBe(true);
+    expect(
+      agent.enqueueMidTurnMessage('and summarize findings', undefined, {
+        messageId: 'queued-2',
+      }),
+    ).toBe(true);
     await expect(
       internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'sdk-session-qwen',
@@ -247,14 +259,60 @@ describe('QwenAgent slash command history', () => {
     ).resolves.toEqual({
       messages: ['and summarize findings'],
     });
-    expect(onMidTurnMessagesDrained).toHaveBeenLastCalledWith([
-      'and summarize findings',
-    ]);
+    expect(onMidTurnMessagesDrained).toHaveBeenLastCalledWith(['queued-2']);
     await expect(
       internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'sdk-session-qwen',
       }),
     ).resolves.toEqual({ messages: [] });
+
+    agent.destroy();
+  });
+
+  it('drains queued mid-turn image attachments as ACP content blocks', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(
+      agent.enqueueMidTurnMessage('please inspect this image', [attachment], {
+        messageId: 'queued-image',
+      }),
+    ).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            { type: 'text', text: 'please inspect this image' },
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: 'please inspect this image',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['queued-image']);
 
     agent.destroy();
   });

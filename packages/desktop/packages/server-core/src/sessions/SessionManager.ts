@@ -305,6 +305,20 @@ export const AGENT_FLAGS = {
   defaultModesEnabled: true,
 } as const
 
+function canOfferMidTurnAttachments(
+  attachments?: FileAttachment[],
+  storedAttachments?: StoredAttachment[],
+): boolean {
+  if (!attachments?.length) {
+    return !storedAttachments?.length
+  }
+
+  return attachments.every((attachment) => {
+    if (!attachment.mimeType?.startsWith('image/')) return true
+    return typeof attachment.base64 === 'string' && attachment.base64.length > 0
+  })
+}
+
 const MAX_ADMIN_REMEMBER_MINUTES = 60
 const MAX_ANNOTATIONS_PER_MESSAGE = 200
 const MAX_ANNOTATION_JSON_BYTES = 32 * 1024
@@ -4978,14 +4992,14 @@ export class SessionManager implements ISessionManager {
         })
       }
 
-      const onMidTurnMessagesDrained = (messages: string[]) => {
+      const onMidTurnMessagesDrained = (messageIds: string[]) => {
         const drainedEntries: Array<{
           messageId?: string
           optimisticMessageId?: string
         }> = []
-        for (const message of messages) {
+        for (const messageId of messageIds) {
           const index = managed.messageQueue.findIndex(
-            (entry) => entry.midTurnPending && entry.message === message,
+            (entry) => entry.midTurnPending && entry.messageId === messageId,
           )
           if (index >= 0) {
             const [entry] = managed.messageQueue.splice(index, 1)
@@ -8097,15 +8111,6 @@ export class SessionManager implements ISessionManager {
     // injection point is available, keep the message queued for the next turn.
     if (managed.isProcessing) {
       const agent = managed.agent
-      const canInjectMidTurn =
-        !attachments?.length &&
-        !storedAttachments?.length &&
-        (agent?.enqueueMidTurnMessage?.(message) ?? false)
-
-      sessionLog.info(
-        `Session ${sessionId} ${canInjectMidTurn ? 'queued message for mid-turn injection' : 'queued message for next turn'}`,
-      )
-
       // Create user message for UI
       const userMessage: Message = {
         id: generateMessageId(),
@@ -8116,6 +8121,18 @@ export class SessionManager implements ISessionManager {
         textElements: options?.textElements,
         isQueued: true,
       }
+      const canInjectMidTurn =
+        canOfferMidTurnAttachments(attachments, storedAttachments) &&
+        (agent?.enqueueMidTurnMessage?.(message, attachments, {
+          messageId: userMessage.id,
+          optimisticMessageId: options?.optimisticMessageId,
+        }) ??
+          false)
+
+      sessionLog.info(
+        `Session ${sessionId} ${canInjectMidTurn ? 'queued message for mid-turn injection' : 'queued message for next turn'}`,
+      )
+
       managed.messages.push(userMessage)
 
       // Always show the message as queued while the current turn is still

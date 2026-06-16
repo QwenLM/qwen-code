@@ -22,20 +22,33 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 
-interface HandleAtCommandParams {
+export interface ResolveAtCommandParams {
   query: string;
   config: Config;
   onDebugMessage: (message: string) => void;
   messageId: number;
   signal: AbortSignal;
+}
+
+interface HandleAtCommandParams extends ResolveAtCommandParams {
   addItem?: (item: HistoryItemWithoutId, baseTimestamp: number) => number;
 }
 
-interface HandleAtCommandResult {
+export interface HandleAtCommandResult {
   processedQuery: PartListUnion | null;
   shouldProceed: boolean;
   toolDisplays?: IndividualToolCallDisplay[];
   filesRead?: string[];
+}
+
+interface AtCommandRecording {
+  filesRead: string[];
+  status: 'success' | 'error';
+  message?: string;
+}
+
+interface ResolveAtCommandResult extends HandleAtCommandResult {
+  recording?: AtCommandRecording;
 }
 
 interface AtCommandPart {
@@ -126,29 +139,17 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
  * @returns An object indicating whether the main hook should proceed with an
  *          LLM call and the processed query parts (including file content).
  */
-export async function handleAtCommand({
+export async function resolveAtCommandQuery({
   query,
   config,
   onDebugMessage,
   messageId: userMessageTimestamp,
   signal,
-  addItem,
-}: HandleAtCommandParams): Promise<HandleAtCommandResult> {
+}: ResolveAtCommandParams): Promise<ResolveAtCommandResult> {
   const commandParts = parseAllAtCommands(query);
   const atPathCommandParts = commandParts.filter(
     (part) => part.type === 'atPath',
   );
-
-  const addToolGroup = (result: HandleAtCommandResult): void => {
-    if (!addItem) return;
-    if (result.toolDisplays && result.toolDisplays.length > 0) {
-      const toolGroupItem: HistoryItemToolGroup = {
-        type: 'tool_group',
-        tools: result.toolDisplays,
-      };
-      addItem(toolGroupItem, userMessageTimestamp);
-    }
-  };
 
   if (atPathCommandParts.length === 0) {
     return { processedQuery: [{ text: query }], shouldProceed: true };
@@ -395,15 +396,13 @@ export async function handleAtCommand({
       filesRead: contentLabelsForDisplay,
     };
 
-    const chatRecorder = config.getChatRecordingService?.();
-    chatRecorder?.recordAtCommand({
-      filesRead: contentLabelsForDisplay,
-      status: 'success',
-      userText: query,
-    });
-
-    addToolGroup(processedResult);
-    return processedResult;
+    return {
+      ...processedResult,
+      recording: {
+        filesRead: contentLabelsForDisplay,
+        status: 'success',
+      },
+    };
   } catch (error: unknown) {
     const errorToolCallDisplay: IndividualToolCallDisplay = {
       callId: `client-read-${userMessageTimestamp}`,
@@ -413,24 +412,49 @@ export async function handleAtCommand({
       resultDisplay: `Error reading files (${contentLabelsForDisplay.join(', ')}): ${getErrorMessage(error)}`,
       confirmationDetails: undefined,
     };
-    const chatRecorder = config.getChatRecordingService?.();
     const errorMessage =
       typeof errorToolCallDisplay.resultDisplay === 'string'
         ? errorToolCallDisplay.resultDisplay
         : undefined;
-    chatRecorder?.recordAtCommand({
-      filesRead: contentLabelsForDisplay,
-      status: 'error',
-      message: errorMessage,
-      userText: query,
-    });
-    const result = {
+    return {
       processedQuery: null,
       shouldProceed: false,
       toolDisplays: [errorToolCallDisplay],
       filesRead: contentLabelsForDisplay,
+      recording: {
+        filesRead: contentLabelsForDisplay,
+        status: 'error',
+        message: errorMessage,
+      },
     };
-    addToolGroup(result);
-    return result;
   }
+}
+
+export async function handleAtCommand(
+  params: HandleAtCommandParams,
+): Promise<HandleAtCommandResult> {
+  const result = await resolveAtCommandQuery(params);
+
+  if (result.recording) {
+    const chatRecorder = params.config.getChatRecordingService?.();
+    chatRecorder?.recordAtCommand({
+      filesRead: result.recording.filesRead,
+      status: result.recording.status,
+      ...(result.recording.message
+        ? { message: result.recording.message }
+        : {}),
+      userText: params.query,
+    });
+  }
+
+  if (params.addItem && result.toolDisplays && result.toolDisplays.length > 0) {
+    const toolGroupItem: HistoryItemToolGroup = {
+      type: 'tool_group',
+      tools: result.toolDisplays,
+    };
+    params.addItem(toolGroupItem, params.messageId);
+  }
+
+  const { recording, ...publicResult } = result;
+  return publicResult;
 }

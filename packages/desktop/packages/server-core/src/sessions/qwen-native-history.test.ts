@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentBackend } from '@craft-agent/shared/agent/backend';
 import type { Workspace } from '@craft-agent/shared/config';
-import { RPC_CHANNELS } from '@craft-agent/shared/protocol';
+import { RPC_CHANNELS, type FileAttachment } from '@craft-agent/shared/protocol';
 import {
   loadSession,
   saveSession,
@@ -1388,6 +1388,183 @@ describe('Qwen native history loading', () => {
     expect(persisted?.messages).toHaveLength(1);
     expect(persisted?.messages[0]?.content).toBe('这个是什么图片');
     expect(persisted?.messages[0]?.attachments).toEqual([attachment]);
+  });
+
+  it('offers live image attachments to Qwen mid-turn injection', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-midturn-live-visual';
+    const timestamp = Date.now();
+    const liveAttachment: FileAttachment = {
+      type: 'image',
+      path: join(workspaceRoot, 'subscription.jpg'),
+      name: 'subscription.jpg',
+      mimeType: 'image/jpeg',
+      base64: 'base64-image',
+      size: 1024,
+    };
+    const storedAttachment: NonNullable<Message['attachments']>[number] = {
+      id: 'attachment-1',
+      type: 'image',
+      name: 'subscription.jpg',
+      mimeType: 'image/jpeg',
+      size: 1024,
+      storedPath: join(
+        workspaceRoot,
+        'sessions',
+        sessionId,
+        'attachments',
+        'subscription.jpg',
+      ),
+      thumbnailBase64: 'data:image/jpeg;base64,thumb',
+    };
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { isProcessing: true, messagesLoaded: true },
+    );
+    const enqueueCalls: Array<{
+      message: string;
+      attachments?: FileAttachment[];
+      metadata?: { messageId?: string; optimisticMessageId?: string };
+    }> = [];
+    managed.agent = {
+      enqueueMidTurnMessage: (
+        message: string,
+        attachments?: FileAttachment[],
+        metadata?: { messageId?: string; optimisticMessageId?: string },
+      ) => {
+        enqueueCalls.push({ message, attachments, metadata });
+        return true;
+      },
+      destroy: () => {},
+      dispose: () => {},
+    } as unknown as AgentBackend;
+    const manager = new SessionManager();
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    await manager.sendMessage(
+      sessionId,
+      '这个是什么图片',
+      [liveAttachment],
+      [storedAttachment],
+      { optimisticMessageId: 'optimistic-1' },
+    );
+
+    expect(enqueueCalls).toHaveLength(1);
+    expect(enqueueCalls[0]).toEqual({
+      message: '这个是什么图片',
+      attachments: [liveAttachment],
+      metadata: {
+        messageId: expect.any(String),
+        optimisticMessageId: 'optimistic-1',
+      },
+    });
+    expect(managed.messageQueue[0]?.midTurnPending).toBe(true);
+    expect(managed.messageQueue[0]?.attachments).toEqual([liveAttachment]);
+    expect(managed.messageQueue[0]?.storedAttachments).toEqual([
+      storedAttachment,
+    ]);
+  });
+
+  it('keeps image attachments queued when live base64 is unavailable', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-midturn-stored-visual';
+    const timestamp = Date.now();
+    const liveAttachment: FileAttachment = {
+      type: 'image',
+      path: join(workspaceRoot, 'subscription.jpg'),
+      name: 'subscription.jpg',
+      mimeType: 'image/jpeg',
+      size: 1024,
+    };
+    const storedAttachment: NonNullable<Message['attachments']>[number] = {
+      id: 'attachment-1',
+      type: 'image',
+      name: 'subscription.jpg',
+      mimeType: 'image/jpeg',
+      size: 1024,
+      storedPath: join(
+        workspaceRoot,
+        'sessions',
+        sessionId,
+        'attachments',
+        'subscription.jpg',
+      ),
+      thumbnailBase64: 'data:image/jpeg;base64,thumb',
+    };
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { isProcessing: true, messagesLoaded: true },
+    );
+    const enqueueCalls: string[] = [];
+    managed.agent = {
+      enqueueMidTurnMessage: (message: string) => {
+        enqueueCalls.push(message);
+        return true;
+      },
+      destroy: () => {},
+      dispose: () => {},
+    } as unknown as AgentBackend;
+    const manager = new SessionManager();
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    await manager.sendMessage(
+      sessionId,
+      '这个是什么图片',
+      [liveAttachment],
+      [storedAttachment],
+      { optimisticMessageId: 'optimistic-1' },
+    );
+
+    expect(enqueueCalls).toEqual([]);
+    expect(managed.messageQueue[0]?.midTurnPending).toBe(false);
+    expect(managed.messageQueue[0]?.attachments).toEqual([liveAttachment]);
+    expect(managed.messageQueue[0]?.storedAttachments).toEqual([
+      storedAttachment,
+    ]);
   });
 
   it('merges local visual overlays into provider-loaded Qwen messages', async () => {

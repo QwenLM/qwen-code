@@ -72,7 +72,10 @@ import {
   isSlashCommand,
 } from '../utils/commandUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
-import { handleAtCommand } from './atCommandProcessor.js';
+import {
+  handleAtCommand,
+  resolveAtCommandQuery,
+} from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -95,6 +98,8 @@ import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+const MID_TURN_USER_MESSAGE_PREFIX =
+  '\n[User message received during tool execution]: ';
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -231,6 +236,42 @@ function checkImageFormatsSupport(parts: PartListUnion): {
     hasUnsupportedFormats: unsupportedMimeTypes.length > 0,
     unsupportedMimeTypes,
   };
+}
+
+function toPartArray(parts: PartListUnion): Part[] {
+  const partsArray = Array.isArray(parts) ? parts : [parts];
+  return partsArray.map((part): Part => {
+    if (typeof part === 'string') {
+      return { text: part };
+    }
+    return part;
+  });
+}
+
+function prefixMidTurnUserMessageParts(
+  parts: PartListUnion,
+  displayText: string,
+): Part[] {
+  const partArray = toPartArray(parts);
+  if (partArray.length === 0) {
+    return [{ text: `${MID_TURN_USER_MESSAGE_PREFIX}${displayText}` }];
+  }
+
+  const [firstPart, ...rest] = partArray;
+  if ('text' in firstPart && typeof firstPart.text === 'string') {
+    return [
+      {
+        ...firstPart,
+        text: `${MID_TURN_USER_MESSAGE_PREFIX}${firstPart.text}`,
+      },
+      ...rest,
+    ];
+  }
+
+  return [
+    { text: `${MID_TURN_USER_MESSAGE_PREFIX}${displayText}` },
+    ...partArray,
+  ];
 }
 
 enum StreamProcessingStatus {
@@ -2414,14 +2455,52 @@ export const useGeminiStream = (
           ? []
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
-        for (const msg of drained) {
-          const midTurnUserMessage = {
-            text: `\n[User message received during tool execution]: ${msg}`,
-          };
-          responsesToSend.push(midTurnUserMessage);
+        const midTurnTimestamp = Date.now();
+        for (let index = 0; index < drained.length; index += 1) {
+          const msg = drained[index];
+          let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
+          if (isAtCommand(msg)) {
+            try {
+              const atCommandResult = await resolveAtCommandQuery({
+                query: msg,
+                config,
+                onDebugMessage,
+                messageId: midTurnTimestamp + index,
+                signal:
+                  abortControllerRef.current?.signal ??
+                  new AbortController().signal,
+              });
+              if (
+                atCommandResult.shouldProceed &&
+                atCommandResult.processedQuery !== null
+              ) {
+                resolvedMidTurnQuery = atCommandResult.processedQuery;
+              }
+            } catch (error) {
+              onDebugMessage(
+                `Failed to resolve mid-turn @ command: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+
+          const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
+            resolvedMidTurnQuery,
+            msg,
+          );
+          const formatCheck = checkImageFormatsSupport(midTurnUserMessageParts);
+          if (formatCheck.hasUnsupportedFormats) {
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: getUnsupportedImageFormatWarning(),
+              },
+              Date.now(),
+            );
+          }
+          responsesToSend.push(...midTurnUserMessageParts);
           config
             .getChatRecordingService()
-            ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
+            ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
           addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
         }
       }
@@ -2438,6 +2517,7 @@ export const useGeminiStream = (
       midTurnDrainRef,
       addItem,
       dualOutput,
+      onDebugMessage,
     ],
   );
 
