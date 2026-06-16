@@ -328,6 +328,43 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
+  it('throws when a marketplace source is a symlink resolving outside the marketplace dir', async () => {
+    // A host directory reachable via a symlink whose relative name stays inside
+    // the marketplace dir. resolvePluginSource must reject it before copying.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    fs.writeFileSync(path.join(secretDir, 'SKILL.md'), 'secret', 'utf-8');
+
+    const pluginSourceDir = path.join(testDir, 'plugin-evil-source');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.symlinkSync(secretDir, path.join(pluginSourceDir, 'evil-link'));
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'evil',
+          version: '1.0.0',
+          description: 'Evil plugin',
+          source: './evil-link',
+          strict: false,
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    await expect(
+      convertClaudePluginPackage(pluginSourceDir, 'evil'),
+    ).rejects.toThrow(/resolves through a symlink outside the marketplace/);
+
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
   it('should use all skills from folder when config does not specify skills', async () => {
     // Setup: Create a plugin source with skills but no skills config
     const pluginSourceDir = path.join(testDir, 'plugin-source-default');
@@ -851,6 +888,63 @@ describe('convertClaudePluginStandalone', () => {
     const result = await convertClaudePluginStandalone(testDir);
     // The absolute path was not read, so no servers were folded in.
     expect(result.config.mcpServers?.['leaked']).toBeUndefined();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('throws when plugin.json is a symlink resolving outside the plugin', async () => {
+    // A hostile clone makes the manifest itself a symlink to a JSON-shaped host
+    // file. The converter must refuse to follow it rather than read the target.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'config.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({ name: 'leaked', version: '9.9.9' }),
+      'utf-8',
+    );
+
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.symlinkSync(secretFile, path.join(pluginDir, 'plugin.json'));
+
+    await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
+      /resolves through a symlink outside/,
+    );
+
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('does not load mcpServers from a relative path that is a symlink escaping the plugin', async () => {
+    // mcpServers is a relative path whose name stays inside the plugin, but the
+    // file is a symlink to a host secret. resolvePluginRelativeFile must reject
+    // it so the target is never read into the config.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'servers.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({ leaked: { command: 'cat', args: ['/etc/passwd'] } }),
+      'utf-8',
+    );
+
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({
+        name: 'evil',
+        version: '1.0.0',
+        mcpServers: './servers.json',
+      }),
+      'utf-8',
+    );
+    fs.symlinkSync(secretFile, path.join(testDir, 'servers.json'));
+
+    const result = await convertClaudePluginStandalone(testDir);
+    const servers = result.config.mcpServers as
+      | Record<string, unknown>
+      | undefined;
+    expect(servers?.['leaked']).toBeUndefined();
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
     fs.rmSync(secretDir, { recursive: true, force: true });

@@ -19,7 +19,11 @@ import type {
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { createHash } from 'node:crypto';
-import { copyDirectory } from './gemini-converter.js';
+import {
+  copyDirectory,
+  isPathWithin,
+  realPathWithin,
+} from './gemini-converter.js';
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
@@ -432,6 +436,13 @@ export async function convertClaudePluginPackage(
       `Marketplace configuration not found at ${marketplaceJsonPath}`,
     );
   }
+  // The manifest itself can be a symlink in an untrusted clone; refuse to read
+  // it when it resolves outside the plugin (would leak a JSON-shaped host file).
+  if (!realPathWithin(marketplaceJsonPath, extensionDir)) {
+    throw new Error(
+      `Marketplace configuration at ${marketplaceJsonPath} resolves through a symlink outside the plugin`,
+    );
+  }
 
   const marketplaceContent = fs.readFileSync(marketplaceJsonPath, 'utf-8');
   const marketplaceConfig: ClaudeMarketplaceConfig =
@@ -474,11 +485,21 @@ export async function convertClaudePluginPackage(
   if (strict && !fs.existsSync(pluginJsonPath)) {
     throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
   }
-  if (fs.existsSync(pluginJsonPath)) {
+  // Treat a symlinked plugin.json (pointing outside the source) as absent
+  // rather than reading an arbitrary host file into the merged config.
+  const pluginJsonSafe =
+    fs.existsSync(pluginJsonPath) &&
+    realPathWithin(pluginJsonPath, pluginSource);
+  if (pluginJsonSafe) {
     const pluginContent = fs.readFileSync(pluginJsonPath, 'utf-8');
     const pluginConfig: ClaudePluginConfig = JSON.parse(pluginContent);
     mergedConfig = mergeClaudeConfigs(marketplacePlugin, pluginConfig);
   } else {
+    if (fs.existsSync(pluginJsonPath)) {
+      debugLogger.warn(
+        `Ignoring plugin.json at ${pluginJsonPath}; it resolves through a symlink outside the plugin.`,
+      );
+    }
     mergedConfig = marketplacePlugin as ClaudePluginConfig;
   }
 
@@ -504,7 +525,7 @@ function resolvePluginRelativeFile(
   }
   const resolved = path.resolve(pluginSource, relativePath);
   const base = path.resolve(pluginSource);
-  if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+  if (!isPathWithin(resolved, base)) {
     debugLogger.warn(
       `Ignoring path "${relativePath}" in plugin config; it escapes the plugin directory.`,
     );
@@ -521,24 +542,6 @@ function resolvePluginRelativeFile(
     return null;
   }
   return resolved;
-}
-
-/**
- * True when `target` exists and its real (symlink-resolved) path stays within
- * `root`'s real path. Both sides are resolved with `fs.realpathSync` so a
- * symlink inside an untrusted plugin source cannot point the converter at a
- * file outside the package. Returns false for missing/broken paths.
- */
-function realPathWithin(target: string, root: string): boolean {
-  try {
-    const realTarget = fs.realpathSync(target);
-    const realRoot = fs.realpathSync(root);
-    return (
-      realTarget === realRoot || realTarget.startsWith(realRoot + path.sep)
-    );
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -687,6 +690,13 @@ export async function convertClaudePluginStandalone(
   if (!fs.existsSync(pluginJsonPath)) {
     throw new Error(`Plugin configuration not found at ${pluginJsonPath}`);
   }
+  // The manifest may be a symlink in an untrusted clone; refuse to follow it
+  // outside the package (would read an arbitrary JSON-shaped host file).
+  if (!realPathWithin(pluginJsonPath, extensionDir)) {
+    throw new Error(
+      `Plugin configuration at ${pluginJsonPath} resolves through a symlink outside the plugin`,
+    );
+  }
 
   const mergedConfig: ClaudePluginConfig = JSON.parse(
     fs.readFileSync(pluginJsonPath, 'utf-8'),
@@ -694,7 +704,10 @@ export async function convertClaudePluginStandalone(
 
   if (!mergedConfig.mcpServers) {
     const mcpJsonPath = path.join(extensionDir, '.mcp.json');
-    if (fs.existsSync(mcpJsonPath)) {
+    if (
+      fs.existsSync(mcpJsonPath) &&
+      realPathWithin(mcpJsonPath, extensionDir)
+    ) {
       try {
         const parsed = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf-8'));
         if (

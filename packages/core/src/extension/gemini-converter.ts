@@ -109,9 +109,35 @@ export async function convertGeminiExtensionPackage(
 }
 
 /**
+ * True when `child` equals or is nested under `parent`. Both must already be
+ * absolute, resolved paths. Shared containment primitive for the symlink
+ * confinement guards (kept in one place so the rule can't drift between files).
+ */
+export function isPathWithin(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent + path.sep);
+}
+
+/**
+ * True when `target` exists and its real (symlink-resolved) path stays within
+ * `root`'s real path. Both sides are resolved with `fs.realpathSync` so a
+ * symlink in an untrusted source cannot point a read/copy at a file outside
+ * the package. Returns false for missing or broken paths.
+ */
+export function realPathWithin(target: string, root: string): boolean {
+  try {
+    return isPathWithin(fs.realpathSync(target), fs.realpathSync(root));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Recursively copies a directory and its contents.
  * @param source Source directory path
  * @param destination Destination directory path
+ * @param confineRoot If set, any symlink whose real target escapes this
+ *   directory is skipped. Defaults to `fs.realpathSync(source)` when omitted.
+ *   Always pass this explicitly when `source` originates from untrusted input.
  */
 export async function copyDirectory(
   source: string,
@@ -150,7 +176,7 @@ export async function copyDirectory(
       // stays inside the package root.
       try {
         const realPath = fs.realpathSync(sourcePath);
-        if (realPath !== root && !realPath.startsWith(root + path.sep)) {
+        if (!isPathWithin(realPath, root)) {
           debugLogger.warn(
             `Skipping symlink that escapes the package: ${sourcePath} -> ${realPath}`,
           );
