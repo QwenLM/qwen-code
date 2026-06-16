@@ -79,6 +79,17 @@ describe('CronDeleteTool', () => {
     expect(await readCronTasks(tmpDir)).toEqual([]);
   });
 
+  it('deletes a pending loop wakeup', async () => {
+    const wakeup = config._scheduler.scheduleWakeup(300, 'continue loop');
+
+    const invocation = tool.build({ id: wakeup.id });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(`Cancelled job ${wakeup.id}`);
+    expect(config._scheduler.sessionSize).toBe(0);
+  });
+
   it('validates required params', () => {
     expect(() => tool.build({} as never)).toThrow();
   });

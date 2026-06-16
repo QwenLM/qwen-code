@@ -451,6 +451,12 @@ describe('CronScheduler', () => {
       expect(w.wasClamped).toBe(false);
     });
 
+    it('rounds fractional input to a boundary before reporting clamping', () => {
+      const w = scheduler.scheduleWakeup(59.6, 'p');
+      expect(w.clampedDelaySeconds).toBe(60);
+      expect(w.wasClamped).toBe(false);
+    });
+
     it('falls back to the default heartbeat for non-finite delays', () => {
       const w = scheduler.scheduleWakeup(Infinity, 'p');
       expect(w.clampedDelaySeconds).toBe(1200);
@@ -503,10 +509,24 @@ describe('CronScheduler', () => {
       expect(scheduler.sessionSize).toBe(0);
     });
 
-    it('is separate from the cron jobs map (not in list/size)', () => {
+    it('lists wakeups without counting them against the cron job limit', () => {
       scheduler.scheduleWakeup(300, 'p');
-      expect(scheduler.list()).toHaveLength(0);
+      const jobs = scheduler.list();
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({
+        cronExpr: '@wakeup',
+        prompt: 'p',
+        recurring: false,
+        jitterMs: 0,
+      });
       expect(scheduler.size).toBe(0);
+    });
+
+    it('delete cancels a pending wakeup by ID', async () => {
+      const w = scheduler.scheduleWakeup(300, 'p');
+      await expect(scheduler.delete(w.id)).resolves.toBe(true);
+      expect(scheduler.sessionSize).toBe(0);
+      await expect(scheduler.delete(w.id)).resolves.toBe(false);
     });
 
     it('does not count wakeups against the cron job limit', () => {

@@ -60,6 +60,15 @@ describe('LoopWakeupTool', () => {
     );
   });
 
+  it('shows the plain delay in the permission description when in range', () => {
+    const invocation = tool.build({
+      delaySeconds: 300,
+      prompt: 'continue loop',
+    });
+
+    expect(invocation.getDescription()).toBe('300s: continue loop');
+  });
+
   it('schedules a session-only one-shot wakeup on the scheduler', async () => {
     const invocation = tool.build({
       delaySeconds: 300,
@@ -72,9 +81,12 @@ describe('LoopWakeupTool', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Session-only one-shot');
     expect(result.llmContent).toContain('Scheduled for:');
-    // Registered as a wakeup (holds the session open) — not a cron job.
+    // Registered as a visible wakeup and holds the session open.
     expect(scheduler.sessionSize).toBe(1);
-    expect(scheduler.list()).toHaveLength(0);
+    expect(scheduler.list()[0]).toMatchObject({
+      cronExpr: '@wakeup',
+      prompt: 'continue loop',
+    });
   });
 
   it('tells the model to re-arm to keep the loop alive', async () => {

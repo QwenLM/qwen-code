@@ -1,5 +1,5 @@
 /**
- * cron_delete tool — deletes a cron job by ID (in-session or durable).
+ * cron_delete tool — deletes a cron job or loop wakeup by ID.
  */
 
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -82,14 +82,14 @@ export class CronDeleteTool extends BaseDeclarativeTool<
     super(
       CronDeleteTool.Name,
       ToolDisplayNames.CRON_DELETE,
-      `Cancel a cron job previously scheduled with CronCreate. Removes it from the in-memory session store or from ${CRON_TASKS_DISPLAY_PATH} (durable jobs).`,
+      `Cancel a cron job previously scheduled with CronCreate, or a pending loop wakeup scheduled with LoopWakeup. Removes cron jobs from the in-memory session store or from ${CRON_TASKS_DISPLAY_PATH} (durable jobs).`,
       Kind.Other,
       {
         type: 'object',
         properties: {
           id: {
             type: 'string',
-            description: 'Job ID returned by CronCreate.',
+            description: 'Job ID returned by CronCreate or LoopWakeup.',
           },
         },
         required: ['id'],

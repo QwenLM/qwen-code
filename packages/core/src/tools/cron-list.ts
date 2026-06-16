@@ -1,5 +1,5 @@
 /**
- * cron_list tool — lists all active cron jobs (in-session and durable).
+ * cron_list tool — lists active cron jobs and loop wakeups.
  */
 
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -71,7 +71,7 @@ class CronListInvocation extends BaseToolInvocation<
     ];
 
     if (jobs.length === 0) {
-      const result = 'No active cron jobs.';
+      const result = 'No active cron jobs or loop wakeups.';
       return { llmContent: result, returnDisplay: result };
     }
 
@@ -102,7 +102,7 @@ export class CronListTool extends BaseDeclarativeTool<
     super(
       CronListTool.Name,
       ToolDisplayNames.CRON_LIST,
-      `List all cron jobs scheduled via CronCreate, both session-only and durable (${CRON_TASKS_DISPLAY_PATH}).`,
+      `List all cron jobs scheduled via CronCreate and loop wakeups scheduled via LoopWakeup, including session-only jobs and durable jobs in ${CRON_TASKS_DISPLAY_PATH}.`,
       Kind.Other,
       {
         type: 'object',

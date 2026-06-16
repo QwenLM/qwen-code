@@ -276,10 +276,13 @@ export class CronScheduler {
     wasClamped: boolean;
   } {
     const clampedDelaySeconds = clampWakeupSeconds(delaySeconds);
+    const rounded = Number.isFinite(delaySeconds)
+      ? Math.round(delaySeconds)
+      : delaySeconds;
     const wasClamped =
       !Number.isFinite(delaySeconds) ||
-      delaySeconds < WAKEUP_MIN_SECONDS ||
-      delaySeconds > WAKEUP_MAX_SECONDS;
+      rounded < WAKEUP_MIN_SECONDS ||
+      rounded > WAKEUP_MAX_SECONDS;
     const id = generateId();
     const now = Date.now();
     const fireAtMs = now + clampedDelaySeconds * 1000;
@@ -344,7 +347,7 @@ export class CronScheduler {
    */
   async delete(id: string): Promise<boolean> {
     const job = this.jobs.get(id);
-    if (!job) return false;
+    if (!job) return this.cancelWakeup(id);
 
     this.jobs.delete(id);
     if (job.durable && this.projectRoot) {
@@ -361,10 +364,13 @@ export class CronScheduler {
   }
 
   /**
-   * Returns all active jobs.
+   * Returns all active cron jobs and pending loop wakeups.
    */
   list(): CronJob[] {
-    return [...this.jobs.values()];
+    return [
+      ...this.jobs.values(),
+      ...[...this.wakeups.values()].map(wakeupToJob),
+    ];
   }
 
   /**

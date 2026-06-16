@@ -56,11 +56,11 @@ describe('CronListTool', () => {
     expect(tool.name).toBe('cron_list');
   });
 
-  it('returns empty message when no jobs', async () => {
+  it('returns empty message when no jobs or wakeups', async () => {
     const invocation = tool.build({});
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('No active cron jobs');
+    expect(result.llmContent).toContain('No active cron jobs or loop wakeups');
   });
 
   it('lists created jobs', async () => {
@@ -103,6 +103,19 @@ describe('CronListTool', () => {
     expect(lines).toHaveLength(2);
     expect(result.llmContent).toContain('[durable]: check deploy');
     expect(result.llmContent).toContain('[session-only]: session task');
+  });
+
+  it('lists pending loop wakeups', async () => {
+    config._scheduler.scheduleWakeup(300, 'continue loop');
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
+      '@wakeup (one-shot) [session-only]: continue loop',
+    );
+    expect(result.returnDisplay).toContain('@wakeup [session-only]');
   });
 
   it('does not double-list a durable job the scheduler has also loaded', async () => {
