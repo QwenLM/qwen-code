@@ -252,11 +252,12 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
         ],
       });
 
-      // Bot joins + binds the room, THEN starts (key-share order).
-      await adapter!.joinRoom(roomId);
+      // Real fresh-room path: the bot is INVITED and AutojoinRoomsMixin joins it
+      // after start() (we do NOT pre-join) — verifying that a room joined post-
+      // start still decrypts. Bind the session; then start + settle before send.
       await rooms.bind(roomId, 'sess_e2ee');
-      await bridge.start(ac.signal); // runInbound → adapter prepare + sync
-      await sleep(2000);
+      await bridge.start(ac.signal); // runInbound → adapter prepare + sync + autojoin
+      await sleep(4000);
 
       // (1) decrypted message → bound session.
       const prompt = `do-thing-${stamp}`;

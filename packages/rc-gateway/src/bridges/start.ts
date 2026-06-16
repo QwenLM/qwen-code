@@ -59,6 +59,22 @@ export interface StartedBridge {
   stop(): void;
 }
 
+/** Sleep `ms`, resolving early if `signal` aborts (so shutdown stays prompt). */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 /**
  * Construct the runner for `cfg.kind`, start its loops, and return a handle that
  * aborts them. The caller owns process lifecycle (signals, exit). For Matrix the
@@ -158,8 +174,31 @@ export async function startBridge(
     syncOnce: (since, signal) =>
       mxRest.sync(since, 30000, signal).then((r) => r.body),
     // The adapter owns /sync when present; otherwise the fetch syncLoop runs.
+    // adapter.start() makes a live network call (getJoinedRooms) that throws if
+    // the homeserver is unreachable at boot. The fetch syncLoop self-catches and
+    // backs off, so match that here: retry with backoff until success or abort,
+    // never letting the rejection escape `void runner.start()` (an unhandled
+    // rejection can crash the process). Once started, the SDK handles reconnects.
     ...(adapter
-      ? { runInbound: async () => void (await adapter.start()) }
+      ? {
+          runInbound: async (signal: AbortSignal) => {
+            let backoff = 1000;
+            while (!signal.aborted) {
+              try {
+                await adapter.start();
+                return;
+              } catch (err) {
+                log?.(
+                  `matrix crypto start failed, retrying: ${
+                    (err as Error).message ?? err
+                  }`,
+                );
+                await abortableSleep(backoff, signal);
+                backoff = Math.min(backoff * 2, 30_000);
+              }
+            }
+          },
+        }
       : {}),
     log,
   });
