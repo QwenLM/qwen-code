@@ -288,8 +288,15 @@ export class CronScheduler {
     const now = Date.now();
     const fireAtMs = now + clampedDelaySeconds * 1000;
     const replacedId = this.wakeups.values().next().value?.id ?? null;
+    if (replacedId) {
+      debugLogger.debug(`Replacing pending wakeup ${replacedId}`);
+    }
     this.wakeups.clear();
     this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
+    debugLogger.debug(
+      `Wakeup ${id} scheduled for ${new Date(fireAtMs).toISOString()} ` +
+        `(delay=${clampedDelaySeconds}s)`,
+    );
     return {
       id,
       scheduledFor: new Date(fireAtMs).toISOString(),
@@ -301,7 +308,9 @@ export class CronScheduler {
 
   /** Cancels a single pending wakeup. Returns true if it existed. */
   cancelWakeup(id: string): boolean {
-    return this.wakeups.delete(id);
+    const deleted = this.wakeups.delete(id);
+    if (deleted) debugLogger.debug(`Cancelled wakeup ${id}`);
+    return deleted;
   }
 
   /**
@@ -311,6 +320,7 @@ export class CronScheduler {
   cancelAllWakeups(): number {
     const count = this.wakeups.size;
     this.wakeups.clear();
+    if (count > 0) debugLogger.debug(`Cancelled ${count} wakeup(s)`);
     return count;
   }
 
@@ -857,7 +867,10 @@ export class CronScheduler {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
-    this.wakeups.clear();
+    if (this.wakeups.size > 0) {
+      debugLogger.debug(`stop() discarding ${this.wakeups.size} wakeup(s)`);
+      this.wakeups.clear();
+    }
     this.onFire = null;
 
     if (this.durableEnabled) {
@@ -962,9 +975,10 @@ export class CronScheduler {
     // Fire due wakeups (second-resolution, one-shot). Delivered through the
     // same onFire channel as cron jobs so interactive, headless, and ACP
     // consumers handle them identically, then removed immediately.
-    for (const wakeup of [...this.wakeups.values()]) {
+    for (const wakeup of this.wakeups.values()) {
       if (wakeup.fireAtMs > currentMs) continue;
       this.wakeups.delete(wakeup.id);
+      debugLogger.debug(`Firing wakeup ${wakeup.id}`);
       if (this.onFire) this.onFire(wakeupToJob(wakeup));
     }
   }

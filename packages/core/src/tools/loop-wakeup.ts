@@ -122,7 +122,7 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
           prompt: {
             type: 'string',
             description:
-              'Continuation prompt to enqueue when the wakeup fires. Pass the prompt to re-run when the loop resumes — typically the same input that started this self-paced loop, verbatim — so the next firing continues it.',
+              'Continuation prompt to enqueue when the wakeup fires. Prefix with `/loop` so the next firing re-invokes the loop skill, e.g. `/loop check the deploy`.',
           },
           reason: {
             type: 'string',
