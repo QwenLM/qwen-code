@@ -7,6 +7,7 @@
 import { parse } from 'shell-quote';
 
 const BRE_OPERATORS = new Set(['+', '?', '|', '(', ')', '{', '}']);
+const SIMPLE_REGEX_QUANTIFIERS = new Set(['*', '+', '?']);
 
 export interface SedEditInfo {
   filePath: string;
@@ -134,11 +135,109 @@ function hasShellVariableReference(value: string): boolean {
 
 function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
   try {
-    new RegExp(toJavascriptPattern(sedInfo));
-    return true;
+    const jsPattern = toJavascriptPattern(sedInfo);
+    new RegExp(jsPattern);
+    return !hasNestedQuantifiedGroup(jsPattern);
   } catch {
     return false;
   }
+}
+
+function hasNestedQuantifiedGroup(pattern: string): boolean {
+  const groups: Array<{ hasQuantifier: boolean }> = [];
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      i = skipCharacterClass(pattern, i);
+      continue;
+    }
+    if (char === '(') {
+      groups.push({ hasQuantifier: false });
+      continue;
+    }
+    if (char === ')') {
+      const group = groups.pop();
+      if (group === undefined) {
+        continue;
+      }
+      const quantifierEnd = getRegexQuantifierEnd(pattern, i + 1);
+      if (quantifierEnd !== null) {
+        if (group.hasQuantifier) {
+          return true;
+        }
+        if (groups.length > 0) {
+          groups[groups.length - 1]!.hasQuantifier = true;
+        }
+        i = quantifierEnd - 1;
+      }
+      continue;
+    }
+
+    const quantifierEnd = getRegexQuantifierEnd(pattern, i);
+    if (quantifierEnd !== null) {
+      if (groups.length > 0) {
+        groups[groups.length - 1]!.hasQuantifier = true;
+      }
+      i = quantifierEnd - 1;
+    }
+  }
+
+  return false;
+}
+
+function skipCharacterClass(pattern: string, start: number): number {
+  for (let i = start + 1; i < pattern.length; i++) {
+    if (pattern[i] === '\\') {
+      i++;
+      continue;
+    }
+    if (pattern[i] === ']') {
+      return i;
+    }
+  }
+  return pattern.length - 1;
+}
+
+function getRegexQuantifierEnd(
+  pattern: string,
+  start: number,
+): number | null {
+  const char = pattern[start];
+  if (char === undefined) {
+    return null;
+  }
+  if (SIMPLE_REGEX_QUANTIFIERS.has(char)) {
+    return start + 1;
+  }
+  if (char !== '{') {
+    return null;
+  }
+
+  let i = start + 1;
+  let hasDigit = false;
+  while (isAsciiDigit(pattern[i])) {
+    hasDigit = true;
+    i++;
+  }
+  if (!hasDigit) {
+    return null;
+  }
+  if (pattern[i] === ',') {
+    i++;
+    while (isAsciiDigit(pattern[i])) {
+      i++;
+    }
+  }
+  return pattern[i] === '}' ? i + 1 : null;
+}
+
+function isAsciiDigit(char: string | undefined): boolean {
+  return char !== undefined && char >= '0' && char <= '9';
 }
 
 function parseSubstitution(

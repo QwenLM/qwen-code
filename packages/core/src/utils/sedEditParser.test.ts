@@ -132,6 +132,10 @@ describe('sedEditParser', () => {
     expect(applySedSubstitution('foo foo foo', sedInfo!)).toBe('foo [foo] foo');
   });
 
+  it('rejects nested quantifier patterns before simulated edits', () => {
+    expect(parseSedEditCommand("sed -E -i 's/(a*)*b/X/g' file.txt")).toBeNull();
+  });
+
   it('supports multi-digit numeric occurrences', () => {
     const sedInfo = parseSedEditCommand("sed -i 's/x/y/10' file.txt");
 
