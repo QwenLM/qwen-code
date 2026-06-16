@@ -23,6 +23,19 @@ import { type PushRateLimiter, DEFAULT_MAX_PER_HOUR } from './rateLimiter.js';
 import type { PushCoalescer } from './coalescer.js';
 import type { PushDigest, DigestSummary } from './digest.js';
 import { QuietDigestWatcher } from './quietDigestWatcher.js';
+import type {
+  ApnsStore,
+  ApnsSubscriptionRecord,
+} from '../nativePush/apnsStore.js';
+
+/**
+ * The APNs send seam the notifier drives (satisfied by `ApnsSender`). Kept
+ * structural so the notifier needn't import the http2 transport. The orphan
+ * guard (`isTokenLive`) and 410/400 removal + 429/5xx backoff live in the sender.
+ */
+export interface ApnsNotifier {
+  send(sub: ApnsSubscriptionRecord, payload: PushPayload): Promise<unknown>;
+}
 
 /**
  * Per-kind required scope. A subscription only receives a kind if its owning
@@ -51,6 +64,13 @@ export class PushNotifier {
     private readonly rateLimiter?: PushRateLimiter,
     private readonly coalescer?: PushCoalescer,
     private readonly digest?: PushDigest,
+    /**
+     * APNs transport for the iOS native shell (add-native-mobile-shells). When
+     * present, `notify` fans the SAME payload out to APNs device subscriptions
+     * through the token-level + global gates (see {@link notifyApns}). Absent
+     * (no loadable P-8 key) → APNs is simply not delivered.
+     */
+    private readonly apns?: { store: ApnsStore; sender: ApnsNotifier },
   ) {}
 
   /** Edge-detector for the end-of-quiet-window digest flush (D4, cycle 75). */
@@ -330,6 +350,93 @@ export class PushNotifier {
           }
         }
         await this.sender.send(r, payload);
+      }),
+    );
+    // Second transport: fan the same payload out to APNs device subscriptions
+    // (add-native-mobile-shells), under the same global gates already applied
+    // above (snooze, routing drop) plus the token-level gates re-checked per sub.
+    await this.notifyApns(payload, ctx, routing, need, now);
+  }
+
+  /**
+   * APNs fan-out for the iOS native shell. APNs subscriptions are token-bound but
+   * carry NO per-subscription prefs/quiet/maxPerHour (the registration captures
+   * none), so only the applicable gates run:
+   *
+   *  - **scope + session-lock** — confinement, MUST apply (a share token locked to
+   *    one session must never receive another session's metadata via APNs);
+   *  - **per-subscription routing drop** — an operator rule by token scopes/id;
+   *  - **coalescing (D6)** — reuse the shared coalescer keyed by the APNs sub id.
+   *
+   * Intentionally NOT applied:
+   *  - **prefs / quiet-hours** — no such field on an APNs record (nothing to read);
+   *  - **working-device** — it keys on tokenId (so it *could* run), but its meaning
+   *    ("you're looking at this device right now") doesn't transfer: a phone whose
+   *    token merely polled recently is NOT foregrounded, and that is exactly when a
+   *    `permission.required` push must still arrive — so suppressing here would
+   *    defeat the point of mobile push;
+   *  - **rate-limit** — a deliberate choice, not an oversight: the spec names only
+   *    coalescing, and coalescing + the sender's 429 backoff cover bursts/abuse;
+   *    the default-cap path exists if symmetry is wanted later.
+   *
+   * The orphan guard (a revoked token's device must never be delivered to) lives
+   * in the sender's `isTokenLive`. Best-effort: `sender.send` never throws.
+   */
+  private async notifyApns(
+    payload: PushPayload,
+    ctx: { sessionId: string; sessionName?: string },
+    routing: RoutingMatcher | undefined,
+    need: RcScope,
+    now: Date,
+  ): Promise<void> {
+    const apns = this.apns;
+    if (!apns) return;
+    await Promise.all(
+      apns.store.listAll().map(async (rec) => {
+        const scopes = this.tokens.scopesFor(rec.tokenId);
+        if (!scopes || !scopes.includes(need)) return; // scope gate (silent)
+        const lock = this.tokens.sessionLockFor(rec.tokenId);
+        if (lock !== undefined && lock !== ctx.sessionId) return; // session-lock
+        const perSubDrop = routing?.firstDropForSubscription?.(
+          { kind: payload.kind, sessionName: ctx.sessionName },
+          { tokenId: rec.tokenId, scopes },
+        );
+        if (perSubDrop) {
+          void this.audit?.record({
+            action: 'push_suppressed',
+            target: ctx.sessionId,
+            detail: {
+              kind: payload.kind,
+              reason: 'routing_rule',
+              ruleId: perSubDrop,
+              subscriptionId: rec.id,
+            },
+          });
+          return;
+        }
+        if (this.coalescer) {
+          const { allowed, firstSuppress } = this.coalescer.tryPass(
+            rec.id,
+            payload.kind,
+            ctx.sessionId,
+            now.getTime(),
+          );
+          if (!allowed) {
+            if (firstSuppress) {
+              void this.audit?.record({
+                action: 'push_suppressed',
+                target: ctx.sessionId,
+                detail: {
+                  kind: payload.kind,
+                  reason: 'coalesced',
+                  subscriptionId: rec.id,
+                },
+              });
+            }
+            return;
+          }
+        }
+        await apns.sender.send(rec, payload);
       }),
     );
   }

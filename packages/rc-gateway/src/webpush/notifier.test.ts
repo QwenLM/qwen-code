@@ -13,16 +13,18 @@ import { TokenStore } from '../tokenStore.js';
 import { PushStore } from '../pushStore.js';
 import { VapidStore } from './vapid.js';
 import { PushSender, type PushTransport } from './sender.js';
-import { PushNotifier } from './notifier.js';
+import { PushNotifier, type ApnsNotifier } from './notifier.js';
 import { PushRateLimiter } from './rateLimiter.js';
 import { PushCoalescer } from './coalescer.js';
 import { PushDigest } from './digest.js';
 import type { PushPayload } from './payload.js';
+import { ApnsStore } from '../nativePush/apnsStore.js';
 import { SESSION_READ, APPROVE, SHARE } from '../scopes.js';
 import { SnoozeStore } from '../routing/snooze.js';
 import { WorkingDeviceTracker } from '../routing/workingDevice.js';
 import { compileRouting, loadRoutingConfig } from '../routing/rules.js';
 
+let dir: string;
 let tokens: TokenStore;
 let store: PushStore;
 let vapid: VapidStore;
@@ -35,10 +37,32 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   return { calls, record: async (e: AuditEntry) => void calls.push(e) };
 }
 
+/** A fake APNs sender that records what it was asked to deliver. */
+function fakeApns(): ApnsNotifier & {
+  sends: Array<{ tokenId: string; deviceToken: string; payload: PushPayload }>;
+} {
+  const sends: Array<{
+    tokenId: string;
+    deviceToken: string;
+    payload: PushPayload;
+  }> = [];
+  return {
+    sends,
+    send: async (sub, payload) => {
+      sends.push({
+        tokenId: sub.tokenId,
+        deviceToken: sub.deviceToken,
+        payload,
+      });
+      return { ok: true };
+    },
+  };
+}
+
 const FAST = { backoffMs: [0, 0, 0, 0, 0], sleep: async () => {} };
 
 beforeEach(async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'rc-notifier-'));
+  dir = mkdtempSync(join(tmpdir(), 'rc-notifier-'));
   tokens = await TokenStore.open(join(dir, 'tokens.json'));
   store = await PushStore.open(join(dir, 'push.json'));
   vapid = await VapidStore.open(join(dir, 'vapid.json'));
@@ -1280,5 +1304,154 @@ describe('PushNotifier.flushQuietDigests (D4 end-of-quiet digest)', () => {
     notifier.flushQuietDigests(new Date('2026-06-09T08:00:00Z'));
     await settle();
     expect(sent).toHaveLength(0);
+  });
+});
+
+describe('PushNotifier — APNs fan-out', () => {
+  const PERM = {
+    type: 'permission_request',
+    data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+  };
+
+  it('SECURITY: does NOT deliver another session’s push to a session-locked share token’s APNs device', async () => {
+    const share = await tokens.issueShare({
+      scopes: [SESSION_READ, APPROVE],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner',
+    });
+    const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
+    await apnsStore.register({
+      tokenId: share.id,
+      deviceToken: 'devhex',
+      bundleId: 'com.example.app',
+      shellVersion: '1',
+    });
+    const apns = fakeApns();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: apnsStore, sender: apns },
+    );
+    // Event for a DIFFERENT session — the s1-locked guest's device must not get it.
+    await notifier.notify(PERM, { sessionId: 's2' });
+    expect(apns.sends).toHaveLength(0);
+    // Its OWN session's event IS delivered.
+    await notifier.notify(PERM, { sessionId: 's1' });
+    expect(apns.sends).toHaveLength(1);
+    expect(apns.sends[0]).toMatchObject({
+      tokenId: share.id,
+      deviceToken: 'devhex',
+    });
+    expect(apns.sends[0].payload.kind).toBe('permission.required');
+  });
+
+  it('only delivers a kind to APNs devices whose token holds the mapped scope', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const reader = await tokens.issue([SESSION_READ], 'reader');
+    const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
+    await apnsStore.register({
+      tokenId: approver.id,
+      deviceToken: 'app-dev',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    await apnsStore.register({
+      tokenId: reader.id,
+      deviceToken: 'read-dev',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    const apns = fakeApns();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: apnsStore, sender: apns },
+    );
+    await notifier.notify(PERM, { sessionId: 's1' });
+    expect(apns.sends.map((s) => s.deviceToken)).toEqual(['app-dev']);
+  });
+
+  it('a global snooze suppresses the APNs fan-out too (no send)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
+    await apnsStore.register({
+      tokenId: approver.id,
+      deviceToken: 'app-dev',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    const snooze = await SnoozeStore.open(join(dir, 'snooze.state'));
+    await snooze.snooze(3600, 'all');
+    const apns = fakeApns();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      snooze,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: apnsStore, sender: apns },
+    );
+    await notifier.notify(PERM, { sessionId: 's1' });
+    expect(apns.sends).toHaveLength(0);
+  });
+
+  it('coalesces a same-(kind,session) burst to the APNs device within the window', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
+    await apnsStore.register({
+      tokenId: approver.id,
+      deviceToken: 'app-dev',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    const coalescer = new PushCoalescer(5000);
+    const apns = fakeApns();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      coalescer,
+      undefined,
+      { store: apnsStore, sender: apns },
+    );
+    const t0 = new Date('2026-06-09T00:00:00Z');
+    const t1 = new Date('2026-06-09T00:00:03Z'); // +3s, within 5s window
+    await notifier.notify(PERM, { sessionId: 's1' }, t0);
+    await notifier.notify(PERM, { sessionId: 's1' }, t1);
+    expect(apns.sends).toHaveLength(1); // second collapsed
+    expect(
+      audit.calls.some(
+        (c) =>
+          c.action === 'push_suppressed' && c.detail?.reason === 'coalesced',
+      ),
+    ).toBe(true);
   });
 });
