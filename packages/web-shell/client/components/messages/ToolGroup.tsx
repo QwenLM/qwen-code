@@ -804,13 +804,7 @@ export const ToolLine = memo(function ToolLine({
               : t('tool.expand')
             : undefined
         }
-        aria-label={
-          expandable
-            ? expanded
-              ? t('tool.collapseHint')
-              : t('tool.expand')
-            : undefined
-        }
+        aria-expanded={expandable ? expanded : undefined}
         role={expandable ? 'button' : undefined}
         tabIndex={expandable ? 0 : undefined}
         onClick={

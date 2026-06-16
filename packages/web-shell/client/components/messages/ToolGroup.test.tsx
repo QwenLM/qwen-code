@@ -221,10 +221,13 @@ describe('tool description expand toggle', () => {
     const header = getToolHeader(container);
     expect(header.getAttribute('title')).toBe('Expand');
     expect(header.getAttribute('role')).toBe('button');
+    expect(header.getAttribute('aria-label')).toBeNull();
+    expect(header.getAttribute('aria-expanded')).toBe('false');
 
     click(header);
 
     expect(header.getAttribute('title')).toBe('Collapse');
+    expect(header.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('keeps the result summary when expanding a long-description tool with no detail view', () => {

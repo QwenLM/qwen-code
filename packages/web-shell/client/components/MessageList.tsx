@@ -64,8 +64,6 @@ interface MessageListProps {
   autoScrollTailIntoView?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
-  /** Enable per-turn step summaries and collapsible execution traces. */
-  summarizeSteps?: boolean;
 }
 
 function isAskUserQuestion(request: PermissionRequest): boolean {
@@ -689,7 +687,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       autoScrollTailIntoView = false,
       showRetryHint = false,
       onRetryClick,
-      summarizeSteps,
     },
     ref,
   ) {
@@ -714,7 +711,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
     const { collapseCompletedTurns } = useWebShellCustomization();
-    const collapseEnabled = summarizeSteps ?? collapseCompletedTurns ?? true;
+    const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
     >(() => new Map());

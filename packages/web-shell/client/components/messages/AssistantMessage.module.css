@@ -132,6 +132,14 @@
   pointer-events: auto;
 }
 
+@media (hover: none) {
+  .thinkingPreviewWrap .expandToggle,
+  .thinkingExpandedWrap .expandToggle {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .expandToggle:hover {
   color: var(--text-dimmed);
 }
