@@ -5,13 +5,16 @@ on:
     branches:
       - 'main'
       - 'feat/e2e/**'
+  pull_request:
+    branches:
+      - 'main'
   merge_group:
 
 concurrency:
   group: |-
-    ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}
+    ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: |-
-    ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 jobs:
   e2e-test-linux:
