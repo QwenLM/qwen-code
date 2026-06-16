@@ -9277,7 +9277,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
 
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 }, true)],
+      [makeRequest('c1', 'strictStringTool', { value: {} }, true)],
       new AbortController().signal,
     );
     let msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9285,7 +9285,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
 
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9293,7 +9293,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
 
     await scheduler.schedule(
-      [makeRequest('c3', 'strictStringTool', { value: 123 }, true)],
+      [makeRequest('c3', 'strictStringTool', { value: {} }, true)],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
