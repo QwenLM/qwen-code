@@ -49,7 +49,7 @@ Pick the path that matches your goal:
 
 - [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md) - TypeScript SDK: `DaemonClient`, `DaemonSessionClient`, `DaemonAuthFlow`, SSE parser, event reducers, `ui/*` transcript layer.
 - [`14-cli-tui-adapter.md`](./14-cli-tui-adapter.md) - shared UI transcript layer and the legacy CLI TUI daemon adapter relationship.
-- [`15-channel-adapters.md`](./15-channel-adapters.md) - `DaemonChannelBridge` shared base plus DingTalk, WeChat (Weixin), Telegram per-channel adapters.
+- [`15-channel-adapters.md`](./15-channel-adapters.md) - `DaemonChannelBridge` shared base plus DingTalk, WeChat (Weixin), Telegram, Feishu per-channel adapters.
 - [`16-vscode-ide-adapter.md`](./16-vscode-ide-adapter.md) - `DaemonIdeConnection`, loopback-only enforcement, webview bridging.
 
 ### Reference appendices
@@ -134,7 +134,7 @@ Use these anchors when moving from the docs into the latest `main` code:
 | Area                         | Current state                                                                                                                                                | Primary docs                                                                                                                                  |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | TypeScript SDK daemon client | `DaemonClient`, `DaemonSessionClient`, `DaemonAuthFlow`, SSE parser, event reducers, feature preflight, and UI transcript exports are documented.            | [`13`](./13-sdk-daemon-client.md)                                                                                                             |
-| Shared UI transcript layer   | SDK `daemon/ui/*` normalizes daemon events into 36 UI semantic event types, reduces them into transcript blocks, and provides renderers/conformance helpers. | [`14`](./14-cli-tui-adapter.md), [`../daemon-ui/README.md`](../daemon-ui/README.md), [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) |
+| Shared UI transcript layer   | SDK `daemon/ui/*` normalizes daemon events into 37 UI semantic event types, reduces them into transcript blocks, and provides renderers/conformance helpers. | [`14`](./14-cli-tui-adapter.md), [`../daemon-ui/README.md`](../daemon-ui/README.md), [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) |
 | Web UI daemon consumer       | `packages/webui/src/daemon/` consumes the SDK transcript store through React providers and adapters.                                                         | [`14`](./14-cli-tui-adapter.md), [`../daemon-client-adapters/web-ui.md`](../daemon-client-adapters/web-ui.md)                                 |
 | CLI TUI / channels / VS Code | Legacy paths still exist; migration to shared transcript primitives is documented as follow-up work, not completed behavior.                                 | [`14`](./14-cli-tui-adapter.md), [`15`](./15-channel-adapters.md), [`16`](./16-vscode-ide-adapter.md)                                         |
 

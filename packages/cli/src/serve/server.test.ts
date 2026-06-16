@@ -61,6 +61,7 @@ import {
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
+  type BridgeDaemonStatusSnapshot,
   type BridgeRestoredSession,
   type BridgeClientRequestContext,
   type BridgeRestoreSessionRequest,
@@ -120,6 +121,7 @@ const WS_BOUND = path.resolve(path.sep, 'work', 'bound');
 const WS_DIFFERENT = path.resolve(path.sep, 'work', 'different');
 const EXPECTED_STAGE1_FEATURES = [
   'health',
+  'daemon_status',
   'capabilities',
   'session_create',
   'session_scope_override',
@@ -235,9 +237,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
-      f !== 'session_branch' &&
-      f !== 'rate_limit' &&
-      f !== 'workspace_reload',
+      f !== 'session_branch',
   ),
   'workspace_settings',
   'workspace_init',
@@ -272,6 +272,15 @@ interface FakeBridgeOpts {
    * validator returns 400. Defaults to an empty set.
    */
   knownClientIds?: Iterable<string>;
+  /**
+   * Drives the `POST /session/:id/mid-turn-message` route. Default accepts.
+   * Throw (e.g. `SessionNotFoundError`) to exercise the error branch.
+   */
+  enqueueMidTurnImpl?: (
+    sessionId: string,
+    message: string,
+    context?: BridgeClientRequestContext,
+  ) => { accepted: boolean };
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
   loadImpl?: (
     req: BridgeRestoreSessionRequest,
@@ -436,6 +445,7 @@ interface FakeBridgeOpts {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ) => Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  daemonStatusSnapshotImpl?: () => BridgeDaemonStatusSnapshot;
 }
 
 interface FakeBridge extends AcpSessionBridge {
@@ -458,6 +468,11 @@ interface FakeBridge extends AcpSessionBridge {
     opts?: { requireZeroAttaches?: boolean };
   }>;
   detachCalls: Array<{ sessionId: string; clientId?: string }>;
+  enqueueMidTurnCalls: Array<{
+    sessionId: string;
+    message: string;
+    context?: BridgeClientRequestContext;
+  }>;
   permissionVotes: Array<{
     requestId: string;
     response: RequestPermissionResponse;
@@ -567,6 +582,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
   const detachCalls: FakeBridge['detachCalls'] = [];
+  const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
+  const enqueueMidTurnImpl =
+    opts.enqueueMidTurnImpl ?? (() => ({ accepted: true }));
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
@@ -876,6 +894,22 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       output: `$ ${command}`,
       aborted: false,
     }));
+  const daemonStatusSnapshotImpl =
+    opts.daemonStatusSnapshotImpl ??
+    (() => ({
+      limits: {
+        maxSessions: 20,
+        maxPendingPromptsPerSession: 5,
+        eventRingSize: 8000,
+        channelIdleTimeoutMs: 0,
+        sessionIdleTimeoutMs: 1_800_000,
+      },
+      sessionCount: 0,
+      pendingPermissionCount: 0,
+      channelLive: false,
+      permissionPolicy: 'first-responder' as const,
+      sessions: [],
+    }));
   return {
     // F3 Commit 6 — `AcpSessionBridge.permissionPolicy` is required so
     // `/capabilities` can expose `policy.permission`. Tests don't
@@ -889,6 +923,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     cancelCalls,
     killCalls,
     detachCalls,
+    enqueueMidTurnCalls,
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
@@ -946,6 +981,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get pendingPermissionCount() {
       return 0;
+    },
+    getDaemonStatusSnapshot() {
+      return daemonStatusSnapshotImpl();
     },
     async spawnOrAttach(req) {
       const result = await spawnImpl(req);
@@ -1111,6 +1149,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async generateSessionBtw(sessionId, _question, _signal, _context) {
       return { sessionId, answer: 'mock btw answer' };
     },
+    enqueueMidTurnMessage(sessionId, message, context) {
+      enqueueMidTurnCalls.push({
+        sessionId,
+        message,
+        ...(context ? { context } : {}),
+      });
+      return enqueueMidTurnImpl(sessionId, message, context);
+    },
     async executeShellCommand(sessionId, command, signal, context) {
       shellCalls.push({
         sessionId,
@@ -1209,39 +1255,39 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     isChannelLive() {
       return false;
     },
-    async queryWorkspaceStatus<T>(method: string, idle: () => T) {
+    async queryWorkspaceStatus<T>(method: string, idle: () => T): Promise<T> {
       // Dispatch based on method to mirror ACP child routing.
       if (method === 'qwen/status/workspace/mcp') {
         workspaceMcpCalls += 1;
-        return workspaceMcpImpl();
+        return workspaceMcpImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/skills') {
         workspaceSkillsCalls += 1;
-        return workspaceSkillsImpl();
+        return workspaceSkillsImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/providers') {
         workspaceProvidersCalls += 1;
-        return workspaceProvidersImpl();
+        return workspaceProvidersImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/preflight') {
         workspacePreflightCalls += 1;
-        return workspacePreflightImpl();
+        return workspacePreflightImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/hooks') {
         workspaceHooksCalls += 1;
-        return workspaceHooksImpl();
+        return workspaceHooksImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/extensions') {
         workspaceExtensionsCalls += 1;
-        return workspaceExtensionsImpl();
+        return workspaceExtensionsImpl() as Promise<T>;
       }
       return idle();
     },
-    async invokeWorkspaceCommand(
+    async invokeWorkspaceCommand<T>(
       method: string,
       params?: Record<string, unknown>,
       _opts?: { timeoutMs?: number },
-    ) {
+    ): Promise<T> {
       if (method === 'qwen/control/workspace/mcp/restart') {
         const serverName = (params?.['serverName'] as string) ?? '';
         const entryIndex = params?.['entryIndex'] as number | undefined;
@@ -1253,9 +1299,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
           serverName,
           undefined,
           entryIndex !== undefined ? { entryIndex } : undefined,
-        );
+        ) as Promise<T>;
       }
-      return {};
+      return {} as T;
     },
     async shutdown() {
       shutdownCalls += 1;
@@ -2457,6 +2503,128 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ cleared: false });
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
+    });
+  });
+
+  describe('POST /session/:id/mid-turn-message', () => {
+    const midTurnPost = (
+      app: ReturnType<typeof createServeApp>,
+      sessionId: string,
+      body: Record<string, unknown>,
+      clientId?: string,
+    ) => {
+      const r = request(app)
+        .post(`/session/${sessionId}/mid-turn-message`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      if (clientId !== undefined) r.set('X-Qwen-Client-Id', clientId);
+      return r.send(body);
+    };
+    const midTurnApp = (bridge: FakeBridge) =>
+      createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+    it('200 { accepted: true } and forwards the trimmed message + client id', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(
+        midTurnApp(bridge),
+        's-1',
+        { message: '  hello  ' },
+        'client-9',
+      );
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: true });
+      // Trimmed before enqueue, and the client id is forwarded for the bridge's
+      // ownership check + originator stamping.
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'hello',
+          context: { clientId: 'client-9' },
+        },
+      ]);
+    });
+
+    it('200 { accepted: false } when the bridge rejects (idle session)', async () => {
+      const bridge = fakeBridge({
+        enqueueMidTurnImpl: () => ({ accepted: false }),
+      });
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'later',
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: false });
+    });
+
+    it('400 when `message` is missing', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {});
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('400 when `message` is whitespace-only', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: '   ',
+      });
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('400 when the trimmed message exceeds the 16 KB cap', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'x'.repeat(16 * 1024 + 1),
+      });
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('maps a bridge SessionNotFoundError to 404', async () => {
+      const bridge = fakeBridge({
+        enqueueMidTurnImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const res = await midTurnPost(midTurnApp(bridge), 'missing', {
+        message: 'hi',
+      });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('400 on a malformed X-Qwen-Client-Id (never reaches the bridge)', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(
+        midTurnApp(bridge),
+        's-1',
+        { message: 'hi' },
+        'bad client id with spaces',
+      );
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('maps a bridge InvalidClientIdError to 400 invalid_client_id', async () => {
+      // Well-formed but unbound client id: the bridge's ownership check throws,
+      // and `sendBridgeError` maps it like the sibling routes.
+      const bridge = fakeBridge({
+        enqueueMidTurnImpl: (sid) => {
+          throw new InvalidClientIdError(sid, 'rogue');
+        },
+      });
+      const res = await midTurnPost(
+        midTurnApp(bridge),
+        's-1',
+        { message: 'hi' },
+        'rogue',
+      );
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
     });
   });
 
@@ -6231,6 +6399,207 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(503);
       expect(res.body).toEqual({ status: 'degraded' });
+    });
+  });
+
+  describe('GET /daemon/status', () => {
+    it('requires bearer auth when a token is configured', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge: fakeBridge(),
+      });
+
+      const noAuth = await request(app)
+        .get('/daemon/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(noAuth.status).toBe(401);
+
+      const withAuth = await request(app)
+        .get('/daemon/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(withAuth.status).toBe(200);
+      expect(withAuth.body).toMatchObject({
+        v: 1,
+        detail: 'summary',
+      });
+    });
+
+    it('returns summary diagnostics without querying workspace status', async () => {
+      const bridge = fakeBridge();
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        daemonLog,
+        qwenCodeVersion: '1.2.3-test',
+      });
+
+      const res = await request(app)
+        .get('/daemon/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        detail: 'summary',
+        status: 'ok',
+        issues: [],
+        daemon: {
+          pid: process.pid,
+          mode: 'http-bridge',
+          workspaceCwd: expect.any(String),
+          qwenCodeVersion: '1.2.3-test',
+          daemonId: 'test-daemon',
+        },
+        security: {
+          tokenConfigured: false,
+          requireAuth: false,
+          loopbackBind: true,
+          allowOriginConfigured: false,
+          allowOriginMode: 'none',
+          sessionShellCommandEnabled: false,
+        },
+        runtime: {
+          sessions: { active: 0 },
+          permissions: { pending: 0 },
+          channel: { live: false },
+          transport: {
+            restSseActive: 0,
+            acp: {
+              enabled: true,
+              connections: 0,
+              connectionStreams: 0,
+              sessionStreams: 0,
+              sseStreams: 0,
+              wsStreams: 0,
+              pendingClientRequests: 0,
+            },
+          },
+        },
+      });
+      expect(res.body.generatedAt).toEqual(expect.any(String));
+      expect(res.body.daemon).not.toHaveProperty('logPath');
+      expect(bridge.workspaceMcpCalls).toBe(0);
+      expect(bridge.workspaceSkillsCalls).toBe(0);
+      expect(bridge.workspaceToolsCalls).toBe(0);
+      expect(bridge.workspaceProvidersCalls).toBe(0);
+      expect(bridge.workspaceEnvCalls).toBe(0);
+      expect(bridge.workspacePreflightCalls).toBe(0);
+      expect(bridge.workspaceHooksCalls).toBe(0);
+      expect(bridge.workspaceExtensionsCalls).toBe(0);
+    });
+
+    it('rejects unknown detail values', async () => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+      });
+
+      const res = await request(app)
+        .get('/daemon/status?detail=verbose')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_detail',
+      });
+    });
+
+    it('returns full diagnostics with independent workspace section degradation', async () => {
+      const bridge = fakeBridge({
+        daemonStatusSnapshotImpl: () => ({
+          limits: {
+            maxSessions: 20,
+            maxPendingPromptsPerSession: 5,
+            eventRingSize: 8000,
+            channelIdleTimeoutMs: 0,
+            sessionIdleTimeoutMs: 1_800_000,
+          },
+          sessionCount: 1,
+          pendingPermissionCount: 0,
+          channelLive: true,
+          permissionPolicy: 'first-responder',
+          sessions: [
+            {
+              sessionId: 'session-1',
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-06-01T00:00:00.000Z',
+              clientCount: 2,
+              subscriberCount: 1,
+              attachCount: 1,
+              pendingPromptCount: 0,
+              pendingPermissionCount: 0,
+              hasActivePrompt: false,
+              lastEventId: 4,
+            },
+          ],
+        }),
+        workspaceMcpImpl: async () => {
+          throw new Error('mcp status unavailable');
+        },
+        workspacePreflightImpl: async () => ({
+          v: 1 as const,
+          workspaceCwd: WS_BOUND,
+          initialized: true as const,
+          acpChannelLive: true,
+          cells: [
+            {
+              kind: 'git' as const,
+              locality: 'daemon' as const,
+              status: 'error' as const,
+              error: 'git missing',
+            },
+          ],
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+
+      const res = await request(app)
+        .get('/daemon/status?detail=full')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        detail: 'full',
+        status: 'error',
+        full: {
+          sessions: [
+            {
+              sessionId: 'session-1',
+              clientCount: 2,
+              subscriberCount: 1,
+            },
+          ],
+          workspace: {
+            mcp: {
+              status: 'unavailable',
+              error: { kind: 'error' },
+            },
+            preflight: {
+              status: 'error',
+              summary: { cellsCount: expect.any(Number) },
+            },
+          },
+          auth: {
+            supportedDeviceFlowProviders: ['qwen-oauth'],
+            pendingDeviceFlowCount: 0,
+          },
+        },
+      });
+      expect(res.body.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: 'workspace_status_unavailable',
+            section: 'mcp',
+          }),
+          expect.objectContaining({
+            code: 'preflight_error',
+            section: 'preflight',
+          }),
+        ]),
+      );
+      expect(bridge.workspaceMcpCalls).toBe(1);
     });
   });
 

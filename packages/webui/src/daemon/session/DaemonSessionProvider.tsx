@@ -62,6 +62,10 @@ import {
   parseSidechannelFollowupSuggestion,
   publishSidechannelFollowupSuggestion,
 } from '../followupSidechannel.js';
+import {
+  parseSidechannelMidTurnInjected,
+  publishSidechannelMidTurnInjected,
+} from '../midTurnInjectedSidechannel.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -478,6 +482,11 @@ export function DaemonSessionProvider({
           setConnection((current) => ({
             status: 'connected',
             sessionId: activeSession.sessionId,
+            // Surface the bound client id so consumers can recognize their own
+            // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+            ...(activeSession.clientId
+              ? { clientId: activeSession.clientId }
+              : {}),
             workspaceCwd: activeSession.workspaceCwd,
             commands,
             skills,
@@ -662,6 +671,13 @@ export function DaemonSessionProvider({
                 parseSidechannelFollowupSuggestion(event);
               if (followupSuggestion) {
                 publishSidechannelFollowupSuggestion(followupSuggestion);
+                continue;
+              }
+              const midTurnInjected = parseSidechannelMidTurnInjected(event);
+              if (midTurnInjected) {
+                // Transient UX signal — consumers drop these from their pending
+                // queue. Not a transcript item, so skip normalization.
+                publishSidechannelMidTurnInjected(midTurnInjected);
                 continue;
               }
               const normalizedUiEvents = normalizeAndFilterEvent(
