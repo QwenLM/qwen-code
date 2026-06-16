@@ -6,7 +6,7 @@ let builtinsPromise: Promise<void> | null = null;
 function ensureBuiltins(): Promise<void> {
   if (!builtinsPromise) {
     builtinsPromise = (async () => {
-      const [telegram, weixin, dingtalk, feishu, qqbot] = await Promise.all([
+      const results = await Promise.allSettled([
         import('@qwen-code/channel-telegram'),
         import('@qwen-code/channel-weixin'),
         import('@qwen-code/channel-dingtalk'),
@@ -14,8 +14,14 @@ function ensureBuiltins(): Promise<void> {
         import('@qwen-code/channel-qqbot'),
       ]);
 
-      for (const mod of [telegram, weixin, dingtalk, feishu, qqbot]) {
-        registry.set(mod.plugin.channelType, mod.plugin);
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          registry.set(result.value.plugin.channelType, result.value.plugin);
+        } else {
+          process.stderr.write(
+            `[channel-registry] Failed to load a built-in channel: ${result.reason}\n`,
+          );
+        }
       }
     })();
   }
