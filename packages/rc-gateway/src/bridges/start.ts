@@ -50,6 +50,13 @@ export interface StartBridgeOptions {
   token: string;
   /** Logger for boot/error lines (never receives the token). */
   log?: (msg: string) => void;
+  /**
+   * User-reachable base for deeplinks. Defaults to `cfg.gatewayUrl` (the sidecar
+   * case, where transport and deeplink collapse). In-process the transport is
+   * loopback (`cfg.gatewayUrl`) but deeplinks must be reachable, so the caller
+   * passes `QWEN_DAEMON_URL || loopback` here — distinct from the transport.
+   */
+  deeplinkUrl?: string;
   /** Injectable crypto-adapter factory (tests); defaults to the real one. */
   createCryptoAdapter?: typeof createMatrixCryptoAdapter;
 }
@@ -86,7 +93,10 @@ export async function startBridge(
   opts: StartBridgeOptions,
 ): Promise<StartedBridge> {
   const { token, log } = opts;
+  // Transport is always cfg.gatewayUrl (loopback in-process; the remote gateway
+  // for a sidecar). Deeplinks default to the same, but in-process they differ.
   const client = new BridgeClient({ baseUrl: cfg.gatewayUrl, token });
+  const deeplinkUrl = opts.deeplinkUrl ?? cfg.gatewayUrl;
   const abort = new AbortController();
 
   if (cfg.kind === 'telegram') {
@@ -94,7 +104,7 @@ export async function startBridge(
       botApi: new TelegramBotApi({ botToken: cfg.botToken }),
       client,
       chats: await TelegramChatStore.open(join(cfg.stateDir, 'chats.json')),
-      baseUrl: cfg.gatewayUrl,
+      baseUrl: deeplinkUrl,
       log,
     });
     void runner.start(abort.signal);
@@ -117,7 +127,7 @@ export async function startBridge(
         guildId: cfg.guildId,
         log,
       }),
-      baseUrl: cfg.gatewayUrl,
+      baseUrl: deeplinkUrl,
       log,
     });
     void runner.start(abort.signal);
@@ -169,7 +179,7 @@ export async function startBridge(
     rest: adapter ?? mxRest,
     rooms,
     botUserId: cfg.userId,
-    baseUrl: cfg.gatewayUrl,
+    baseUrl: deeplinkUrl,
     commandPrefix: cfg.commandPrefix,
     syncOnce: (since, signal) =>
       mxRest.sync(since, 30000, signal).then((r) => r.body),

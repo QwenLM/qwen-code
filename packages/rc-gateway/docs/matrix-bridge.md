@@ -19,9 +19,9 @@ sidecar later by changing only its configuration.
 > `matrix-bot-sdk` + olm crypto adapter becomes the bridge's transport: it owns
 > `/sync` (subsuming the fetch loop), decrypts encrypted rooms transparently, and
 > sends encrypted replies. This full path is **verified end-to-end against a real
-> Synapse** (see "End-to-end encryption" below). The flag is honored in the
-> standalone sidecar (`qwen-rc-bridge matrix`); the in-process `cli.ts` path is the
-> one remaining deferral.
+> Synapse** (see "End-to-end encryption" below). The flag is honored on both the
+> standalone sidecar (`qwen-rc-bridge matrix`) and the in-process bridge (both
+> construct via the shared `startBridge`).
 
 ## What it does
 
@@ -220,12 +220,12 @@ run. Fixed by sourcing the store-type value from the native
 both type-correct and present at runtime — a reminder that "compile-checked" can
 hide runtime-erased const enums.
 
-## Deferred (not blocking E2EE in the sidecar path)
+## Deferred
 
-- **`MATRIX_ENABLE_E2EE` is sidecar-only.** The standalone `qwen-rc-bridge matrix`
-  sidecar honors the flag (via `startBridge`); the in-process `cli.ts` path reads
-  Matrix env directly and does not yet know it. It gains the flag with the `cli.ts`
-  → `startBridge` de-dup, deferred for lack of CI coverage of that path.
+- **`MATRIX_ENABLE_E2EE` works on both paths.** The standalone `qwen-rc-bridge
+matrix` sidecar and the in-process bridge both honor the flag — they construct
+  through the shared `startBridge` (`cli.ts` resolves which bridges to start via
+  the unit-tested `resolveInProcessBridges`, then hands each to `startBridge`).
 - **`olmStorePresent` on a bridge healthz** (spec "Healthz reflects olm store
   status") — the in-process bridge has no HTTP listener; `olmStorePresent` is built
   and tested and ready to surface when a bridge healthz endpoint is added.

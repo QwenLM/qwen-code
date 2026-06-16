@@ -52,17 +52,10 @@ import {
 } from './routing/test.js';
 import { createGatewayApp } from './server.js';
 import { pruneStaleBridges, HEARTBEAT_INTERVAL_SEC } from './routes/bridges.js';
-import { BridgeClient } from './bridges/client.js';
-import { TelegramBotApi } from './bridges/telegram/botApi.js';
-import { TelegramChatStore } from './bridges/telegram/chatStore.js';
-import { TelegramBridge } from './bridges/telegram/runner.js';
-import { DiscordRestApi } from './bridges/discord/restApi.js';
-import { DiscordChannelStore } from './bridges/discord/channelStore.js';
-import { DiscordBridge } from './bridges/discord/runner.js';
-import { makeDiscordGateway } from './bridges/discord/gateway.js';
+import { startBridge, type StartedBridge } from './bridges/start.js';
+import { resolveInProcessBridges } from './bridges/inProcess.js';
+import { checkMxid } from './bridges/sidecarConfig.js';
 import { MatrixRestApi } from './bridges/matrix/restApi.js';
-import { MatrixRoomStore } from './bridges/matrix/roomStore.js';
-import { MatrixBridge } from './bridges/matrix/runner.js';
 import { IdleSessionToggles } from './idle/sessionToggles.js';
 import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
@@ -808,150 +801,60 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     quietDigestTimer.unref();
   }
 
-  // In-process Telegram bridge (add-telegram-bridge), opt-in. The HYBRID: it runs
-  // in this process but talks the gateway ONLY over the loopback contract with an
-  // OPERATOR-MINTED bridge token (QWEN_BRIDGE_TOKEN, minted via POST /rc/tokens
-  // {scopes:['bridge']}) — never an auto-minted internal token — so it stays
-  // extractable to a sidecar by changing only its config. Started only when both
-  // a bot token and a bridge token are present.
-  let telegramAbort: AbortController | undefined;
-  const tgBotToken =
-    process.env.QWEN_RC_TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
-  if (tgBotToken) {
-    const bridgeToken = process.env.QWEN_BRIDGE_TOKEN;
-    if (!bridgeToken) {
+  // In-process bridges (add-{telegram,discord,matrix}-bridge), opt-in. The HYBRID:
+  // each runs in THIS process but talks the gateway ONLY over the loopback contract
+  // with an OPERATOR-MINTED bridge token (QWEN_BRIDGE_TOKEN) — never an auto-minted
+  // internal token — so it stays extractable to a sidecar by changing only config.
+  // Construction is shared with the standalone sidecar via startBridge; the pure
+  // resolver decides which bridges are configured (and threads MATRIX_ENABLE_E2EE
+  // into the in-process Matrix bridge too). Transport is loopback; deeplinks use
+  // QWEN_DAEMON_URL when set (a phone can't reach loopback).
+  const startedBridges: StartedBridge[] = [];
+  {
+    const { plans, warnings } = resolveInProcessBridges(process.env, {
+      port,
+      homeDir: homedir(),
+    });
+    for (const w of warnings) {
       // eslint-disable-next-line no-console
-      console.warn(
-        'telegram bridge: bot token set but QWEN_BRIDGE_TOKEN missing — mint a ' +
-          "bridge token (POST /rc/tokens {scopes:['bridge']}) and set " +
-          'QWEN_BRIDGE_TOKEN. Bridge NOT started.',
-      );
-    } else {
-      const loopbackUrl = `http://127.0.0.1:${port}`;
-      const runner = new TelegramBridge({
-        botApi: new TelegramBotApi({ botToken: tgBotToken }),
-        client: new BridgeClient({ baseUrl: loopbackUrl, token: bridgeToken }),
-        chats: await TelegramChatStore.open(
-          join(homedir(), '.qwen', 'rc', 'bridges', 'telegram', 'chats.json'),
-        ),
-        // Deeplinks must be user-reachable (a phone can't hit loopback); prefer
-        // QWEN_DAEMON_URL when the operator set a reachable address.
-        baseUrl: process.env.QWEN_DAEMON_URL || loopbackUrl,
-        // eslint-disable-next-line no-console
-        log: (m) => console.log(m),
-      });
-      telegramAbort = new AbortController();
-      void runner.start(telegramAbort.signal);
-      // eslint-disable-next-line no-console
-      console.log('telegram bridge: started (in-process, loopback contract)');
+      console.warn(w);
     }
-  }
-
-  // In-process Discord bridge (add-discord-bridge), opt-in. Same HYBRID as the
-  // Telegram bridge: in-process but loopback-contract-only with an OPERATOR-MINTED
-  // QWEN_BRIDGE_TOKEN, so it's sidecar-extractable by config alone. Per the
-  // operator's choice (spec D2), discord.js owns the stateful gateway protocol.
-  // Started only when bot token, application id, and bridge token are all present.
-  let discordAbort: AbortController | undefined;
-  const discordBotToken = process.env.DISCORD_BOT_TOKEN;
-  const discordAppId = process.env.DISCORD_APPLICATION_ID;
-  if (discordBotToken && discordAppId) {
-    const bridgeToken = process.env.QWEN_BRIDGE_TOKEN;
-    if (!bridgeToken) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        'discord bridge: bot token set but QWEN_BRIDGE_TOKEN missing — mint a ' +
-          "bridge token (POST /rc/tokens {scopes:['bridge']}) and set " +
-          'QWEN_BRIDGE_TOKEN. Bridge NOT started.',
-      );
-    } else {
-      const loopbackUrl = `http://127.0.0.1:${port}`;
-      const runner = new DiscordBridge({
-        client: new BridgeClient({ baseUrl: loopbackUrl, token: bridgeToken }),
-        rest: new DiscordRestApi({
-          botToken: discordBotToken,
-          applicationId: discordAppId,
-        }),
-        channels: await DiscordChannelStore.open(
-          join(homedir(), '.qwen', 'rc', 'bridges', 'discord', 'channels.json'),
-        ),
-        makeGateway: makeDiscordGateway({
-          botToken: discordBotToken,
-          applicationId: discordAppId,
-          guildId: process.env.DISCORD_GUILD_ID,
+    for (const plan of plans) {
+      // Matrix fail-fast (in-process analog: log + don't start, never kill the
+      // gateway): the configured MXID must match the access token's identity.
+      // Bounded by a 5s timeout; on timeout or a network error `userId` is
+      // undefined → fail-open (the bridge starts) rather than wedging boot.
+      if (plan.cfg.kind === 'matrix') {
+        let whoamiUserId: string | undefined;
+        try {
+          const mxRest = new MatrixRestApi({
+            homeserverUrl: plan.cfg.homeserverUrl,
+            accessToken: plan.cfg.accessToken,
+          });
+          whoamiUserId = (await mxRest.whoami(AbortSignal.timeout(5000)))
+            .userId;
+        } catch {
+          // Unreachable/slow homeserver → fail-open (do not block the gateway).
+        }
+        const mismatch = checkMxid(whoamiUserId, plan.cfg.userId);
+        if (mismatch) {
           // eslint-disable-next-line no-console
-          log: (m) => console.log(m),
-        }),
-        // Deeplinks must be user-reachable; prefer QWEN_DAEMON_URL when set.
-        baseUrl: process.env.QWEN_DAEMON_URL || loopbackUrl,
-        // eslint-disable-next-line no-console
-        log: (m) => console.log(m),
-      });
-      discordAbort = new AbortController();
-      void runner.start(discordAbort.signal);
-      // eslint-disable-next-line no-console
-      console.log('discord bridge: started (in-process, loopback contract)');
-    }
-  }
-
-  // In-process Matrix bridge (add-matrix-bridge), opt-in. Same HYBRID as the
-  // others: in-process but loopback-contract-only with an OPERATOR-MINTED
-  // QWEN_BRIDGE_TOKEN. UNENCRYPTED rooms only — encrypted rooms are detected and
-  // refused (E2EE/olm crypto is deferred). Started only when homeserver, MXID,
-  // access token, and bridge token are all present AND whoami matches the MXID.
-  let matrixAbort: AbortController | undefined;
-  const mxHomeserver = process.env.MATRIX_HOMESERVER_URL;
-  const mxUserId = process.env.MATRIX_USER_ID;
-  const mxAccessToken = process.env.MATRIX_ACCESS_TOKEN;
-  if (mxHomeserver && mxUserId && mxAccessToken) {
-    const bridgeToken = process.env.QWEN_BRIDGE_TOKEN;
-    if (!bridgeToken) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        'matrix bridge: homeserver creds set but QWEN_BRIDGE_TOKEN missing — ' +
-          "mint a bridge token (POST /rc/tokens {scopes:['bridge']}) and set " +
-          'QWEN_BRIDGE_TOKEN. Bridge NOT started.',
-      );
-    } else {
-      const loopbackUrl = `http://127.0.0.1:${port}`;
-      const mxRest = new MatrixRestApi({
-        homeserverUrl: mxHomeserver,
-        accessToken: mxAccessToken,
-      });
-      // whoami fail-fast (in-process analog: log + don't start, never kill the
-      // gateway). The configured MXID must match the access token's identity.
-      // Bounded by a 5s timeout so a hung homeserver can't wedge boot before the
-      // signal handlers register; on timeout `userId` is undefined → fail-open
-      // (the bridge starts) rather than blocking the gateway.
-      const who = await mxRest.whoami(AbortSignal.timeout(5000));
-      if (who.userId && who.userId !== mxUserId) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `matrix bridge: MXID mismatch (token resolves to a different user than ${mxUserId}). Bridge NOT started.`,
-        );
-      } else {
-        const runner = new MatrixBridge({
-          client: new BridgeClient({
-            baseUrl: loopbackUrl,
-            token: bridgeToken,
-          }),
-          rest: mxRest,
-          rooms: await MatrixRoomStore.open(
-            join(homedir(), '.qwen', 'rc', 'bridges', 'matrix', 'rooms.json'),
-          ),
-          botUserId: mxUserId,
-          baseUrl: process.env.QWEN_DAEMON_URL || loopbackUrl,
-          commandPrefix: process.env.MATRIX_COMMAND_PREFIX || '!qwen',
-          syncOnce: (since, signal) =>
-            mxRest.sync(since, 30000, signal).then((r) => r.body),
-          // eslint-disable-next-line no-console
-          log: (m) => console.log(m),
-        });
-        matrixAbort = new AbortController();
-        void runner.start(matrixAbort.signal);
-        // eslint-disable-next-line no-console
-        console.log('matrix bridge: started (in-process, loopback contract)');
+          console.warn(`matrix bridge: ${mismatch}. Bridge NOT started.`);
+          continue;
+        }
       }
+      startedBridges.push(
+        await startBridge(plan.cfg, {
+          token: plan.token,
+          deeplinkUrl: plan.deeplinkUrl,
+          // eslint-disable-next-line no-console
+          log: (m) => console.log(m),
+        }),
+      );
+      // eslint-disable-next-line no-console
+      console.log(
+        `${plan.cfg.kind} bridge: started (in-process, loopback contract)`,
+      );
     }
   }
 
@@ -962,9 +865,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     rateReloader?.stop();
     if (quietDigestTimer) clearInterval(quietDigestTimer);
     clearInterval(bridgeReaper);
-    telegramAbort?.abort();
-    discordAbort?.abort();
-    matrixAbort?.abort();
+    for (const b of startedBridges) b.stop();
     // mDNS Goodbye (design D4): withdraw the advertisement so a stale record does
     // not haunt the LAN for the 75-min TTL; bounded to 500 ms.
     if (mdnsAdvertiser) await mdnsAdvertiser.stop(500);
