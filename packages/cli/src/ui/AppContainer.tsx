@@ -2208,9 +2208,10 @@ export const AppContainer = (props: AppContainerProps) => {
     settingInputRequests,
   ]);
 
-  // Abort speculation when promptSuggestion is cleared (new turn, feature toggle, or
-  // user-initiated dismiss via typing/paste). InputPrompt calls onPromptSuggestionDismiss
-  // on user input, which clears promptSuggestion, triggering this effect to abort speculation.
+  // Abort speculation when promptSuggestion is cleared (new turn or feature toggle).
+  // promptSuggestion is only cleared when the model responds or the feature is disabled;
+  // user typing/paste no longer dismisses it — the AbortController in InputPrompt handles
+  // that path, so this effect only fires on state changes from non-user-input sources.
   useEffect(() => {
     if (!promptSuggestion && speculationRef.current.status !== 'idle') {
       abortSpeculation(speculationRef.current).catch(() => {});

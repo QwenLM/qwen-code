@@ -452,6 +452,77 @@ describe('InputPrompt', () => {
         unmount();
       }
     });
+
+    // Regression for #5145: the `promptSuggestion` prop fallback path must work
+    // when `followup.state.suggestion` is null (e.g. after user typed and
+    // deleted — the followup controller was dismissed but the placeholder
+    // text is still available via the prop).
+    describe('promptSuggestion prop fallback (when followup.state.suggestion is null)', () => {
+      it('accepts promptSuggestion via Tab when followup.state.suggestion is null', async () => {
+        vi.useFakeTimers();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} promptSuggestion="commit this" />,
+        );
+        try {
+          await advanceTimers(SUGGESTION_VISIBLE_WAIT_MS);
+
+          act(() => {
+            stdin.write('\t');
+          });
+          await flush();
+
+          // Tab should insert the suggestion text into the buffer
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('accepts promptSuggestion via Right arrow when followup.state.suggestion is null', async () => {
+        vi.useFakeTimers();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} promptSuggestion="commit this" />,
+        );
+        try {
+          await advanceTimers(SUGGESTION_VISIBLE_WAIT_MS);
+
+          act(() => {
+            stdin.write('\x1b[C'); // right arrow
+          });
+          await flush();
+
+          // Right arrow should insert the suggestion text into the buffer
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('submits promptSuggestion via Enter when followup.state.suggestion is null', async () => {
+        vi.useFakeTimers();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} promptSuggestion="commit this" />,
+        );
+        try {
+          await advanceTimers(SUGGESTION_VISIBLE_WAIT_MS);
+
+          act(() => {
+            stdin.write('\r');
+          });
+          await flush();
+
+          expect(props.onSubmit).toHaveBeenCalledWith('commit this');
+          // Enter path must NOT call buffer.insert — it passes text directly to
+          // handleSubmitAndClear.
+          expect(mockBuffer.insert).not.toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+    });
   });
 
   // Regression for #4171: `onTabConsumerChange` (consumed by AppContainer
@@ -474,6 +545,25 @@ describe('InputPrompt', () => {
       );
       await wait(SUGGESTION_VISIBLE_WAIT_MS);
 
+      expect(onTabConsumerChange).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    // Regression for #5145: `hasTabConsumer` must be true when ONLY
+    // `promptSuggestion` prop is set (followup.state.suggestion is null),
+    // so Windows Tab approval-mode cycling is blocked even before the
+    // followup controller's debounce fires.
+    it('reports true immediately when promptSuggestion prop is set (no followup debounce needed)', async () => {
+      const onTabConsumerChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          promptSuggestion="commit this"
+          onTabConsumerChange={onTabConsumerChange}
+        />,
+      );
+      // Must report true immediately — no need to wait for followup debounce
+      // because `hasTabConsumer` includes `Boolean(promptSuggestion)`.
       expect(onTabConsumerChange).toHaveBeenCalledWith(true);
       unmount();
     });
