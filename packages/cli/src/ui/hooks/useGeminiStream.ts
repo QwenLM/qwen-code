@@ -363,13 +363,11 @@ export const useGeminiStream = (
   useLayoutEffect(() => {
     historyRef.current = history;
   }, [history]);
-  // In-flight tool-use-summary aborters. Each batch gets its own AbortController
-  // because the captured turn controller is replaced when submitQuery starts
-  // the next turn, and the summary call outlives the current turn (that's the
-  // whole point — it overlaps with the next turn's streaming). cancelOngoingRequest
-  // aborts all in-flight summaries so Ctrl+C during the next turn also kills
-  // this turn's stale summary work.
-  const summaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
+  // In-flight auxiliary work. Some work is batch-scoped rather than turn-scoped:
+  // summaries intentionally outlive the turn, and mid-turn @ resolution may run
+  // before submitQuery installs the next turn controller.
+  // cancelOngoingRequest aborts these controllers so Ctrl+C still cancels them.
+  const auxiliaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   const [
@@ -643,12 +641,12 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
-    // Cancel any in-flight tool-use-summary generations so their Promise.then
-    // doesn't addItem a stale label after the user cancelled.
-    for (const ac of summaryAbortRefsRef.current) {
+    // Cancel any in-flight auxiliary work so its Promise.then doesn't add
+    // stale content after the user cancelled.
+    for (const ac of auxiliaryAbortRefsRef.current) {
       ac.abort();
     }
-    summaryAbortRefsRef.current.clear();
+    auxiliaryAbortRefsRef.current.clear();
 
     // Report cancellation to arena status reporter (if in arena mode).
     // This is needed because cancellation during tool execution won't
@@ -2348,7 +2346,7 @@ export const useGeminiStream = (
           // resolve time (which covers both Ctrl+C on the next turn and
           // mid-flight cancellation of this batch via turnCancelledRef).
           const summaryAbort = new AbortController();
-          summaryAbortRefsRef.current.add(summaryAbort);
+          auxiliaryAbortRefsRef.current.add(summaryAbort);
 
           // Capture the first callId so we can locate "our" tool_group at
           // resolve time. If a newer tool_group has been added since we
@@ -2363,7 +2361,7 @@ export const useGeminiStream = (
             lastAssistantText,
           })
             .then((summary) => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
               const cancelled =
                 turnCancelledRef.current ||
                 abortControllerRef.current?.signal.aborted ||
@@ -2400,7 +2398,7 @@ export const useGeminiStream = (
               }
             })
             .catch(() => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
             });
         }
       }
@@ -2419,63 +2417,83 @@ export const useGeminiStream = (
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
         const midTurnTimestamp = Date.now();
-        for (let index = 0; index < drained.length; index += 1) {
-          const msg = drained[index];
-          let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
-          if (isAtCommand(msg)) {
-            try {
-              const atCommandResult = await resolveAtCommandQuery({
-                query: msg,
-                config,
-                onDebugMessage,
-                messageId: midTurnTimestamp + index,
-                signal:
-                  abortControllerRef.current?.signal ??
-                  new AbortController().signal,
-              });
-              if (
-                atCommandResult.shouldProceed &&
-                atCommandResult.processedQuery !== null
-              ) {
-                resolvedMidTurnQuery = atCommandResult.processedQuery;
-              }
-              if (atCommandResult.recording) {
-                config.getChatRecordingService()?.recordAtCommand?.({
-                  filesRead: atCommandResult.recording.filesRead,
-                  status: atCommandResult.recording.status,
-                  ...(atCommandResult.recording.message
-                    ? { message: atCommandResult.recording.message }
-                    : {}),
-                  userText: msg,
+        const midTurnAbort =
+          abortControllerRef.current ?? new AbortController();
+        const shouldTrackMidTurnAbort = !abortControllerRef.current;
+        if (shouldTrackMidTurnAbort) {
+          auxiliaryAbortRefsRef.current.add(midTurnAbort);
+        }
+        try {
+          for (let index = 0; index < drained.length; index += 1) {
+            const msg = drained[index];
+            let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
+            if (isAtCommand(msg)) {
+              try {
+                const atCommandResult = await resolveAtCommandQuery({
+                  query: msg,
+                  config,
+                  onDebugMessage,
+                  messageId: midTurnTimestamp + index,
+                  signal: midTurnAbort.signal,
                 });
+                if (
+                  atCommandResult.shouldProceed &&
+                  atCommandResult.processedQuery !== null
+                ) {
+                  resolvedMidTurnQuery = atCommandResult.processedQuery;
+                }
+                if (atCommandResult.recording) {
+                  config.getChatRecordingService()?.recordAtCommand?.({
+                    filesRead: atCommandResult.recording.filesRead,
+                    status: atCommandResult.recording.status,
+                    ...(atCommandResult.recording.message
+                      ? { message: atCommandResult.recording.message }
+                      : {}),
+                    userText: msg,
+                  });
+                }
+              } catch (error) {
+                onDebugMessage(
+                  `Failed to resolve mid-turn @ command: ${error instanceof Error ? error.message : String(error)}`,
+                );
               }
-            } catch (error) {
-              onDebugMessage(
-                `Failed to resolve mid-turn @ command: ${error instanceof Error ? error.message : String(error)}`,
+            }
+
+            const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
+              resolvedMidTurnQuery,
+              msg,
+            );
+            const formatCheck = checkImageFormatsSupport(
+              midTurnUserMessageParts,
+            );
+            if (formatCheck.hasUnsupportedFormats) {
+              addItem(
+                {
+                  type: MessageType.INFO,
+                  text: getUnsupportedImageFormatWarning(),
+                },
+                Date.now(),
               );
             }
+            responsesToSend.push(...midTurnUserMessageParts);
+            config
+              .getChatRecordingService()
+              ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
+            addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
           }
-
-          const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
-            resolvedMidTurnQuery,
-            msg,
-          );
-          const formatCheck = checkImageFormatsSupport(midTurnUserMessageParts);
-          if (formatCheck.hasUnsupportedFormats) {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: getUnsupportedImageFormatWarning(),
-              },
-              Date.now(),
-            );
+        } finally {
+          if (shouldTrackMidTurnAbort) {
+            auxiliaryAbortRefsRef.current.delete(midTurnAbort);
+            midTurnAbort.abort();
           }
-          responsesToSend.push(...midTurnUserMessageParts);
-          config
-            .getChatRecordingService()
-            ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
-          addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
         }
+      }
+
+      if (
+        turnCancelledRef.current ||
+        abortControllerRef.current?.signal.aborted
+      ) {
+        return;
       }
 
       submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);

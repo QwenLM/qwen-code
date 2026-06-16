@@ -1567,6 +1567,63 @@ describe('Qwen native history loading', () => {
     ]);
   });
 
+  it('keeps non-image attachments queued for the next turn', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-midturn-pdf';
+    const timestamp = Date.now();
+    const liveAttachment: FileAttachment = {
+      type: 'pdf',
+      path: join(workspaceRoot, 'report.pdf'),
+      name: 'report.pdf',
+      mimeType: 'application/pdf',
+      base64: 'base64-pdf',
+      size: 1024,
+    };
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { isProcessing: true, messagesLoaded: true },
+    );
+    const enqueueCalls: string[] = [];
+    managed.agent = {
+      enqueueMidTurnMessage: (message: string) => {
+        enqueueCalls.push(message);
+        return true;
+      },
+      destroy: () => {},
+      dispose: () => {},
+    } as unknown as AgentBackend;
+    const manager = new SessionManager();
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    await manager.sendMessage(sessionId, 'read this pdf', [liveAttachment]);
+
+    expect(enqueueCalls).toEqual([]);
+    expect(managed.messageQueue[0]?.midTurnPending).toBe(false);
+    expect(managed.messageQueue[0]?.attachments).toEqual([liveAttachment]);
+  });
+
   it('merges local visual overlays into provider-loaded Qwen messages', async () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),

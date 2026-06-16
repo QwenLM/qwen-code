@@ -269,6 +269,32 @@ describe('QwenAgent slash command history', () => {
     agent.destroy();
   });
 
+  it('acknowledges drained mid-turn messages without metadata by text', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    expect(agent.enqueueMidTurnMessage('legacy queued message')).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      messages: ['legacy queued message'],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
+      'legacy queued message',
+    ]);
+
+    agent.destroy();
+  });
+
   it('drains queued mid-turn image attachments as ACP content blocks', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);

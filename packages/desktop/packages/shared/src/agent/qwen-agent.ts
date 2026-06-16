@@ -1625,11 +1625,9 @@ function permissionTypeForKind(
   }
 }
 
-interface QueuedMidTurnMessage {
+interface QueuedMidTurnMessage extends MidTurnMessageMetadata {
   message: string;
   attachments?: FileAttachment[];
-  messageId?: string;
-  optimisticMessageId?: string;
 }
 
 export class QwenAgent extends BaseAgent {
@@ -2817,7 +2815,7 @@ export class QwenAgent extends BaseAgent {
         `Drained ${entries.length} mid-turn user message(s) to Qwen ACP`,
       );
       const messageIds = entries
-        .map((entry) => entry.messageId)
+        .map((entry) => entry.messageId ?? entry.message)
         .filter((messageId): messageId is string => !!messageId);
       if (messageIds.length > 0) {
         this.config.onMidTurnMessagesDrained?.(messageIds);

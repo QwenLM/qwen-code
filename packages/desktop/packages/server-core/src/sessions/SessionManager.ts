@@ -314,7 +314,7 @@ function canOfferMidTurnAttachments(
   }
 
   return attachments.every((attachment) => {
-    if (!attachment.mimeType?.startsWith('image/')) return true
+    if (!attachment.mimeType?.startsWith('image/')) return false
     return typeof attachment.base64 === 'string' && attachment.base64.length > 0
   })
 }
@@ -4999,7 +4999,9 @@ export class SessionManager implements ISessionManager {
         }> = []
         for (const messageId of messageIds) {
           const index = managed.messageQueue.findIndex(
-            (entry) => entry.midTurnPending && entry.messageId === messageId,
+            (entry) =>
+              entry.midTurnPending &&
+              (entry.messageId === messageId || entry.message === messageId),
           )
           if (index >= 0) {
             const [entry] = managed.messageQueue.splice(index, 1)

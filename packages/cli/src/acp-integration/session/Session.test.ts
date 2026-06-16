@@ -2632,6 +2632,92 @@ describe('Session', () => {
         ).toHaveBeenCalledWith(midTurnParts, 'please inspect this image');
       });
 
+      it('rejects mid-turn resource links and keeps valid messages in the same batch', async () => {
+        const readManyFilesSpy = vi
+          .spyOn(core, 'readManyFiles')
+          .mockResolvedValue({
+            contentParts: 'secret file',
+            files: [],
+          });
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'resource_link',
+                  uri: 'file:///etc/passwd',
+                  name: 'passwd',
+                },
+              ],
+              displayText: 'secret file',
+            },
+            {
+              content: [{ type: 'text', text: 'safe follow-up' }],
+              displayText: 'safe follow-up',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          const midTurnPart = {
+            text: '\n[User message received during tool execution]: safe follow-up',
+          };
+          const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1];
+          expect(secondCall?.[1].message).toEqual(
+            expect.arrayContaining([midTurnPart]),
+          );
+          expect(readManyFilesSpy).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([midTurnPart], 'safe follow-up');
+        } finally {
+          readManyFilesSpy.mockRestore();
+        }
+      });
+
       it('latches mid-turn drain off after a permanent (-32601) error', async () => {
         const tool = {
           name: 'read_file',

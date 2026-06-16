@@ -175,6 +175,7 @@ const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 // means the client silently drops unknown methods; without a deadline the
 // await would wedge the prompt turn forever.
 const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
+const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
 // Latch the drain off only after this many consecutive timeouts: one slow
 // answer must not permanently disable mid-turn messages for a
 // conforming-but-busy client, while a client that never answers stops
@@ -202,16 +203,35 @@ function isContentBlock(value: unknown): value is ContentBlock {
         typeof value['data'] === 'string'
       );
     case 'resource_link':
-      return (
-        typeof value['uri'] === 'string' &&
-        (value['name'] === undefined || typeof value['name'] === 'string') &&
-        (value['mimeType'] === undefined ||
-          typeof value['mimeType'] === 'string')
-      );
+      return false;
     case 'resource':
       return isEmbeddedResourceResource(value['resource']);
     default:
       return false;
+  }
+}
+
+async function withTimeoutSignal<T>(
+  parentSignal: AbortSignal,
+  timeoutMs: number,
+  fn: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  if (parentSignal.aborted) {
+    throw new Error('Mid-turn message resolution aborted');
+  }
+
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(parentSignal.reason);
+  const timeoutHandle = setTimeout(() => {
+    controller.abort(new Error('Mid-turn message resolution timed out'));
+  }, timeoutMs);
+
+  parentSignal.addEventListener('abort', abortFromParent, { once: true });
+  try {
+    return await fn(controller.signal);
+  } finally {
+    clearTimeout(timeoutHandle);
+    parentSignal.removeEventListener('abort', abortFromParent);
   }
 }
 
@@ -1423,7 +1443,9 @@ export class Session implements SessionContext {
                     role: 'user',
                     parts: [
                       ...toolResponseParts,
-                      ...(await this.#drainMidTurnUserMessages()),
+                      ...(await this.#drainMidTurnUserMessages(
+                        pendingSend.signal,
+                      )),
                     ],
                   };
                 }
@@ -1688,7 +1710,7 @@ export class Session implements SessionContext {
               role: 'user',
               parts: [
                 ...toolResponseParts,
-                ...(await this.#drainMidTurnUserMessages()),
+                ...(await this.#drainMidTurnUserMessages(pendingSend.signal)),
               ],
             };
           }
@@ -1957,7 +1979,7 @@ export class Session implements SessionContext {
     });
   }
 
-  async #drainMidTurnUserMessages(): Promise<Part[]> {
+  async #drainMidTurnUserMessages(abortSignal: AbortSignal): Promise<Part[]> {
     if (this.midTurnDrainUnavailable) return [];
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
@@ -1982,20 +2004,28 @@ export class Session implements SessionContext {
       const drainedMessages = parseMidTurnDrainResponse(response);
       const drainedParts: Part[] = [];
       for (const message of drainedMessages) {
-        const displayText =
-          message.kind === 'text' ? message.message : message.displayText;
-        const rawParts =
-          message.kind === 'text'
-            ? [{ text: message.message }]
-            : await this.#resolvePrompt(
-                message.content,
-                new AbortController().signal,
-              );
-        const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
-        this.config
-          .getChatRecordingService()
-          ?.recordMidTurnUserMessage(parts, displayText);
-        drainedParts.push(...parts);
+        try {
+          const displayText =
+            message.kind === 'text' ? message.message : message.displayText;
+          const rawParts =
+            message.kind === 'text'
+              ? [{ text: message.message }]
+              : await withTimeoutSignal(
+                  abortSignal,
+                  MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+                  (signal) => this.#resolvePrompt(message.content, signal),
+                );
+          const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
+          this.config
+            .getChatRecordingService()
+            ?.recordMidTurnUserMessage(parts, displayText);
+          drainedParts.push(...parts);
+        } catch (messageError) {
+          if (abortSignal.aborted) throw messageError;
+          debugLogger.warn(
+            `Failed to resolve mid-turn message: ${this.#formatError(messageError)}`,
+          );
+        }
       }
 
       return drainedParts;
@@ -2260,7 +2290,7 @@ export class Session implements SessionContext {
                     role: 'user',
                     parts: [
                       ...toolResponseParts,
-                      ...(await this.#drainMidTurnUserMessages()),
+                      ...(await this.#drainMidTurnUserMessages(ac.signal)),
                     ],
                   };
                 }
@@ -2566,7 +2596,7 @@ export class Session implements SessionContext {
                 role: 'user',
                 parts: [
                   ...toolResponseParts,
-                  ...(await this.#drainMidTurnUserMessages()),
+                  ...(await this.#drainMidTurnUserMessages(ac.signal)),
                 ],
               };
             }
