@@ -997,7 +997,9 @@ function fixBooleanValues(
               }
             } else if (typeof item === 'string') {
               const elAccepted = getAcceptedTypes(elSchema, root);
-              if (elAccepted?.has('boolean')) {
+              // Same string-guard as the scalar path: don't coerce a
+              // legitimate string when the element also accepts string.
+              if (elAccepted?.has('boolean') && !elAccepted.has('string')) {
                 const lower = item.toLowerCase();
                 if (lower === 'true' || lower === 'false') {
                   debugLogger.debug(
@@ -1035,9 +1037,12 @@ function fixBooleanValues(
               }
             } else {
               // Array of primitives — coerce "true"/"false" strings when
-              // the items schema accepts boolean.
+              // the items schema accepts boolean (and not also string).
               const itemsAccepted = getAcceptedTypes(resolvedItems, root);
-              if (itemsAccepted?.has('boolean')) {
+              if (
+                itemsAccepted?.has('boolean') &&
+                !itemsAccepted.has('string')
+              ) {
                 for (let i = 0; i < value.length; i++) {
                   const item = value[i];
                   if (typeof item === 'string') {
@@ -1075,11 +1080,15 @@ function fixBooleanValues(
       const lower = value.toLowerCase();
       if (lower !== 'true' && lower !== 'false') continue;
 
-      // Only coerce when the schema explicitly accepts boolean.
-      // If getAcceptedTypes returns null (no type info — enum-only, const-only,
-      // or empty schemas), skip coercion to avoid corrupting legitimate strings.
+      // Only coerce when the schema explicitly accepts boolean AND does NOT
+      // also accept string. If getAcceptedTypes returns null (no type info —
+      // enum-only, const-only, or empty schemas), or if string is also
+      // accepted, skip: the value is a legitimate string ("true"/"false" as
+      // text, e.g. an old_string argument) and coercing it to a boolean would
+      // corrupt the tool call. Mirrors fixStringValues / fixStringifiedJsonValues
+      // and main's pre-existing guard.
       const accepted = resolved ? getAcceptedTypes(resolved, root) : null;
-      if (accepted?.has('boolean')) {
+      if (accepted?.has('boolean') && !accepted.has('string')) {
         debugLogger.debug(
           `coercion: ${key} = ${JSON.stringify(value)} → ${lower === 'true'} (accepted: ${[...accepted].join('|')})`,
         );

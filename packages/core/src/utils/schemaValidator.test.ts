@@ -229,22 +229,28 @@ describe('SchemaValidator', () => {
       expect(params.is_active).toBe(false);
     });
 
-    it('should coerce string booleans when boolean is accepted (even if string also accepted)', () => {
+    it('should preserve string "true"/"false" when the field also accepts string', () => {
+      // When a field accepts both boolean AND string (a common Pydantic /
+      // draft-2020-12 union), a string value of "true"/"false" is legitimate
+      // — e.g. user content that happens to be the text "true"/"false" — and
+      // must NOT be coerced to a boolean. Coercing it would corrupt the tool
+      // call. Mirrors main's pre-existing guard and the symmetric guard in
+      // fixStringValues. Previously this regressed vs main (the string was
+      // silently rewritten into a boolean).
       const unionSchema = {
         type: 'object',
         properties: {
-          value: { anyOf: [{ type: 'string' }, { type: 'boolean' }] },
+          value: { anyOf: [{ type: 'boolean' }, { type: 'string' }] },
           is_active: { type: 'boolean' },
         },
         required: ['value', 'is_active'],
       };
-      const params = { value: 'true', is_active: 'true' };
+      const params = { value: 'false', is_active: 'false' };
       expect(SchemaValidator.validate(unionSchema, params)).toBeNull();
-      // fixBooleanValues coerces "true" → true when boolean is accepted,
-      // even if string is also accepted. fixStringValues then skips because
-      // boolean is already an accepted type (round-trip prevention).
-      expect(params.value).toBe(true);
-      expect(params.is_active).toBe(true);
+      // value accepts string → the string "false" is preserved, not coerced.
+      expect(params.value).toBe('false');
+      // is_active is boolean-only → still coerced to false.
+      expect(params.is_active).toBe(false);
     });
 
     it('should coerce string booleans inside arrays of booleans', () => {
@@ -1148,6 +1154,55 @@ describe('SchemaValidator', () => {
       SchemaValidator.validate(schema, params);
       expect(params.items).toEqual([{ enabled: true }, { enabled: false }]);
     });
+
+    it('should preserve string "true"/"false" in arrays whose items also accept string', () => {
+      // items schema accepts boolean AND string → a string element of
+      // "true"/"false" is legitimate and must not be coerced to a boolean.
+      // Mirrors the scalar-field guard; covers the uniform-items path.
+      const schema = {
+        type: 'object',
+        properties: {
+          values: {
+            type: 'array',
+            items: { anyOf: [{ type: 'boolean' }, { type: 'string' }] },
+          },
+          flags: { type: 'array', items: { type: 'boolean' } },
+        },
+        required: ['values', 'flags'],
+      };
+      const params = { values: ['true', 'false'], flags: ['true', 'false'] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      // values accept string → strings preserved.
+      expect(params.values).toEqual(['true', 'false']);
+      // flags are boolean-only → still coerced.
+      expect(params.flags).toEqual([true, false]);
+    });
+
+    it('should preserve string "true"/"false" in tuple elements that also accept string', () => {
+      // prefixItems tuple where position 0 accepts boolean AND string → a
+      // string element of "true"/"false" there must not be coerced, while
+      // position 1 (boolean-only) is still coerced. Covers the per-element
+      // (prefixItems) path. bad_field forces initial validation to fail so the
+      // coercion pass runs and walks prefixItems.
+      const schema = {
+        type: 'object',
+        properties: {
+          pair: {
+            type: 'array',
+            prefixItems: [
+              { anyOf: [{ type: 'boolean' }, { type: 'string' }] },
+              { type: 'boolean' },
+            ],
+          },
+          bad_field: { type: 'integer' },
+        },
+        required: ['pair', 'bad_field'],
+      };
+      const params = { pair: ['false', 'false'], bad_field: 'not_a_number' };
+      SchemaValidator.validate(schema, params);
+      // Position 0 accepts string → preserved; position 1 is boolean-only → coerced.
+      expect(params.pair).toEqual(['false', false]);
+    });
   });
 
   describe('fixStringValues with oneOf', () => {
@@ -1545,10 +1600,12 @@ describe('SchemaValidator', () => {
       expect(params.val).toBe('true');
     });
 
-    it('should not round-trip boolean→string when coercion runs due to other failure', () => {
-      // When coercion runs (triggered by another field failing), fixBooleanValues
-      // coerces "true" → true, then fixStringValues should NOT coerce true → "true"
-      // because boolean is already accepted by the schema.
+    it('should preserve string when coercion runs due to other failure', () => {
+      // When coercion runs (triggered by required_num failing), the string
+      // "true" must stay a string: fixBooleanValues skips it (string is also
+      // accepted) and fixStringValues skips it (it is already a string). No
+      // round-trip or corruption occurs. Previously fixBooleanValues coerced
+      // "true" → true here, regressing vs main.
       const schema = {
         type: 'object',
         properties: {
@@ -1559,18 +1616,14 @@ describe('SchemaValidator', () => {
       };
       const params = { val: 'true', required_num: 'not_a_number' };
       SchemaValidator.validate(schema, params);
-      // fixBooleanValues coerces "true" → true (boolean is accepted)
-      // fixStringValues sees true, checks typeIsAccepted('boolean', {boolean,string}) → true → skips
-      expect(params.val).toBe(true);
+      // val accepts string → the string "true" is preserved untouched.
+      expect(params.val).toBe('true');
     });
 
-    it('should not round-trip boolean→string in tuple position when schema accepts both', () => {
-      // Same round-trip invariant as above, but for prefixItems tuples.
-      // Position 0: anyOf [boolean, string] with value "true"
-      // Position 1: string with value "hello"
-      // Pass 1 (fixBooleanValues) coerces "true" → true at position 0.
-      // Pass 2 (fixStringValues) should skip position 0 because boolean
-      // is accepted by the schema (anyOf includes string too).
+    it('should preserve string in tuple position when schema accepts both', () => {
+      // Same invariant as above, but for prefixItems tuples.
+      // Position 0: anyOf [boolean, string] with value "true" → stays a string.
+      // Position 1: string with value "hello" → stays a string.
       const schema = {
         type: 'object',
         properties: {
@@ -1587,9 +1640,8 @@ describe('SchemaValidator', () => {
       };
       const params = { tuple: ['true', 'hello'], required_num: 'not_a_number' };
       SchemaValidator.validate(schema, params);
-      // Position 0: "true" → true (boolean pass), then NOT reverted to "true"
-      // Position 1: "hello" stays as string
-      expect(params.tuple).toEqual([true, 'hello']);
+      // Position 0 accepts string → preserved; position 1 stays a string.
+      expect(params.tuple).toEqual(['true', 'hello']);
     });
   });
 
