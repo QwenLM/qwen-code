@@ -20,41 +20,99 @@ permissions:
   pull-requests: 'write'
 
 jobs:
+  authorize:
+    # Gate PR and /triage-comment triggers on the principal having write+
+    # permission: the PR author for PR events, the commenter for /triage
+    # comments. Replaces the same-repo-only fork check and the comment
+    # author_association check, so fork PRs by trusted authors are triaged.
+    # `issues` and `workflow_dispatch` triggers do not need this gate.
+    if: |-
+      github.repository == 'QwenLM/qwen-code' &&
+      (github.event_name == 'pull_request_target' ||
+       (github.event_name == 'issue_comment' &&
+        startsWith(github.event.comment.body, '@qwen-code /triage')))
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    outputs:
+      should_run: '${{ steps.perm.outputs.should_run }}'
+    steps:
+      - name: 'Check principal write permission'
+        id: 'perm'
+        env:
+          # CI_BOT_PAT (not GITHUB_TOKEN): reading a user's collaborator
+          # permission requires write/maintain/admin access, which the
+          # GITHUB_TOKEN with contents:read does not have. Safe here — this job
+          # runs no agent, checks out nothing, and processes no untrusted PR
+          # content; it only reads event metadata and calls one read API.
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          COMMENT_USER: '${{ github.event.comment.user.login }}'
+        run: |-
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request_target) principal="$PR_AUTHOR" ;;
+            issue_comment) principal="$COMMENT_USER" ;;
+            *) principal="" ;;
+          esac
+          if [ -z "$principal" ]; then
+            echo "No principal resolved for ${EVENT_NAME}; denying." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail closed: any API error or non-write permission denies the run.
+          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>/dev/null)"; then
+            echo "Failed to check permission for ${principal}; denying." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$permission" in
+            admin|maintain|write)
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Denying triage: ${principal} permission is '${permission}' (needs write)." >> "$GITHUB_STEP_SUMMARY"
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
   triage:
+    needs: ['authorize']
     timeout-minutes: 30
     concurrency:
       group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
-      # Repeat the maintainer /triage check here intentionally: GitHub
-      # evaluates concurrency before the job `if`, so this controls
-      # cancellation, not job eligibility. Other job gates below can diverge.
+      # GitHub evaluates concurrency before the job `if`, and it cannot call
+      # the permission API, so this only controls cancellation (a coarse event
+      # match), not eligibility. The real write-permission gate is the
+      # `authorize` job below.
       cancel-in-progress: >-
         ${{
           github.event_name == 'issues' ||
           (github.event_name == 'pull_request_target' &&
-           github.event.pull_request.head.repo.full_name == github.repository &&
            github.event.pull_request.draft == false) ||
           github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'issue_comment' &&
-           startsWith(github.event.comment.body, '@qwen-code /triage') &&
-           (github.event.comment.author_association == 'OWNER' ||
-            github.event.comment.author_association == 'MEMBER' ||
-            github.event.comment.author_association == 'COLLABORATOR'))
+           startsWith(github.event.comment.body, '@qwen-code /triage'))
         }}
     runs-on: 'ubuntu-latest'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
+    # always() so the job still evaluates when the upstream `authorize` job is
+    # skipped (issues / workflow_dispatch paths, which need no permission gate).
     if: >-
+      always() &&
       github.repository == 'QwenLM/qwen-code' && (
         github.event_name == 'issues' ||
-        (github.event_name == 'pull_request_target' &&
-         github.event.pull_request.head.repo.full_name == github.repository &&
-         github.event.pull_request.draft == false) ||
         github.event_name == 'workflow_dispatch' ||
-        (github.event_name == 'issue_comment' &&
-         startsWith(github.event.comment.body, '@qwen-code /triage') &&
-         (github.event.comment.author_association == 'OWNER' ||
-          github.event.comment.author_association == 'MEMBER' ||
-          github.event.comment.author_association == 'COLLABORATOR'))
+        (
+          ((github.event_name == 'pull_request_target' &&
+            github.event.pull_request.draft == false) ||
+           (github.event_name == 'issue_comment' &&
+            startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
+          needs.authorize.outputs.should_run == 'true'
+        )
       )
     steps:
       - name: 'Checkout repo'
