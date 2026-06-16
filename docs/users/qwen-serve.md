@@ -383,7 +383,7 @@ Stage 1's contract is sized for prototyping. Per [#3889 chiga0 downstream-consum
 
 3. ~~**Client-initiated heartbeat path**~~ — shipped via [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 9. `POST /session/:id/heartbeat` records last-seen timestamps on the daemon (capability tag `client_heartbeat`); SDK helpers are `DaemonClient.heartbeat()` / `DaemonSessionClient.heartbeat()`.
 4. **`permission_already_resolved` event** when a vote loses the first-responder race — currently UIs have to infer state from a `404`.
-5. **Larger / per-session-configurable replay ring** — default 8000 covers short drops; mobile / chatty-turn workloads need 8000+ or per-session config.
+5. ~~**Larger replay ring**~~ — bumped to 8000. **Per-session-configurable ring** still open — mobile / chatty-turn workloads may need per-session overrides.
 6. **`slow_client_warning` event before `client_evicted`** — soft backpressure so well-behaved slow clients can self-throttle (trim render depth, drop chunks) before being terminated.
 
 **Integration ergonomics:**
