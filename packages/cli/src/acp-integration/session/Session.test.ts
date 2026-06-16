@@ -3208,6 +3208,47 @@ describe('Session', () => {
         );
       });
 
+      it('marks loop wakeup ACP prompts with loop source metadata', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: '/loop check status',
+                cronExpr: '@wakeup',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: '/loop check status' },
+              _meta: { source: 'loop' },
+            },
+          });
+        });
+      });
+
       it('stops cron-fired ACP prompt before sending when the session token limit is exceeded', async () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {

@@ -411,6 +411,37 @@ describe('useGeminiStream', () => {
     });
   });
 
+  it('labels loop wakeup cron notifications as Loop', async () => {
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            prompt: string;
+            cronExpr?: string;
+            missed?: boolean;
+          }) => void,
+        ) => {
+          callback({ prompt: '/loop check status', cronExpr: '@wakeup' });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: 'Loop: /loop check status' },
+        expect.any(Number),
+      );
+    });
+  });
+
   it('renders teammate reports as a compact notification, not a raw envelope bubble', async () => {
     const mockManager = { setLeaderMessageCallback: vi.fn() };
     (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(mockManager);
