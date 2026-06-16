@@ -208,8 +208,9 @@ const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 /**
  * SSE frame published when mid-turn messages are actually drained into the
  * running turn. The browser consumes it to move those messages out of its
- * pending queue (so they aren't resent as the next turn) and render them as
- * sent. `data: { sessionId, messages: string[] }`.
+ * pending queue so they aren't resent as the next turn (a transient dedupe
+ * signal — it isn't rendered as a transcript item).
+ * `data: { sessionId, messages: string[] }`.
  */
 const MID_TURN_MESSAGE_INJECTED_EVENT = 'mid_turn_message_injected';
 
@@ -538,8 +539,9 @@ export class BridgeClient implements Client {
    * pull any messages the browser queued mid-turn. We splice the per-session
    * queue, return them to the child as the response, and — when non-empty —
    * publish a `mid_turn_message_injected` SSE frame so the browser can move
-   * those messages out of its pending queue and render them as sent. Unknown
-   * methods reject with ACP `methodNotFound` (-32601), matching the SDK's
+   * those messages out of its pending queue (a dedupe signal, not a transcript
+   * render). Unknown methods reject with ACP `methodNotFound` (-32601), matching
+   * the SDK's
    * default for an unimplemented client surface; the child's drain caller
    * treats that as "drain unsupported" and stops asking.
    */

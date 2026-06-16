@@ -2718,20 +2718,24 @@ export function createServeApp(
     if (sessionId === null) return;
     const body = safeBody(req);
     const message = body['message'];
-    if (typeof message !== 'string' || message.trim().length === 0) {
+    // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
+    // stores the trimmed string, so checking the raw length would reject input
+    // whose real content fits but is padded with whitespace.
+    const trimmed = typeof message === 'string' ? message.trim() : '';
+    if (trimmed.length === 0) {
       res.status(400).json({
         error: '`message` is required and must be a non-empty string',
       });
       return;
     }
-    if (message.length > MID_TURN_MESSAGE_MAX_LENGTH) {
+    if (trimmed.length > MID_TURN_MESSAGE_MAX_LENGTH) {
       res.status(400).json({
         error: `\`message\` must be at most ${MID_TURN_MESSAGE_MAX_LENGTH} characters`,
       });
       return;
     }
     try {
-      const result = bridge.enqueueMidTurnMessage(sessionId, message);
+      const result = bridge.enqueueMidTurnMessage(sessionId, trimmed);
       res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err, {

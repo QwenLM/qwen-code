@@ -254,8 +254,10 @@ export interface DaemonSessionMetadataUpdatedData {
 /**
  * `mid_turn_message_injected` payload. Emitted when the daemon drains
  * browser-queued mid-turn messages into the running turn (web-shell mid-turn
- * drain). Consumers move these messages out of their pending queue — so they
- * aren't resent as the next turn — and render them as sent.
+ * drain). It is a transient dedupe signal, not a transcript item: consumers
+ * move these messages out of their pending queue so they aren't resent as the
+ * next turn. They are not rendered from this event — the message already reached
+ * the model mid-turn, and the persisted transcript shows it on reload.
  */
 export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
