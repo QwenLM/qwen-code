@@ -54,6 +54,7 @@ export interface CronJob {
   recurring: boolean;
   createdAt: number;
   expiresAt: number;
+  fireAtMs?: number;
   lastFiredAt?: number;
   jitterMs: number;
   /** Persisted under ~/.qwen (per-project) — survives restarts. */
@@ -176,6 +177,7 @@ function wakeupToJob(wakeup: SessionWakeup): CronJob {
     recurring: false,
     createdAt: wakeup.createdAt,
     expiresAt: Infinity,
+    fireAtMs: wakeup.fireAtMs,
     jitterMs: 0,
   };
 }

@@ -2588,15 +2588,18 @@ export const useGeminiStream = (
       );
     });
 
-    scheduler.start((job: { prompt: string; missed?: boolean }) => {
-      const label = job.prompt.slice(0, 40);
-      notificationQueueRef.current.push({
-        displayText: `${job.missed ? 'Missed' : 'Cron'}: ${label}`,
-        modelText: job.prompt,
-        sendMessageType: SendMessageType.Cron,
-      });
-      setNotificationTrigger((n) => n + 1);
-    });
+    scheduler.start(
+      (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+        const label = job.prompt.slice(0, 40);
+        const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+        notificationQueueRef.current.push({
+          displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+          modelText: job.prompt,
+          sendMessageType: SendMessageType.Cron,
+        });
+        setNotificationTrigger((n) => n + 1);
+      },
+    );
     return () => {
       const summary = scheduler.getExitSummary();
       scheduler.stop();

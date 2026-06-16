@@ -1396,10 +1396,10 @@ export async function runNonInteractive(
                 reject(err);
               };
 
-              scheduler.start((job: { prompt: string }) => {
+              scheduler.start((job: { prompt: string; cronExpr?: string }) => {
                 const label = job.prompt.slice(0, 40);
                 localQueue.push({
-                  displayText: `Cron: ${label}`,
+                  displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
                   modelText: job.prompt,
                   sendMessageType: SendMessageType.Cron,
                 });

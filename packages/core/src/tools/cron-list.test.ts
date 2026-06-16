@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CronListTool } from './cron-list.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 import { getCronFilePath, writeCronTasks } from '../services/cronTasksFile.js';
@@ -80,15 +80,29 @@ describe('CronListTool', () => {
   });
 
   it('lists pending wakeups', async () => {
-    config._scheduler.scheduleWakeup(300, 'continue loop');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2025, 0, 15, 10, 30, 0));
+    const longPrompt = `continue ${'x'.repeat(80)}`;
+    config._scheduler.scheduleWakeup(300, longPrompt);
 
-    const invocation = tool.build({});
-    const result = await invocation.execute(new AbortController().signal);
+    try {
+      const invocation = tool.build({});
+      const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('@wakeup');
-    expect(result.llmContent).toContain('[session-only]: continue loop');
-    expect(result.returnDisplay).toContain('@wakeup [session-only]');
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain(
+        new Date(2025, 0, 15, 10, 35, 0).toISOString(),
+      );
+      expect(result.llmContent).not.toContain('@wakeup');
+      expect(result.llmContent).toContain(
+        `[session-only]: ${longPrompt.slice(0, 57)}...`,
+      );
+      expect(result.llmContent).not.toContain(longPrompt);
+      expect(result.returnDisplay).toContain('wakeup at');
+      expect(result.returnDisplay).not.toContain('@wakeup');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('lists durable jobs from the tasks file without the scheduler loading them', async () => {

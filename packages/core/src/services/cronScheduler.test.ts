@@ -501,6 +501,9 @@ describe('CronScheduler', () => {
       scheduler.tick(new Date(2025, 0, 15, 10, 32, 0)); // 120s — due
       expect(fired).toHaveLength(1);
       expect(fired[0]!.prompt).toBe('wake up');
+      expect(fired[0]!.fireAtMs).toBe(
+        new Date(2025, 0, 15, 10, 32, 0).getTime(),
+      );
 
       scheduler.tick(new Date(2025, 0, 15, 10, 33, 0)); // already fired+removed
       expect(fired).toHaveLength(1);
@@ -530,6 +533,7 @@ describe('CronScheduler', () => {
           cronExpr: '@wakeup',
           prompt: 'p',
           recurring: false,
+          fireAtMs: new Date(2025, 0, 15, 10, 35, 0).getTime(),
           jitterMs: 0,
         },
       ]);
