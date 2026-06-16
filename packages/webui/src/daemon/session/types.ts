@@ -331,9 +331,11 @@ export interface ActivePrompt {
   promptId?: string;
   resolve?: (result: PromptResult) => void;
   reject?: (error: unknown) => void;
-  pendingResult?: PromptResult;
-  pendingError?: unknown;
 }
+
+export type SettledPrompt =
+  | { status: 'resolved'; result: PromptResult }
+  | { status: 'rejected'; error: unknown };
 
 export interface PendingSessionLoad {
   id: number;
