@@ -17,6 +17,7 @@ import {
   SessionService,
   shouldShowStep,
   TrustGateError,
+  addDaemonRequestAttribute,
   emitDaemonLog,
   hashDaemonWorkspace,
   recordDaemonBridgeError,
@@ -53,7 +54,11 @@ import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { isLoopbackBind } from './loopbackBinds.js';
-import { mountAcpHttp } from './acpHttp/index.js';
+import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
+import {
+  buildDaemonStatusResponse,
+  parseDaemonStatusDetail,
+} from './daemonStatus.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
@@ -68,11 +73,14 @@ import {
   McpServerRestartFailedError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
+  PromptQueueFullError,
   RestoreInProgressError,
   SessionBusyError,
   InvalidRewindTargetError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   WorkspaceInitConflictError,
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
@@ -110,6 +118,7 @@ import {
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspaceSettings.js';
+import { registerA2uiActionRoutes } from './routes/a2uiAction.js';
 import {
   createRateLimiter,
   setRateLimiter,
@@ -669,8 +678,11 @@ function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/sessions/delete') {
     return { route: 'POST /sessions/delete' };
   }
+  if (req.method === 'GET' && path === '/daemon/status') {
+    return { route: 'GET /daemon/status' };
+  }
   const sessionAction = path.match(
-    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode|language)$/,
+    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|mid-turn-message|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
   );
   const sessionActionId = sessionAction?.[1];
   const sessionActionName = sessionAction?.[2];
@@ -855,6 +867,17 @@ export function resolvePromptDeadlineMs(
   return Math.min(serverMs, requestMs);
 }
 
+// Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
+const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
+
+function advertisedMaxPendingPromptsPerSession(
+  value: number | undefined,
+): number | null {
+  if (value === undefined) return DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
+  if (value === 0 || value === Number.POSITIVE_INFINITY) return null;
+  return value;
+}
+
 /**
  * Build the Express app for `qwen serve`. Pure function — no side effects on
  * the network or process; `runQwenServe` does the listen/signal handling.
@@ -866,6 +889,7 @@ export function resolvePromptDeadlineMs(
  *
  * Supported routes:
  *   - `GET  /health`
+ *   - `GET  /daemon/status`
  *   - `GET  /capabilities`
  *   - `GET  /workspace/mcp`
  *   - `GET  /workspace/skills`
@@ -941,12 +965,18 @@ export function createServeApp(
     injected: deps.fsFactory,
     trusted: false,
   });
+  const tokenConfigured =
+    typeof opts.token === 'string' && opts.token.length > 0;
+  const sessionShellCommandEnabled =
+    opts.enableSessionShell === true && tokenConfigured;
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
+      maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
       boundWorkspace,
+      sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider: createDaemonStatusProvider(),
@@ -1325,7 +1355,7 @@ export function createServeApp(
   // Mutation-route gate factory. Non-strict mode is passthrough;
   // `{ strict: true }` requires a token even on loopback defaults.
   const mutate = createMutationGate({
-    tokenConfigured: opts.token !== undefined,
+    tokenConfigured,
     requireAuth: opts.requireAuth === true,
   });
 
@@ -1344,6 +1374,65 @@ export function createServeApp(
   }
 
   const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
+  const currentServeFeatures = () =>
+    getAdvertisedServeFeatures(undefined, {
+      requireAuth: opts.requireAuth === true,
+      mcpPoolActive: opts.mcpPoolActive !== false,
+      allowOriginActive:
+        opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
+      ...(opts.promptDeadlineMs !== undefined
+        ? { promptDeadlineMs: opts.promptDeadlineMs }
+        : {}),
+      ...(opts.writerIdleTimeoutMs !== undefined
+        ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
+        : {}),
+      persistSettingAvailable: deps.persistSetting !== undefined,
+      sessionShellCommandEnabled,
+      rateLimit: opts.rateLimit === true,
+      reloadAvailable: deps.workspace !== undefined,
+    });
+  const acpHandleRef: { current?: AcpHttpHandle } = {};
+
+  app.get('/daemon/status', async (req, res) => {
+    const detail = parseDaemonStatusDetail(req.query['detail']);
+    if (!detail.ok || !detail.detail) {
+      res.status(400).json({
+        error: 'detail must be one of: summary, full',
+        code: 'invalid_detail',
+      });
+      return;
+    }
+    try {
+      res.status(200).json(
+        await buildDaemonStatusResponse(detail.detail, {
+          opts,
+          boundWorkspace,
+          bridge,
+          workspace,
+          daemonLog,
+          qwenCodeVersion: deps.qwenCodeVersion,
+          acpHandle: acpHandleRef.current,
+          rateLimiter,
+          getRestSseActive: getActiveSseCount,
+          features: currentServeFeatures(),
+          protocolVersions: getServeProtocolVersions(),
+          supportedDeviceFlowProviders: Array.from(
+            deviceFlowProviderMap.keys(),
+          ),
+          deviceFlowRegistry,
+          sessionShellCommandEnabled,
+        }),
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /daemon/status failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({
+        error: 'Failed to build daemon status',
+        code: 'daemon_status_failed',
+      });
+    }
+  });
 
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
@@ -1353,27 +1442,24 @@ export function createServeApp(
         ? { qwenCodeVersion: deps.qwenCodeVersion }
         : {}),
       mode: opts.mode,
-      features: getAdvertisedServeFeatures(undefined, {
-        requireAuth: opts.requireAuth === true,
-        mcpPoolActive: opts.mcpPoolActive !== false,
-        allowOriginActive:
-          opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
-        ...(opts.promptDeadlineMs !== undefined
-          ? { promptDeadlineMs: opts.promptDeadlineMs }
-          : {}),
-        ...(opts.writerIdleTimeoutMs !== undefined
-          ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
-          : {}),
-        persistSettingAvailable: deps.persistSetting !== undefined,
-        rateLimit: opts.rateLimit === true,
-        reloadAvailable: deps.workspace !== undefined,
-      }),
+      features: currentServeFeatures(),
       modelServices: [],
       // Surface the bound workspace so clients can detect mismatch
       // pre-flight and omit `cwd` on `POST /session`.
       workspaceCwd: boundWorkspace,
+      // Advertise supported transport families so SDK clients can
+      // auto-negotiate the best available transport via
+      // `negotiateTransport()`. REST is always available; future PRs
+      // will add 'acp-http' / 'acp-ws' entries when the corresponding
+      // routes are wired.
+      transports: ['rest'],
       // Active mediation policy under the `policy` namespace.
       policy: { permission: bridge.permissionPolicy },
+      limits: {
+        maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
+          opts.maxPendingPromptsPerSession,
+        ),
+      },
       supportedLanguages: LANGUAGE_CODES,
     };
     res.status(200).json(envelope);
@@ -1529,6 +1615,26 @@ export function createServeApp(
         parseAndValidateWorkspaceClientId(req, res, bridge),
     });
   }
+
+  // A2UI action inbound (the upstream half of A2UI-over-MCP): user
+  // interactions from web clients are proxied to the UI MCP server's
+  // standard `action` tool.
+  registerA2uiActionRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    // UI-server discovery uses the daemon's workspace MCP status, which
+    // includes servers registered at runtime.
+    getMcpServers: async (req) => {
+      const ctx = buildWorkspaceCtx(req, 'POST /session/:id/a2ui-action');
+      const status = await workspace.getWorkspaceMcpStatus(ctx);
+      return (status.servers ?? []) as Array<{
+        name: string;
+        mcpStatus?: string;
+        config?: Record<string, unknown>;
+      }>;
+    },
+  });
 
   // -- auth device-flow routes ---------------------------------------------
 
@@ -2188,6 +2294,7 @@ export function createServeApp(
       });
       return;
     }
+    addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
     const abort = new AbortController();
     const effectiveDeadlineMs = resolvePromptDeadlineMs(
@@ -2204,8 +2311,9 @@ export function createServeApp(
       deadlineTimer.unref();
     }
 
-    bridge
-      .sendPrompt(
+    let promptPromise: ReturnType<AcpSessionBridge['sendPrompt']>;
+    try {
+      promptPromise = bridge.sendPrompt(
         sessionId,
         {
           ...forwardedBody,
@@ -2217,7 +2325,26 @@ export function createServeApp(
           ...(clientId !== undefined ? { clientId } : {}),
           promptId,
         },
-      )
+      );
+    } catch (err) {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      if (daemonLog && err instanceof PromptQueueFullError) {
+        daemonLog.warn('prompt admission rejected: queue full', {
+          sessionId,
+          promptId,
+          ...(clientId !== undefined ? { clientId } : {}),
+          limit: err.limit,
+          pendingCount: err.pendingCount,
+        });
+      }
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/prompt',
+        sessionId,
+      });
+      return;
+    }
+
+    promptPromise
       .then(
         () => {
           if (daemonLog) {
@@ -2612,8 +2739,82 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/shell', mutate(), async (req, res) => {
+  // Queue a user message typed while the session's turn is still running. The
+  // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
+  // model sees it before the turn ends, instead of waiting for the next turn.
+  // Returns `{ accepted }`: `false` when the session is idle (or the per-session
+  // queue is full), so the browser keeps the message in its own queue and sends
+  // it as a normal next-turn prompt. Synchronous — the bridge only pushes onto
+  // an in-memory queue.
+  //
+  // Per-message abuse guard. The sibling `/btw` caps its field; without this
+  // only the global 10 MB body limit applies. Not a UX limit — a rejected
+  // message stays in the browser's own queue and is sent as the (uncapped)
+  // next-turn prompt — it only bounds how much a single mid-turn push can pin in
+  // the in-memory queue (the queue DEPTH is bounded in `enqueueMidTurnMessage`).
+  const MID_TURN_MESSAGE_MAX_LENGTH = 16 * 1024;
+  app.post('/session/:id/mid-turn-message', mutate(), (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    const message = body['message'];
+    // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
+    // stores the trimmed string, so checking the raw length would reject input
+    // whose real content fits but is padded with whitespace.
+    const trimmed = typeof message === 'string' ? message.trim() : '';
+    if (trimmed.length === 0) {
+      res.status(400).json({
+        error: '`message` is required and must be a non-empty string',
+      });
+      return;
+    }
+    if (trimmed.length > MID_TURN_MESSAGE_MAX_LENGTH) {
+      res.status(400).json({
+        error: `\`message\` must be at most ${MID_TURN_MESSAGE_MAX_LENGTH} characters`,
+      });
+      return;
+    }
+    // Forward the client id so the bridge authorizes it against the session
+    // (like `/prompt` and `/btw`) — a token-holding client bound to another
+    // session must not push into this one — and records it as the message's
+    // originator for SSE echo routing. `null` = malformed id (already answered).
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = bridge.enqueueMidTurnMessage(
+        sessionId,
+        trimmed,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/mid-turn-message',
+        sessionId,
+      });
+    }
+  });
+
+  app.post('/session/:id/shell', mutate({ strict: true }), async (req, res) => {
     const sessionId = req.params['id'];
+    if (!sessionShellCommandEnabled) {
+      sendBridgeError(res, new SessionShellDisabledError(), {
+        route: 'POST /session/:id/shell',
+        sessionId,
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) {
+      return;
+    }
+    if (clientId === undefined) {
+      sendBridgeError(res, new SessionShellClientRequiredError(), {
+        route: 'POST /session/:id/shell',
+        sessionId,
+      });
+      return;
+    }
     const body = safeBody(req);
     const command = body['command'];
     if (typeof command !== 'string' || command.trim().length === 0) {
@@ -2627,17 +2828,12 @@ export function createServeApp(
       if (!res.writableEnded) abort.abort();
     };
     res.once('close', onResClose);
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) {
-      res.off('close', onResClose);
-      return;
-    }
     try {
       const result = await bridge.executeShellCommand(
         sessionId,
         command.trim(),
         abort.signal,
-        clientId !== undefined ? { clientId } : undefined,
+        { clientId },
       );
       if (daemonLog) {
         daemonLog.info('shell command completed', {
@@ -3575,16 +3771,17 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  const acpHandle = mountAcpHttp(app, bridge, {
+  acpHandleRef.current = mountAcpHttp(app, bridge, {
     boundWorkspace,
     workspace,
     fsFactory,
     deviceFlowRegistry,
     token: opts.token,
+    sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
   });
-  if (acpHandle) {
-    app.locals['acpHandle'] = acpHandle;
+  if (acpHandleRef.current) {
+    app.locals['acpHandle'] = acpHandleRef.current;
   }
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
@@ -4319,6 +4516,22 @@ function sendBridgeErrorImpl(
     });
     return;
   }
+  if (err instanceof SessionShellDisabledError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'session_shell_disabled',
+      errorKind: 'session_shell_disabled',
+    });
+    return;
+  }
+  if (err instanceof SessionShellClientRequiredError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'client_id_required',
+      errorKind: 'client_id_required',
+    });
+    return;
+  }
   if (err instanceof WorkspaceMismatchError) {
     // Single-workspace mode: the daemon binds to one workspace at
     // boot; cross-workspace POSTs are rejected here.
@@ -4393,6 +4606,17 @@ function sendBridgeErrorImpl(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+    });
+    return;
+  }
+  if (err instanceof PromptQueueFullError) {
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'prompt_queue_full',
+      sessionId: err.sessionId,
+      limit: err.limit,
+      pendingCount: err.pendingCount,
     });
     return;
   }

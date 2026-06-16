@@ -25,6 +25,10 @@ import {
 } from '../auth/deviceFlow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import {
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
@@ -67,7 +71,9 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-const QWEN_VENDOR_METHODS: readonly string[] = [
+const SESSION_SHELL_METHOD = `${QWEN_METHOD_NS}session/shell`;
+
+const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/heartbeat`,
   `${QWEN_METHOD_NS}session/context`,
   `${QWEN_METHOD_NS}session/supported_commands`,
@@ -83,7 +89,7 @@ const QWEN_VENDOR_METHODS: readonly string[] = [
   // Wave 1: session extensions
   `${QWEN_METHOD_NS}session/recap`,
   `${QWEN_METHOD_NS}session/btw`,
-  `${QWEN_METHOD_NS}session/shell`,
+  SESSION_SHELL_METHOD,
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
@@ -117,6 +123,14 @@ const QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/agents/delete`,
 ];
 
+function advertisedQwenVendorMethods(
+  sessionShellCommandEnabled: boolean,
+): string[] {
+  return ALL_QWEN_VENDOR_METHODS.filter(
+    (method) => sessionShellCommandEnabled || method !== SESSION_SHELL_METHOD,
+  );
+}
+
 /**
  * Method names whose responses ride the CONNECTION-scoped stream (the
  * session stream may not exist yet / ownership not granted on failure).
@@ -129,7 +143,8 @@ const CONN_ROUTED_METHODS = new Set<string>([
   'session/resume',
   'session/list',
   'session/close',
-  ...QWEN_VENDOR_METHODS,
+  'session/fork',
+  ...ALL_QWEN_VENDOR_METHODS,
 ]);
 
 // SYNC: server.ts MAX_TOOL_NAME_LENGTH / MAX_SERVER_NAME_LENGTH (both 256).
@@ -250,6 +265,20 @@ function toRpcError(err: unknown): {
       data: { errorKind: 'upstream_error' },
     };
   }
+  if (err instanceof SessionShellDisabledError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: errMsg(err),
+      data: { errorKind: 'session_shell_disabled' },
+    };
+  }
+  if (err instanceof SessionShellClientRequiredError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: errMsg(err),
+      data: { errorKind: 'client_id_required' },
+    };
+  }
   const name = err instanceof Error ? err.name : '';
   switch (name) {
     case 'SessionNotFoundError':
@@ -259,6 +288,23 @@ function toRpcError(err: unknown): {
       return { code: RPC.INVALID_PARAMS, message: errMsg(err) };
     case 'SessionLimitExceededError':
       return { code: RPC.INTERNAL_ERROR, message: errMsg(err) };
+    case 'PromptQueueFullError': {
+      const promptErr = err as {
+        sessionId?: unknown;
+        limit?: unknown;
+        pendingCount?: unknown;
+      };
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'prompt_queue_full',
+          sessionId: promptErr.sessionId,
+          limit: promptErr.limit,
+          pendingCount: promptErr.pendingCount,
+        },
+      };
+    }
     default:
       return {
         code: RPC.INTERNAL_ERROR,
@@ -266,6 +312,11 @@ function toRpcError(err: unknown): {
         data: { errorKind: 'internal' },
       };
   }
+}
+
+function rpcErrorFrame(id: JsonRpcId, err: unknown) {
+  const { code, message, data } = toRpcError(err);
+  return error(id, code, message, data);
 }
 
 /**
@@ -288,6 +339,7 @@ export class AcpDispatcher {
     private readonly workspace: DaemonWorkspaceService,
     private readonly fsFactory?: WorkspaceFileSystemFactory,
     private readonly deviceFlowRegistry?: DeviceFlowRegistry,
+    private readonly sessionShellCommandEnabled: boolean = false,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -365,6 +417,62 @@ export class AcpDispatcher {
   }
 
   /**
+   * Extract ACP-standard `SessionModelState` from configOptions.
+   * ConfigOptions carry model info as `{ category: 'model', type: 'select',
+   * currentValue, options }`. Maps to `{ currentModelId, availableModels }`.
+   */
+  private extractModelState(
+    configOptions: unknown[] | undefined,
+  ): { currentModelId: string; availableModels: unknown[] } | undefined {
+    if (!configOptions) return undefined;
+    const modelOpt = configOptions.find(
+      (o) =>
+        typeof o === 'object' &&
+        o !== null &&
+        (o as Record<string, unknown>)['category'] === 'model',
+    ) as Record<string, unknown> | undefined;
+    if (!modelOpt) return undefined;
+    const currentModelId = String(modelOpt['currentValue'] ?? '');
+    const options = Array.isArray(modelOpt['options'])
+      ? modelOpt['options']
+      : [];
+    return {
+      currentModelId,
+      availableModels: options.map((opt: unknown) => {
+        const o = opt as Record<string, unknown>;
+        return { id: String(o['value'] ?? o['id'] ?? '') };
+      }),
+    };
+  }
+
+  /**
+   * Extract ACP-standard `SessionModeState` from configOptions.
+   * ConfigOptions carry mode info as `{ category: 'mode', type: 'select',
+   * currentValue, options }`. Maps to `{ currentModeId, availableModes }`.
+   */
+  private extractModeState(
+    configOptions: unknown[] | undefined,
+  ): { currentModeId: string; availableModes: unknown[] } | undefined {
+    if (!configOptions) return undefined;
+    const modeOpt = configOptions.find(
+      (o) =>
+        typeof o === 'object' &&
+        o !== null &&
+        (o as Record<string, unknown>)['category'] === 'mode',
+    ) as Record<string, unknown> | undefined;
+    if (!modeOpt) return undefined;
+    const currentModeId = String(modeOpt['currentValue'] ?? '');
+    const options = Array.isArray(modeOpt['options']) ? modeOpt['options'] : [];
+    return {
+      currentModeId,
+      availableModes: options.map((opt: unknown) => {
+        const o = opt as Record<string, unknown>;
+        return { id: String(o['value'] ?? o['id'] ?? '') };
+      }),
+    };
+  }
+
+  /**
    * Cancel a permission request the client abandoned (closed its stream /
    * connection before voting), so the bridge isn't left blocked. Invoked
    * by the connection-registry teardown path.
@@ -434,7 +542,9 @@ export class AcpDispatcher {
           [QWEN_META_KEY]: {
             connectionId,
             workspaceCwd: this.boundWorkspace,
-            methods: [...QWEN_VENDOR_METHODS],
+            methods: advertisedQwenVendorMethods(
+              this.sessionShellCommandEnabled,
+            ),
           },
         },
       },
@@ -541,30 +651,14 @@ export class AcpDispatcher {
 
         case 'session/new': {
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
-          // Forward sessionScope like REST (bridge supports single|thread).
-          const rawScope = params['sessionScope'];
-          if (
-            rawScope !== undefined &&
-            rawScope !== 'single' &&
-            rawScope !== 'thread'
-          ) {
-            if (id !== undefined) {
-              conn.sendConn(
-                error(
-                  id,
-                  RPC.INVALID_PARAMS,
-                  '`sessionScope` must be "single" or "thread"',
-                ),
-              );
-            }
-            return;
-          }
+          // ACP standard: session/new MUST create a new isolated session.
+          // Always use sessionScope 'thread' regardless of client params.
+          // The REST surface (POST /session) supports 'single' for
+          // backward compat, but the ACP endpoint follows the standard.
           const session = await this.bridge.spawnOrAttach({
             workspaceCwd: cwd,
             clientId: conn.clientId,
-            ...(rawScope !== undefined
-              ? { sessionScope: rawScope as 'single' | 'thread' }
-              : {}),
+            sessionScope: 'thread',
           });
           // Teardown raced the spawn: the connection was destroyed while the
           // bridge call was in flight, so nothing will tear this session down.
@@ -581,9 +675,16 @@ export class AcpDispatcher {
             this.killOrphanSession(session.sessionId);
             return;
           }
+          // Build ACP-standard models/modes from configOptions.
+          // configOptions carry model/mode as category-tagged entries;
+          // the standard also expects top-level models/modes objects.
+          const models = this.extractModelState(configOptions);
+          const modes = this.extractModeState(configOptions);
           this.replyConn(conn, id, {
             sessionId: session.sessionId,
             ...(configOptions ? { configOptions } : {}),
+            ...(models ? { models } : {}),
+            ...(modes ? { modes } : {}),
           });
           return;
         }
@@ -669,7 +770,16 @@ export class AcpDispatcher {
           }
           conn.getOrCreateSession(sessionId).clientId = restored.clientId;
           conn.ownSession(sessionId);
-          this.replyConn(conn, id, restored.state ?? {});
+          // ACP standard: load/resume response includes configOptions + models + modes
+          const loadConfigOptions = await this.configOptionsFor(sessionId);
+          const loadModels = this.extractModelState(loadConfigOptions);
+          const loadModes = this.extractModeState(loadConfigOptions);
+          this.replyConn(conn, id, {
+            ...(restored.state ?? {}),
+            ...(loadConfigOptions ? { configOptions: loadConfigOptions } : {}),
+            ...(loadModels ? { models: loadModels } : {}),
+            ...(loadModes ? { modes: loadModes } : {}),
+          });
           return;
         }
 
@@ -731,6 +841,46 @@ export class AcpDispatcher {
             conn.closingSessions.delete(sessionId);
           }
           this.replyConn(conn, id, {});
+          return;
+        }
+
+        // ACP standard: session/fork — create a branched copy of an existing
+        // session. Maps to bridge.branchSession().
+        case 'session/fork': {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!sessionId) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`sessionId` is required'),
+              );
+            }
+            return;
+          }
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const ctx = this.sessionCtx(conn, sessionId, loopback);
+          const result = await this.bridge.branchSession(
+            sessionId,
+            {
+              name:
+                typeof params['name'] === 'string' ? params['name'] : undefined,
+            },
+            ctx,
+          );
+          if (conn.destroyed) {
+            this.killOrphanSession(result.sessionId);
+            return;
+          }
+          conn.getOrCreateSession(result.sessionId).clientId = result.clientId;
+          conn.ownSession(result.sessionId);
+          const configOptions = await this.configOptionsFor(result.sessionId);
+          const models = this.extractModelState(configOptions);
+          const modes = this.extractModeState(configOptions);
+          this.replyConn(conn, id, {
+            sessionId: result.sessionId,
+            ...(configOptions ? { configOptions } : {}),
+            ...(models ? { models } : {}),
+            ...(modes ? { modes } : {}),
+          });
           return;
         }
 
@@ -837,6 +987,82 @@ export class AcpDispatcher {
           // Response returns the updated config option set (per ACP).
           const configOptions = await this.configOptionsFor(sessionId);
           this.replySession(conn, sessionId, id, { configOptions });
+          return;
+        }
+
+        // ACP standard: session/set_mode — dedicated method for mode changes.
+        // Maps to the same bridge call as set_config_option with configId='mode'.
+        case 'session/set_mode': {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!sessionId) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`sessionId` is required'),
+              );
+            return;
+          }
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const modeId = String(params['modeId'] ?? '');
+          if (!modeId || !APPROVAL_MODES.includes(modeId as ApprovalMode)) {
+            if (id !== undefined) {
+              this.replySession(
+                conn,
+                sessionId,
+                id,
+                undefined,
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `invalid modeId "${modeId}" (expected one of: ${APPROVAL_MODES.join(', ')})`,
+                ),
+              );
+            }
+            return;
+          }
+          const ctx = this.sessionCtx(conn, sessionId, loopback);
+          await this.bridge.setSessionApprovalMode(
+            sessionId,
+            modeId as ApprovalMode,
+            { persist: false },
+            ctx,
+          );
+          this.replySession(conn, sessionId, id, {});
+          return;
+        }
+
+        // ACP standard (unstable): session/set_model — dedicated method for
+        // model changes. Maps to the same bridge call as set_config_option
+        // with configId='model'.
+        case 'session/set_model': {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!sessionId) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`sessionId` is required'),
+              );
+            return;
+          }
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const modelId = String(params['modelId'] ?? '');
+          if (!modelId) {
+            if (id !== undefined) {
+              this.replySession(
+                conn,
+                sessionId,
+                id,
+                undefined,
+                error(id, RPC.INVALID_PARAMS, '`modelId` is required'),
+              );
+            }
+            return;
+          }
+          const ctx = this.sessionCtx(conn, sessionId, loopback);
+          await this.bridge.setSessionModel(
+            sessionId,
+            { modelId, sessionId },
+            ctx,
+          );
+          this.replySession(conn, sessionId, id, {});
           return;
         }
 
@@ -1067,7 +1293,23 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/shell`: {
           const sessionId = String(params['sessionId'] ?? '');
+          if (!this.sessionShellCommandEnabled) {
+            if (id !== undefined) {
+              conn.sendConn(rpcErrorFrame(id, new SessionShellDisabledError()));
+            }
+            return;
+          }
           if (!this.requireOwned(conn, sessionId, id)) return;
+          const binding = conn.sessions.get(sessionId);
+          const clientId = binding?.clientId;
+          if (!clientId) {
+            if (id !== undefined) {
+              conn.sendConn(
+                rpcErrorFrame(id, new SessionShellClientRequiredError()),
+              );
+            }
+            return;
+          }
           const rawCmd = params['command'];
           if (typeof rawCmd !== 'string' || rawCmd.trim().length === 0) {
             if (id !== undefined)
@@ -1090,7 +1332,7 @@ export class AcpDispatcher {
           const result = await this.bridge.executeShellCommand(
             sessionId,
             rawCmd,
-            undefined,
+            binding.abort.signal,
             this.sessionCtx(conn, sessionId, loopback),
           );
           this.replyConn(conn, id, result as unknown);
@@ -1719,8 +1961,10 @@ export class AcpDispatcher {
                 ) {
                   closedIds.push(sid);
                 } else {
+                  const safeSessionId = logSafe(sid.slice(0, 8));
+                  const safeMessage = logSafe(msg);
                   writeStderrLine(
-                    `qwen serve: /acp sessions/delete closeSession(${sid.slice(0, 8)}) failed: ${msg}`,
+                    `qwen serve: /acp sessions/delete closeSession(${safeSessionId}) failed: ${safeMessage}`,
                   );
                   closeErrors.push({ sessionId: sid, error: msg });
                 }
@@ -1730,8 +1974,10 @@ export class AcpDispatcher {
           const svc = new SessionService(this.boundWorkspace);
           const removeResult = await svc.removeSessions(closedIds);
           for (const e of removeResult.errors) {
+            const safeSessionId = logSafe(e.sessionId.slice(0, 8));
+            const safeMessage = logSafe(errMsg(e.error));
             writeStderrLine(
-              `qwen serve: /acp sessions/delete removeSessions(${e.sessionId.slice(0, 8)}) failed: ${e.error.message}`,
+              `qwen serve: /acp sessions/delete removeSessions(${safeSessionId}) failed: ${safeMessage}`,
             );
           }
           this.replyConn(conn, id, {
@@ -1741,7 +1987,7 @@ export class AcpDispatcher {
               ...closeErrors,
               ...removeResult.errors.map((e) => ({
                 sessionId: e.sessionId,
-                error: e.error.message,
+                error: errMsg(e.error),
               })),
             ],
           } as unknown);

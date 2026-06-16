@@ -85,7 +85,7 @@ describe('AgentTabBar', () => {
       setAgentTabBarFocused,
     } as never);
     vi.mocked(useBackgroundTaskViewState).mockReturnValue({
-      entries: [{ kind: 'agent', agentId: 'bg-agent' }],
+      entries: [{ kind: 'agent', agentId: 'bg-agent', status: 'running' }],
     } as never);
     vi.mocked(useBackgroundTaskViewActions).mockReturnValue({
       setLivePanelFocused,
@@ -137,6 +137,25 @@ describe('AgentTabBar', () => {
     setActiveView('main');
     vi.mocked(useBackgroundTaskViewState).mockReturnValue({
       entries: [{ kind: 'shell', shellId: 'bg-shell' }],
+    } as never);
+    render(<AgentTabBar />);
+
+    pressKey({ name: 'up', sequence: '[A' });
+    expect(setAgentTabBarFocused).toHaveBeenCalledWith(false);
+    expect(setLivePanelFocused).not.toHaveBeenCalled();
+  });
+
+  it('Up ignores terminal bg agents after the live panel visibility window (#5067)', () => {
+    setActiveView('main');
+    vi.mocked(useBackgroundTaskViewState).mockReturnValue({
+      entries: [
+        {
+          kind: 'agent',
+          agentId: 'done-bg-agent',
+          status: 'completed',
+          endTime: Date.now() - 9000,
+        },
+      ],
     } as never);
     render(<AgentTabBar />);
 

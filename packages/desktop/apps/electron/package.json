@@ -1,6 +1,6 @@
 {
   "name": "@craft-agent/electron",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Electron desktop app for Qwen Code",
   "main": "dist/main.cjs",
   "private": true,

@@ -231,6 +231,11 @@ describe('ToolCallEmitter', () => {
           _meta: { toolName: 'edit_file', provenance: 'builtin' },
         }),
       );
+      expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toEqual({
+        fileName: '/test/file.ts',
+        originalContent: 'old content',
+        newContent: 'new content',
+      });
     });
 
     it('should not replay truncated session previews as full diffs', async () => {
@@ -266,6 +271,7 @@ describe('ToolCallEmitter', () => {
           _meta: { toolName: 'edit_file', provenance: 'builtin' },
         }),
       );
+      expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toBeUndefined();
     });
 
     it('should transform message parts to content', async () => {
@@ -426,6 +432,9 @@ describe('ToolCallEmitter', () => {
       expect(emitter.mapToolKind(Kind.Execute)).toBe('execute');
       expect(emitter.mapToolKind(Kind.Think)).toBe('think');
       expect(emitter.mapToolKind(Kind.Fetch)).toBe('fetch');
+      // Kind.Agent maps to 'other' on the wire: ACP has no 'agent' ToolKind,
+      // so emitting it would be Zod-rejected at the daemon's ACP boundary.
+      expect(emitter.mapToolKind(Kind.Agent)).toBe('other');
       expect(emitter.mapToolKind(Kind.Other)).toBe('other');
     });
 

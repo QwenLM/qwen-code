@@ -273,7 +273,9 @@ export abstract class ChannelBase {
     // 3.5. Bang (!) shell command — direct execution, no LLM
     if (envelope.text.startsWith('!')) {
       const cmd = envelope.text.slice(1).trim();
-      const bridgeShellCommand = (this.bridge as unknown as Record<string, unknown>)['shellCommand'];
+      const bridgeShellCommand = (
+        this.bridge as unknown as Record<string, unknown>
+      )['shellCommand'];
       if (cmd && typeof bridgeShellCommand === 'function') {
         try {
           const result = (await bridgeShellCommand(sessionId, cmd)) as {

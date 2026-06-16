@@ -39,14 +39,53 @@ describe('MCP utils', () => {
           promptCount: 0,
           isDisabled: false,
         },
+        {
+          name: 'server3',
+          status: MCPServerStatus.CONNECTED,
+          source: 'project',
+          config: { command: 'cmd3' },
+          toolCount: 3,
+          promptCount: 0,
+          isDisabled: false,
+        },
+        {
+          name: 'server4',
+          status: MCPServerStatus.CONNECTED,
+          source: 'workspace',
+          config: { command: 'cmd4' },
+          toolCount: 4,
+          promptCount: 0,
+          isDisabled: false,
+        },
+        {
+          name: 'server5',
+          status: MCPServerStatus.CONNECTED,
+          source: 'system',
+          config: { command: 'cmd5' },
+          toolCount: 5,
+          promptCount: 0,
+          isDisabled: false,
+        },
       ];
 
       const result = groupServersBySource(servers);
 
-      expect(result).toHaveLength(2);
+      expect(result).toHaveLength(5);
       expect(result[0].source).toBe('user');
       expect(result[0].servers).toHaveLength(1);
-      expect(result[1].source).toBe('extension');
+      expect(result[1]).toMatchObject({
+        source: 'project',
+        displayName: 'Project MCPs',
+      });
+      expect(result[2]).toMatchObject({
+        source: 'workspace',
+        displayName: 'Workspace Settings',
+      });
+      expect(result[3]).toMatchObject({
+        source: 'system',
+        displayName: 'System Settings',
+      });
+      expect(result[4].source).toBe('extension');
     });
   });
 

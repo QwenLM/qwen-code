@@ -591,7 +591,7 @@
           "default": false
         },
         "clearContextOnIdle": {
-          "description": "Settings for clearing stale context after idle periods. Use -1 to disable a threshold.",
+          "description": "Settings for clearing stale or oversized tool result context. Use -1 to disable a threshold.",
           "type": "object",
           "properties": {
             "toolResultsThresholdMinutes": {
@@ -603,6 +603,11 @@
               "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
               "type": "number",
               "default": 5
+            },
+            "toolResultsTotalCharsThreshold": {
+              "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
+              "type": "number",
+              "default": 500000
             }
           }
         },
@@ -909,13 +914,18 @@
           "default": 200000
         },
         "computerUse": {
-          "description": "Cross-platform desktop automation via the upstream open-computer-use MCP server. Tools: list_apps, get_app_state, click, type_text, scroll, drag, press_key, perform_secondary_action, set_value. On first invocation, the upstream binary is fetched via npx and the user is walked through macOS Accessibility / Screen Recording permissions if needed.",
+          "description": "Cross-platform desktop automation via the cua-driver native driver (trycua/cua). On first invocation a pinned, signed + notarized binary (~20MB) is downloaded into ~/.qwen/computer-use/ and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Exposes cua-driver's full tool surface (click, type_text, scroll, drag, press_key, get_window_state, page, launch_app, and more).",
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "When enabled (default), the 9 computer_use__* tools are registered as deferred built-ins.",
+              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.",
               "type": "boolean",
               "default": true
+            },
+            "maxImageDimension": {
+              "description": "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
+              "type": "number",
+              "default": -1
             }
           }
         }

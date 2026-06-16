@@ -50,19 +50,12 @@ export const ToolNames = {
   TOOL_SEARCH: 'tool_search',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
-  // Computer Use tools — built-in but backed by an upstream MCP server.
-  // All deferred; revealed only when the user-initiated request triggers
-  // a computer-use action. See packages/core/src/tools/computer-use/.
-  COMPUTER_USE_LIST_APPS: 'computer_use__list_apps',
-  COMPUTER_USE_GET_APP_STATE: 'computer_use__get_app_state',
-  COMPUTER_USE_CLICK: 'computer_use__click',
-  COMPUTER_USE_PERFORM_SECONDARY_ACTION:
-    'computer_use__perform_secondary_action',
-  COMPUTER_USE_SCROLL: 'computer_use__scroll',
-  COMPUTER_USE_DRAG: 'computer_use__drag',
-  COMPUTER_USE_TYPE_TEXT: 'computer_use__type_text',
-  COMPUTER_USE_PRESS_KEY: 'computer_use__press_key',
-  COMPUTER_USE_SET_VALUE: 'computer_use__set_value',
+  // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
+  // Their full 35-tool surface is generated into computer-use/schemas.ts and
+  // registered via computer-use/index.ts (cast to ToolName). Duplicating a
+  // subset here only goes stale on every cua-driver version bump — review
+  // round 1 removed the old ocu-era 9-name list, which still carried
+  // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
 } as const;
 
@@ -104,16 +97,7 @@ export const ToolDisplayNames = {
   TOOL_SEARCH: 'ToolSearch',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
-  COMPUTER_USE_LIST_APPS: 'computer_use__list_apps',
-  COMPUTER_USE_GET_APP_STATE: 'computer_use__get_app_state',
-  COMPUTER_USE_CLICK: 'computer_use__click',
-  COMPUTER_USE_PERFORM_SECONDARY_ACTION:
-    'computer_use__perform_secondary_action',
-  COMPUTER_USE_SCROLL: 'computer_use__scroll',
-  COMPUTER_USE_DRAG: 'computer_use__drag',
-  COMPUTER_USE_TYPE_TEXT: 'computer_use__type_text',
-  COMPUTER_USE_PRESS_KEY: 'computer_use__press_key',
-  COMPUTER_USE_SET_VALUE: 'computer_use__set_value',
+  // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
 } as const;
 

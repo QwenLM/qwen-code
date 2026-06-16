@@ -119,6 +119,51 @@ describe('extractPendingPermission', () => {
     expect(result?.toolCallId).toBe('call-xyz');
   });
 
+  it('extracts the canonical toolName from toolCall._meta', () => {
+    const permission = {
+      id: 'perm-agent',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-agent',
+      resolved: undefined,
+      title: 'Agent: probe agent kind',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: {
+        toolCallId: 'call-agent',
+        kind: 'other',
+        _meta: { toolName: 'agent' },
+        rawInput: {},
+      },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolName).toBe('agent');
+  });
+
+  it('leaves toolName undefined when _meta is absent', () => {
+    const permission = {
+      id: 'perm-no-meta',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-no-meta',
+      resolved: undefined,
+      title: 'Bash: ls',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: { toolCallId: 'call-bash', rawInput: {} },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolName).toBeUndefined();
+  });
+
   it('returns undefined toolCallId when toolCall has neither field', () => {
     const permission = {
       id: 'perm-tc3',

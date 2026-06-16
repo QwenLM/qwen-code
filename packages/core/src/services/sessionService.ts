@@ -33,6 +33,7 @@ import {
   readLastJsonStringFieldSync,
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
+import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -1462,7 +1463,7 @@ export function buildApiHistoryFromConversation(
 export function replayUiTelemetryFromConversation(
   conversation: ConversationRecord,
   sessionId?: string,
-): void {
+): ResumeTokenCounts | undefined {
   if (sessionId) {
     uiTelemetryService.resetSession(sessionId);
   } else {
@@ -1482,10 +1483,18 @@ export function replayUiTelemetryFromConversation(
     }
   }
 
-  const resumePromptTokens = getResumePromptTokenCount(conversation);
-  if (resumePromptTokens !== undefined) {
-    uiTelemetryService.setLastPromptTokenCount(resumePromptTokens);
+  const resumeTokenCounts = getResumeTokenCounts(conversation);
+  if (resumeTokenCounts !== undefined) {
+    uiTelemetryService.setLastPromptTokenCount(
+      resumeTokenCounts.promptTokenCount,
+    );
   }
+  return resumeTokenCounts;
+}
+
+export interface ResumeTokenCounts {
+  promptTokenCount: number;
+  outputTokenCount: number;
 }
 
 /**
@@ -1497,6 +1506,18 @@ export function replayUiTelemetryFromConversation(
 export function getResumePromptTokenCount(
   conversation: ConversationRecord,
 ): number | undefined {
+  return getResumeTokenCounts(conversation)?.promptTokenCount;
+}
+
+/**
+ * Returns the prompt and previous-response output token counts used to seed a
+ * resumed chat. The prompt count restores the context anchor; the output
+ * count preserves the output tokens appended after that prompt count was
+ * reported, matching steady-state prompt estimation on the next send.
+ */
+export function getResumeTokenCounts(
+  conversation: ConversationRecord,
+): ResumeTokenCounts | undefined {
   for (let i = conversation.messages.length - 1; i >= 0; i--) {
     const record = conversation.messages[i];
 
@@ -1504,7 +1525,10 @@ export function getResumePromptTokenCount(
       const usage = record.usageMetadata;
       const candidate = usage?.promptTokenCount ?? usage?.totalTokenCount;
       if (candidate) {
-        return candidate;
+        return {
+          promptTokenCount: candidate,
+          outputTokenCount: getUsageOutputTokenCountForPromptEstimate(usage),
+        };
       }
     }
 
@@ -1513,7 +1537,10 @@ export function getResumePromptTokenCount(
         | ChatCompressionRecordPayload
         | undefined;
       if (payload?.info) {
-        return payload.info.newTokenCount;
+        return {
+          promptTokenCount: payload.info.newTokenCount,
+          outputTokenCount: 0,
+        };
       }
     }
   }

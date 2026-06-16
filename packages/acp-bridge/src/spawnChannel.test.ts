@@ -247,23 +247,22 @@ describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {
 });
 
 describe('getAcpMemoryArgs', () => {
-  it('returns a valid --max-old-space-size flag or empty array', () => {
+  it('always includes --expose-gc and optionally --max-old-space-size', () => {
     const args = getAcpMemoryArgs();
-    if (args.length > 0) {
-      expect(args).toHaveLength(1);
-      expect(args[0]).toMatch(/^--max-old-space-size=\d+$/);
-      const sizeMB = Number(args[0]!.split('=')[1]);
+    expect(args).toContain('--expose-gc');
+    const heapArg = args.find((a) => a.startsWith('--max-old-space-size='));
+    if (heapArg) {
+      const sizeMB = Number(heapArg.split('=')[1]);
       expect(sizeMB).toBeGreaterThan(0);
       expect(sizeMB).toBeLessThanOrEqual(16_384);
-    } else {
-      expect(args).toEqual([]);
     }
   });
 
   it('respects the 16GB cap', () => {
     const args = getAcpMemoryArgs();
-    if (args.length > 0) {
-      const sizeMB = Number(args[0]!.split('=')[1]);
+    const heapArg = args.find((a) => a.startsWith('--max-old-space-size='));
+    if (heapArg) {
+      const sizeMB = Number(heapArg.split('=')[1]);
       expect(sizeMB).toBeLessThanOrEqual(16_384);
     }
   });

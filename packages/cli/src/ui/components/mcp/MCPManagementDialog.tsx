@@ -64,13 +64,6 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     const toolRegistry = config.getToolRegistry();
     const promptRegistry = config.getPromptRegistry();
 
-    // Get settings to determine the scope of each server
-    const settings = loadSettings();
-    const userSettings = settings.forScope(SettingScope.User).settings;
-    const workspaceSettings = settings.forScope(
-      SettingScope.Workspace,
-    ).settings;
-
     const serverInfos: MCPServerDisplayInfo[] = [];
 
     for (const [name, serverConfig] of Object.entries(mcpServers) as Array<
@@ -93,13 +86,15 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       );
 
       // Determine source type
-      let source: 'user' | 'project' | 'extension' = 'user';
+      let source: MCPServerDisplayInfo['source'] = 'user';
       if (serverConfig.extensionName) {
         source = 'extension';
-      } else if (workspaceSettings.mcpServers?.[name]) {
+      } else if (serverConfig.scope === 'project') {
         source = 'project';
-      } else if (userSettings.mcpServers?.[name]) {
-        source = 'user';
+      } else if (serverConfig.scope === 'workspace') {
+        source = 'workspace';
+      } else if (serverConfig.scope === 'system') {
+        source = 'system';
       }
 
       // Use config.isMcpServerDisabled() to check if server is disabled
