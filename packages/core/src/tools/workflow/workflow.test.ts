@@ -484,4 +484,84 @@ describe('WorkflowTool', () => {
     expect(entry.status).toBe('cancelled');
     expect(entry.endTime).toBeDefined();
   });
+
+  // P4 Round 7 (wenshao): end-to-end simulation of the dialog-cancel
+  // race. The dialog's `cancelSelected` calls `registry.cancel()` which
+  // flips status to 'cancelled' + aborts the registry entry's
+  // controller (the same `dispatchController` the tool's catch arm
+  // sees). Then the in-flight dispatch rejects, the catch arm runs,
+  // and `setRecentLogs(runId, logs)` is called — pre-fix this was
+  // rejected by the `status === 'running'` guard, so the cancelled
+  // dialog row always showed an empty Logs section. Post-fix the
+  // guard allows 'cancelled' too and the script's `log()` output
+  // survives.
+  //
+  // This drives the EXACT production flow: real WorkflowTool +
+  // real WorkflowRunRegistry + real sandbox emitting through the
+  // real emitter wiring. The dialog itself isn't reachable in the
+  // current TUI build (pre-existing pill-focus infra gap that
+  // wenshao R7 noted is out of P4 scope), so this test stands in
+  // for what a tmux dialog-cancel would assert.
+  it('R7: dialog-cancel race during run — logs accumulated before cancel survive', async () => {
+    const { config, registry } = configWithRegistry();
+    // Controllable dispatch: hangs until the in-flight reject is
+    // triggered externally (simulating the dialog cancel's abort
+    // cascading through dispatchController into the dispatch).
+    let dispatchInflight:
+      | { reject: (err: Error) => void; prompt: string }
+      | undefined;
+    const dispatch = async (prompt: string): Promise<string> =>
+      new Promise<string>((_resolve, reject) => {
+        dispatchInflight = { reject, prompt };
+      });
+
+    const tool = new WorkflowTool(config, { dispatch });
+    const invocation = tool.build({
+      script: `
+        phase('Plan');
+        log('before agent dispatch');
+        const a = await agent('q1');
+        log('after agent: ' + a);
+        return { a };
+      `,
+    });
+
+    const outerSignal = new AbortController().signal;
+    const executePromise = invocation.execute(outerSignal);
+
+    // Wait for execute() to register the run and queue the dispatch.
+    for (let i = 0; i < 200; i++) {
+      if (registry.list().length > 0 && dispatchInflight) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(registry.list()).toHaveLength(1);
+    const runId = registry.list()[0]!.runId;
+
+    // Simulate the dialog cancel: flip status to 'cancelled' AND abort
+    // the registry entry's controller. The dispatchController IS this
+    // controller, so aborting it causes the dispatch to be cascaded.
+    registry.cancel(runId, Date.now());
+    expect(registry.get(runId)!.status).toBe('cancelled');
+
+    // Cause the in-flight dispatch to reject (the production path: the
+    // dispatchController abort propagates through the orchestrator's
+    // limiter / countedDispatch to the test dispatch).
+    dispatchInflight!.reject(new Error('aborted by dialog cancel'));
+
+    // Tool's catch arm runs. With R7 fix the setRecentLogs call lands;
+    // before R7 it was silently dropped because the guard rejected
+    // 'cancelled'.
+    const result = await executePromise;
+    expect(result.error).toBeDefined();
+
+    const final = registry.get(runId)!;
+    expect(final.status).toBe('cancelled');
+    // R7 fix verification: logs accumulated BEFORE the cancel are
+    // preserved on the registry entry so the dialog's Logs section
+    // is non-empty.
+    expect(final.recentLogs.length).toBeGreaterThan(0);
+    expect(
+      final.recentLogs.some((l) => l.includes('before agent dispatch')),
+    ).toBe(true);
+  });
 });
