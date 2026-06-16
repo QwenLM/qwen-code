@@ -64,13 +64,15 @@ class LoopWakeupInvocation extends BaseToolInvocation<
     }
 
     try {
-      const { id, scheduledFor, clampedDelaySeconds, wasClamped } = this.config
-        .getCronScheduler()
-        .scheduleWakeup(this.params.delaySeconds, prompt);
+      const { id, scheduledFor, clampedDelaySeconds, wasClamped, replacedId } =
+        this.config
+          .getCronScheduler()
+          .scheduleWakeup(this.params.delaySeconds, prompt);
       const reason = this.params.reason?.trim();
 
       const llmContent = [
         `Scheduled loop wakeup ${id}.`,
+        replacedId ? `Replaced pending wakeup ${replacedId}.` : null,
         `Scheduled for: ${scheduledFor} (in ${clampedDelaySeconds}s).`,
         wasClamped
           ? `Requested ${formatRequested(this.params.delaySeconds)} was clamped to the [60, 3600] s range.`

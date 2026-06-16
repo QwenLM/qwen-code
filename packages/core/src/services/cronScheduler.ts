@@ -274,6 +274,7 @@ export class CronScheduler {
     scheduledFor: string;
     clampedDelaySeconds: number;
     wasClamped: boolean;
+    replacedId: string | null;
   } {
     const clampedDelaySeconds = clampWakeupSeconds(delaySeconds);
     const wasClamped =
@@ -283,6 +284,7 @@ export class CronScheduler {
     const id = generateId();
     const now = Date.now();
     const fireAtMs = now + clampedDelaySeconds * 1000;
+    const replacedId = this.wakeups.values().next().value?.id ?? null;
     this.wakeups.clear();
     this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
     return {
@@ -290,6 +292,7 @@ export class CronScheduler {
       scheduledFor: new Date(fireAtMs).toISOString(),
       clampedDelaySeconds,
       wasClamped,
+      replacedId,
     };
   }
 
@@ -344,7 +347,7 @@ export class CronScheduler {
    */
   async delete(id: string): Promise<boolean> {
     const job = this.jobs.get(id);
-    if (!job) return false;
+    if (!job) return this.cancelWakeup(id);
 
     this.jobs.delete(id);
     if (job.durable && this.projectRoot) {
@@ -364,7 +367,10 @@ export class CronScheduler {
    * Returns all active jobs.
    */
   list(): CronJob[] {
-    return [...this.jobs.values()];
+    return [
+      ...this.jobs.values(),
+      ...[...this.wakeups.values()].map(wakeupToJob),
+    ];
   }
 
   /**
@@ -910,6 +916,7 @@ export class CronScheduler {
    * that are due. Exported for testing.
    */
   tick(now?: Date): void {
+    // Wakeups live in a separate map; check both or self-paced loops stop firing.
     if (this.jobs.size === 0 && this.wakeups.size === 0) return;
     const currentDate = now ?? new Date();
     const currentMs = currentDate.getTime();
@@ -1042,7 +1049,7 @@ export class CronScheduler {
       lines.push(
         `  - [${wakeup.id}] wakeup at ${new Date(
           wakeup.fireAtMs,
-        ).toLocaleString()}: ${truncatePrompt(wakeup.prompt)}`,
+        ).toISOString()}: ${truncatePrompt(wakeup.prompt)}`,
       );
     }
     return lines.join('\n');

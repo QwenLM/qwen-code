@@ -72,9 +72,14 @@ describe('LoopWakeupTool', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Session-only one-shot');
     expect(result.llmContent).toContain('Scheduled for:');
-    // Registered as a wakeup (holds the session open) — not a cron job.
+    // Registered as a wakeup: it holds the session open and is manageable
+    // through CronList/CronDelete, but does not count against cron capacity.
     expect(scheduler.sessionSize).toBe(1);
-    expect(scheduler.list()).toHaveLength(0);
+    expect(scheduler.list()[0]).toMatchObject({
+      cronExpr: '@wakeup',
+      prompt: 'continue loop',
+    });
+    expect(scheduler.size).toBe(0);
   });
 
   it('tells the model to re-arm to keep the loop alive', async () => {
@@ -96,6 +101,20 @@ describe('LoopWakeupTool', () => {
     expect(result.llmContent).toContain(
       'Requested 5s was clamped to the [60, 3600] s range.',
     );
+  });
+
+  it('reports when a wakeup replaces an earlier pending wakeup', async () => {
+    const first = await tool
+      .build({ delaySeconds: 300, prompt: 'first' })
+      .execute(new AbortController().signal);
+    const firstId = String(first.llmContent).match(/wakeup ([a-z0-9]+)\./)?.[1];
+
+    const second = await tool
+      .build({ delaySeconds: 300, prompt: 'second' })
+      .execute(new AbortController().signal);
+
+    expect(firstId).toBeDefined();
+    expect(second.llmContent).toContain(`Replaced pending wakeup ${firstId}.`);
   });
 
   it('does not report a clamp when the delay is in range', async () => {

@@ -503,9 +503,16 @@ describe('CronScheduler', () => {
       expect(scheduler.sessionSize).toBe(0);
     });
 
-    it('is separate from the cron jobs map (not in list/size)', () => {
+    it('lists wakeups without counting them against the cron job limit', () => {
       scheduler.scheduleWakeup(300, 'p');
-      expect(scheduler.list()).toHaveLength(0);
+      expect(scheduler.list()).toMatchObject([
+        {
+          cronExpr: '@wakeup',
+          prompt: 'p',
+          recurring: false,
+          jitterMs: 0,
+        },
+      ]);
       expect(scheduler.size).toBe(0);
     });
 
@@ -524,6 +531,7 @@ describe('CronScheduler', () => {
       const second = scheduler.scheduleWakeup(240, 'second');
 
       expect(scheduler.sessionSize).toBe(1);
+      expect(second.replacedId).toEqual(expect.any(String));
 
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
@@ -563,8 +571,19 @@ describe('CronScheduler', () => {
       const summary = scheduler.getExitSummary()!;
 
       expect(summary).toContain('1 active loop cancelled:');
-      expect(summary).toContain('wakeup');
+      expect(summary).toContain(new Date(2025, 0, 15, 10, 35, 0).toISOString());
       expect(summary).toContain('continue checking the deployment status');
+    });
+
+    it('reports mixed session jobs and wakeups in the exit summary', () => {
+      scheduler.create('*/5 * * * *', 'cron check', false);
+      scheduler.scheduleWakeup(300, 'wakeup check');
+
+      const summary = scheduler.getExitSummary()!;
+
+      expect(summary).toContain('2 active loops cancelled:');
+      expect(summary).toContain('cron check');
+      expect(summary).toContain('wakeup check');
     });
 
     it('stop clears pending wakeups so they cannot fire after restart', () => {

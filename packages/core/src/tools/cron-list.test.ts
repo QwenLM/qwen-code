@@ -79,6 +79,18 @@ describe('CronListTool', () => {
     expect(result.returnDisplay).toContain('[session-only]');
   });
 
+  it('lists pending wakeups', async () => {
+    config._scheduler.scheduleWakeup(300, 'continue loop');
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('@wakeup');
+    expect(result.llmContent).toContain('[session-only]: continue loop');
+    expect(result.returnDisplay).toContain('@wakeup [session-only]');
+  });
+
   it('lists durable jobs from the tasks file without the scheduler loading them', async () => {
     // Headless situation: the task is on disk but this scheduler never
     // called enableDurable, so its job map is empty.
