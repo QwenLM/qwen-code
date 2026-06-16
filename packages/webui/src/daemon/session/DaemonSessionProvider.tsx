@@ -643,7 +643,8 @@ export function DaemonSessionProvider({
                 e.type === 'turn_error' ||
                 e.type === 'prompt_cancelled',
             );
-            if (replayEvents.length > 0 && !hasTurnTerminalEvent) {
+            const hasReplayUserMessage = replayEvents.some(isUserMessageEvent);
+            if (hasReplayUserMessage && !hasTurnTerminalEvent) {
               setPromptStatus((s) => (s === 'idle' ? 'waiting' : s));
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
@@ -1214,6 +1215,15 @@ function settleActivePromptFromTurnEvent(
 
 function isPromptLifecycleTurnEvent(event: DaemonEvent): boolean {
   return event.type === 'turn_complete';
+}
+
+function isUserMessageEvent(event: DaemonEvent): boolean {
+  if (event.type !== 'session_update') return false;
+  const data = event.data as
+    | { update?: { sessionUpdate?: unknown } }
+    | null
+    | undefined;
+  return data?.update?.sessionUpdate === 'user_message_chunk';
 }
 
 function normalizeAndFilterEvent(

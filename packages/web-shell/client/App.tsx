@@ -315,6 +315,8 @@ export interface WebShellProps {
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
+  /** Called whenever transcript blocks change. Receives the full blocks array from useTranscriptBlocks(). */
+  onEventChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
   /** Called when a critical error occurs (auth failure, session gone, etc). */
   onError?: (error: Error) => void;
   /** Called when `/bug` is invoked. Receives system info. If omitted, web-shell opens the report URL itself. */
@@ -692,6 +694,7 @@ export function App({
   style: externalStyle,
   onConnectionChange,
   onStreamingStateChange,
+  onEventChange,
   onError,
   onBugReport,
   hiddenSlashCommands,
@@ -1614,6 +1617,10 @@ export function App({
   useEffect(() => {
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
+
+  useEffect(() => {
+    onEventChange?.(blocks);
+  }, [blocks, onEventChange]);
 
   useEffect(() => {
     if (connection.error) {
