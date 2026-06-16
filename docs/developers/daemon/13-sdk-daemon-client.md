@@ -219,7 +219,7 @@ sequenceDiagram
 The SDK also exports `packages/sdk-typescript/src/daemon/ui/`, a host-neutral
 set of primitives that turn daemon events into transcript blocks:
 
-- `normalizeDaemonEvent(evt)` maps the 43 known daemon wire events into 36 UI-friendly `DaemonUiEventType` values; unmodeled or malformed events normalize to `debug`.
+- `normalizeDaemonEvent(evt)` maps the 43 known daemon wire events into 37 UI-friendly `DaemonUiEventType` values; unmodeled or malformed events normalize to `debug`.
 - `createDaemonTranscriptState()` plus `reduceDaemonTranscriptEvents(state, events)` projects UI events into `DaemonTranscriptBlock[]`.
 - `createDaemonTranscriptStore()` wraps subscribe / dispatch.
 - `render.ts` / `terminal.ts` provide HTML and terminal baseline renderers, while `toolPreview.ts` produces tool-call summaries.

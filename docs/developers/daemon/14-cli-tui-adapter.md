@@ -6,7 +6,7 @@
 
 `packages/sdk-typescript/src/daemon/ui/` adds a `ui/*` subpackage to the SDK. It turns the daemon SSE event stream into UI-renderable transcript blocks through reusable primitives:
 
-- **Normalization** (`normalizer.ts`): maps the daemon wire schema's 43 known event types (see [`09-event-schema.md`](./09-event-schema.md)) into 36 UI-friendly `DaemonUiEventType` semantic events such as `assistant.text.delta`, `tool.update`, and `session.metadata.changed`.
+- **Normalization** (`normalizer.ts`): maps the daemon wire schema's 43 known event types (see [`09-event-schema.md`](./09-event-schema.md)) into 37 UI-friendly `DaemonUiEventType` semantic events such as `assistant.text.delta`, `tool.update`, and `session.metadata.changed`.
 - **State machine** (`transcript.ts`, `store.ts`): pure reducer plus subscribable store that projects UI events into an ordered `DaemonTranscriptBlock[]`.
 - **Renderers** (`render.ts`, `terminal.ts`, `toolPreview.ts`): transcript blocks to HTML, terminal text, and tool preview strings. Hosts can use or replace them.
 - **Conformance** (`conformance.ts`): cross-host consistency tests used when channel, TUI, and IDE surfaces migrate to these primitives.
@@ -41,7 +41,7 @@ The first production consumer is **`packages/webui/src/daemon/`** ([#4328](https
 
 ### `DaemonUiEventType` vocabulary
 
-`ui/types.ts` defines 36 UI event types, grouped by domain.
+`ui/types.ts` defines 37 UI event types, grouped by domain.
 
 **Chat stream (Stage 1)**
 
@@ -117,7 +117,7 @@ flowchart LR
     A --> B["DaemonClient.subscribeEvents<br/>parseSseStream"]
     B --> C["asKnownDaemonEvent<br/>(09-event-schema.md)"]
     C --> D["normalizeDaemonEvent<br/>ui/normalizer.ts"]
-    D --> E["DaemonUiEvent<br/>(36 UI-friendly types)"]
+    D --> E["DaemonUiEvent<br/>(37 UI-friendly types)"]
     E --> F["reduceDaemonTranscriptEvents<br/>ui/transcript.ts"]
     F --> G["DaemonTranscriptState +<br/>DaemonTranscriptBlock[]"]
     G --> H["renderer<br/>(render.ts HTML / terminal.ts / host custom)"]
