@@ -1201,6 +1201,19 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 
+    it('clears drained notification completion before continuing', async () => {
+      type NotificationInternals = {
+        notificationCompletion: Promise<void> | null;
+      };
+      const internals = session as unknown as NotificationInternals;
+      internals.notificationCompletion = Promise.resolve();
+      setHistoryTail([{ role: 'model', parts: [{ text: 'done' }] }]);
+
+      await session.continueTurn();
+
+      expect(internals.notificationCompletion).toBeNull();
+    });
+
     it('re-submits an orphaned trailing user prompt under the same turn id without recording a user message', async () => {
       setHistoryTail([{ role: 'user', parts: [{ text: 'do the thing' }] }]);
       const stripSpy = getStripSpy();
@@ -1380,6 +1393,69 @@ describe('Session', () => {
               },
             },
           ],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        'test-session-id########0',
+      );
+    });
+
+    it('adds system reminders without moving function responses', async () => {
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      setHistoryTail([
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+        },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.continueTurn();
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'qwen3-code-plus',
+        {
+          message: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'shell',
+                response: { error: expect.stringContaining('not recorded') },
+              },
+            },
+            {
+              text: expect.stringContaining(SYSTEM_REMINDER_OPEN),
+            },
+          ],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        'test-session-id########0',
+      );
+    });
+
+    it('does not duplicate persisted system reminders on interrupted prompt replay', async () => {
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      const persistedReminder = {
+        text: `${SYSTEM_REMINDER_OPEN}\nPlan mode was active.\n${SYSTEM_REMINDER_CLOSE}`,
+      };
+      setHistoryTail([
+        {
+          role: 'user',
+          parts: [persistedReminder, { text: 'resume me' }],
+        },
+      ]);
+      getStripSpy().mockReturnValue([]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.continueTurn();
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'qwen3-code-plus',
+        {
+          message: [persistedReminder, { text: 'resume me' }],
           config: { abortSignal: expect.any(AbortSignal) },
         },
         'test-session-id########0',

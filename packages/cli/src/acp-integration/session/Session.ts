@@ -906,6 +906,7 @@ export class Session implements SessionContext {
       } catch {
         // Notification errors are surfaced through the session stream.
       }
+      this.notificationCompletion = null;
     }
   }
 
@@ -1159,6 +1160,25 @@ export class Session implements SessionContext {
                   detection.danglingCalls,
                   ORPHAN_TOOL_USE_REPAIR_REASON,
                 );
+              }
+
+              const systemReminders = await this.#buildInitialSystemReminders();
+              const hasSystemReminderPart = parts.some((part) =>
+                isSystemReminderContent({ role: 'user', parts: [part] }),
+              );
+              if (systemReminders.length > 0 && !hasSystemReminderPart) {
+                // Keep functionResponse parts first for backends that require
+                // tool results to precede text blocks in the same user turn.
+                const reminderIndex = parts.findIndex(
+                  (part) => !part.functionResponse,
+                );
+                const insertAt =
+                  reminderIndex === -1 ? parts.length : reminderIndex;
+                parts = [
+                  ...parts.slice(0, insertAt),
+                  ...systemReminders,
+                  ...parts.slice(insertAt),
+                ];
               }
 
               await this.#snapshotFileHistory(promptId);
