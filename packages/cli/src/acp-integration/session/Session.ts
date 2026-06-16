@@ -222,16 +222,30 @@ async function withTimeoutSignal<T>(
 
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(parentSignal.reason);
+  let rejectOnAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    rejectOnAbort = () => {
+      reject(
+        controller.signal.reason instanceof Error
+          ? controller.signal.reason
+          : new Error('Mid-turn message resolution aborted'),
+      );
+    };
+    controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+  });
   const timeoutHandle = setTimeout(() => {
     controller.abort(new Error('Mid-turn message resolution timed out'));
   }, timeoutMs);
 
   parentSignal.addEventListener('abort', abortFromParent, { once: true });
   try {
-    return await fn(controller.signal);
+    return await Promise.race([fn(controller.signal), abortPromise]);
   } finally {
     clearTimeout(timeoutHandle);
     parentSignal.removeEventListener('abort', abortFromParent);
+    if (rejectOnAbort) {
+      controller.signal.removeEventListener('abort', rejectOnAbort);
+    }
   }
 }
 
