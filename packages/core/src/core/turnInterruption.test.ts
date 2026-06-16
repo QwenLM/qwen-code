@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import {
   buildSyntheticToolResponseParts,
   detectTurnInterruption,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
 } from './turnInterruption.js';
 
 const reminder = (text: string) => ({
@@ -16,6 +17,10 @@ const reminder = (text: string) => ({
 });
 
 describe('detectTurnInterruption', () => {
+  it('uses a bounded history tail count for continuation detection callers', () => {
+    expect(TURN_INTERRUPTION_HISTORY_TAIL_COUNT).toBe(50);
+  });
+
   it('returns none for empty history', () => {
     expect(detectTurnInterruption([])).toEqual({ kind: 'none' });
   });

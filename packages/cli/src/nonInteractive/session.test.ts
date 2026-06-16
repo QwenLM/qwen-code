@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SendMessageType, type Config } from '@qwen-code/qwen-code-core';
+import type { Content } from '@google/genai';
 import { runNonInteractiveStreamJson } from './session.js';
 import type {
   CLIUserMessage,
@@ -128,6 +129,16 @@ function createControlRequest(
   };
 }
 
+function createContinueRequest(requestId = 'req-continue'): CLIControlRequest {
+  return {
+    type: 'control_request',
+    request_id: requestId,
+    request: {
+      subtype: 'continue_last_turn',
+    },
+  };
+}
+
 function createControlResponse(requestId: string): CLIControlResponse {
   return {
     type: 'control_response',
@@ -242,6 +253,60 @@ describe('runNonInteractiveStreamJson', () => {
     vi.restoreAllMocks();
   });
 
+  function installContinueDispatch(): {
+    continueResults: Array<Record<string, unknown> | undefined>;
+  } {
+    let controlContext:
+      | { onContinueLastTurn?: () => Promise<Record<string, unknown>> }
+      | undefined;
+    const pendingDispatches = new Set<Promise<unknown>>();
+    const continueResults: Array<Record<string, unknown> | undefined> = [];
+
+    (ControlContext as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (options: {
+        onContinueLastTurn?: () => Promise<Record<string, unknown>>;
+      }) => {
+        controlContext = options;
+        return {};
+      },
+    );
+    mockDispatcher.dispatch.mockImplementation((request: CLIControlRequest) => {
+      const work = (async () => {
+        if (request.request.subtype !== 'continue_last_turn') {
+          return undefined;
+        }
+        const result = await controlContext?.onContinueLastTurn?.();
+        continueResults.push(result);
+        return result;
+      })();
+      pendingDispatches.add(work);
+      void work.finally(() => pendingDispatches.delete(work));
+      return work;
+    });
+    mockDispatcher.getPendingIncomingRequestCount.mockImplementation(
+      () => pendingDispatches.size,
+    );
+    mockDispatcher.waitForPendingIncomingRequests.mockImplementation(
+      async () => {
+        await Promise.allSettled([...pendingDispatches]);
+      },
+    );
+
+    return { continueResults };
+  }
+
+  function createInitializedGeminiClient(historyTail: Content[]) {
+    const getHistoryTail = vi.fn().mockReturnValue(historyTail);
+    const geminiClient = {
+      isInitialized: vi.fn().mockReturnValue(true),
+      getChat: vi.fn().mockReturnValue({ getHistoryTail }),
+    };
+    config = createConfig({
+      getGeminiClient: vi.fn().mockReturnValue(geminiClient),
+    });
+    return { geminiClient, getHistoryTail };
+  }
+
   it('initializes session and processes initialize control request', async () => {
     const initRequest = createControlRequest('initialize');
 
@@ -290,6 +355,128 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects continue_last_turn when the Gemini client is not initialized', async () => {
+    const { continueResults } = installContinueDispatch();
+    config = createConfig({
+      getGeminiClient: vi.fn().mockReturnValue(undefined),
+    });
+    const initRequest = createControlRequest('initialize');
+    const continueRequest = createContinueRequest();
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield continueRequest;
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(continueResults).toEqual([
+      { accepted: false, interruption: 'none' },
+    ]);
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects continue_last_turn when the last turn ended cleanly', async () => {
+    const { continueResults } = installContinueDispatch();
+    const { getHistoryTail } = createInitializedGeminiClient([
+      { role: 'model', parts: [{ text: 'done' }] },
+    ]);
+    const initRequest = createControlRequest('initialize');
+    const continueRequest = createContinueRequest();
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield continueRequest;
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(getHistoryTail).toHaveBeenCalledWith(50);
+    expect(continueResults).toEqual([
+      { accepted: false, interruption: 'none' },
+    ]);
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates continue_last_turn while a continuation is pending or running', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedGeminiClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    const initRequest = createControlRequest('initialize');
+    const firstContinue = createContinueRequest('req-continue-1');
+    const secondContinue = createContinueRequest('req-continue-2');
+    let releaseContinue!: () => void;
+    let continueRunCount = 0;
+    runNonInteractiveMock.mockImplementation(() => {
+      continueRunCount++;
+      if (continueRunCount === 1) {
+        return new Promise<void>((resolve) => {
+          releaseContinue = resolve;
+        });
+      }
+      return Promise.resolve();
+    });
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield firstContinue;
+      await vi.waitFor(() => {
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+      });
+      yield secondContinue;
+      await vi.waitFor(() => {
+        expect(continueResults).toHaveLength(2);
+      });
+      releaseContinue();
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(continueResults).toEqual([
+      { accepted: true, interruption: 'interrupted_prompt' },
+      { accepted: false, interruption: 'interrupted_prompt' },
+    ]);
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    expect(runNonInteractiveMock).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({ merged: expect.any(Object) }),
+      '',
+      expect.stringContaining('test-session'),
+      expect.objectContaining({ continueInterrupted: true }),
+    );
+  });
+
+  it('emits an error result when a scheduled continue turn fails', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedGeminiClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    const initRequest = createControlRequest('initialize');
+    const continueRequest = createContinueRequest();
+    runNonInteractiveMock.mockRejectedValueOnce(new Error('continue failed'));
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield continueRequest;
+      await vi.waitFor(() => {
+        expect(continueResults).toHaveLength(1);
+      });
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(continueResults).toEqual([
+      { accepted: true, interruption: 'interrupted_prompt' },
+    ]);
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: 'continue failed',
+      }),
+    );
   });
 
   it('routes monitor notifications through the session queue', async () => {

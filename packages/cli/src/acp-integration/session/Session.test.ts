@@ -32,7 +32,17 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 
+const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const withInteractionSpanSpy = vi.hoisted(() =>
+  vi.fn(
+    async <T>(
+      _config: unknown,
+      _options: unknown,
+      fn: () => Promise<T>,
+    ): Promise<T> => fn(),
+  ),
+);
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -41,12 +51,13 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ...actual,
     createDebugLogger: () => ({
       debug: vi.fn(),
-      info: vi.fn(),
+      info: debugLoggerInfoSpy,
       warn: debugLoggerWarnSpy,
       error: vi.fn(),
     }),
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
+    withInteractionSpan: withInteractionSpanSpy,
   };
 });
 
@@ -345,6 +356,8 @@ describe('Session', () => {
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
       .getAvailableCommands as unknown as ReturnType<typeof vi.fn>;
     getAvailableCommandsSpy.mockResolvedValue([]);
+    debugLoggerInfoSpy.mockClear();
+    withInteractionSpanSpy.mockClear();
 
     session = new Session(
       'test-session-id',
@@ -1370,6 +1383,62 @@ describe('Session', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         'test-session-id########0',
+      );
+    });
+
+    it('wraps a continued turn in an interaction span', async () => {
+      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+      getStripSpy().mockReturnValue([]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.continueTurn();
+
+      expect(withInteractionSpanSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          promptId: 'test-session-id########0',
+          model: 'qwen3-code-plus',
+          messageType: 'acp_continue',
+        }),
+        expect.any(Function),
+        expect.any(Function),
+      );
+    });
+
+    it('snapshots file state before a continued turn sends', async () => {
+      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+      getStripSpy().mockReturnValue([]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.continueTurn();
+
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
+        'test-session-id########0',
+      );
+    });
+
+    it('logs continuation detection and stripped-entry counts', async () => {
+      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+      getStripSpy().mockReturnValue([
+        { role: 'user', parts: [{ text: 'resume me' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.continueTurn();
+
+      expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
+        expect.stringContaining('continueTurn detected interruption'),
+        expect.objectContaining({ kind: 'interrupted_prompt' }),
+      );
+      expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
+        expect.stringContaining('continueTurn stripped orphaned user entries'),
+        expect.objectContaining({ strippedCount: 1 }),
       );
     });
 
@@ -5489,22 +5558,20 @@ describe('Session', () => {
         isOutputMarkdown: true,
       });
 
-      const parts = await (session as unknown as ToolCallInternals).runToolCalls(
-        new AbortController().signal,
-        'prompt-dup',
-        [
-          {
-            id: 'dup_id_0001',
-            name: 'read_file',
-            args: { file_path: 'a.ts' },
-          },
-          {
-            id: 'dup_id_0001',
-            name: 'read_file',
-            args: { file_path: 'b.ts' },
-          },
-        ],
-      );
+      const parts = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-dup', [
+        {
+          id: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+        {
+          id: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+        },
+      ]);
 
       expect(execute).toHaveBeenCalledOnce();
       expect(parts.map((part) => part.functionResponse?.id)).toEqual([
@@ -5534,22 +5601,20 @@ describe('Session', () => {
         isOutputMarkdown: true,
       });
 
-      const parts = await (session as unknown as ToolCallInternals).runToolCalls(
-        new AbortController().signal,
-        'prompt-empty',
-        [
-          {
-            id: '',
-            name: 'read_file',
-            args: { file_path: 'a.ts' },
-          },
-          {
-            id: '',
-            name: 'read_file',
-            args: { file_path: 'b.ts' },
-          },
-        ],
-      );
+      const parts = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-empty', [
+        {
+          id: '',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+        {
+          id: '',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+        },
+      ]);
 
       expect(execute).toHaveBeenCalledTimes(2);
       expect(parts).toHaveLength(2);
@@ -5828,6 +5893,7 @@ describe('Session', () => {
 
     it('aborts the in-flight generator when a new prompt arrives', async () => {
       let capturedSignal: AbortSignal | undefined;
+      let releaseSuggestion: (() => void) | undefined;
       generateMock
         .mockImplementationOnce(
           async (
@@ -5837,9 +5903,8 @@ describe('Session', () => {
           ): Promise<{ suggestion: string | null }> => {
             capturedSignal = signal;
             return new Promise((resolve) => {
-              signal.addEventListener('abort', () =>
-                resolve({ suggestion: null }),
-              );
+              releaseSuggestion = () => resolve({ suggestion: null });
+              signal.addEventListener('abort', releaseSuggestion);
             });
           },
         )
@@ -5863,6 +5928,50 @@ describe('Session', () => {
       });
 
       expect(capturedSignal!.aborted).toBe(true);
+      releaseSuggestion?.();
+    });
+
+    it('aborts the in-flight generator when a continued turn starts', async () => {
+      let capturedSignal: AbortSignal | undefined;
+      let releaseSuggestion: (() => void) | undefined;
+      generateMock
+        .mockImplementationOnce(
+          async (
+            _config: unknown,
+            _history: unknown,
+            signal: AbortSignal,
+          ): Promise<{ suggestion: string | null }> => {
+            capturedSignal = signal;
+            return new Promise((resolve) => {
+              releaseSuggestion = () => resolve({ suggestion: null });
+              signal.addEventListener('abort', releaseSuggestion);
+            });
+          },
+        )
+        .mockResolvedValue({ suggestion: null });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      await vi.waitFor(() => expect(capturedSignal).toBeDefined());
+      expect(capturedSignal!.aborted).toBe(false);
+
+      (
+        mockChat as unknown as { getHistoryTail: ReturnType<typeof vi.fn> }
+      ).getHistoryTail = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = vi.fn().mockReturnValue([]);
+
+      await session.continueTurn();
+
+      expect(capturedSignal!.aborted).toBe(true);
+      releaseSuggestion?.();
     });
 
     it('aborts the in-flight generator when cancelPendingPrompt is called', async () => {

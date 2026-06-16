@@ -42,10 +42,10 @@ export type TurnInterruption =
       danglingCalls: Array<{ callId: string; name: string }>;
     };
 
-// Continue detection must see every trailing user entry because the matching
-// strip step removes all of them. This path is explicit and cold, so cloning
-// the full practical history is safer than a small bounded tail.
-export const TURN_INTERRUPTION_HISTORY_TAIL_COUNT = Number.MAX_SAFE_INTEGER;
+// Continue detection only walks the final run of trailing user/model entries.
+// A bounded tail avoids deep-cloning long daemon histories for each probe while
+// still leaving ample room for repeated failed sends and tool-result retries.
+export const TURN_INTERRUPTION_HISTORY_TAIL_COUNT = 50;
 
 /**
  * Detect whether the last turn of `history` was left unfinished, and if so

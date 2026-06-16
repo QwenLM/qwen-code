@@ -72,6 +72,7 @@ class Session {
    * runs before any prompt that arrives after it.
    */
   private pendingContinueTurns: number = 0;
+  private continueTurnInProgress: boolean = false;
   private abortController: AbortController;
   private config: Config;
   private sessionId: string;
@@ -495,6 +496,9 @@ class Session {
     if (detection.kind === 'none') {
       return { accepted: false, interruption: 'none' };
     }
+    if (this.pendingContinueTurns > 0 || this.continueTurnInProgress) {
+      return { accepted: false, interruption: detection.kind };
+    }
 
     this.pendingContinueTurns += 1;
     this.ensureProcessingStarted();
@@ -508,10 +512,11 @@ class Session {
    * a no-op result message.
    */
   private async processContinueTurn(): Promise<void> {
-    await this.waitForInitialization();
-
-    const promptId = this.getNextPromptId();
+    this.continueTurnInProgress = true;
     try {
+      await this.waitForInitialization();
+
+      const promptId = this.getNextPromptId();
       await runNonInteractive(this.config, this.settings, '', promptId, {
         abortController: this.abortController,
         adapter: this.outputAdapter,
@@ -522,6 +527,9 @@ class Session {
       });
     } catch (error) {
       debugLogger.error('[Session] Continue turn execution error:', error);
+      throw error;
+    } finally {
+      this.continueTurnInProgress = false;
     }
   }
 

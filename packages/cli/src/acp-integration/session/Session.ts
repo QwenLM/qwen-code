@@ -831,20 +831,7 @@ export class Session implements SessionContext {
       this.followupAbort = null;
     }
     // Abort any in-progress cron execution (user prompt takes priority)
-    if (this.cronAbortController) {
-      this.cronAbortController.abort();
-      this.cronAbortController = null;
-      this.cronQueue = [];
-      this.cronProcessing = false;
-    }
-    if (this.cronCompletion) {
-      try {
-        await this.cronCompletion;
-      } catch {
-        // Expected: cron was aborted
-      }
-      this.cronCompletion = null;
-    }
+    await this.#abortAndDrainCronTurn();
 
     // Wait for the previous prompt to finish so chat history is consistent.
     if (this.pendingPromptCompletion) {
@@ -858,19 +845,7 @@ export class Session implements SessionContext {
     // A background notification turn mutates the same chat history as a user
     // prompt. Abort it before awaiting the drain so user input is not blocked
     // behind notification tool calls.
-    if (this.notificationAbortController) {
-      this.notificationAbortController.abort();
-      this.notificationAbortController = null;
-      this.notificationQueue = [];
-      this.notificationProcessing = false;
-    }
-    if (this.notificationCompletion) {
-      try {
-        await this.notificationCompletion;
-      } catch {
-        // Notification errors are surfaced through the session stream.
-      }
-    }
+    await this.#abortAndDrainNotificationTurn();
 
     // Cancelled while waiting for the previous prompt to finish.
     if (pendingSend.signal.aborted) {
@@ -896,6 +871,58 @@ export class Session implements SessionContext {
       this.pendingPrompt = null;
       resolveCompletion();
       this.pendingPromptCompletion = null;
+    }
+  }
+
+  async #abortAndDrainCronTurn(): Promise<void> {
+    if (this.cronAbortController) {
+      this.cronAbortController.abort();
+      this.cronAbortController = null;
+      this.cronQueue = [];
+      this.cronProcessing = false;
+    }
+    if (this.cronCompletion) {
+      try {
+        await this.cronCompletion;
+      } catch {
+        // Expected: cron was aborted
+      }
+      this.cronCompletion = null;
+    }
+  }
+
+  async #abortAndDrainNotificationTurn(): Promise<void> {
+    if (this.notificationAbortController) {
+      this.notificationAbortController.abort();
+      this.notificationAbortController = null;
+      this.notificationQueue = [];
+      this.notificationProcessing = false;
+    }
+    if (this.notificationCompletion) {
+      try {
+        await this.notificationCompletion;
+      } catch {
+        // Notification errors are surfaced through the session stream.
+      }
+    }
+  }
+
+  async #snapshotFileHistory(promptId: string): Promise<void> {
+    try {
+      const fileHistoryService = this.config.getFileHistoryService();
+      await fileHistoryService.makeSnapshot(promptId);
+      try {
+        const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
+        if (latestSnapshot) {
+          this.config
+            .getChatRecordingService()
+            ?.recordFileHistorySnapshot(latestSnapshot);
+        }
+      } catch (e) {
+        debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+      }
+    } catch (e) {
+      debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
     }
   }
 
@@ -1015,36 +1042,16 @@ export class Session implements SessionContext {
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
 
+    if (this.followupAbort) {
+      this.followupAbort.abort();
+      this.followupAbort = null;
+    }
+
     try {
       // Background cron/notification turns mutate the same chat history;
       // stop and drain them before continuing, mirroring prompt().
-      if (this.cronAbortController) {
-        this.cronAbortController.abort();
-        this.cronAbortController = null;
-        this.cronQueue = [];
-        this.cronProcessing = false;
-      }
-      if (this.cronCompletion) {
-        try {
-          await this.cronCompletion;
-        } catch {
-          // Expected: cron was aborted
-        }
-        this.cronCompletion = null;
-      }
-      if (this.notificationAbortController) {
-        this.notificationAbortController.abort();
-        this.notificationAbortController = null;
-        this.notificationQueue = [];
-        this.notificationProcessing = false;
-      }
-      if (this.notificationCompletion) {
-        try {
-          await this.notificationCompletion;
-        } catch {
-          // Notification errors are surfaced through the session stream.
-        }
-      }
+      await this.#abortAndDrainCronTurn();
+      await this.#abortAndDrainNotificationTurn();
 
       // Cancelled while draining background turns.
       if (pendingSend.signal.aborted) {
@@ -1102,85 +1109,114 @@ export class Session implements SessionContext {
         this.runtimeBaseDir,
         this.config.getWorkingDir(),
         async () => {
-          const detection = detectTurnInterruption(
-            this.#getCurrentChat().getHistoryTail(
-              TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-            ),
-          );
-          if (detection.kind === 'none') {
-            return {
-              stopReason: 'end_turn' as const,
-              resumed: false,
-              interruption: 'none' as const,
-            };
-          }
-
           const promptId = this.config.getSessionId() + '########' + this.turn;
-
-          let parts: Part[];
-          let strippedPromptEntries: Content[] = [];
-          if (detection.kind === 'interrupted_prompt') {
-            // The send below re-pushes this content; strip the orphaned
-            // original first so history doesn't carry it twice.
-            strippedPromptEntries =
-              this.config
-                .getGeminiClient()!
-                .stripOrphanedUserEntriesFromHistory() ?? [];
-            parts = detection.parts;
-          } else {
-            parts = buildSyntheticToolResponseParts(
-              detection.danglingCalls,
-              ORPHAN_TOOL_USE_REPAIR_REASON,
-            );
-          }
-
-          let turnCount = 0;
-          let continueSendStarted = false;
-          // When we have orphaned entries to restore, `restoreStrippedPromptEntries`
-          // below is the single source of truth for re-adding the unsent initial
-          // message. Tell the turn loop to skip its own functionResponse-only
-          // preservation of that message so a tool_result orphan isn't written
-          // to history twice (once by preserve, once by restore).
-          const ownsInitialUnsentMessage = strippedPromptEntries.length > 0;
-          const restoreStrippedPromptEntries = () => {
-            if (continueSendStarted || strippedPromptEntries.length === 0) {
-              return;
-            }
-            for (const entry of strippedPromptEntries) {
-              this.#getCurrentChat().addHistory(entry);
-            }
-            strippedPromptEntries = [];
-          };
-          try {
-            const earlyExit = await this.#runModelTurnLoop(
+          return await withInteractionSpan(
+            this.config,
+            {
               promptId,
-              { role: 'user', parts },
-              pendingSend,
-              () => {
-                turnCount++;
-              },
-              () => {
-                continueSendStarted = true;
-              },
-              ownsInitialUnsentMessage,
-            );
-            const result =
-              earlyExit ?? (await this.#finishTurn(pendingSend, promptId));
-            return {
-              ...result,
-              resumed: true,
-              interruption: detection.kind,
-            };
-          } finally {
-            restoreStrippedPromptEntries();
-            logConversationFinishedEvent(
-              this.config,
-              new ConversationFinishedEvent(
-                this.config.getApprovalMode(),
-                turnCount,
-              ),
-            );
-          }
+              model: this.config.getModel(),
+              messageType: 'acp_continue',
+            },
+            async () => {
+              const historyTail = this.#getCurrentChat().getHistoryTail(
+                TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+              );
+              const detection = detectTurnInterruption(historyTail);
+              debugLogger.info('[Session] continueTurn detected interruption', {
+                kind: detection.kind,
+                historyTailCount: historyTail.length,
+                danglingCallCount:
+                  detection.kind === 'interrupted_turn'
+                    ? detection.danglingCalls.length
+                    : 0,
+              });
+              if (detection.kind === 'none') {
+                return {
+                  stopReason: 'end_turn' as const,
+                  resumed: false,
+                  interruption: 'none' as const,
+                };
+              }
+
+              let parts: Part[];
+              let strippedPromptEntries: Content[] = [];
+              if (detection.kind === 'interrupted_prompt') {
+                // The send below re-pushes this content; strip the orphaned
+                // original first so history doesn't carry it twice.
+                strippedPromptEntries =
+                  this.config
+                    .getGeminiClient()!
+                    .stripOrphanedUserEntriesFromHistory() ?? [];
+                debugLogger.info(
+                  '[Session] continueTurn stripped orphaned user entries',
+                  { strippedCount: strippedPromptEntries.length },
+                );
+                parts = detection.parts;
+              } else {
+                parts = buildSyntheticToolResponseParts(
+                  detection.danglingCalls,
+                  ORPHAN_TOOL_USE_REPAIR_REASON,
+                );
+              }
+
+              await this.#snapshotFileHistory(promptId);
+
+              let turnCount = 0;
+              let continueSendStarted = false;
+              // When we have orphaned entries to restore, `restoreStrippedPromptEntries`
+              // below is the single source of truth for re-adding the unsent initial
+              // message. Tell the turn loop to skip its own functionResponse-only
+              // preservation of that message so a tool_result orphan isn't written
+              // to history twice (once by preserve, once by restore).
+              const ownsInitialUnsentMessage = strippedPromptEntries.length > 0;
+              const restoreStrippedPromptEntries = () => {
+                if (continueSendStarted || strippedPromptEntries.length === 0) {
+                  return;
+                }
+                const restoredCount = strippedPromptEntries.length;
+                for (const entry of strippedPromptEntries) {
+                  this.#getCurrentChat().addHistory(entry);
+                }
+                strippedPromptEntries = [];
+                debugLogger.info(
+                  '[Session] continueTurn restored stripped prompt entries',
+                  { restoredCount },
+                );
+              };
+              try {
+                const earlyExit = await this.#runModelTurnLoop(
+                  promptId,
+                  { role: 'user', parts },
+                  pendingSend,
+                  () => {
+                    turnCount++;
+                  },
+                  () => {
+                    continueSendStarted = true;
+                  },
+                  ownsInitialUnsentMessage,
+                );
+                const result =
+                  earlyExit ?? (await this.#finishTurn(pendingSend, promptId));
+                return {
+                  ...result,
+                  resumed: true,
+                  interruption: detection.kind,
+                };
+              } finally {
+                restoreStrippedPromptEntries();
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    turnCount,
+                  ),
+                );
+              }
+            },
+            (result) =>
+              result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
+          );
         },
       ),
     );
@@ -1358,27 +1394,7 @@ export class Session implements SessionContext {
               // slash-command and hook early-returns so locally handled commands
               // don't create phantom snapshots that desync the snapshot index.
               if (!isRetry) {
-                try {
-                  const fileHistoryService =
-                    this.config.getFileHistoryService();
-                  await fileHistoryService.makeSnapshot(promptId);
-                  try {
-                    const latestSnapshot = fileHistoryService
-                      .getSnapshots()
-                      .at(-1);
-                    if (latestSnapshot) {
-                      this.config
-                        .getChatRecordingService()
-                        ?.recordFileHistorySnapshot(latestSnapshot);
-                    }
-                  } catch (e) {
-                    debugLogger.error(
-                      `FileHistory: recordSnapshot failed: ${e}`,
-                    );
-                  }
-                } catch (e) {
-                  debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
-                }
+                await this.#snapshotFileHistory(promptId);
               }
 
               // Prepend session-level system reminders (plan mode / subagent /
