@@ -237,9 +237,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
-      f !== 'session_branch' &&
-      f !== 'rate_limit' &&
-      f !== 'workspace_reload',
+      f !== 'session_branch',
   ),
   'workspace_settings',
   'workspace_init',
@@ -1231,39 +1229,39 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     isChannelLive() {
       return false;
     },
-    async queryWorkspaceStatus<T>(method: string, idle: () => T) {
+    async queryWorkspaceStatus<T>(method: string, idle: () => T): Promise<T> {
       // Dispatch based on method to mirror ACP child routing.
       if (method === 'qwen/status/workspace/mcp') {
         workspaceMcpCalls += 1;
-        return workspaceMcpImpl();
+        return workspaceMcpImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/skills') {
         workspaceSkillsCalls += 1;
-        return workspaceSkillsImpl();
+        return workspaceSkillsImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/providers') {
         workspaceProvidersCalls += 1;
-        return workspaceProvidersImpl();
+        return workspaceProvidersImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/preflight') {
         workspacePreflightCalls += 1;
-        return workspacePreflightImpl();
+        return workspacePreflightImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/hooks') {
         workspaceHooksCalls += 1;
-        return workspaceHooksImpl();
+        return workspaceHooksImpl() as Promise<T>;
       }
       if (method === 'qwen/status/workspace/extensions') {
         workspaceExtensionsCalls += 1;
-        return workspaceExtensionsImpl();
+        return workspaceExtensionsImpl() as Promise<T>;
       }
       return idle();
     },
-    async invokeWorkspaceCommand(
+    async invokeWorkspaceCommand<T>(
       method: string,
       params?: Record<string, unknown>,
       _opts?: { timeoutMs?: number },
-    ) {
+    ): Promise<T> {
       if (method === 'qwen/control/workspace/mcp/restart') {
         const serverName = (params?.['serverName'] as string) ?? '';
         const entryIndex = params?.['entryIndex'] as number | undefined;
@@ -1275,9 +1273,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
           serverName,
           undefined,
           entryIndex !== undefined ? { entryIndex } : undefined,
-        );
+        ) as Promise<T>;
       }
-      return {};
+      return {} as T;
     },
     async shutdown() {
       shutdownCalls += 1;
