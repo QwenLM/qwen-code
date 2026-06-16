@@ -29,6 +29,7 @@ import {
   renderResolveEdit,
   tracksReactions,
 } from './render.js';
+import type { MatrixHealthState } from './health.js';
 
 /** The inbound Matrix surface the runner needs (subset of MatrixRestApi). */
 export interface MatrixInbound extends MatrixResponder {
@@ -64,6 +65,13 @@ export interface MatrixBridgeConfig {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Injectable idle-flush timer for the stream router (tests). */
   setTimer?: (ms: number, fn: () => void) => () => void;
+  /**
+   * Optional liveness state the runner updates for the `/healthz` endpoint:
+   * `registeredId`/`daemonReachable` on a successful register, `homeserverReachable`
+   * on sync success/failure. On the E2EE adapter path the SDK owns `/sync`, so
+   * `homeserverReachable` is set by the caller at adapter start (not live here).
+   */
+  health?: MatrixHealthState;
   log?: (msg: string) => void;
 }
 
@@ -222,6 +230,10 @@ export class MatrixBridge {
   async start(signal: AbortSignal): Promise<void> {
     this.signal = signal;
     const reg = await this.registerSelf();
+    if (reg.ok && this.cfg.health) {
+      this.cfg.health.registeredId = MATRIX_BRIDGE_ID;
+      this.cfg.health.daemonReachable = true;
+    }
     this.log(
       reg.ok
         ? 'matrix bridge: registered with the gateway'
@@ -251,6 +263,7 @@ export class MatrixBridge {
       try {
         sync = await this.cfg.syncOnce(since, signal);
       } catch {
+        if (this.cfg.health) this.cfg.health.homeserverReachable = false;
         if (signal.aborted) break;
         await this.backoff(signal, backoff);
         backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
@@ -263,6 +276,7 @@ export class MatrixBridge {
       // this guard the loop would busy-spin and hammer the homeserver on exactly
       // the normal operational failures. Back off; a healthy sync resets it.
       if (!ex.nextBatch) {
+        if (this.cfg.health) this.cfg.health.homeserverReachable = false;
         if (signal.aborted) break;
         await this.backoff(signal, backoff);
         backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
@@ -270,6 +284,7 @@ export class MatrixBridge {
       }
       since = ex.nextBatch;
       backoff = RECONNECT_INITIAL_MS;
+      if (this.cfg.health) this.cfg.health.homeserverReachable = true;
 
       for (const roomId of ex.invites) {
         await this.cfg.rest.joinRoom(roomId);

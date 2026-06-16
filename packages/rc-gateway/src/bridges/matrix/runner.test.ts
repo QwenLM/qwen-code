@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { MatrixRoomStore } from './roomStore.js';
 import { MatrixBridge } from './runner.js';
 import { ENCRYPTED_ROOM_NOTICE } from './dispatch.js';
+import { initialMatrixHealthState, type MatrixHealthState } from './health.js';
 import type { BridgeClient } from '../client.js';
 import type { MatrixInbound } from './runner.js';
 
@@ -40,6 +41,7 @@ function harness(
   opts: {
     park?: boolean;
     runInbound?: (signal: AbortSignal) => Promise<void>;
+    health?: MatrixHealthState;
   } = {},
 ) {
   const sent: Array<{ roomId: string; content: unknown }> = [];
@@ -117,6 +119,7 @@ function harness(
       return batches[i++];
     },
     ...(opts.runInbound ? { runInbound: opts.runInbound } : {}),
+    ...(opts.health ? { health: opts.health } : {}),
     sleep: () => new Promise<void>(() => {}), // park SSE reconnect after 1 subscribe
     setTimer: (_ms, fn) => {
       timers.push(fn);
@@ -191,6 +194,19 @@ describe('MatrixBridge runner — sync loop', () => {
     await h.bridge.start(h.ac.signal);
     expect(ranInbound).toBe(true);
     expect(h.syncCalls()).toBe(0); // the fetch sync was never invoked
+  });
+
+  it('updates health state: registered + daemonReachable on start, homeserverReachable on a good sync', async () => {
+    // park after the one good batch so the loop stays live (the abort sentinel
+    // would otherwise be an empty sync that honestly flips homeserverReachable off).
+    const health = initialMatrixHealthState();
+    const h = harness([{ next_batch: 's1' }], { health, park: true });
+    void h.bridge.start(h.ac.signal);
+    await waitFor(() => health.homeserverReachable);
+    expect(health.registeredId).toBe('matrix');
+    expect(health.daemonReachable).toBe(true);
+    expect(health.homeserverReachable).toBe(true);
+    h.ac.abort();
   });
 
   it('skips replaying timeline history on the initial sync', async () => {
