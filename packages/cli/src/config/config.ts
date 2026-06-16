@@ -1464,7 +1464,7 @@ export async function loadCliConfig(
     approvalMode = parseApprovalModeValue(argv.approvalMode);
   } else if (argv.yolo) {
     approvalMode = ApprovalMode.YOLO;
-  } else if (!bareMode && settings.tools?.approvalMode) {
+  } else if (!bareMode && !safeMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
   } else {
     approvalMode = ApprovalMode.DEFAULT;
@@ -1542,19 +1542,19 @@ export async function loadCliConfig(
   // not auto-approve semantics. They are passed via the `coreTools` Config param
   // and handled by PermissionManager.coreToolsAllowList.
   const resolvedCoreTools: string[] = [
-    ...(bareMode ? [] : (argv.coreTools ?? [])),
-    ...(bareMode ? [] : (settings.tools?.core ?? [])),
+    ...(bareMode || safeMode ? [] : (argv.coreTools ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.tools?.core ?? [])),
   ];
   const mergedAllow: string[] = [
-    ...(bareMode ? [] : (settings.permissions?.allow ?? [])),
-    ...(bareMode ? [] : (settings.tools?.allowed ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.permissions?.allow ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.tools?.allowed ?? [])),
   ];
   const mergedAsk: string[] = [
-    ...(bareMode ? [] : (settings.permissions?.ask ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.permissions?.ask ?? [])),
   ];
   const mergedDeny: string[] = [
-    ...(bareMode ? [] : (settings.permissions?.deny ?? [])),
-    ...(bareMode ? [] : (settings.tools?.exclude ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.permissions?.deny ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.tools?.exclude ?? [])),
   ];
 
   // argv.allowedTools adds allow rules (auto-approve).
@@ -1582,7 +1582,10 @@ export async function loadCliConfig(
       disabledSlashCommands.push(trimmed);
     }
   };
-  for (const name of settings.slashCommands?.disabled ?? []) addDisabled(name);
+  if (!bareMode && !safeMode) {
+    for (const name of settings.slashCommands?.disabled ?? [])
+      addDisabled(name);
+  }
   for (const name of argv.disabledSlashCommands ?? []) addDisabled(name);
   for (const name of (process.env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
     ',',
@@ -1593,7 +1596,10 @@ export async function loadCliConfig(
   // Resolve the per-workspace tool denylist. De-duplicate while preserving
   // original casing; shared helper since the MCP restart refresh path
   // must agree byte-for-byte with this.
-  const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
+  const disabledTools =
+    bareMode || safeMode
+      ? []
+      : normalizeDisabledToolList(settings.tools?.disabled);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1836,12 +1842,14 @@ export async function loadCliConfig(
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
-    coreTools: bareMode
-      ? undefined
-      : argv.coreTools || settings.tools?.core || undefined,
-    allowedTools: bareMode
-      ? argv.allowedTools || undefined
-      : argv.allowedTools || settings.tools?.allowed || undefined,
+    coreTools:
+      bareMode || safeMode
+        ? undefined
+        : argv.coreTools || settings.tools?.core || undefined,
+    allowedTools:
+      bareMode || safeMode
+        ? argv.allowedTools || undefined
+        : argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools: mergedDeny,
     disabledSlashCommands:
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
@@ -1852,7 +1860,8 @@ export async function loadCliConfig(
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
-      autoMode: settings.permissions?.autoMode,
+      autoMode:
+        bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {

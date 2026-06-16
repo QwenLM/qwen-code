@@ -1466,6 +1466,11 @@ export class Config {
       params.safeMode ??
       (process.env['QWEN_CODE_SAFE_MODE'] === 'true' ||
         process.env['QWEN_CODE_SAFE_MODE'] === '1');
+    if (this.safeMode) {
+      this.debugLogger.info(
+        'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
+      );
+    }
     this.warnings = params.warnings ?? [];
     this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
@@ -1573,11 +1578,9 @@ export class Config {
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
     const explicitExtensionNames = this.getExplicitExtensionNames();
-    if (this.isSafeMode()) {
-      // Safe mode: skip all extension loading
-    } else if (!this.getBareMode()) {
+    if (!this.isSafeMode() && !this.getBareMode()) {
       await this.extensionManager.refreshCache();
-    } else if (explicitExtensionNames.length > 0) {
+    } else if (!this.isSafeMode() && explicitExtensionNames.length > 0) {
       await this.extensionManager.refreshCache({
         names: explicitExtensionNames,
       });
