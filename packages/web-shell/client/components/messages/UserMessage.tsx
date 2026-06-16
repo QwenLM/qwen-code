@@ -175,7 +175,7 @@ export const UserMessage = memo(function UserMessage({
                   collapse.collapsed ? t('turn.expand') : t('turn.collapse')
                 }
               >
-                {`${collapse.collapsed ? '▸' : '▾'} ${t('turn.hiddenSteps', {
+                {`${collapse.collapsed ? '▸' : '▾'} ${t('turn.executionSteps', {
                   count: collapse.hiddenCount,
                 })}`}
               </button>

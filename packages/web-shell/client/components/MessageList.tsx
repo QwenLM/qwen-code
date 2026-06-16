@@ -58,6 +58,8 @@ interface MessageListProps {
   autoScrollTailIntoView?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
+  /** Enable per-turn step summaries and collapsible execution traces. */
+  summarizeSteps?: boolean;
 }
 
 function isAskUserQuestion(request: PermissionRequest): boolean {
@@ -98,6 +100,8 @@ export type DisplayItem =
        * collapsible; drives the prompt-row expand/collapse toggle.
        */
       collapse?: TurnCollapseHead;
+      /** True when this row belongs to an expanded turn's execution trace body. */
+      trace?: boolean;
     }
   | {
       type: 'parallel_agents';
@@ -108,6 +112,8 @@ export type DisplayItem =
        * box reveals its time on hover exactly like a standalone message row.
        */
       timestamp?: number;
+      /** True when this row belongs to an expanded turn's execution trace body. */
+      trace?: boolean;
     };
 
 function isAgentOnlyToolGroup(msg: Message): boolean {
@@ -297,6 +303,10 @@ export function getDisplayItemVirtualKey(item: DisplayItem): string {
     : `msg:${item.key}`;
 }
 
+function withTrace(item: DisplayItem): DisplayItem {
+  return { ...item, trace: true };
+}
+
 export interface ApplyTurnCollapseOptions {
   /**
    * Per-turn user override keyed by the turn's user-message id:
@@ -363,6 +373,11 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       return false;
     }
   }
+}
+
+function isNonAssistantStep(item: DisplayItem): boolean {
+  if (item.type === 'parallel_agents') return true;
+  return item.message.role === 'tool_group' || item.message.role === 'plan';
 }
 
 /** Wall-clock stamp of a display row, whichever variant carries it. */
@@ -482,12 +497,16 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    // Final answer = last assistant-with-content row in (start, end]. On an
-    // active turn this is provisional (the latest streamed text), so it is not
-    // counted as a step — keeping a step-less reply step-less — but it is folded
-    // away with everything else when the live turn is collapsed (see below).
+    // Final answer = last assistant-with-content row after the turn's last
+    // non-assistant step. Assistant text that is followed by a tool/plan is
+    // narration for the execution trace, not the final answer; marking it as a
+    // step immediately keeps the trace indentation stable while a turn streams.
     let answerIdx = -1;
-    for (let i = end; i > start; i--) {
+    let lastNonAssistantStepIdx = start;
+    for (let i = start + 1; i <= end; i++) {
+      if (isNonAssistantStep(items[i])) lastNonAssistantStepIdx = i;
+    }
+    for (let i = end; i > lastNonAssistantStepIdx; i--) {
       if (isAssistantAnswer(items[i])) {
         answerIdx = i;
         break;
@@ -566,7 +585,12 @@ export function applyTurnCollapse(
     });
 
     if (!collapsed) {
-      for (let i = start + 1; i <= end; i++) result.push(items[i]);
+      for (let i = start + 1; i <= end; i++) {
+        const item = items[i];
+        result.push(
+          isHideableStep(item, i === answerIdx) ? withTrace(item) : item,
+        );
+      }
       continue;
     }
 
@@ -669,6 +693,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       autoScrollTailIntoView = false,
       showRetryHint = false,
       onRetryClick,
+      summarizeSteps,
     },
     ref,
   ) {
@@ -693,7 +718,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
     const { collapseCompletedTurns } = useWebShellCustomization();
-    const collapseEnabled = collapseCompletedTurns ?? true;
+    const collapseEnabled = summarizeSteps ?? collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
     >(() => new Map());
@@ -1152,6 +1177,17 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const virtualItems = virtualizer.getVirtualItems();
     const totalVirtualSize = virtualizer.getTotalSize();
 
+    const getRowClassName = useCallback(
+      (index: number, key: string): string | undefined => {
+        const classes: string[] = [];
+        if (flashKey === key) classes.push(styles.rowFlash);
+        const item = visibleItems[index - headerOffset];
+        if (item?.trace) classes.push(styles.traceRow);
+        return classes.length > 0 ? classes.join(' ') : undefined;
+      },
+      [flashKey, headerOffset, visibleItems],
+    );
+
     // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
     // Fires whenever the virtualizer's total content height changes —
     // this captures every scenario: streaming tokens appending, tool
@@ -1185,11 +1221,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={
-                  flashKey === String(virtualRow.key)
-                    ? styles.rowFlash
-                    : undefined
-                }
+                className={getRowClassName(
+                  virtualRow.index,
+                  String(virtualRow.key),
+                )}
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -1209,7 +1244,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
               <div
                 key={key}
                 data-index={index}
-                className={flashKey === key ? styles.rowFlash : undefined}
+                className={getRowClassName(index, key)}
               >
                 {renderVirtualItem(index)}
               </div>

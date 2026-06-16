@@ -329,6 +329,8 @@ export interface WebShellProps {
   renderFooter?: FooterRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
+  /** Summarize each turn's intermediate steps behind an execution trace header. Defaults to collapseCompletedTurns when unset. */
+  summarizeSteps?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
   collapseCompletedTurns?: boolean;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
@@ -698,6 +700,7 @@ export function App({
   renderWelcomeHeader,
   renderFooter,
   compactThinking = false,
+  summarizeSteps,
   collapseCompletedTurns = true,
   virtualScrollThreshold,
   markdown,
@@ -2775,6 +2778,7 @@ export function App({
                     onShowContextDetail={handleShowContextDetail}
                     catchingUp={connection.catchingUp}
                     isResponding={streamingState !== 'idle'}
+                    summarizeSteps={summarizeSteps}
                     workspaceCwd={connection.workspaceCwd || ''}
                     shellOutputMaxLines={shellOutputMaxLines}
                     showRetryHint={showRetryHint}

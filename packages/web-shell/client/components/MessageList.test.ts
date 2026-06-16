@@ -415,6 +415,27 @@ describe('applyTurnCollapse', () => {
       hiddenCount: 1,
       toolCallCount: 2,
     });
+    expect(out[1].trace).toBe(true);
+    expect(out[2].trace).toBeUndefined();
+  });
+
+  it('marks narration followed by a tool as trace immediately', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        id: 'a0',
+        role: 'assistant',
+        content: 'I will inspect the project.',
+      },
+      makeMultiToolGroup('g1'),
+    ]);
+    const out = collapseItems(items, {
+      isResponding: true,
+      overrides: new Map([['u1', true]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'a0', 'g1']);
+    expect(out[1].trace).toBe(true);
+    expect(out[2].trace).toBe(true);
   });
 
   it('tags but keeps the active turn expanded while responding', () => {
