@@ -449,6 +449,10 @@ describe('CronScheduler', () => {
       const w = scheduler.scheduleWakeup(60.4, 'p');
       expect(w.clampedDelaySeconds).toBe(60);
       expect(w.wasClamped).toBe(false);
+
+      const roundedToMin = scheduler.scheduleWakeup(59.6, 'p');
+      expect(roundedToMin.clampedDelaySeconds).toBe(60);
+      expect(roundedToMin.wasClamped).toBe(false);
     });
 
     it('falls back to the default heartbeat for non-finite delays', () => {

@@ -277,10 +277,13 @@ export class CronScheduler {
     replacedId: string | null;
   } {
     const clampedDelaySeconds = clampWakeupSeconds(delaySeconds);
+    const roundedDelaySeconds = Number.isFinite(delaySeconds)
+      ? Math.round(delaySeconds)
+      : delaySeconds;
     const wasClamped =
       !Number.isFinite(delaySeconds) ||
-      delaySeconds < WAKEUP_MIN_SECONDS ||
-      delaySeconds > WAKEUP_MAX_SECONDS;
+      roundedDelaySeconds < WAKEUP_MIN_SECONDS ||
+      roundedDelaySeconds > WAKEUP_MAX_SECONDS;
     const id = generateId();
     const now = Date.now();
     const fireAtMs = now + clampedDelaySeconds * 1000;
