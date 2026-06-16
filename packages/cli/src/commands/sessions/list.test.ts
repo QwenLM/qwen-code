@@ -5,7 +5,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
-import { handleList } from './list.js';
+import { handleList, SESSION_COL, TIME_COL, TITLE_COL } from './list.js';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -73,7 +73,7 @@ describe('sessions list command', () => {
 
     const calls = mockedWriteStdout.mock.calls.map((c) => c[0]);
     expect(calls.some((c) => c.includes('SESSION ID'))).toBe(true);
-    expect(calls.some((c) => c.includes('STARTED'))).toBe(true);
+    expect(calls.some((c) => c.includes('STARTED (LOCAL)'))).toBe(true);
     expect(calls.some((c) => c.includes('TITLE'))).toBe(true);
     expect(calls.some((c) => c.includes('BRANCH'))).toBe(true);
     expect(calls.some((c) => c.includes('PROMPT'))).toBe(true);
@@ -135,14 +135,14 @@ describe('sessions list command', () => {
     await handleList({});
 
     // customTitle '' is a valid value — should not fall back to prompt.
-    // TITLE column occupies positions 56-79 (24 chars wide).
+    // TITLE column starts after SESSION_COL + 1 + TIME_COL + 1.
     const calls = mockedWriteStdout.mock.calls.map((c) => c[0]);
     const dataLine = calls.find(
       (c) => c.includes('a1b2c3d4') && !c.includes('SESSION ID'),
     );
     expect(dataLine).toBeDefined();
-    // TITLE column should be empty (24 spaces), not containing '你好'
-    const titleCol = dataLine!.slice(56, 80);
+    const titleStart = SESSION_COL + 1 + TIME_COL + 1;
+    const titleCol = dataLine!.slice(titleStart, titleStart + TITLE_COL);
     expect(titleCol.trim()).toBe('');
   });
 
@@ -213,7 +213,10 @@ describe('sessions list command', () => {
     mockedListSessions.mockResolvedValue({
       items: [
         sampleSession,
-        { ...sampleSession, sessionId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' },
+        {
+          ...sampleSession,
+          sessionId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+        },
       ],
       hasMore: false,
     });
@@ -244,6 +247,20 @@ describe('sessions list command', () => {
     mockedListSessions.mockResolvedValue({
       items: [sampleSession],
       hasMore: false,
+    });
+
+    await handleList({});
+
+    const calls = mockedWriteStdout.mock.calls.map((c) => c[0]);
+    expect(calls.some((c) => c.includes('Use --limit to show more'))).toBe(
+      false,
+    );
+  });
+
+  it('should not show hasMore hint when items is empty', async () => {
+    mockedListSessions.mockResolvedValue({
+      items: [],
+      hasMore: true,
     });
 
     await handleList({});
