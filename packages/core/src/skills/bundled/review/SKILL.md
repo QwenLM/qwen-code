@@ -573,20 +573,24 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
   --input .qwen/tmp/qwen-review-{target}-review.json
 ```
 
-If there are **no confirmed findings**, submit a single-line review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body:
+If there are **no confirmed findings**, submit a short summary review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body. Separate the footer from the body with a blank line so it renders on its own line — `-f body` does not interpret `\n`, so use a real line break inside the quotes:
 
 ```bash
 # downgradeApprove=false (non-self PR, green CI):
 gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
   -f commit_id="{commit_sha}" \
   -f event="APPROVE" \
-  -f body="No issues found. LGTM! ✅ _— YOUR_MODEL_ID via Qwen Code /review_"
+  -f body="No issues found. LGTM! ✅
+
+_— YOUR_MODEL_ID via Qwen Code /review_"
 
 # downgradeApprove=true (self-PR, CI failing, or CI still running):
 gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
   -f commit_id="{commit_sha}" \
   -f event="COMMENT" \
-  -f body="No review findings. Downgraded from Approve to Comment: <downgradeReasons joined with '; '>. _— YOUR_MODEL_ID via Qwen Code /review_"
+  -f body="No review findings. Downgraded from Approve to Comment: <downgradeReasons joined with '; '>.
+
+_— YOUR_MODEL_ID via Qwen Code /review_"
 ```
 
 Clean up the JSON file in Step 11.

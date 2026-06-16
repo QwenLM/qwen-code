@@ -54,7 +54,11 @@ import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { isLoopbackBind } from './loopbackBinds.js';
-import { mountAcpHttp } from './acpHttp/index.js';
+import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
+import {
+  buildDaemonStatusResponse,
+  parseDaemonStatusDetail,
+} from './daemonStatus.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
@@ -674,6 +678,9 @@ function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/sessions/delete') {
     return { route: 'POST /sessions/delete' };
   }
+  if (req.method === 'GET' && path === '/daemon/status') {
+    return { route: 'GET /daemon/status' };
+  }
   const sessionAction = path.match(
     /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
   );
@@ -882,6 +889,7 @@ function advertisedMaxPendingPromptsPerSession(
  *
  * Supported routes:
  *   - `GET  /health`
+ *   - `GET  /daemon/status`
  *   - `GET  /capabilities`
  *   - `GET  /workspace/mcp`
  *   - `GET  /workspace/skills`
@@ -1366,6 +1374,65 @@ export function createServeApp(
   }
 
   const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
+  const currentServeFeatures = () =>
+    getAdvertisedServeFeatures(undefined, {
+      requireAuth: opts.requireAuth === true,
+      mcpPoolActive: opts.mcpPoolActive !== false,
+      allowOriginActive:
+        opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
+      ...(opts.promptDeadlineMs !== undefined
+        ? { promptDeadlineMs: opts.promptDeadlineMs }
+        : {}),
+      ...(opts.writerIdleTimeoutMs !== undefined
+        ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
+        : {}),
+      persistSettingAvailable: deps.persistSetting !== undefined,
+      sessionShellCommandEnabled,
+      rateLimit: opts.rateLimit === true,
+      reloadAvailable: deps.workspace !== undefined,
+    });
+  const acpHandleRef: { current?: AcpHttpHandle } = {};
+
+  app.get('/daemon/status', async (req, res) => {
+    const detail = parseDaemonStatusDetail(req.query['detail']);
+    if (!detail.ok || !detail.detail) {
+      res.status(400).json({
+        error: 'detail must be one of: summary, full',
+        code: 'invalid_detail',
+      });
+      return;
+    }
+    try {
+      res.status(200).json(
+        await buildDaemonStatusResponse(detail.detail, {
+          opts,
+          boundWorkspace,
+          bridge,
+          workspace,
+          daemonLog,
+          qwenCodeVersion: deps.qwenCodeVersion,
+          acpHandle: acpHandleRef.current,
+          rateLimiter,
+          getRestSseActive: getActiveSseCount,
+          features: currentServeFeatures(),
+          protocolVersions: getServeProtocolVersions(),
+          supportedDeviceFlowProviders: Array.from(
+            deviceFlowProviderMap.keys(),
+          ),
+          deviceFlowRegistry,
+          sessionShellCommandEnabled,
+        }),
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /daemon/status failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({
+        error: 'Failed to build daemon status',
+        code: 'daemon_status_failed',
+      });
+    }
+  });
 
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
@@ -1375,22 +1442,7 @@ export function createServeApp(
         ? { qwenCodeVersion: deps.qwenCodeVersion }
         : {}),
       mode: opts.mode,
-      features: getAdvertisedServeFeatures(undefined, {
-        requireAuth: opts.requireAuth === true,
-        mcpPoolActive: opts.mcpPoolActive !== false,
-        allowOriginActive:
-          opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
-        ...(opts.promptDeadlineMs !== undefined
-          ? { promptDeadlineMs: opts.promptDeadlineMs }
-          : {}),
-        ...(opts.writerIdleTimeoutMs !== undefined
-          ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
-          : {}),
-        persistSettingAvailable: deps.persistSetting !== undefined,
-        sessionShellCommandEnabled,
-        rateLimit: opts.rateLimit === true,
-        reloadAvailable: deps.workspace !== undefined,
-      }),
+      features: currentServeFeatures(),
       modelServices: [],
       // Surface the bound workspace so clients can detect mismatch
       // pre-flight and omit `cwd` on `POST /session`.
@@ -3675,7 +3727,7 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  const acpHandle = mountAcpHttp(app, bridge, {
+  acpHandleRef.current = mountAcpHttp(app, bridge, {
     boundWorkspace,
     workspace,
     fsFactory,
@@ -3684,8 +3736,8 @@ export function createServeApp(
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
   });
-  if (acpHandle) {
-    app.locals['acpHandle'] = acpHandle;
+  if (acpHandleRef.current) {
+    app.locals['acpHandle'] = acpHandleRef.current;
   }
 
   // Final error handler. `express.json()` throws `SyntaxError` (with

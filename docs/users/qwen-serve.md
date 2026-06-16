@@ -70,17 +70,28 @@ curl http://127.0.0.1:4170/health
 # → {"status":"ok"}
 
 curl http://127.0.0.1:4170/capabilities
-# → {"v":1,"mode":"http-bridge","features":["health","capabilities","session_create",...],"workspaceCwd":"/path/to/your-project"}
+# → {"v":1,"mode":"http-bridge","features":["health","daemon_status","capabilities","session_create",...],"workspaceCwd":"/path/to/your-project"}
+
+curl http://127.0.0.1:4170/daemon/status
+# → {"v":1,"detail":"summary","status":"ok","runtime":{...}}
 ```
 
 The `workspaceCwd` field surfaces the bound workspace so clients can pre-flight check + omit `cwd` on `POST /session`.
 The `limits.maxPendingPromptsPerSession` field advertises the active per-session prompt admission cap; `null` means the cap is disabled.
 
-The daemon also exposes read-only runtime snapshots for client UIs:
-`GET /workspace/mcp`, `GET /workspace/skills`, `GET /workspace/providers`,
-`GET /workspace/env`, `GET /workspace/preflight`,
+The daemon also exposes read-only runtime snapshots for client UIs and
+operators: `GET /daemon/status`, `GET /workspace/mcp`,
+`GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
+`GET /workspace/preflight`,
 `GET /session/:id/context`, `GET /session/:id/supported-commands`, and
 `GET /session/:id/tasks`.
+
+`GET /daemon/status` is the consolidated troubleshooting snapshot. The default
+`detail=summary` reads only in-memory daemon state (sessions, permissions,
+SSE/ACP transport counts, rate limit rejects, process memory, resolved limits)
+and does not start the ACP child. Use `GET /daemon/status?detail=full` for
+per-session diagnostics, ACP connection details, auth device-flow counts, and
+workspace status sections when you are actively investigating a problem.
 
 `GET /workspace/mcp`, `GET /workspace/skills`, and `GET /workspace/providers`
 report the live ACP runtime and do not start the ACP child when idle; an
@@ -320,9 +331,9 @@ To handle multiple **users** (each with their own quota, audit log, sandbox) or 
 
 The daemon exposes ACP's `session/load` and resume flow over HTTP via two routes:
 
-| Route                      | Use when                                                                                                                                                                                                                      |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /session/:id/load`   | The client has **no** history rendered (cold reconnect, picker-then-open). The daemon replays every persisted turn through SSE so subscribers see the full transcript. Capability tag: `session_load`.                        |
+| Route                      | Use when                                                                                                                                                                                                                                                                                      |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /session/:id/load`   | The client has **no** history rendered (cold reconnect, picker-then-open). The daemon replays every persisted turn through SSE so subscribers see the full transcript. Capability tag: `session_load`.                                                                                        |
 | `POST /session/:id/resume` | The client already has the turns on screen and only needs the daemon-side handle back. Model context is restored on the agent side without UI replay — the SSE stream stays clean. Capability tag: `session_resume` (`unstable_session_resume` remains a deprecated alias for older clients). |
 
 The TypeScript SDK exposes both as static factories on `DaemonSessionClient`:
