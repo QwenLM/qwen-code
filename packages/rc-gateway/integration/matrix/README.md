@@ -1,16 +1,21 @@
-# Matrix E2EE live-decrypt integration test
+# Matrix E2EE live integration test
 
-This closes the **decrypt half** of the Matrix E2EE ceiling: it runs the real
-`cryptoAdapter` against a real Synapse homeserver and asserts the bot decrypts a
-message sent into an encrypted room. The test
-(`src/bridges/matrix/crypto.integration.test.ts`) is **env-gated** — it skips in
-the normal suite and runs only when pointed at a homeserver.
+This closes the Matrix E2EE ceiling end-to-end: it runs the real `cryptoAdapter`
 
-Everything else around it is already verified without a homeserver: the adapter's
-SDK construction is compile-checked, the `synapseRegisterMac` provisioning HMAC has
-a known-answer unit test, and the decrypted-message → dispatch routing seam
-(`MatrixBridge.dispatchDecryptedMessage`) is unit-tested. This test adds the live
-olm/megolm round-trip.
+- `MatrixBridge` against a real Synapse homeserver. The test file
+  (`src/bridges/matrix/crypto.integration.test.ts`) is **env-gated** — it skips in
+  the normal suite and runs only when pointed at a homeserver — and asserts:
+
+1. the bot decrypts a message sent into an encrypted room;
+2. a decrypted message reaches a **bound session** through dispatch;
+3. the bot's reply is real ciphertext the **sender decrypts** (no plaintext leak);
+4. a 👍 reaction on the bot's tracked message **registers a vote**.
+
+Everything around it is verified without a homeserver: the adapter's SDK
+construction is compile-checked, the `synapseRegisterMac` provisioning HMAC has a
+known-answer unit test, and the dispatch seams (`dispatchDecryptedMessage`,
+`dispatchReaction`, the `runInbound` subsume) are unit-tested. This test adds the
+live olm/megolm round-trip and the full wired path.
 
 ## 1. Stand up Synapse (any Docker host)
 
@@ -68,8 +73,9 @@ nodejs` `StoreType` instead; don't "simplify" it back to the matrix-bot-sdk
 
 ## Status
 
-Verified **green** end-to-end (2026-06-15) against a self-hosted Synapse container:
-two provisioned crypto users, an encrypted room, bot decrypts in ~12 s.
+Verified **green** end-to-end against a self-hosted Synapse container: both tests
+pass (~25 s total) — bot decrypt, decrypted→bound-session dispatch, sender-decrypts
+the bot's encrypted reply, and reaction→vote.
 
 ## Teardown
 

@@ -13,14 +13,15 @@ sidecar later by changing only its configuration.
 > fork's zero-edit boundary (everything lives under `packages/rc-gateway/`), the
 > bridge is built in-process at `src/bridges/matrix/` and this doc lives here.
 
-> **⚠️ Encrypted rooms are still refused at runtime in this build.** The default
-> bridge talks the plain client-server API over `fetch`; in an encrypted room it
-> posts a notice and **refuses to bind** rather than silently fail. Use an
-> **unencrypted** room. The `matrix-bot-sdk` + olm crypto adapter is built and its
-> decrypt has been **verified end-to-end against a real Synapse** (see "End-to-end
-> encryption" below); what remains is the live wiring — starting the adapter and
-> reconciling its `/sync` with the runner's — so encrypted rooms are not yet
-> functionally delivered by the running bridge.
+> **Encrypted rooms: supported when `MATRIX_ENABLE_E2EE` is set (sidecar path).**
+> By default (flag off) the bridge talks the plain client-server API over `fetch`
+> and **refuses to bind** an encrypted room (posts a notice). With the flag on, the
+> `matrix-bot-sdk` + olm crypto adapter becomes the bridge's transport: it owns
+> `/sync` (subsuming the fetch loop), decrypts encrypted rooms transparently, and
+> sends encrypted replies. This full path is **verified end-to-end against a real
+> Synapse** (see "End-to-end encryption" below). The flag is honored in the
+> standalone sidecar (`qwen-rc-bridge matrix`); the in-process `cli.ts` path is the
+> one remaining deferral.
 
 ## What it does
 
@@ -153,71 +154,84 @@ breaks — everything else HTML-escaped; no CommonMark dependency). Matrix's
 keeping the room readable; a new turn (after a resolve, or the next inbound
 prompt) starts back in the room timeline.
 
-## End-to-end encryption (compile-checked adapter; live crypto unverified)
+## End-to-end encryption (live-wired; verified against a real Synapse)
 
 E2EE is a **second transport, opt-in and OFF by default** (`MATRIX_ENABLE_E2EE`).
 The tested fetch path stays the default for plain rooms, so enabling crypto can
 never destabilize the working unencrypted bridge.
 
+**The subsume model.** When the flag is on and the adapter builds, `startBridge`
+makes the `matrix-bot-sdk` crypto client the bridge's transport: it owns the single
+`/sync` and the runner's fetch `/sync` is **subsumed** (`runInbound` replaces
+`syncLoop`). This is not a style choice — two `/sync` loops on one access
+token/device would race for the device-global **to-device** events that carry the
+megolm room keys, so a second syncer starves the crypto client and decrypts fail
+intermittently. The SDK client also becomes the **outbound** transport
+(`sendMessage` → `sendEvent`), which encrypts iff the room is encrypted — so no
+permission prompt, command reply, or streamed prose ever lands as plaintext in an
+encrypted room. With the flag off, the fetch loop runs unchanged and still
+detect-and-refuses encrypted rooms.
+
 **Pure layer (unit-tested):** the flag (`parseE2eeEnabled`), the olm-store
 convention (`$QWEN_BRIDGE_STATE_DIR/olm/`), `olmStorePresent` (a real fs check),
 the truthful first-boot `olm_store_missing` re-key decision (`shouldWarnOlmMissing`
 — warns only when E2EE is on AND no store exists), and the per-room transport
-decision (`decideMatrixTransport`).
+decision (`decideMatrixTransport`, used by the fetch dispatch).
+
+**Seams (unit-tested against a fake):** `MatrixBridge.dispatchDecryptedMessage`
+(decrypted message → shared `handleMessage`, with the sender's power level so
+gated commands work), `dispatchReaction` (👍/👎 → shared `handleReaction`), the
+`runInbound` subsume (asserts the fetch sync is **never** called when an inbound
+transport is injected), and reconcile-after-dispatch (a decrypted-path `!qwen
+attach` picks up the newly bound session).
 
 **Crypto adapter (`cryptoAdapter.ts`, compile-checked ceiling):**
 `createMatrixCryptoAdapter` constructs a `matrix-bot-sdk` `MatrixClient` with a
-`RustSdkCryptoStorageProvider` (SQLite olm store at `<stateDir>/olm/`), prepares
-crypto for the joined rooms, and exposes `start`/`stop`/`sendEncrypted`/`onMessage`.
+`RustSdkCryptoStorageProvider` (SQLite olm store at `<stateDir>/olm/`), sets up
+`AutojoinRoomsMixin`, resolves sender power levels from `m.room.power_levels`, and
+implements `MatrixInbound` (`sendMessage`/`joinRoom`) plus `start`/`stop`/
+`isReady`, surfacing decrypted messages (`onMessage`) and reactions (`onReaction`).
 matrix-bot-sdk is an `optionalDependency`, dynamically imported (absent → adapter
 returns `null`, E2EE stays off, plain bridge unaffected). The construction is typed
 against the **real** SDK — the ctor calls are signature-checked by tsc (proven via
 a deliberate-wrong-argument test that makes the build go red), **not** hand-rolled
-`*Like` shapes. The sidecar constructs the adapter (initializing the persistent olm
-store) when `MATRIX_ENABLE_E2EE` is set, and logs honestly.
+`*Like` shapes.
 
-**Live decrypt — verified against a real Synapse (env-gated).** The olm/megolm
-round-trip is exercised by `crypto.integration.test.ts`: it provisions two throwaway
-crypto users on a real Synapse, has the SENDER create an encrypted room, and asserts
-the bot's `cryptoAdapter` decrypts a message into `onMessage`. It **skips** in the
-default suite and runs only when `QWEN_MATRIX_IT_HS_URL` + `QWEN_MATRIX_IT_REG_SECRET`
-point at a homeserver — stand one up with `integration/matrix/docker-compose.yml`
-(see that README; mind the key-share **ordering** and **unverified-device** gotchas).
-This test has been **run green** against a self-hosted Synapse container (the bot
-decrypted a real encrypted-room message end-to-end). The provisioning HMAC
-(`synapseRegisterMac`) also has its own known-answer unit test.
+**Live round-trip — verified against a real Synapse (env-gated).**
+`crypto.integration.test.ts` provisions two throwaway crypto users on a real
+Synapse, has the SENDER create an encrypted room, and asserts the FULL wired path:
+the bot decrypts an inbound message; a decrypted message reaches a **bound session**
+through dispatch; the bot's reply is real ciphertext the **sender decrypts** (no
+plaintext leak); and a 👍 reaction on the bot's tracked message **registers a
+vote**. It **skips** in the default suite and runs only when `QWEN_MATRIX_IT_HS_URL`
 
-Running it surfaced a real bug the compile-checked path could not: matrix-bot-sdk's
-`RustSdkCryptoStoreType` is a **`const enum`** (erased at runtime under esbuild →
-`undefined`), so `RustSdkCryptoStoreType.Sqlite` threw at construction and the
-adapter silently degraded to `null` (E2EE off) on every real run. Fixed by sourcing
-the store-type value from the native `@matrix-org/matrix-sdk-crypto-nodejs`
-`StoreType` (a real runtime object), which is both type-correct and present at
-runtime — a reminder that "compile-checked" can hide runtime-erased const enums.
+- `QWEN_MATRIX_IT_REG_SECRET` point at a homeserver — stand one up with
+  `integration/matrix/docker-compose.yml` (see that README; mind the key-share
+  **ordering** and **unverified-device** gotchas). Both tests have been **run green**
+  against a self-hosted Synapse container. The provisioning HMAC
+  (`synapseRegisterMac`) also has its own known-answer unit test.
 
-What's still un-CI-able: only a _public/federated_ homeserver interop and a fully
-_verified_-device path. The sidecar still **constructs but does not start** the
-adapter — see below.
+Running it earlier surfaced a real bug the compile-checked path could not:
+matrix-bot-sdk's `RustSdkCryptoStoreType` is a **`const enum`** (erased at runtime
+under esbuild → `undefined`), so `RustSdkCryptoStoreType.Sqlite` threw at
+construction and the adapter silently degraded to `null` (E2EE off) on every real
+run. Fixed by sourcing the store-type value from the native
+`@matrix-org/matrix-sdk-crypto-nodejs` `StoreType` (a real runtime object), which is
+both type-correct and present at runtime — a reminder that "compile-checked" can
+hide runtime-erased const enums.
 
-## Residual integration (the one unverified edge)
+## Deferred (not blocking E2EE in the sidecar path)
 
-- **Routing decrypted events into dispatch — seam built + unit-tested.**
-  `MatrixBridge.dispatchDecryptedMessage({roomId, sender, body})` normalizes a
-  decrypted message (computing `isBot` from the bot MXID) and routes it through the
-  SAME `handleMessage` dispatch as the cleartext `/sync` path; tests assert a
-  decrypted prompt reaches a bound session, the bot's own message never echoes, and
-  an unbound room is ignored. **What remains** is the live connection: the SDK
-  client runs its own `/sync` loop while the runner runs a separate fetch `/sync`
-  loop, so connecting a _started_ adapter's `onMessage` to `dispatchDecryptedMessage`
-  requires reconciling the two loops (or letting the SDK client subsume the fetch
-  loop for crypto deployments) — a production architecture decision left open. Until
-  then the seam is verified but not driven by a live adapter.
+- **`MATRIX_ENABLE_E2EE` is sidecar-only.** The standalone `qwen-rc-bridge matrix`
+  sidecar honors the flag (via `startBridge`); the in-process `cli.ts` path reads
+  Matrix env directly and does not yet know it. It gains the flag with the `cli.ts`
+  → `startBridge` de-dup, deferred for lack of CI coverage of that path.
 - **`olmStorePresent` on a bridge healthz** (spec "Healthz reflects olm store
   status") — the in-process bridge has no HTTP listener; `olmStorePresent` is built
   and tested and ready to surface when a bridge healthz endpoint is added.
-- **`MATRIX_ENABLE_E2EE` is sidecar-only today.** The in-process path (`cli.ts`)
-  reads Matrix env directly and does not yet know the flag; it gains it with the
-  `cli.ts` → `startBridge` de-dup.
+- **Un-CI-able:** a _public/federated_ homeserver interop and a fully
+  _verified_-device path (our Synapse IT covers same-homeserver + unverified
+  devices, the realistic path).
 
 ## Other deferred (not yet built)
 

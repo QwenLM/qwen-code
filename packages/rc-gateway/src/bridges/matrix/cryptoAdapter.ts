@@ -12,12 +12,17 @@
  *
  * The construction is typed against the REAL SDK (the `import('matrix-bot-sdk')`
  * types flow through tsc and the ctor calls are signature-checked). The live
- * olm/megolm decrypt is exercised by the env-gated `crypto.integration.test.ts`
- * and has been RUN GREEN against a real Synapse (the bot decrypts a real
- * encrypted-room message); the pure seams — olm-store presence, the store-missing
- * warn, `e2eeEnabled` gating — are unit-tested. The remaining residual is the LIVE
- * WIRING: starting the adapter and reconciling its `/sync` loop with the runner's
- * fetch `/sync`, then feeding `onMessage` into dispatch — see docs/matrix-bridge.md.
+ * olm/megolm round-trip is exercised by the env-gated `crypto.integration.test.ts`
+ * and has been RUN GREEN against a real Synapse: the bot decrypts an encrypted
+ * message, a decrypted message reaches a BOUND SESSION through dispatch, the bot's
+ * reply is real ciphertext the sender decrypts (no plaintext leak), and a 👍
+ * reaction registers a vote. The pure seams — olm-store presence, the
+ * store-missing warn, `e2eeEnabled` gating — are unit-tested.
+ *
+ * When E2EE is on, `startBridge` makes this adapter the SOLE `/sync` owner (a
+ * second sync on the same device would race it for the to-device megolm keys) and
+ * the bridge's outbound transport (the SDK encrypts iff the room is encrypted).
+ * See docs/matrix-bridge.md.
  */
 
 import { existsSync, readdirSync } from 'node:fs';

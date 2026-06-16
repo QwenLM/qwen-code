@@ -14,20 +14,21 @@
  * This module is the pure decision/convention layer — the flag, the olm-store
  * path/status, and the per-room transport decision — so the bug-prone routing is
  * unit-tested without the native crypto module or a homeserver. The actual
- * decrypt/encrypt adapter (matrix-bot-sdk + the native rust crypto, dynamically
- * imported) is a separate, quarantined slice; until it is built, an enabled flag
- * still falls back to refusing encrypted rooms (see {@link MatrixTransport}).
+ * decrypt/encrypt adapter ({@link ./cryptoAdapter.js}, matrix-bot-sdk + the native
+ * rust crypto, dynamically imported) is wired live by `startBridge`: when E2EE is
+ * on, the SDK crypto client SUBSUMES the fetch `/sync` (so it can't race the
+ * to-device megolm keys) and transparently decrypts encrypted rooms — there is no
+ * per-room refuse, the whole bridge runs over crypto. When OFF (the default), the
+ * fetch path runs unchanged and still detect-and-refuses encrypted rooms
+ * (see {@link MatrixTransport} / {@link decideMatrixTransport}, used by the fetch
+ * dispatch).
  *
- * TODO (crypto-adapter slice): wire this in end-to-end —
- *   1. thread `cfg.e2eeEnabled` → `MatrixBridgeConfig` → the dispatch deps;
- *   2. dynamically import the SDK adapter (set `cryptoAvailable` from whether it
- *      loaded) and call {@link decideMatrixTransport} per room instead of the
- *      unconditional refuse in `dispatch.ts`;
- *   3. emit {@link OLM_STORE_MISSING_LOG} on first boot (truthful only once the
- *      adapter exists — rooms are re-keyed, not refused);
- *   4. add the flag to the IN-PROCESS path too (it is sidecar-only today — folds
- *      into the cli.ts→startBridge de-dup), and expose `olmStorePresent` on a
- *      bridge healthz (spec "Healthz reflects olm store status").
+ * Deferred (separate cycles, not blocking E2EE in the sidecar path):
+ *   - the IN-PROCESS `cli.ts` bridge path does not yet honor the flag (it is
+ *     sidecar-only); it folds into the cli.ts→startBridge de-dup, which is
+ *     deferred for lack of CI coverage of that path;
+ *   - expose `olmStorePresent` on a bridge healthz (spec "Healthz reflects olm
+ *     store status") — the in-process bridge has no HTTP listener yet.
  */
 
 import { join } from 'node:path';
