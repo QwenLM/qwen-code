@@ -1473,10 +1473,21 @@ export const AppContainer = (props: AppContainerProps) => {
   // Dismiss callback — aborts in-flight generation/speculation. Does NOT
   // clear `promptSuggestion` so the placeholder can restore it when the
   // buffer becomes empty again (user types then deletes).
+  //
+  // NOTE: The function name "dismiss" can be misleading — the suggestion
+  // text is NOT cleared from state. Only the in-flight speculation is
+  // aborted. Future maintainers should not assume this function clears
+  // `promptSuggestion`. Consider renaming to `abortPromptSuggestion` if
+  // the semantic confusion becomes a problem.
   const dismissPromptSuggestion = useCallback(() => {
     suggestionAbortRef.current?.abort();
     suggestionAbortRef.current = null;
-  }, []);
+    // Also abort the speculation so it doesn't continue running after dismiss.
+    if (speculationRef.current.status !== 'idle') {
+      abortSpeculation(speculationRef.current).catch(() => {});
+      speculationRef.current = IDLE_SPECULATION;
+    }
+  }, []);  
 
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const geminiClient = config.getGeminiClient();

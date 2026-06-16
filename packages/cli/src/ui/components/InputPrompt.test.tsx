@@ -379,7 +379,10 @@ describe('InputPrompt', () => {
     // generous buffer (renderWithProviders cold start can be 100-200ms).
     const SUGGESTION_VISIBLE_WAIT_MS = 700;
 
-    it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
+    // Regression: Enter on suggestion should fill buffer, NOT submit — matches
+    // Tab/Right-arrow behavior and Claude Code's design. This prevents accidental
+    // execution of destructive slash commands (/clear, /quit).
+    it('fills buffer on Enter when suggestion is available (does not submit)', async () => {
       vi.useFakeTimers();
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
@@ -392,11 +395,9 @@ describe('InputPrompt', () => {
         });
         await flush();
 
-        expect(props.onSubmit).toHaveBeenCalledWith('commit this');
-        // Enter path must NOT call buffer.insert — it passes text directly to
-        // handleSubmitAndClear. Calling insert would re-fill the buffer after
-        // it was already cleared (the microtask race bug).
-        expect(mockBuffer.insert).not.toHaveBeenCalled();
+        // Enter on suggestion should fill buffer, NOT submit
+        expect(props.onSubmit).not.toHaveBeenCalled();
+        expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
       } finally {
         vi.useRealTimers();
         unmount();
@@ -513,10 +514,9 @@ describe('InputPrompt', () => {
           });
           await flush();
 
-          expect(props.onSubmit).toHaveBeenCalledWith('commit this');
-          // Enter path must NOT call buffer.insert — it passes text directly to
-          // handleSubmitAndClear.
-          expect(mockBuffer.insert).not.toHaveBeenCalled();
+          // Enter on suggestion should fill buffer, NOT submit (matches Tab/Right-arrow behavior)
+          expect(props.onSubmit).not.toHaveBeenCalled();
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
         } finally {
           vi.useRealTimers();
           unmount();
