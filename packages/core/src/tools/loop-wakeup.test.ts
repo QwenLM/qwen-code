@@ -60,6 +60,24 @@ describe('LoopWakeupTool', () => {
     );
   });
 
+  it('shows the plain delay in the permission description when in range', () => {
+    const invocation = tool.build({
+      delaySeconds: 300,
+      prompt: 'continue loop',
+    });
+
+    expect(invocation.getDescription()).toBe('300s: continue loop');
+  });
+
+  it('does not show rounded in-range delays as requested values', () => {
+    const invocation = tool.build({
+      delaySeconds: 60.4,
+      prompt: 'continue loop',
+    });
+
+    expect(invocation.getDescription()).toBe('60s: continue loop');
+  });
+
   it('schedules a session-only one-shot wakeup on the scheduler', async () => {
     const invocation = tool.build({
       delaySeconds: 300,

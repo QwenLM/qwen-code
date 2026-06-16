@@ -35,8 +35,11 @@ class LoopWakeupInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     const clamped = clampWakeupSeconds(this.params.delaySeconds);
+    const roundedDelaySeconds = Number.isFinite(this.params.delaySeconds)
+      ? Math.round(this.params.delaySeconds)
+      : this.params.delaySeconds;
     const prefix =
-      clamped === this.params.delaySeconds
+      clamped === roundedDelaySeconds
         ? `${clamped}s`
         : `${clamped}s (requested ${formatRequested(this.params.delaySeconds)})`;
     return `${prefix}: ${this.params.prompt}`;
@@ -109,7 +112,7 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
     super(
       LoopWakeupTool.Name,
       ToolDisplayNames.LOOP_WAKEUP,
-      'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. Session-only and one-shot — it does not persist or recur.',
+      'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. Session-only and one-shot — it does not persist or recur. A self-paced wakeup chain may run for at most 24h.',
       Kind.Other,
       {
         type: 'object',
