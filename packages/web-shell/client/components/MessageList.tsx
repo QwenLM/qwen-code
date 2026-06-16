@@ -106,8 +106,6 @@ export type DisplayItem =
        * collapsible; drives the prompt-row expand/collapse toggle.
        */
       collapse?: TurnCollapseHead;
-      /** True when this row belongs to an expanded turn's execution trace body. */
-      trace?: boolean;
     }
   | {
       type: 'parallel_agents';
@@ -118,8 +116,6 @@ export type DisplayItem =
        * box reveals its time on hover exactly like a standalone message row.
        */
       timestamp?: number;
-      /** True when this row belongs to an expanded turn's execution trace body. */
-      trace?: boolean;
     };
 
 function isAgentOnlyToolGroup(msg: Message): boolean {
@@ -309,10 +305,6 @@ export function getDisplayItemVirtualKey(item: DisplayItem): string {
     : `msg:${item.key}`;
 }
 
-function withTrace(item: DisplayItem): DisplayItem {
-  return { ...item, trace: true };
-}
-
 export interface ApplyTurnCollapseOptions {
   /**
    * Per-turn user override keyed by the turn's user-message id:
@@ -381,7 +373,7 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   }
 }
 
-function isNonAssistantStep(item: DisplayItem): boolean {
+function isExecutionWorkStep(item: DisplayItem): boolean {
   if (item.type === 'parallel_agents') return true;
   return item.message.role === 'tool_group' || item.message.role === 'plan';
 }
@@ -510,7 +502,7 @@ export function applyTurnCollapse(
     let answerIdx = -1;
     let lastNonAssistantStepIdx = start;
     for (let i = start + 1; i <= end; i++) {
-      if (isNonAssistantStep(items[i])) lastNonAssistantStepIdx = i;
+      if (isExecutionWorkStep(items[i])) lastNonAssistantStepIdx = i;
     }
     for (let i = end; i > lastNonAssistantStepIdx; i--) {
       if (isAssistantAnswer(items[i])) {
@@ -592,10 +584,7 @@ export function applyTurnCollapse(
 
     if (!collapsed) {
       for (let i = start + 1; i <= end; i++) {
-        const item = items[i];
-        result.push(
-          isHideableStep(item, i === answerIdx) ? withTrace(item) : item,
-        );
+        result.push(items[i]!);
       }
       continue;
     }
@@ -1187,11 +1176,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const totalVirtualSize = virtualizer.getTotalSize();
 
     const getRowClassName = useCallback(
-      (index: number, key: string): string | undefined => {
-        const classes: string[] = [];
-        if (flashKey === key) classes.push(styles.rowFlash);
-        return classes.length > 0 ? classes.join(' ') : undefined;
-      },
+      (key: string): string | undefined =>
+        flashKey === key ? styles.rowFlash : undefined,
       [flashKey],
     );
 
@@ -1228,10 +1214,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={getRowClassName(
-                  virtualRow.index,
-                  String(virtualRow.key),
-                )}
+                className={getRowClassName(String(virtualRow.key))}
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -1251,7 +1234,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
               <div
                 key={key}
                 data-index={index}
-                className={getRowClassName(index, key)}
+                className={getRowClassName(key)}
               >
                 {renderVirtualItem(index)}
               </div>

@@ -66,12 +66,12 @@ export const AssistantMessage = memo(function AssistantMessage({
   useEffect(() => {
     const el = previewRef.current;
     if (!el || !collapsed) return;
-    if (isStreaming) {
+    if (isStreaming && !content) {
       el.scrollTop = el.scrollHeight;
     } else {
       el.scrollTop = 0;
     }
-  }, [collapsed, isStreaming, thinking]);
+  }, [collapsed, isStreaming, thinking, content]);
 
   const handleToggle = useCallback(() => {
     setThinkingExpanded((v) => !v);
@@ -111,7 +111,7 @@ export const AssistantMessage = memo(function AssistantMessage({
                     aria-label={t('thinking.expand')}
                     title={t('thinking.expand')}
                   >
-                    ⌄
+                    ▼
                   </button>
                 )}
               </div>
@@ -130,7 +130,7 @@ export const AssistantMessage = memo(function AssistantMessage({
                     aria-label={t('thinking.collapse')}
                     title={t('thinking.collapse')}
                   >
-                    ⌃
+                    ▲
                   </button>
                 )}
               </div>

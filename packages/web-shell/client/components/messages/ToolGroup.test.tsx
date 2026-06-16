@@ -564,3 +564,42 @@ describe('edit raw diff rendering', () => {
     expect(container.querySelector('pre')?.textContent).toBe(preview);
   });
 });
+
+describe('keyboard accessibility', () => {
+  function pressKey(el: Element, key: string): void {
+    act(() => {
+      el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    });
+  }
+
+  it('expands an expandable tool row on Enter', () => {
+    const command = `echo ${'z'.repeat(80)}`;
+    const container = renderTool(makeShellCommandTool(command));
+    const header = getToolHeader(container);
+
+    expect(container.querySelector('pre')).toBeNull();
+
+    pressKey(header, 'Enter');
+    expect(container.querySelector('pre')).not.toBeNull();
+  });
+
+  it('expands an expandable tool row on Space', () => {
+    const command = `echo ${'z'.repeat(80)}`;
+    const container = renderTool(makeShellCommandTool(command));
+    const header = getToolHeader(container);
+
+    expect(container.querySelector('pre')).toBeNull();
+
+    pressKey(header, ' ');
+    expect(container.querySelector('pre')).not.toBeNull();
+  });
+
+  it('does not toggle on other keys', () => {
+    const command = `echo ${'z'.repeat(80)}`;
+    const container = renderTool(makeShellCommandTool(command));
+    const header = getToolHeader(container);
+
+    pressKey(header, 'a');
+    expect(container.querySelector('pre')).toBeNull();
+  });
+});
