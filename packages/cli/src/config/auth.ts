@@ -25,8 +25,11 @@ const DEFAULT_ENV_KEYS: Record<string, string> = {
 
 /**
  * Find model configuration from modelProviders by authType and modelId.
- * When multiple models share the same id (different baseUrls), returns the
- * first match. Callers that need an exact match should also compare baseUrl.
+ * When a baseUrl is given, prefers the exact id+baseUrl match (disambiguating
+ * providers that share a model id) and falls back to the first id match if the
+ * paired provider was edited/removed. When no baseUrl is given, returns the
+ * first id match. Mirrors resolveCliGenerationConfig so pre-flight auth
+ * validation checks the same provider that startup resolution selects.
  */
 function findModelConfig(
   modelProviders: ModelProvidersConfig | undefined,
@@ -44,9 +47,30 @@ function findModelConfig(
   }
 
   if (baseUrl) {
-    return models.find((m) => m.id === modelId && m.baseUrl === baseUrl);
+    return (
+      models.find((m) => m.id === modelId && m.baseUrl === baseUrl) ??
+      models.find((m) => m.id === modelId)
+    );
   }
   return models.find((m) => m.id === modelId);
+}
+
+/**
+ * Resolve the selected model id and its paired baseUrl for provider lookup.
+ * Prefers the runtime-resolved generation config (which folds in CLI args, env
+ * vars, settings, and the selected provider), falling back to the persisted
+ * settings.model.{name,baseUrl} when no Config is available yet (pre-flight).
+ */
+function resolveSelectedModel(
+  settings: Settings,
+  config?: Config,
+): { modelId: string | undefined; baseUrl: string | undefined } {
+  const modelsConfig = config?.getModelsConfig();
+  return {
+    modelId: modelsConfig?.getModel() ?? settings.model?.name,
+    baseUrl:
+      modelsConfig?.getGenerationConfig()?.baseUrl ?? settings.model?.baseUrl,
+  };
 }
 
 function hasEnvValue(settings: Settings, envKey: string | undefined): boolean {
@@ -80,12 +104,19 @@ function hasApiKeyForAuth(
     | ModelProvidersConfig
     | undefined;
 
-  // Use config.getModelsConfig().getModel() if available for accurate model ID resolution
-  // that accounts for CLI args, env vars, and settings. Fall back to settings.model.name.
-  const modelId = config?.getModelsConfig().getModel() ?? settings.model?.name;
+  // Use config.getModelsConfig() if available for accurate model resolution
+  // that accounts for CLI args, env vars, and settings. Fall back to the
+  // persisted settings.model.{name,baseUrl}.
+  const { modelId, baseUrl } = resolveSelectedModel(settings, config);
 
-  // Try to find model-specific envKey from modelProviders
-  const modelConfig = findModelConfig(modelProviders, authType, modelId);
+  // Try to find model-specific envKey from modelProviders, disambiguating by
+  // baseUrl so duplicate-id providers resolve to the selected one.
+  const modelConfig = findModelConfig(
+    modelProviders,
+    authType,
+    modelId,
+    baseUrl,
+  );
 
   // If a Config is available, prefer the API key already resolved into the
   // generation config. The unified resolver folds CLI flags (e.g.
@@ -226,10 +257,15 @@ export function validateAuthMethod(
     const modelProviders = settings.merged.modelProviders as
       | ModelProvidersConfig
       | undefined;
-    // Use config.getModelsConfig().getModel() if available for accurate model ID
-    const modelId =
-      config?.getModelsConfig().getModel() ?? settings.merged.model?.name;
-    const modelConfig = findModelConfig(modelProviders, authMethod, modelId);
+    // Resolve the selected model + baseUrl so duplicate-id providers validate
+    // the Anthropic baseUrl of the selected provider, not the first id match.
+    const { modelId, baseUrl } = resolveSelectedModel(settings.merged, config);
+    const modelConfig = findModelConfig(
+      modelProviders,
+      authMethod,
+      modelId,
+      baseUrl,
+    );
 
     if (modelConfig && !modelConfig.baseUrl) {
       return t(
