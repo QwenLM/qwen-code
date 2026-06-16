@@ -3,6 +3,7 @@
  *
  * Connects QQ Bot via official QQ Bot WebSocket API.
  * Extends ChannelBase for streaming, access control, and session routing.
+ * Supports QR code login, credential persistence, C2C and group chat.
  *
  * @see https://bot.q.qq.com/wiki/develop/api-v2/
  */
@@ -15,21 +16,42 @@ import type {
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { qrConnect } from '@tencent-connect/qqbot-connector';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  chmodSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
-import type { QQChannelConfig, QQMessageEvent, QQGroupMessageEvent } from './types.js';
+import type {
+  QQChannelConfig,
+  QQMessageEvent,
+  QQGroupMessageEvent,
+} from './types.js';
+
+/** Validate chatId to prevent SSRF when constructing URLs. */
+function isValidChatId(id: string): boolean {
+  return /^[A-Za-z0-9_\-./]+$/.test(id) && id.length <= 128;
+}
 
 export class QQChannel extends ChannelBase {
   private ws: WebSocket | null = null;
   private accessToken: string = '';
+  private tokenExpiresAt: number = 0;
+  private tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatInterval: number = 45000;
   private seq: number = 0;
   private reconnectAttempts: number = 0;
   private readonly maxReconnectAttempts: number = 10;
   private readonly qqConfig: QQChannelConfig;
+  /** Set when server sends RECONNECT opcode — close handler uses this to force reconnect. */
+  private serverRequestedReconnect: boolean = false;
+  /** Pending connect promise reject — called when WebSocket closes before READY. */
+  private connectReject: ((err: Error) => void) | null = null;
 
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
@@ -56,7 +78,15 @@ export class QQChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    if (!this.accessToken) return;
+    if (!this.accessToken) {
+      process.stderr.write(`[QQ:${this.name}] Send skipped: no access token\n`);
+      return;
+    }
+
+    if (!isValidChatId(chatId)) {
+      process.stderr.write(`[QQ:${this.name}] Send skipped: invalid chatId\n`);
+      return;
+    }
 
     const base = this.qqConfig.sandbox
       ? 'https://sandbox.api.sgroup.qq.com'
@@ -67,6 +97,9 @@ export class QQChannel extends ChannelBase {
       ? `/v2/groups/${chatId}/messages`
       : `/v2/users/${chatId}/messages`;
 
+    // Capture msgId at send-time to avoid race on replyMsgId
+    const msgId = this.replyMsgId.get(chatId);
+
     for (const chunk of this.splitText(text)) {
       try {
         const body: Record<string, unknown> = {
@@ -74,12 +107,11 @@ export class QQChannel extends ChannelBase {
           msg_type: 0,
         };
         // Multi-block streaming: set msg_id + incrementing msg_seq
-        const msgId = this.replyMsgId.get(chatId);
         if (msgId) {
           const seq = (this.msgSeqMap.get(msgId) ?? 0) + 1;
           this.msgSeqMap.set(msgId, seq);
-          body.msg_id = msgId;
-          body.msg_seq = seq;
+          body['msg_id'] = msgId;
+          body['msg_seq'] = seq;
         }
 
         const resp = await fetch(`${base}${path}`, {
@@ -92,8 +124,10 @@ export class QQChannel extends ChannelBase {
         });
 
         if (!resp.ok) {
+          // Drain response body to avoid socket leak
+          const errBody = await resp.text().catch(() => '');
           process.stderr.write(
-            `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body.msg_seq ?? '-'})\n`,
+            `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${errBody.slice(0, 200)}\n`,
           );
         }
       } catch (e) {
@@ -104,10 +138,18 @@ export class QQChannel extends ChannelBase {
 
   disconnect(): void {
     this.stopHeartbeat();
+    this.stopTokenRefresh();
     if (this.ws) {
       this.ws.close(1000);
       this.ws = null;
     }
+    if (this.connectReject) {
+      this.connectReject(new Error('Channel disconnected'));
+      this.connectReject = null;
+    }
+    this.chatTypeMap.clear();
+    this.replyMsgId.clear();
+    this.msgSeqMap.clear();
   }
 
   // ── Token ──────────────────────────────────────────────────────
@@ -145,10 +187,12 @@ export class QQChannel extends ChannelBase {
       appSecret = creds.appSecret;
       this.qqConfig.appID = appID;
       this.qqConfig.appSecret = appSecret;
-      // Persist to disk
+      // Persist to disk with restrictive permissions
       try {
-        mkdirSync(join(homedir(), '.qwen', 'channels'), { recursive: true });
+        const dir = join(homedir(), '.qwen', 'channels');
+        mkdirSync(dir, { recursive: true });
         writeFileSync(credsFile, JSON.stringify({ appId: appID, appSecret }));
+        chmodSync(credsFile, 0o600);
       } catch {
         /* non-fatal */
       }
@@ -167,11 +211,39 @@ export class QQChannel extends ChannelBase {
       );
     }
 
-    const data = (await resp.json()) as { access_token?: string };
+    const data = (await resp.json()) as {
+      access_token?: string;
+      expires_in?: number;
+    };
     if (!data.access_token) {
       throw new Error('QQ Bot token response missing access_token');
     }
     this.accessToken = data.access_token;
+    this.tokenExpiresAt = Date.now() + (data.expires_in ?? 7200) * 1000;
+    this.scheduleTokenRefresh();
+  }
+
+  private scheduleTokenRefresh(): void {
+    this.stopTokenRefresh();
+    const ttl = Math.max(0, this.tokenExpiresAt - Date.now());
+    // Refresh at 80% of TTL, minimum 60s before expiry
+    const delay = Math.max(Math.min(ttl * 0.8, ttl - 60_000), 60_000);
+    if (delay > 0) {
+      this.tokenRefreshTimer = setTimeout(() => {
+        this.fetchToken().catch((e) =>
+          process.stderr.write(
+            `[QQ:${this.name}] Token refresh failed: ${e}\n`,
+          ),
+        );
+      }, delay);
+    }
+  }
+
+  private stopTokenRefresh(): void {
+    if (this.tokenRefreshTimer) {
+      clearTimeout(this.tokenRefreshTimer);
+      this.tokenRefreshTimer = null;
+    }
   }
 
   // ── WebSocket Gateway ──────────────────────────────────────────
@@ -190,12 +262,13 @@ export class QQChannel extends ChannelBase {
     }
 
     const data = (await resp.json()) as { url?: string };
-    if (!data.url) {
+    if (!data['url']) {
       throw new Error('QQ Bot gateway response missing WebSocket URL');
     }
 
     return new Promise<void>((resolve, reject) => {
-      this.dialGateway(data.url!, resolve, reject);
+      this.connectReject = reject;
+      this.dialGateway(data['url']!, resolve, reject);
     });
   }
 
@@ -220,21 +293,50 @@ export class QQChannel extends ChannelBase {
     });
 
     this.ws.on('close', (code: number) => {
-      process.stderr.write(`[QQ:${this.name}] WebSocket closed (code=${code})\n`);
+      process.stderr.write(
+        `[QQ:${this.name}] WebSocket closed (code=${code})\n`,
+      );
       this.stopHeartbeat();
       this.ws = null;
 
-      if (code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+      const shouldReconnect =
+        this.serverRequestedReconnect ||
+        (code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts);
+
+      this.serverRequestedReconnect = false;
+
+      if (shouldReconnect) {
         this.reconnectAttempts++;
         const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 30000);
         process.stderr.write(
           `[QQ:${this.name}] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})\n`,
         );
         setTimeout(() => {
-          this.connectGateway().catch((e) =>
-            process.stderr.write(`[QQ:${this.name}] Reconnect failed: ${e}\n`),
-          );
+          // Refresh token before reconnecting if expired or near expiry
+          const tokenNear = this.tokenExpiresAt - Date.now() < 120_000;
+          const doConnect = () =>
+            this.connectGateway().catch((e) =>
+              process.stderr.write(
+                `[QQ:${this.name}] Reconnect failed: ${e}\n`,
+              ),
+            );
+
+          if (tokenNear) {
+            this.fetchToken()
+              .then(() => doConnect())
+              .catch(() => doConnect());
+          } else {
+            doConnect();
+          }
         }, delay);
+      } else {
+        // Reject pending connect promise if we're not reconnecting
+        if (this.connectReject) {
+          this.connectReject(
+            new Error(`WebSocket closed before READY (code=${code})`),
+          );
+          this.connectReject = null;
+        }
       }
     });
 
@@ -250,30 +352,32 @@ export class QQChannel extends ChannelBase {
     msg: Record<string, unknown>,
     onReady: () => void,
   ): void {
-    const op = msg.op as number;
+    const op = msg['op'] as number;
 
     switch (op) {
       case OpCode.HELLO: {
         this.heartbeatInterval =
-          ((msg.d as Record<string, unknown>)?.heartbeat_interval as number) ||
-          45000;
+          ((msg['d'] as Record<string, unknown> | undefined)?.[
+            'heartbeat_interval'
+          ] as number) || 45000;
         this.sendIdentify();
         break;
       }
       case OpCode.DISPATCH: {
-        const t = msg.t as string;
-        const s = msg.s as number | undefined;
+        const t = msg['t'] as string;
+        const s = msg['s'] as number | undefined;
         if (s !== undefined) this.seq = s;
 
         if (t === 'READY') {
           this.reconnectAttempts = 0;
+          this.connectReject = null;
           this.startHeartbeat();
           process.stderr.write(`[QQ:${this.name}] Ready\n`);
           onReady();
         } else if (t === 'C2C_MESSAGE_CREATE') {
-          this.handleC2C(msg.d as unknown as QQMessageEvent);
+          this.handleC2C(msg['d'] as unknown as QQMessageEvent);
         } else if (t === 'GROUP_AT_MESSAGE_CREATE') {
-          this.handleGroup(msg.d as unknown as QQGroupMessageEvent);
+          this.handleGroup(msg['d'] as unknown as QQGroupMessageEvent);
         }
         break;
       }
@@ -281,7 +385,8 @@ export class QQChannel extends ChannelBase {
         // Expected, nothing to do
         break;
       case OpCode.RECONNECT:
-        this.ws?.close(1000);
+        this.serverRequestedReconnect = true;
+        this.ws?.close(4000);
         break;
       case OpCode.INVALID_SESSION:
         this.sendIdentify();
