@@ -111,6 +111,24 @@ export async function startBridge(
   const deeplinkUrl = opts.deeplinkUrl ?? cfg.gatewayUrl;
   const abort = new AbortController();
 
+  // Launch a runner's loops without letting a boot-time rejection escape as an
+  // UNHANDLED rejection. A runner's start() awaits registerSelf(), which THROWS
+  // when the gateway is unreachable (the BridgeClient propagates fetch errors) —
+  // and these are launched fire-and-forget, so an unguarded throw would crash the
+  // host process (the gateway itself, for an in-process bridge). In-process the
+  // gateway is loopback (never unreachable), so this only bites a sidecar whose
+  // gateway is down at boot; it then logs and stays inert (a supervisor restarts
+  // it) rather than taking the process down. Mirrors the runInbound hardening.
+  const launch = (r: { start(signal: AbortSignal): Promise<void> }): void => {
+    void r.start(abort.signal).catch((err) => {
+      log?.(
+        `${cfg.kind} bridge: start failed (${
+          (err as Error).message ?? err
+        }) — not started`,
+      );
+    });
+  };
+
   if (cfg.kind === 'telegram') {
     const runner = new TelegramBridge({
       botApi: new TelegramBotApi({ botToken: cfg.botToken }),
@@ -119,7 +137,7 @@ export async function startBridge(
       baseUrl: deeplinkUrl,
       log,
     });
-    void runner.start(abort.signal);
+    launch(runner);
     return { stop: () => abort.abort() };
   }
 
@@ -142,7 +160,7 @@ export async function startBridge(
       baseUrl: deeplinkUrl,
       log,
     });
-    void runner.start(abort.signal);
+    launch(runner);
     return { stop: () => abort.abort() };
   }
 
@@ -238,7 +256,7 @@ export async function startBridge(
   // Now that the runner exists, point the adapter's callbacks at its dispatch.
   sink.onMessage = (m) => runner.dispatchDecryptedMessage(m, m.powerLevel);
   sink.onReaction = (r) => runner.dispatchReaction(r);
-  void runner.start(abort.signal);
+  launch(runner);
 
   // Start the loopback /healthz server (when configured); close it on shutdown.
   // Never throws — a bind failure degrades to a no-op handle.
