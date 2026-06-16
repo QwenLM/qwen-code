@@ -104,6 +104,7 @@ flowchart TB
         DT["channels/dingtalk"]
         WX["channels/weixin"]
         TG["channels/telegram"]
+        FS["channels/feishu"]
         IDEA["vscode-ide-companion/<br/>daemonIdeConnection.ts"]
     end
 
