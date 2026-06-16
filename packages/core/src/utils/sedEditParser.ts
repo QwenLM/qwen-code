@@ -137,14 +137,14 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
   try {
     const jsPattern = toJavascriptPattern(sedInfo);
     new RegExp(jsPattern);
-    return !hasNestedQuantifiedGroup(jsPattern);
+    return !hasUnsafeQuantifiedGroup(jsPattern);
   } catch {
     return false;
   }
 }
 
-function hasNestedQuantifiedGroup(pattern: string): boolean {
-  const groups: Array<{ hasQuantifier: boolean }> = [];
+function hasUnsafeQuantifiedGroup(pattern: string): boolean {
+  const groups: Array<{ hasAlternation: boolean; hasQuantifier: boolean }> = [];
 
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i]!;
@@ -157,7 +157,11 @@ function hasNestedQuantifiedGroup(pattern: string): boolean {
       continue;
     }
     if (char === '(') {
-      groups.push({ hasQuantifier: false });
+      groups.push({ hasAlternation: false, hasQuantifier: false });
+      continue;
+    }
+    if (char === '|' && groups.length > 0) {
+      groups[groups.length - 1]!.hasAlternation = true;
       continue;
     }
     if (char === ')') {
@@ -167,13 +171,18 @@ function hasNestedQuantifiedGroup(pattern: string): boolean {
       }
       const quantifierEnd = getRegexQuantifierEnd(pattern, i + 1);
       if (quantifierEnd !== null) {
-        if (group.hasQuantifier) {
+        if (group.hasAlternation || group.hasQuantifier) {
           return true;
         }
         if (groups.length > 0) {
           groups[groups.length - 1]!.hasQuantifier = true;
         }
         i = quantifierEnd - 1;
+      }
+      if (groups.length > 0) {
+        const parent = groups[groups.length - 1]!;
+        parent.hasAlternation ||= group.hasAlternation;
+        parent.hasQuantifier ||= group.hasQuantifier;
       }
       continue;
     }
@@ -343,7 +352,7 @@ export function applySedSubstitution(
   try {
     const regex = new RegExp(jsPattern);
     return content
-      .split(/(\r?\n)/)
+      .split(/(\n)/)
       .map((part, index) => {
         if (index % 2 === 1) {
           return part;
@@ -415,10 +424,6 @@ function replaceLine(
     replaceAll: boolean;
   },
 ): string {
-  if (line === '') {
-    return line;
-  }
-
   let seen = 0;
   const globalRegex = new RegExp(
     regex.source,

@@ -40,6 +40,35 @@ describe('sedEditParser', () => {
     });
   });
 
+  it('parses expression flag forms', () => {
+    expect(parseSedEditCommand("sed -i -e 's/foo/bar/' file.txt")).toEqual({
+      filePath: 'file.txt',
+      pattern: 'foo',
+      replacement: 'bar',
+      flags: '',
+      extendedRegex: false,
+    });
+    expect(
+      parseSedEditCommand("sed -i --expression 's/foo/bar/' file.txt"),
+    ).toEqual({
+      filePath: 'file.txt',
+      pattern: 'foo',
+      replacement: 'bar',
+      flags: '',
+      extendedRegex: false,
+    });
+    expect(
+      parseSedEditCommand("sed -i --expression='s/foo/bar/' file.txt"),
+    ).toEqual({
+      filePath: 'file.txt',
+      pattern: 'foo',
+      replacement: 'bar',
+      flags: '',
+      extendedRegex: false,
+    });
+    expect(parseSedEditCommand('sed -i -e')).toBeNull();
+  });
+
   it('rejects command chains, globs, multiple files, and unsafe flags', () => {
     expect(
       parseSedEditCommand("sed -i 's/foo/bar/' a.ts && echo done"),
@@ -134,6 +163,31 @@ describe('sedEditParser', () => {
 
   it('rejects nested quantifier patterns before simulated edits', () => {
     expect(parseSedEditCommand("sed -E -i 's/(a*)*b/X/g' file.txt")).toBeNull();
+  });
+
+  it('rejects quantified alternation groups before simulated edits', () => {
+    expect(
+      parseSedEditCommand("sed -E -i 's/(a|aa)*b/X/g' file.txt"),
+    ).toBeNull();
+  });
+
+  it('preserves carriage returns in sed pattern space', () => {
+    const anchoredSedInfo = parseSedEditCommand("sed -i 's/foo$/bar/' file.txt");
+    const crSedInfo = parseSedEditCommand("sed -i 's/\\r$//g' file.txt");
+
+    expect(anchoredSedInfo).not.toBeNull();
+    expect(crSedInfo).not.toBeNull();
+    expect(applySedSubstitution('foo\r\n', anchoredSedInfo!)).toBe('foo\r\n');
+    expect(applySedSubstitution('foo\r\n', crSedInfo!)).toBe('foo\n');
+  });
+
+  it('applies substitutions to empty lines', () => {
+    const sedInfo = parseSedEditCommand("sed -i 's/^$/X/g' file.txt");
+
+    expect(sedInfo).not.toBeNull();
+    expect(applySedSubstitution('line1\n\nline3', sedInfo!)).toBe(
+      'line1\nX\nline3',
+    );
   });
 
   it('supports multi-digit numeric occurrences', () => {
