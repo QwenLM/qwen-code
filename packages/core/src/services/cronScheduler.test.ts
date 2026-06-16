@@ -488,6 +488,21 @@ describe('CronScheduler', () => {
       expect(scheduler.hasPendingWork).toBe(false);
     });
 
+    it('fires due cron jobs and due wakeups in the same tick', () => {
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.create('* * * * *', 'cron prompt', false);
+      scheduler.scheduleWakeup(60, 'wakeup prompt');
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 31, 0));
+
+      expect(fired.map((job) => job.prompt)).toEqual([
+        'cron prompt',
+        'wakeup prompt',
+      ]);
+      expect(scheduler.sessionSize).toBe(0);
+    });
+
     it('is separate from the cron jobs map (not in list/size)', () => {
       scheduler.scheduleWakeup(300, 'p');
       expect(scheduler.list()).toHaveLength(0);

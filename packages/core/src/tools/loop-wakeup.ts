@@ -9,6 +9,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { getErrorMessage } from '../utils/errors.js';
 
 export interface LoopWakeupParams {
   delaySeconds: number;
@@ -80,7 +81,7 @@ class LoopWakeupInvocation extends BaseToolInvocation<
 
       return { llmContent, returnDisplay };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
       return {
         llmContent: `Error scheduling loop wakeup: ${message}`,
         returnDisplay: message,
@@ -108,7 +109,7 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
           delaySeconds: {
             type: 'number',
             description:
-              'Seconds from now to wake up. The runtime clamps to [60, 3600] (1–60 min), so you do not need to clamp yourself. The prompt cache has a ~5-minute TTL: a wakeup past 5 minutes pays a cache miss. Prefer 60–270s when actively polling external state that changes fast (stays in cache); prefer 1200s+ when there is no point checking sooner (one cache miss buys a much longer wait). Do not pick ~300s — it pays the cache miss without amortizing it. For idle follow-ups with no specific signal, default to 1200–1800s (20–30 min).',
+              'Seconds from now to wake up. Clamped to [60, 3600]. Prefer 60-270s for fast-changing state, 1200s+ when there is no reason to check sooner.',
           },
           prompt: {
             type: 'string',

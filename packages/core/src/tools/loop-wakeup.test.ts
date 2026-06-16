@@ -151,7 +151,9 @@ describe('LoopWakeupTool', () => {
     const failingConfig = {
       getCronScheduler: () => ({
         scheduleWakeup: () => {
-          throw new Error('scheduler boom');
+          throw new Error('scheduler boom', {
+            cause: new Error('clock unavailable'),
+          });
         },
       }),
       getProjectRoot: () => tmpDir,
@@ -164,7 +166,9 @@ describe('LoopWakeupTool', () => {
 
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.error?.message).toBe('scheduler boom');
+    expect(result.error?.message).toBe(
+      'scheduler boom (cause: clock unavailable)',
+    );
     expect(result.llmContent).toContain('Error scheduling loop wakeup:');
   });
 });
