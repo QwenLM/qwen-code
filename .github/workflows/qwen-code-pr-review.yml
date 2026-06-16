@@ -263,6 +263,29 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     steps:
+      # Self-hosted runners reuse the workspace, so an interrupted review can
+      # leave a stale `.qwen/tmp/review-pr-*` worktree or `qwen-review/*` branch
+      # that trips the checkout below. Prune defensively; never fail the job.
+      - name: 'Clean stale review worktrees'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in a
+          # worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to clean"
+            exit 0
+          fi
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          git worktree prune -v || true
+          git for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+            | while read -r stale_ref; do
+                if [ -n "$stale_ref" ]; then
+                  git branch -D "$stale_ref" || true
+                fi
+              done
+          git worktree prune -v || true
+          echo "stale review worktrees cleaned"
+
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
       - name: 'Checkout base branch'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -351,7 +374,75 @@ jobs:
           if ! command -v qwen >/dev/null 2>&1; then
             fail "qwen CLI is required on the review runner."
           fi
-          qwen --version
+
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host proxy_bin
+            if ! command -v node >/dev/null 2>&1; then
+              fail "node is required to parse OPENAI_BASE_URL for the proxy bypass."
+            fi
+            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            if [ -z "$openai_host" ]; then
+              fail "Could not parse a hostname from OPENAI_BASE_URL."
+            fi
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+
+            # qwen currently reads HTTP(S)_PROXY directly and does not apply
+            # NO_PROXY when constructing its proxy agent. Clear proxy env for
+            # qwen itself, while restoring it for child gh/git commands.
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
+            mkdir -p "$proxy_bin"
+
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+
+            export PATH="$proxy_bin:$PATH"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+
+            echo "qwen_path=$(command -v qwen)"
+            qwen --version
+            echo "openai_host=${openai_host}"
+            echo "qwen_http_proxy=disabled"
+            if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
+              echo "child_git_github_proxy=restored"
+            else
+              echo "child_git_github_proxy=unset"
+            fi
+          }
+
+          configure_qwen_network
 
           case "$TIMEOUT_MINUTES" in
             ''|*[!0-9]*)

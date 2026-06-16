@@ -9,6 +9,8 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { TransportStream } from './transportStream.js';
 
 export class WsStream implements TransportStream {
+  readonly kind = 'ws' as const;
+
   private writeChain: Promise<void> = Promise.resolve();
   private _closed = false;
   private heartbeat: ReturnType<typeof setInterval> | undefined;

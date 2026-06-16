@@ -183,7 +183,44 @@ export interface BridgeHeartbeatState {
   clientLastSeenAt: ReadonlyMap<string, number>;
 }
 
+export interface BridgeDaemonStatusLimits {
+  maxSessions: number | null;
+  maxPendingPromptsPerSession: number | null;
+  eventRingSize: number;
+  channelIdleTimeoutMs: number;
+  sessionIdleTimeoutMs: number;
+}
+
+export interface BridgeDaemonSessionDiagnostic {
+  sessionId: string;
+  workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
+  clientCount: number;
+  subscriberCount: number;
+  attachCount: number;
+  pendingPromptCount: number;
+  pendingPermissionCount: number;
+  hasActivePrompt: boolean;
+  lastEventId: number;
+  lastSeenAt?: number;
+  currentModelId?: string;
+  currentApprovalMode?: string;
+}
+
+export interface BridgeDaemonStatusSnapshot {
+  limits: BridgeDaemonStatusLimits;
+  sessionCount: number;
+  pendingPermissionCount: number;
+  channelLive: boolean;
+  permissionPolicy: PermissionPolicy;
+  sessions: BridgeDaemonSessionDiagnostic[];
+}
+
 export interface AcpSessionBridge {
+  /** Read-only daemon diagnostics for status endpoints. */
+  getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
+
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
    * existing session for the same workspace.

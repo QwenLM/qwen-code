@@ -23,6 +23,8 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
  * resumability is RFD Phase 4, deferred per the design doc §7).
  */
 export class SseStream {
+  readonly kind = 'sse' as const;
+
   private writeChain: Promise<void> = Promise.resolve();
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private closed = false;

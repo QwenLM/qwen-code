@@ -32,6 +32,12 @@ export interface ComputerUseClientOptions {
   binary: string;
   /** Streaming hook for progress messages during slow operations. */
   onProgress?: (message: string) => void;
+  /**
+   * Longest-edge pixel cap applied to cua-driver screenshots via `set_config`
+   * after every (re)connect. `undefined` leaves cua-driver's built-in default
+   * (1568) untouched; `0` disables resizing. See {@link resolveMaxImageDimension}.
+   */
+  maxImageDimension?: number;
 }
 
 export class ComputerUseClient {
@@ -39,12 +45,24 @@ export class ComputerUseClient {
 
   private readonly binary: string;
   private readonly onProgress: (message: string) => void;
+  private maxImageDimension: number | undefined;
   private client: Client | undefined;
   private startPromise: Promise<void> | undefined;
 
   constructor(options: ComputerUseClientOptions) {
     this.binary = options.binary;
     this.onProgress = options.onProgress ?? (() => {});
+    this.maxImageDimension = options.maxImageDimension;
+  }
+
+  /**
+   * Set the screenshot longest-edge cap applied on the next (re)connect via
+   * `set_config`. Cheap to call before every `start()`; the value is only
+   * pushed to cua-driver inside `doStart` (once per spawn, re-applied after a
+   * reconnect). `undefined` means "don't override".
+   */
+  setMaxImageDimension(value: number | undefined): void {
+    this.maxImageDimension = value;
   }
 
   /**
@@ -81,9 +99,9 @@ export class ComputerUseClient {
    * and startup messages during this call. It overrides the instance-level
    * callback for the duration of the start operation only.
    *
-   * Throws on spawn failure (network down, npx missing, etc.). The
-   * caller (bootstrap state machine) is responsible for mapping the
-   * throw into user-facing UX.
+   * Throws on spawn failure (binary missing / not executable, daemon
+   * launch failure, etc.). The caller (bootstrap state machine) is
+   * responsible for mapping the throw into user-facing UX.
    */
   async start(onProgress?: (message: string) => void): Promise<void> {
     if (this.client) return;
@@ -111,6 +129,37 @@ export class ComputerUseClient {
     );
     await client.connect(transport);
     this.client = client;
+    await this.applyRuntimeConfig(client, progress);
+  }
+
+  /**
+   * Push session-level runtime config to a freshly connected daemon. Today
+   * that is just `max_image_dimension` (the screenshot longest-edge cap),
+   * applied via the `set_config` tool when an override is configured.
+   *
+   * Runs once per spawn — including after the reconnect in `callTool`, since a
+   * daemon restart resets runtime config to its persisted default. Best-effort:
+   * a failed `set_config` must NOT abort startup (the driver is still usable at
+   * its default dimension), so the error is surfaced via `progress` and
+   * swallowed. Calls the inner client directly to avoid recursing through
+   * `callTool`'s reconnect path.
+   */
+  private async applyRuntimeConfig(
+    client: Client,
+    progress: (message: string) => void,
+  ): Promise<void> {
+    if (this.maxImageDimension === undefined) return;
+    try {
+      await client.callTool({
+        name: 'set_config',
+        arguments: { max_image_dimension: this.maxImageDimension },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      progress(
+        `Computer Use: could not apply max_image_dimension=${this.maxImageDimension} (${msg}); using driver default.`,
+      );
+    }
   }
 
   /**

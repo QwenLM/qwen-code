@@ -31,6 +31,7 @@ import {
   type BackgroundApproval,
   type MonitorTask,
   type ToolCallConfirmationDetails,
+  type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -192,6 +193,15 @@ function rowLabel(entry: DialogEntry): string {
       return `${SHELL_ROW_PREFIX} ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
+    case 'workflow': {
+      const label = entry.meta?.name ?? entry.runId;
+      const phase = entry.currentPhase ? ` · ${entry.currentPhase}` : '';
+      const counts =
+        entry.agentsDispatched > 0
+          ? ` (${entry.agentsCompleted}/${entry.agentsDispatched})`
+          : '';
+      return `[workflow] ${label}${phase}${counts}`;
+    }
     case 'dream':
       return formatDreamRowLabel(entry);
     default: {
@@ -357,6 +367,14 @@ const DetailBody: React.FC<{
     case 'monitor':
       return (
         <MonitorDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'workflow':
+      return (
+        <WorkflowDetailBody
           entry={entry}
           maxHeight={maxHeight}
           maxWidth={maxWidth}
@@ -865,6 +883,156 @@ const MonitorDetailBody: React.FC<{
           </Box>
           <Box>
             <Text color={errorColor} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
+};
+
+// ─── Workflow detail body ──────────────────────────────────
+//
+// Shows the workflow's declared meta (name + description + whenToUse),
+// the phase tree with truncation, per-phase dispatch counts, and the
+// log tail. Phase tree is capped at MAX_VISIBLE_PHASES with a "+N more
+// above" header so deeply nested fan-outs don't blow the dialog body.
+// Logs are the most recent tail; the registry caps at 100 lines but
+// the body further truncates to fit the available height.
+
+const MAX_VISIBLE_PHASES = 20;
+const MAX_VISIBLE_LOG_LINES = 10;
+
+const WorkflowDetailBody: React.FC<{
+  entry: WorkflowTask;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = `${t('Workflow')} › ${entry.meta?.name ?? entry.runId}`;
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.agentsDispatched > 0) {
+    dimSubtitleParts.push(
+      `${entry.agentsCompleted}/${entry.agentsDispatched} ${t('agents')}`,
+    );
+  }
+  dimSubtitleParts.push(
+    `${entry.phases.length} ${entry.phases.length === 1 ? t('phase') : t('phases')}`,
+  );
+
+  // Phase tree: collapse the head when over the visible cap, keeping
+  // the most recent N entries (the user almost always wants to see the
+  // current state, not the launch sequence).
+  const phaseOverflow = Math.max(0, entry.phases.length - MAX_VISIBLE_PHASES);
+  const visiblePhases = entry.phases.slice(-MAX_VISIBLE_PHASES);
+
+  // Log tail: similar truncation logic; show "+N more above" header if
+  // the registry has more than the visible window.
+  const logOverflow = Math.max(
+    0,
+    entry.recentLogs.length - MAX_VISIBLE_LOG_LINES,
+  );
+  const visibleLogs = entry.recentLogs.slice(-MAX_VISIBLE_LOG_LINES);
+
+  const hasError = Boolean(entry.error);
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      {entry.meta?.description && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text wrap="wrap">{entry.meta.description}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      <Box />
+      <Box>
+        <Text bold dimColor>
+          {t('Phases')}
+        </Text>
+      </Box>
+      {entry.phases.length === 0 ? (
+        <Box>
+          <Text dimColor>{t('(no phase recorded yet)')}</Text>
+        </Box>
+      ) : (
+        <Fragment>
+          {phaseOverflow > 0 && (
+            <Box>
+              <Text dimColor>{`+${phaseOverflow} ${t('more above')}`}</Text>
+            </Box>
+          )}
+          {visiblePhases.map((phaseTitle, i) => {
+            const isCurrent =
+              entry.status === 'running' &&
+              i === visiblePhases.length - 1 &&
+              entry.currentPhase === phaseTitle;
+            const marker = isCurrent ? '▸' : '·';
+            return (
+              <Box key={`${phaseTitle}-${i}`}>
+                <Text color={isCurrent ? theme.status.success : undefined}>
+                  {`  ${marker} ${phaseTitle}`}
+                </Text>
+              </Box>
+            );
+          })}
+        </Fragment>
+      )}
+
+      {entry.recentLogs.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Logs')}
+            </Text>
+          </Box>
+          {logOverflow > 0 && (
+            <Box>
+              <Text dimColor>{`+${logOverflow} ${t('more above')}`}</Text>
+            </Box>
+          )}
+          {visibleLogs.map((line, i) => (
+            <Box key={`log-${i}`}>
+              <Text wrap="truncate-end" dimColor>
+                {line}
+              </Text>
+            </Box>
+          ))}
+        </Fragment>
+      )}
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              {t('Error')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
               {entry.error}
             </Text>
           </Box>
