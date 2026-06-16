@@ -822,6 +822,108 @@ describe('CoreToolScheduler', () => {
     );
   });
 
+  it('executes only the first request for duplicate callIds in one batch', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'first result',
+      returnDisplay: 'first result',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'read_file',
+        new MockTool({
+          name: 'read_file',
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-dup',
+        },
+        {
+          callId: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-dup',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({ file_path: 'a.ts' }),
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    expect(completedCalls.map((call) => call.request.callId)).toEqual([
+      'dup_id_0001',
+    ]);
+  });
+
+  it('does not dedupe requests with empty callIds in one batch', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'result',
+      returnDisplay: 'result',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'read_file',
+        new MockTool({
+          name: 'read_file',
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-empty',
+        },
+        {
+          callId: '',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-empty',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ file_path: 'a.ts' }),
+    );
+    expect(execute).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ file_path: 'b.ts' }),
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(2);
+  });
+
   function outputOfFirstCall(
     onAllToolCallsComplete: ReturnType<typeof vi.fn>,
   ): string {

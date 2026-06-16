@@ -209,8 +209,8 @@ export default {
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
   'Connect an LLM provider': '連接 LLM 提供商',
-  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
-    '將最近的 AI 回應複製到剪貼簿（/copy N 複製倒數第 N 則）',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    '複製到剪貼簿：AI 回應、程式碼區塊（可依語言篩選）、LaTeX 或 Mermaid。N 為倒數第 N 則訊息，index 為程式碼區塊序號',
   'Show working-tree change stats versus HEAD':
     '顯示工作區相對 HEAD 的變更統計',
   'Could not determine current working directory.': '無法確定當前工作目錄。',
@@ -833,6 +833,7 @@ export default {
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
   'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
+  'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',
   'Could not retrieve tool registry.': '無法檢索工具註冊表',
   "Successfully authenticated and refreshed tools for '{{name}}'.":

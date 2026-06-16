@@ -232,8 +232,8 @@ export default {
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
   'Connect an LLM provider': 'Connect an LLM provider',
-  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
-    'Copy the last AI response to clipboard (/copy N for Nth-latest)',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number',
   'Show working-tree change stats versus HEAD':
     'Show working-tree change stats versus HEAD',
   'Could not determine current working directory.':
@@ -976,6 +976,8 @@ export default {
     'No managed auto-memory entries matched: {{query}}',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
+  'Import MCP servers from Claude configs':
+    'Import MCP servers from Claude configs',
   'Open MCP management dialog': 'Open MCP management dialog',
   'Could not retrieve tool registry.': 'Could not retrieve tool registry.',
   "Successfully authenticated and refreshed tools for '{{name}}'.":

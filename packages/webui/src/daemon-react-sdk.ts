@@ -134,10 +134,16 @@ export { useDaemonPromptStatus as usePromptStatus } from './daemon/session/index
 /** Server-pushed prompt follow-up suggestions for daemon-backed UIs. */
 export { useDaemonFollowupSuggestion } from './daemon/index.js';
 
+/** Notifies when the daemon drains browser-queued messages into the running turn. */
+export { useDaemonMidTurnInjected } from './daemon/index.js';
+
 // ── Constants ─────────────────────────────────────────────────────
 
 /** Ordered list of approval modes for cycling: `['auto', 'suggest', 'ask']`. */
 export { DAEMON_APPROVAL_MODES } from './daemon/index.js';
+
+/** Canonical Agent (sub-agent) tool name + predicate for permission UIs. */
+export { AGENT_TOOL_NAME, isAgentTool } from './constants/toolNames.js';
 
 // ── Types: Connection & Session ───────────────────────────────────
 

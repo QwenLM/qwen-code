@@ -15,11 +15,13 @@ import type {
 import type {
   DaemonMessage,
   DaemonMessageToolCall,
+  DaemonMessageToolCallContent,
   DaemonMessageToolCallStatus,
   DaemonMessageToolKind,
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
+import { isTodoWriteToolName } from '../utils/todos.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -65,6 +67,25 @@ function parseDaemonTodoItemsFromEntries(
     ];
   });
   return todos.length > 0 ? todos : undefined;
+}
+
+/**
+ * Sum the per-block token usage the SDK reducer stamped onto assistant blocks
+ * when several merge into one rendered message. Returns undefined when neither
+ * side has usage, so the message field stays absent rather than a spurious 0/0.
+ */
+function mergeAssistantUsage(
+  a: { inputTokens: number; outputTokens: number; cachedTokens?: number } | undefined,
+  b: { inputTokens: number; outputTokens: number; cachedTokens?: number } | undefined,
+): { inputTokens: number; outputTokens: number; cachedTokens?: number } | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const cachedTokens = (a.cachedTokens ?? 0) + (b.cachedTokens ?? 0);
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    ...(cachedTokens > 0 ? { cachedTokens } : {}),
+  };
 }
 
 export function transcriptBlocksToDaemonMessages(
@@ -184,10 +205,12 @@ export function transcriptBlocksToDaemonMessages(
             ? messages[currentAssistantIdx]
             : undefined;
         if (target && target.role === 'assistant' && !needsNewContentMessage) {
+          const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
+            ...(usage ? { usage } : {}),
           };
           needsNewContentMessage = false;
         } else {
@@ -197,6 +220,7 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
+            ...(textBlock.usage ? { usage: textBlock.usage } : {}),
           });
           currentAssistantIdx = messages.length - 1;
           needsNewContentMessage = false;
@@ -508,13 +532,18 @@ function appendToolCallMessage(
   //
   // Synthetic raw-shell groups (pushed by the `shell` block fallback) use the
   // bare block id without the `tg-` prefix and never absorb real tool calls.
+  // Sub-agent calls and todo_write updates each stand alone in their own group
+  // box instead of being crammed in with the tools around them: an agent renders
+  // an expandable panel, and a todo update is its own collapsible checklist.
+  const isStandalone = (t: DaemonMessageToolCall) =>
+    isSubAgentToolCall(t) || isTodoWriteToolName(t.toolName);
   const last = messages[messages.length - 1];
   if (
     last &&
     last.role === 'tool_group' &&
     last.id.startsWith('tg-') &&
-    !isSubAgentToolCall(toolCall) &&
-    !last.tools.some(isSubAgentToolCall)
+    !isStandalone(toolCall) &&
+    !last.tools.some(isStandalone)
   ) {
     last.tools.push(toolCall);
     return;
@@ -645,6 +674,7 @@ function daemonToolBlockToToolCall(
 ): DaemonMessageToolCall {
   const rawOutput = getToolRawOutput(block);
   const isBackgroundAgent = isBackgroundAgentBlock(block, rawOutput);
+  const content = normalizeToolContent(block.content);
   const statusMap: Record<string, DaemonMessageToolCallStatus> = {
     running: 'in_progress',
     pending: 'pending',
@@ -676,6 +706,7 @@ function daemonToolBlockToToolCall(
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
+    ...(content ? { content } : {}),
   };
 }
 
@@ -811,6 +842,59 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
         ? block.rawOutput
         : block.details,
   };
+}
+
+function normalizeToolContent(
+  value: unknown,
+): DaemonMessageToolCallContent[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const content = value.flatMap((entry): DaemonMessageToolCallContent[] => {
+    const item = getRecord(entry);
+    if (!item) return [];
+
+    const type = item['type'];
+    if (type === 'content') {
+      const body = getRecord(item['content']);
+      if (!body || typeof body['type'] !== 'string') return [];
+      return [
+        {
+          type: 'content',
+          content: { ...body, type: body['type'] },
+        },
+      ];
+    }
+
+    if (type === 'diff') {
+      const newText = item['newText'];
+      if (typeof newText !== 'string') return [];
+
+      const path = item['path'];
+      const oldText = item['oldText'];
+      return [
+        {
+          type: 'diff',
+          ...(typeof path === 'string' ? { path } : {}),
+          ...(typeof oldText === 'string' ? { oldText } : {}),
+          newText,
+        },
+      ];
+    }
+
+    if (type === 'terminal') {
+      const terminalId = item['terminalId'];
+      return [
+        {
+          type: 'terminal',
+          ...(typeof terminalId === 'string' ? { terminalId } : {}),
+        },
+      ];
+    }
+
+    return [];
+  });
+
+  return content.length > 0 ? content : undefined;
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {

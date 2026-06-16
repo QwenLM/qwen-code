@@ -391,6 +391,188 @@ describe('SchemaValidator', () => {
     });
   });
 
+  describe('numeric string coercion', () => {
+    it('should coerce string "3" to integer 3', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          depth: { type: 'integer' },
+        },
+        required: ['depth'],
+      };
+      const params = { depth: '3' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.depth).toBe(3);
+    });
+
+    it('should coerce string "5.5" to number 5.5', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          timeout: { type: 'number' },
+        },
+        required: ['timeout'],
+      };
+      const params = { timeout: '5.5' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.timeout).toBe(5.5);
+    });
+
+    it('should coerce negative numeric strings', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          offset: { type: 'integer' },
+        },
+        required: ['offset'],
+      };
+      const params = { offset: '-10' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.offset).toBe(-10);
+    });
+
+    it('should not coerce non-numeric strings', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          count: { type: 'integer' },
+        },
+        required: ['count'],
+      };
+      const params = { count: 'abc' };
+      expect(SchemaValidator.validate(schema, params)).not.toBeNull();
+    });
+
+    it('should not coerce when schema also accepts string', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          value: { anyOf: [{ type: 'string' }, { type: 'integer' }] },
+        },
+        required: ['value'],
+      };
+      const params = { value: '42' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      // Should remain a string since string is accepted
+      expect(params.value).toBe('42');
+    });
+
+    it('should coerce numeric strings in nested objects', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          options: {
+            type: 'object',
+            properties: {
+              retries: { type: 'integer' },
+            },
+          },
+        },
+      };
+      const params = { options: { retries: '3' } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect((params.options as unknown as { retries: number }).retries).toBe(
+        3,
+      );
+    });
+
+    it('should not affect actual number values', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          depth: { type: 'integer' },
+        },
+        required: ['depth'],
+      };
+      const params = { depth: 3 };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.depth).toBe(3);
+    });
+
+    it('should not corrupt string fields with numeric-looking values', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          count: { type: 'integer' },
+        },
+        required: ['name', 'count'],
+      };
+      const params = { name: '42', count: '7' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.name).toBe('42');
+      expect(params.count).toBe(7);
+    });
+
+    it('should work with draft-2020-12 schema (MCP servers)', () => {
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {
+          time: { type: 'number' },
+        },
+        required: ['time'],
+      };
+      const params = { time: '5' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.time).toBe(5);
+    });
+
+    it('should not coerce decimal string for integer-only schema', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          count: { type: 'integer' },
+        },
+        required: ['count'],
+      };
+      const params = { count: '5.5' };
+      // Should NOT coerce — let validation fail so LLM self-corrects
+      expect(SchemaValidator.validate(schema, params)).not.toBeNull();
+      expect(params.count).toBe('5.5');
+    });
+
+    it('should coerce decimal string when number is accepted via anyOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          value: { anyOf: [{ type: 'integer' }, { type: 'number' }] },
+        },
+        required: ['value'],
+      };
+      const params = { value: '5.5' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.value).toBe(5.5);
+    });
+
+    it('should coerce whole-number decimal string to integer (e.g. "3.0")', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          depth: { type: 'integer' },
+        },
+        required: ['depth'],
+      };
+      const params = { depth: '3.0' };
+      // "3.0" represents an integer — coerce it rather than rejecting.
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.depth).toBe(3);
+    });
+
+    it('should coerce numeric strings inside arrays of integers', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          ports: { type: 'array', items: { type: 'integer' } },
+        },
+        required: ['ports'],
+      };
+      const params = { ports: ['8080', '3000'] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.ports).toEqual([8080, 3000]);
+    });
+  });
+
   describe('JSON Schema version support', () => {
     it('should support JSON Schema draft-2020-12', () => {
       const schema = {

@@ -326,7 +326,7 @@ export async function collectContextData(
   // single render — that resolves the moment any send happens.
   //
   // TODO: plumb the chat history into collectContextData and use
-  // estimatePromptTokens(history, undefined, 0, imageTokenEstimate) here
+  // estimatePromptTokens(history, undefined, 0, 0, imageTokenEstimate) here
   // for same-source-of-truth as the cheap-gate. Defer because Config
   // doesn't expose the active chat instance today.
   const tierTokens = isEstimated ? rawOverhead : apiTotalTokens;

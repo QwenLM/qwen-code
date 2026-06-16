@@ -94,8 +94,12 @@ import {
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
   sessionIdContext,
+  dedupeToolCallsById,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+// Single source of truth shared with the daemon-side answerer (BridgeClient),
+// so a rename can't desync caller and answerer into a silent -32601 latch.
+import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
@@ -134,6 +138,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 // Import modular session components
 import type {
   ApprovalModeValue,
+  CumulativeUsage,
   SessionContext,
   ToolCallStartParams,
 } from './types.js';
@@ -166,7 +171,6 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
-const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
 // means the client silently drops unknown methods; without a deadline the
@@ -416,6 +420,16 @@ export class Session implements SessionContext {
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
   private readonly createdAt: number = Date.now();
+  /**
+   * Running cumulative usage for this session, snapshotted onto each todo/plan
+   * update by PlanEmitter so the web-shell can show per-task token/API spend.
+   */
+  readonly cumulativeUsage: CumulativeUsage = {
+    promptTokens: 0,
+    cachedTokens: 0,
+    candidateTokens: 0,
+    apiTimeMs: 0,
+  };
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state
@@ -2300,8 +2314,14 @@ export class Session implements SessionContext {
         ) {
           break;
         }
+        // ACP processes notifications one-at-a-time (no batch) because each
+        // notification carries distinct task metadata (taskId, status, kind,
+        // toolUseId) used in display and response _meta. Merging would
+        // misattribute the combined response to a single task.
         const item = this.notificationQueue.shift()!;
-        await this.#executeBackgroundNotificationPrompt(item);
+        await sessionIdContext.run(this.config.getSessionId(), () =>
+          this.#executeBackgroundNotificationPromptInner(item),
+        );
       }
     } finally {
       this.notificationProcessing = false;
@@ -2319,15 +2339,6 @@ export class Session implements SessionContext {
         void this.#drainNotificationQueue();
       }
     }
-  }
-
-  async #executeBackgroundNotificationPrompt(
-    item: BackgroundNotificationQueueItem,
-  ): Promise<void> {
-    // Same session-ID binding rationale as #executePrompt.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeBackgroundNotificationPromptInner(item),
-    );
   }
 
   async #executeBackgroundNotificationPromptInner(
@@ -2797,7 +2808,7 @@ export class Session implements SessionContext {
   ): Promise<Part[]> {
     type Batch = { concurrent: boolean; calls: FunctionCall[] };
     const batches: Batch[] = [];
-    for (const fc of functionCalls) {
+    for (const fc of dedupeToolCallsById(functionCalls)) {
       const isAgent = fc.name === ToolNames.AGENT;
       const last = batches[batches.length - 1];
       if (isAgent && last?.concurrent) {
@@ -3315,6 +3326,11 @@ export class Session implements SessionContext {
                   locations: invocation.toolLocations(),
                   kind: mappedKind,
                   rawInput: args,
+                  // Carry the tool name so consumers can give specific tools
+                  // (e.g. the Agent tool) dedicated permission UI without
+                  // relying on a protocol `kind` ACP can't carry. The tool_call
+                  // frame already ships _meta.toolName; mirror it here.
+                  _meta: { toolName },
                 },
               };
 
