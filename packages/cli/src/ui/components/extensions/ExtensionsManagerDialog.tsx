@@ -66,7 +66,10 @@ export function ExtensionsManagerDialog({
     pluginChoiceRequests,
   } = useUIState();
   const { columns } = useTerminalSize();
-  const boxWidth = columns - 4;
+  // Cap the width to the app's main content area (AppContainer caps it at 100).
+  // Without this the dialog grows to the full terminal width on wide terminals
+  // and overflows its container, clipping the right-aligned status column.
+  const boxWidth = Math.min(columns - 4, 100);
 
   // Install flows raise interactive requests (consent, setting input, plugin
   // choice). They are rendered here, inside the dialog, so the dialog stays

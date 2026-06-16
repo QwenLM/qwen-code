@@ -5,6 +5,8 @@
  */
 
 import { render } from 'ink-testing-library';
+import { render as inkRender } from 'ink';
+import { EventEmitter } from 'node:events';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { waitFor } from '@testing-library/react';
 import { ExtensionsManagerDialog } from './ExtensionsManagerDialog.js';
@@ -140,6 +142,63 @@ const renderDialog = (
     </SettingsContext.Provider>,
   );
 
+const stripAnsi = (s: string): string =>
+  // eslint-disable-next-line no-control-regex
+  s.replace(/\u001b\[[0-9;]*m/g, '');
+
+// ink-testing-library hard-codes an 80/100-column buffer, which is too narrow
+// to reproduce wide-terminal layout bugs. Render through ink directly with a
+// custom wide stdout so the dialog lays out at the requested width.
+const renderWide = (config: Config, columns: number) => {
+  let lastFrame = '';
+  const stdout = Object.assign(new EventEmitter(), {
+    columns,
+    rows: 50,
+    write: (frame: string) => {
+      lastFrame = frame;
+    },
+  });
+  const stderr = Object.assign(new EventEmitter(), {
+    columns,
+    rows: 50,
+    write: () => {},
+  });
+  // A TTY-like stdin so KeypressProvider can enable raw mode (ink-testing-
+  // library supplies one; ink's real render against a custom stdout does not).
+  const stdin = Object.assign(new EventEmitter(), {
+    isTTY: true,
+    setRawMode: () => {},
+    setEncoding: () => {},
+    resume: () => {},
+    pause: () => {},
+    ref: () => {},
+    unref: () => {},
+    read: () => null,
+  });
+  const instance = inkRender(
+    <SettingsContext.Provider value={mockSettings}>
+      <ShellFocusContext.Provider value={true}>
+        <UIStateContext.Provider value={createUIState()}>
+          <KeypressProvider kittyProtocolEnabled={false}>
+            <ExtensionsManagerDialog onClose={vi.fn()} config={config} />
+          </KeypressProvider>
+        </UIStateContext.Provider>
+      </ShellFocusContext.Provider>
+    </SettingsContext.Provider>,
+    {
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      // debug:true makes ink write the full frame synchronously (as
+      // ink-testing-library does) instead of throttled cursor-diff output.
+      debug: true,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    },
+  );
+  return { lastFrame: () => lastFrame, unmount: instance.unmount };
+};
+
 describe('ExtensionsManagerDialog (tabbed)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -151,6 +210,47 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('Discover');
     expect(frame).toContain('Installed');
     expect(frame).toContain('Sources');
+  });
+
+  it('caps its width on a wide terminal so the status column is not clipped', async () => {
+    // Regression: the dialog computed boxWidth = columns - 4 with no cap, while
+    // the app's main content area is capped at 100 cols (AppContainer). On a
+    // wide terminal the dialog overflowed its container and the right-aligned
+    // status column ("Extension v… (…)") was clipped off-screen to a sliver
+    // ("扩…"). The dialog must stay within ~100 columns regardless of terminal
+    // width. Rendered through a 200-column stdout to exercise the wide case.
+    const original = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+    Object.defineProperty(process.stdout, 'columns', {
+      value: 200,
+      configurable: true,
+    });
+    let unmount: (() => void) | undefined;
+    try {
+      const r = renderWide(
+        createConfig(
+          createManager({
+            extensions: [mockExtension('alpha'), mockExtension('beta', false)],
+          }),
+        ),
+        200,
+      );
+      unmount = r.unmount;
+      await waitFor(() => {
+        expect(stripAnsi(r.lastFrame())).toContain('alpha');
+      });
+      const frame = stripAnsi(r.lastFrame());
+      // No rendered line spills past the ~100-col content area (the uncapped
+      // dialog produced ~196-col lines and clipped the status column).
+      const widest = Math.max(...frame.split('\n').map((line) => line.length));
+      expect(widest).toBeLessThanOrEqual(102);
+      // And the status column is fully present, not truncated to a sliver.
+      expect(frame).toMatch(/v1\.0\.0\s*\([^)]+\)/);
+    } finally {
+      unmount?.();
+      if (original) {
+        Object.defineProperty(process.stdout, 'columns', original);
+      }
+    }
   });
 
   it('shows discovered plugins on the Discover tab', async () => {
