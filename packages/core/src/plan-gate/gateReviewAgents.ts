@@ -114,22 +114,19 @@ export function formatEvidence(bundle: EvidenceBundle): string {
  * Signal isolation: The gate agent creates its own independent AbortController
  * with a timeout, rather than directly inheriting the parent's signal. This
  * prevents transient parent-side issues (stream errors, round cleanup) from
- * cascading into the gate agent. The parent signal is only pre-checked before
- * starting — it is NOT monitored during execution. If the parent is already
- * aborted when this function is called, it throws immediately.
+ * cascading into the gate agent. The parent signal is intentionally not
+ * checked or monitored — the gate agent's own 5-minute timeout (matching
+ * runConfig.max_time_minutes) is the sole cancellation mechanism.
  *
  * Returns the parsed `GateAgentResult`, or throws on unrecoverable failure.
  */
 export async function runGateAgent(
   config: Config,
   bundle: EvidenceBundle,
-  parentSignal: AbortSignal,
+  // parentSignal is accepted for API consistency but intentionally unused:
+  // the gate agent is fully isolated from parent-side aborts.
+  _parentSignal: AbortSignal,
 ): Promise<GateAgentResult> {
-  // Fast-fail if the parent context is already cancelled before we start
-  if (parentSignal.aborted) {
-    throw new Error('Parent signal already aborted before gate agent start');
-  }
-
   const evidence = formatEvidence(bundle);
   const taskPrompt = buildReviewPrompt(evidence);
 

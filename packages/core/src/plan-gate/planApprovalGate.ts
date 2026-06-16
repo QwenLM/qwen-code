@@ -170,10 +170,15 @@ async function runAgentWithRetry(
 
 /**
  * Sleep for `ms` milliseconds, but return early if `signal` is aborted.
+ * Attaches the abort listener first, then re-checks `signal.aborted` to
+ * eliminate the race window between the initial check and listener setup.
  */
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
   return new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
     const onAbort = () => {
       clearTimeout(timer);
       resolve();
@@ -183,6 +188,12 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
       resolve();
     }, ms);
     signal.addEventListener('abort', onAbort, { once: true });
+    // Re-check after attaching listener to close the race window
+    if (signal.aborted) {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }
   });
 }
 
