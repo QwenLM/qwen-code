@@ -6,17 +6,6 @@
 
 import { parse } from 'shell-quote';
 
-const ESCAPED_AMPERSAND_PLACEHOLDER = '\x00ESCAPED_AMPERSAND\x00';
-const ESCAPED_BACKSLASH_PLACEHOLDER = '\x00ESCAPED_BACKSLASH\x00';
-
-const ESCAPED_AMPERSAND_PLACEHOLDER_RE = new RegExp(
-  ESCAPED_AMPERSAND_PLACEHOLDER,
-  'g',
-);
-const ESCAPED_BACKSLASH_PLACEHOLDER_RE = new RegExp(
-  ESCAPED_BACKSLASH_PLACEHOLDER,
-  'g',
-);
 const BRE_OPERATORS = new Set(['+', '?', '|', '(', ')', '{', '}']);
 
 export interface SedEditInfo {
@@ -361,18 +350,27 @@ function buildReplacement(
   captures: readonly string[],
   replacement: string,
 ): string {
-  let prepared = replacement
-    .replace(/\\\//g, '/')
-    .replace(/\\\\/g, ESCAPED_BACKSLASH_PLACEHOLDER)
-    .replace(/\\&/g, ESCAPED_AMPERSAND_PLACEHOLDER);
+  let result = '';
+  for (let i = 0; i < replacement.length; i++) {
+    const char = replacement[i]!;
+    if (char === '\\' && i + 1 < replacement.length) {
+      const next = replacement[i + 1]!;
+      if (next === '/') {
+        result += '/';
+      } else if (next === '&') {
+        result += '&';
+      } else if (next === '\\') {
+        result += '\\';
+      } else if (next >= '1' && next <= '9') {
+        result += captures[Number(next) - 1] ?? '';
+      } else {
+        result += char + next;
+      }
+      i++;
+      continue;
+    }
 
-  prepared = prepared.replace(
-    /\\([1-9])/g,
-    (_match, digit: string) => captures[Number(digit) - 1] ?? '',
-  );
-
-  return prepared
-    .replace(/&/g, match)
-    .replace(ESCAPED_AMPERSAND_PLACEHOLDER_RE, '&')
-    .replace(ESCAPED_BACKSLASH_PLACEHOLDER_RE, '\\');
+    result += char === '&' ? match : char;
+  }
+  return result;
 }

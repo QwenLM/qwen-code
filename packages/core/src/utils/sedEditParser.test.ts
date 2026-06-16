@@ -74,11 +74,32 @@ describe('sedEditParser', () => {
     expect(applySedSubstitution('foo foo', sedInfo!)).toBe('[foo] [foo]');
   });
 
+  it('supports escaped replacement ampersands', () => {
+    const sedInfo = parseSedEditCommand("sed -i 's/foo/\\&/g' file.txt");
+
+    expect(sedInfo).not.toBeNull();
+    expect(applySedSubstitution('foo foo', sedInfo!)).toBe('& &');
+  });
+
+  it('supports escaped replacement delimiters', () => {
+    const slashSedInfo = parseSedEditCommand("sed -i 's/foo/\\//g' file.txt");
+
+    expect(slashSedInfo).not.toBeNull();
+    expect(applySedSubstitution('foo foo', slashSedInfo!)).toBe('/ /');
+  });
+
   it('supports literal backslashes in replacements', () => {
     const sedInfo = parseSedEditCommand("sed -i 's/foo/\\\\bar/g' file.txt");
 
     expect(sedInfo).not.toBeNull();
     expect(applySedSubstitution('foo foo', sedInfo!)).toBe('\\bar \\bar');
+  });
+
+  it('keeps literal backslashes before replacement ampersands', () => {
+    const sedInfo = parseSedEditCommand("sed -i 's/foo/\\\\&/g' file.txt");
+
+    expect(sedInfo).not.toBeNull();
+    expect(applySedSubstitution('foo foo', sedInfo!)).toBe('\\foo \\foo');
   });
 
   it('keeps unescaped BRE braces literal', () => {
