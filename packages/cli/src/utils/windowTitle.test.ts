@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { computeWindowTitle } from './windowTitle.js';
+import { computeWindowTitle, writeTerminalTitle } from './windowTitle.js';
 
 describe('computeWindowTitle', () => {
   let originalEnv: NodeJS.ProcessEnv;
@@ -20,40 +20,61 @@ describe('computeWindowTitle', () => {
   });
 
   it('should use default Qwen title when CLI_TITLE is not set', () => {
+    const result = computeWindowTitle();
+    expect(result).toBe('Qwen - qwen');
+  });
+
+  it('should use CLI_TITLE environment variable when set', () => {
+    vi.stubEnv('CLI_TITLE', 'Custom Title');
+    const result = computeWindowTitle();
+    expect(result).toBe('Custom Title');
+  });
+
+  it('should use Qwen prefix with folder name when CLI_TITLE is not set', () => {
     const result = computeWindowTitle('my-project');
     expect(result).toBe('Qwen - my-project');
   });
 
-  it('should use CLI_TITLE environment variable when set', () => {
+  it('should prefer CLI_TITLE over folder name', () => {
     vi.stubEnv('CLI_TITLE', 'Custom Title');
     const result = computeWindowTitle('my-project');
     expect(result).toBe('Custom Title');
   });
 
-  it('should remove control characters from title', () => {
+  it('should remove C0 control characters from title', () => {
     vi.stubEnv('CLI_TITLE', 'Title\x1b[31m with \x07 control chars');
-    const result = computeWindowTitle('my-project');
+    const result = computeWindowTitle();
     // The \x1b[31m (ANSI escape sequence) and \x07 (bell character) should be removed
     expect(result).toBe('Title[31m with  control chars');
   });
 
-  it('should handle folder names with control characters', () => {
-    const result = computeWindowTitle('project\x07name');
-    expect(result).toBe('Qwen - projectname');
+  it('should remove C1 control characters from title', () => {
+    vi.stubEnv('CLI_TITLE', 'Title\x9C with \x90 C1\x9F control');
+    const result = computeWindowTitle();
+    expect(result).toBe('Title with  C1 control');
+  });
+});
+
+describe('writeTerminalTitle', () => {
+  it('should write both common terminal title sequences with 80-char padding', () => {
+    const write = vi.fn();
+
+    writeTerminalTitle(write, 'Fix terminal title');
+
+    const padded = 'Fix terminal title'.padEnd(80, ' ');
+    expect(write).toHaveBeenCalledWith(
+      `\x1b]0;${padded}\x07\x1b]2;${padded}\x07`,
+    );
   });
 
-  it('should handle empty folder name', () => {
-    const result = computeWindowTitle('');
-    expect(result).toBe('Qwen - ');
-  });
+  it('should pad short titles to 80 characters', () => {
+    const write = vi.fn();
 
-  it('should handle folder names with spaces', () => {
-    const result = computeWindowTitle('my project');
-    expect(result).toBe('Qwen - my project');
-  });
+    writeTerminalTitle(write, 'qwen');
 
-  it('should handle folder names with special characters', () => {
-    const result = computeWindowTitle('project-name_v1.0');
-    expect(result).toBe('Qwen - project-name_v1.0');
+    const padded = 'qwen'.padEnd(80, ' ');
+    expect(write).toHaveBeenCalledWith(
+      `\x1b]0;${padded}\x07\x1b]2;${padded}\x07`,
+    );
   });
 });

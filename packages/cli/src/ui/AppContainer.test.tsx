@@ -18,6 +18,7 @@ import { useContext, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
+  formatSessionWindowTitle,
   getNextRenderMode,
   isRenderModeToggleKey,
   mergeStartupWarnings,
@@ -191,15 +192,6 @@ describe('AppContainer State Management', () => {
 
     // Initialize mock stdout for terminal title tests
     mockStdout = { write: vi.fn() };
-
-    // Mock computeWindowTitle function to centralize title logic testing
-    vi.mock('../utils/windowTitle.js', async () => ({
-      computeWindowTitle: vi.fn(
-        (folderName: string) =>
-          // Default behavior: return "Gemini - {folderName}" unless CLI_TITLE is set
-          process.env['CLI_TITLE'] || `Gemini - ${folderName}`,
-      ),
-    }));
 
     capturedUIState = null!;
     capturedUIActions = null!;
@@ -2169,12 +2161,30 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Terminal Title Update Feature', () => {
+    /**
+     * Helper to build the expected padded OSC title escape sequence.
+     * writeTerminalTitle pads the title to 80 characters with trailing
+     * spaces and writes both \x1b]0; (icon+title) and \x1b]2; (title).
+     */
+    const titleEscape = (title: string) => {
+      const padded = title.padEnd(80, ' ');
+      return `\x1b]0;${padded}\x07\x1b]2;${padded}\x07`;
+    };
+
     beforeEach(() => {
-      // Reset mock stdout for each test
+      // Reset mock stdout for each test. The title useEffect now uses
+      // process.stdout.write directly (to avoid Ink proxy corruption of
+      // OSC escape sequences), so we spy on that.
       mockStdout = { write: vi.fn() };
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     });
 
-    it('should not update terminal title when showStatusInTitle is false', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+
+    it('should update terminal title when showStatusInTitle is false', () => {
       // Arrange: Set up mock settings with showStatusInTitle disabled
       const mockSettingsWithShowStatusFalse = {
         ...mockSettings,
@@ -2198,11 +2208,12 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that no title-related writes occurred
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
-      expect(titleWrites).toHaveLength(0);
+      // Assert: Check that the default title is written
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
+      expect(titleWrites).toHaveLength(1);
+      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
@@ -2231,14 +2242,14 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that no title-related writes occurred
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(0);
       unmount();
     });
 
-    it('should update terminal title with thought subject when in active state', () => {
+    it('should keep default terminal title when active without a session name', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2274,14 +2285,12 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that title was updated with thought subject
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      // Assert: Check that title uses the default (not thought subject)
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${thoughtSubject.padEnd(80, ' ')}\x07`,
-      );
+      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
@@ -2320,18 +2329,16 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that title was updated with default Idle text
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      // Assert: Check that title was updated with default text
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${'Gemini - workspace'.padEnd(80, ' ')}\x07`,
-      );
+      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
-    it('should update terminal title when in WaitingForConfirmation state with thought subject', () => {
+    it('should keep default terminal title when waiting for confirmation without a session name', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2367,18 +2374,16 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that title was updated with confirmation text
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      // Assert: Check that confirmation status does not replace the session title
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${thoughtSubject.padEnd(80, ' ')}\x07`,
-      );
+      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
-    it('should pad title to exactly 80 characters', () => {
+    it('should pad the terminal title to 80 characters', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2415,21 +2420,20 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that title is padded to exactly 80 characters
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
       const calledWith = titleWrites[0][0];
-      const expectedTitle = shortTitle.padEnd(80, ' ');
-
-      expect(calledWith).toContain(shortTitle);
+      expect(calledWith).toContain('Qwen - workspace');
+      expect(calledWith).toContain('\x1b]0;');
       expect(calledWith).toContain('\x1b]2;');
       expect(calledWith).toContain('\x07');
-      expect(calledWith).toBe('\x1b]2;' + expectedTitle + '\x07');
+      expect(calledWith).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
-    it('should use correct ANSI escape code format', () => {
+    it('should use correct ANSI escape code format with padding', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2466,16 +2470,15 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that the correct ANSI escape sequence is used
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      const expectedEscapeSequence = `\x1b]2;${title.padEnd(80, ' ')}\x07`;
-      expect(titleWrites[0][0]).toBe(expectedEscapeSequence);
+      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
-    it('should use CLI_TITLE environment variable when set', () => {
+    it('should format terminal title from CLI_TITLE when set', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2490,7 +2493,7 @@ describe('AppContainer State Management', () => {
       } as unknown as LoadedSettings;
 
       // Mock CLI_TITLE environment variable
-      vi.stubEnv('CLI_TITLE', 'Custom Gemini Title');
+      vi.stubEnv('CLI_TITLE', 'Custom Title');
 
       // Mock the streaming state as Idle with no thought
       mockedUseGeminiStream.mockReturnValue({
@@ -2513,15 +2516,83 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that title was updated with CLI_TITLE value
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      // Assert: formatSessionWindowTitle falls back to computeWindowTitle()
+      // which respects CLI_TITLE, so the custom title appears padded to 80 chars.
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${'Custom Gemini Title'.padEnd(80, ' ')}\x07`,
+      expect(titleWrites[0][0]).toBe(titleEscape('Custom Title'));
+      unmount();
+    });
+
+    it('should register for recorded session titles and format them in the terminal title', async () => {
+      const mockSettingsWithTitleEnabled = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            showStatusInTitle: true,
+            hideWindowTitle: false,
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      let titleRecordedCallback: ((customTitle: string) => void) | undefined;
+      let registeredTitleRecordedCallback:
+        | ((customTitle: string) => void)
+        | undefined;
+      const setTitleRecordedCallback = vi.fn(
+        (callback: ((customTitle: string) => void) | undefined) => {
+          titleRecordedCallback = callback;
+          if (callback) {
+            registeredTitleRecordedCallback = callback;
+          }
+        },
+      );
+      vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
+        setTitleRecordedCallback,
+      } as unknown as NonNullable<
+        ReturnType<Config['getChatRecordingService']>
+      >);
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettingsWithTitleEnabled}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(registeredTitleRecordedCallback).toBeDefined();
+      // formatSessionWindowTitle returns the session name directly when set.
+      expect(formatSessionWindowTitle('Fix terminal title')).toBe(
+        'Fix terminal title',
+      );
+      // When null, falls back to computeWindowTitle() which returns
+      // 'Qwen - qwen' when CLI_TITLE is not set.
+      expect(formatSessionWindowTitle(null)).toBe('Qwen - qwen');
+      // When null with a folder name, adds the Qwen prefix.
+      expect(formatSessionWindowTitle(null, 'my-project')).toBe(
+        'Qwen - my-project',
       );
       unmount();
+      expect(titleRecordedCallback).toBeUndefined();
     });
   });
 
