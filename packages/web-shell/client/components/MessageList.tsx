@@ -376,14 +376,21 @@ function itemTimestamp(item: DisplayItem): number | undefined {
  * top-level assistant blocks, so summing the turn's assistant messages yields
  * its true total cost.
  */
-function itemAssistantUsage(
-  item: DisplayItem,
-):
-  | { inputTokens: number; outputTokens: number; cachedTokens?: number }
+function itemAssistantUsage(item: DisplayItem):
+  | {
+      inputTokens: number;
+      outputTokens: number;
+      cachedTokens?: number;
+    }
   | undefined {
   return item.type === 'message' && item.message.role === 'assistant'
     ? item.message.usage
     : undefined;
+}
+
+function itemToolCallCount(item: DisplayItem): number {
+  if (item.type === 'parallel_agents') return item.agents.length;
+  return item.message.role === 'tool_group' ? item.message.tools.length : 0;
 }
 
 /**
@@ -492,10 +499,14 @@ export function applyTurnCollapse(
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedTokens = 0;
+    let toolCallCount = 0;
     let hasUsage = false;
     for (let i = start + 1; i <= end; i++) {
-      if (isHideableStep(items[i], i === answerIdx)) hiddenCount++;
-      const ts = itemTimestamp(items[i]);
+      const isStep = isHideableStep(items[i], i === answerIdx);
+      if (isStep) hiddenCount++;
+      toolCallCount += itemToolCallCount(items[i]);
+      const ts =
+        isStep || i === answerIdx ? itemTimestamp(items[i]) : undefined;
       if (ts !== undefined) {
         lastStepTs = lastStepTs === undefined ? ts : Math.max(lastStepTs, ts);
       }
@@ -547,6 +558,7 @@ export function applyTurnCollapse(
         ...(elapsedMs !== undefined ? { elapsedMs } : {}),
         ...(hasUsage ? { inputTokens, outputTokens } : {}),
         ...(cachedTokens > 0 ? { cachedTokens } : {}),
+        ...(toolCallCount > 0 ? { toolCallCount } : {}),
         ...(isActiveTurn && promptTs !== undefined
           ? { liveStartedAt: promptTs }
           : {}),

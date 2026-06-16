@@ -18,7 +18,10 @@ interface UserMessageProps {
   onToggleCollapse?: (turnId: string) => void;
 }
 
-type Translate = (key: string, vars?: Record<string, string | number>) => string;
+type Translate = (
+  key: string,
+  vars?: Record<string, string | number>,
+) => string;
 
 /** Compact turn duration: `820ms` · `12.4s` · `1m 5s`. */
 function formatDuration(ms: number): string {
@@ -51,7 +54,10 @@ function metricsText(
   if (elapsedMs !== undefined) {
     parts.push(formatDuration(elapsedMs));
   }
-  if (collapse.inputTokens !== undefined && collapse.outputTokens !== undefined) {
+  if (
+    collapse.inputTokens !== undefined &&
+    collapse.outputTokens !== undefined
+  ) {
     const cachedTokens = collapse.cachedTokens ?? 0;
     const cached =
       cachedTokens > 0 && collapse.inputTokens > 0
@@ -64,6 +70,9 @@ function metricsText(
         collapse.outputTokens,
       )}`,
     );
+  }
+  if (collapse.toolCallCount !== undefined && collapse.toolCallCount > 0) {
+    parts.push(t('turn.toolCalls', { count: collapse.toolCallCount }));
   }
   return parts.join(' · ');
 }

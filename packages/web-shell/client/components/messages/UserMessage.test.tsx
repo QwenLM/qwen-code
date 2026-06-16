@@ -106,6 +106,7 @@ describe('UserMessage collapse toggle', () => {
         collapse={head({
           hiddenCount: 5,
           elapsedMs: 12_400,
+          toolCallCount: 3,
           inputTokens: 3100,
           outputTokens: 5100,
         })}
@@ -115,8 +116,10 @@ describe('UserMessage collapse toggle', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('5 steps');
     expect(text).toContain('12.4s');
+    expect(text).toContain('3 tool calls');
     expect(text).toContain('↑3.1k');
     expect(text).toContain('↓5.1k');
+    expect(text.indexOf('↓5.1k')).toBeLessThan(text.indexOf('3 tool calls'));
   });
 
   it('puts the chevron + step count in the toggle, metrics inert', () => {
@@ -152,8 +155,7 @@ describe('UserMessage collapse toggle', () => {
     };
     const metaOf = (c: HTMLElement) =>
       c.querySelector('button')!.nextElementSibling!.textContent;
-    const btnOf = (c: HTMLElement) =>
-      c.querySelector('button')!.textContent;
+    const btnOf = (c: HTMLElement) => c.querySelector('button')!.textContent;
     const collapsed = render(
       <UserMessage
         content="hi"
