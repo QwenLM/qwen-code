@@ -14,11 +14,12 @@ import type {
   AcpBridge,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
-import { OpCode } from './types.js';
+import { qrConnect } from '@tencent-connect/qqbot-connector';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { OpCode, Intent } from './types.js';
 import type { QQChannelConfig, QQMessageEvent, QQGroupMessageEvent } from './types.js';
-
-// TODO: Consider splitting into separate modules (gateway.ts, send.ts, auth.ts)
-//       to align with weixin channel structure.
 
 export class QQChannel extends ChannelBase {
   private ws: WebSocket | null = null;
@@ -50,21 +51,8 @@ export class QQChannel extends ChannelBase {
   // ── ChannelBase interface ──────────────────────────────────────
 
   async connect(): Promise<void> {
-    // TODO: Inject channel instructions via this.config.instructions
-    //       (currently not set; weixin channel sets image capability docs here).
-
-    if (!this.qqConfig.appID || !this.qqConfig.appSecret) {
-      throw new Error(
-        'QQ Bot requires appID and appSecret in channel config.\n' +
-        // TODO: Add QR code login flow (similar to @tencent-connect/qqbot-connector)
-        'Example: { "type": "qq", "appID": "YOUR_APP_ID", "appSecret": "YOUR_APP_SECRET" }',
-      );
-    }
-
     await this.fetchToken();
     await this.connectGateway();
-    // TODO: Implement onPromptStart/onPromptEnd typing indicator
-    //       (QQ Bot API may not support this — needs research).
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -105,7 +93,7 @@ export class QQChannel extends ChannelBase {
 
         if (!resp.ok) {
           process.stderr.write(
-            `[QQ:${this.name}] Send HTTP ${resp.status}\n`,
+            `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body.msg_seq ?? '-'})\n`,
           );
         }
       } catch (e) {
@@ -125,7 +113,46 @@ export class QQChannel extends ChannelBase {
   // ── Token ──────────────────────────────────────────────────────
 
   private async fetchToken(): Promise<void> {
-    const { appID, appSecret } = this.qqConfig;
+    const credsFile = join(
+      homedir(),
+      '.qwen',
+      'channels',
+      `${this.name}-credentials.json`,
+    );
+    let appID = this.qqConfig.appID;
+    let appSecret = this.qqConfig.appSecret;
+
+    // Try load from persisted credentials file first
+    if ((!appID || !appSecret) && existsSync(credsFile)) {
+      try {
+        const saved = JSON.parse(readFileSync(credsFile, 'utf-8'));
+        appID = saved.appId;
+        appSecret = saved.appSecret;
+        this.qqConfig.appID = appID;
+        this.qqConfig.appSecret = appSecret;
+      } catch {
+        /* corrupt file, fall through */
+      }
+    }
+
+    // If no credentials, launch QR code login
+    if (!appID || !appSecret) {
+      process.stderr.write(
+        `[QQ:${this.name}] No credentials, scan QR code with QQ...\n`,
+      );
+      const [creds] = await qrConnect();
+      appID = creds.appId;
+      appSecret = creds.appSecret;
+      this.qqConfig.appID = appID;
+      this.qqConfig.appSecret = appSecret;
+      // Persist to disk
+      try {
+        mkdirSync(join(homedir(), '.qwen', 'channels'), { recursive: true });
+        writeFileSync(credsFile, JSON.stringify({ appId: appID, appSecret }));
+      } catch {
+        /* non-fatal */
+      }
+    }
 
     const resp = await fetch('https://bots.qq.com/app/getAppAccessToken', {
       method: 'POST',
@@ -135,7 +162,9 @@ export class QQChannel extends ChannelBase {
 
     if (!resp.ok) {
       const body = await resp.text().catch(() => '');
-      throw new Error(`QQ Bot token request failed (HTTP ${resp.status}): ${body}`);
+      throw new Error(
+        `QQ Bot token request failed (HTTP ${resp.status}): ${body}`,
+      );
     }
 
     const data = (await resp.json()) as { access_token?: string };
@@ -244,9 +273,6 @@ export class QQChannel extends ChannelBase {
         } else if (t === 'C2C_MESSAGE_CREATE') {
           this.handleC2C(msg.d as unknown as QQMessageEvent);
         } else if (t === 'GROUP_AT_MESSAGE_CREATE') {
-          // TODO: Group chat message handling — code path exists but
-          //       has NOT been verified end-to-end. C2C is the primary
-          //       tested path.
           this.handleGroup(msg.d as unknown as QQGroupMessageEvent);
         }
         break;
@@ -270,7 +296,7 @@ export class QQChannel extends ChannelBase {
         op: OpCode.IDENTIFY,
         d: {
           token: `QQBot ${this.accessToken}`,
-          intents: (1 << 25) | (1 << 12), // GROUP_AT_MESSAGE | C2C_MESSAGE
+          intents: Intent.C2C_MESSAGE | Intent.GROUP_AT_MESSAGE,
           shard: [0, 1],
           properties: {},
         },
@@ -316,8 +342,7 @@ export class QQChannel extends ChannelBase {
   }
 
   private handleGroup(event: QQGroupMessageEvent): void {
-    const raw = event as unknown as Record<string, unknown>;
-    const chatId = (raw.group_openid as string) || event.author.id;
+    const chatId = event.group_openid || event.author.id;
     this.chatTypeMap.set(chatId, 'group');
     this.replyMsgId.set(chatId, event.id);
     // Strip bot @mention prefix from group messages

@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@qwen-code/channel-base": "file:../base",
+    "@tencent-connect/qqbot-connector": "^1.1.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
