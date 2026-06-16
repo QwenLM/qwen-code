@@ -30,7 +30,6 @@ docker compose run --rm synapse generate
 
 docker compose up -d
 # Readiness: curl http://<host>:8008/_matrix/client/versions  → expect 200.
-# Wait until http://<host>:8008/_matrix/client/versions returns 200.
 ```
 
 ## 2. Run the test
@@ -57,7 +56,20 @@ an encrypted room, and asserts the bot decrypts.
 2. **Unverified-device policy.** The sender must be willing to share keys to the
    bot's (unverified) device. If your Synapse / SDK build withholds keys from
    unverified devices, the bot never decrypts — verify the device or enable
-   share-to-unverified on the sender. This is the #1 silent failure.
+   share-to-unverified on the sender. (matrix-bot-sdk's default shares to
+   unverified, so this passed out of the box — but it's the #1 silent failure if a
+   build changes the policy.)
+3. **Runtime-erased const enum.** matrix-bot-sdk's `RustSdkCryptoStoreType` is a
+   `const enum` — it type-checks but is **erased at runtime** under esbuild
+   (`.Sqlite` → `undefined`), which silently makes the adapter degrade to `null`.
+   The store-type value is sourced from the native `@matrix-org/matrix-sdk-crypto-
+nodejs` `StoreType` instead; don't "simplify" it back to the matrix-bot-sdk
+   re-export.
+
+## Status
+
+Verified **green** end-to-end (2026-06-15) against a self-hosted Synapse container:
+two provisioned crypto users, an encrypted room, bot decrypts in ~12 s.
 
 ## Teardown
 
