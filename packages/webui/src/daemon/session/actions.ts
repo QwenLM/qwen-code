@@ -250,7 +250,10 @@ export function createDaemonSessionActions({
         ) {
           activePromptsRef.current.delete(session.sessionId);
         }
-        if (sessionRef.current?.sessionId === session.sessionId) {
+        if (
+          sessionRef.current?.sessionId === session.sessionId &&
+          !activePromptsRef.current.has(session.sessionId)
+        ) {
           setPromptStatus('idle');
         }
       }
@@ -850,7 +853,7 @@ export function getPromptSettledKey(
   sessionId: string,
   promptId: string,
 ): string {
-  return `${sessionId}:${promptId}`;
+  return JSON.stringify([sessionId, promptId]);
 }
 
 function getModeFromSessionContext(

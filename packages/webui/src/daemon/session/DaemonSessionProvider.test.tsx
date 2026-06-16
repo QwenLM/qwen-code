@@ -837,6 +837,7 @@ describe('DaemonSessionProvider', () => {
         stopReason: 'end_turn',
       });
     });
+    expect(streamingState).toBe('idle');
   });
 
   it('rejects the prompt when turn_error arrives before acceptance returns', async () => {
