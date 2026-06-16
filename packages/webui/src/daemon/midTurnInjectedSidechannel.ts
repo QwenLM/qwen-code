@@ -52,7 +52,13 @@ export function publishSidechannelMidTurnInjected(
   // a later mutation of the source can't change what the consumer reconciles.
   pending = [
     ...pending,
-    { sessionId: data.sessionId, messages: [...data.messages] },
+    {
+      sessionId: data.sessionId,
+      messages: [...data.messages],
+      ...(data.originatorClientId
+        ? { originatorClientId: data.originatorClientId }
+        : {}),
+    },
   ];
   notifyMidTurnInjectedListeners();
 }
@@ -94,5 +100,13 @@ export function parseSidechannelMidTurnInjected(
       typeof message === 'string' && message.length > 0,
   );
   if (stringMessages.length === 0) return undefined;
-  return { sessionId, messages: stringMessages };
+  // `originatorClientId` lives on the SSE envelope (top-level), not in `data` —
+  // the daemon publishes one frame per originator so consumers dedupe only
+  // their own queue.
+  const originatorClientId = record['originatorClientId'];
+  return {
+    sessionId,
+    messages: stringMessages,
+    ...(typeof originatorClientId === 'string' ? { originatorClientId } : {}),
+  };
 }

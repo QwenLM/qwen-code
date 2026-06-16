@@ -78,6 +78,7 @@ import type {
   BridgeClientRequestContext,
   CloseSessionOpts,
   AcpSessionBridge,
+  MidTurnQueueEntry,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -241,7 +242,7 @@ interface SessionEntry {
    * (preventing a stale next-turn re-injection) and resent by the browser as
    * a fresh prompt.
    */
-  midTurnMessageQueue: string[];
+  midTurnMessageQueue: MidTurnQueueEntry[];
   /**
    * Per-session model-change FIFO. Prevents two concurrent
    * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
@@ -663,11 +664,13 @@ const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
-// Per-session cap on undrained mid-turn messages. Mirrors the bound `/prompt`
-// gets from `maxPendingPromptsPerSession`: a busy turn with no drain point (a
-// long tool-free generation) must not let a client pin unbounded messages in
-// the in-memory queue. Past the cap, `enqueueMidTurnMessage` returns
-// `{ accepted: false }` and the browser keeps the message for the next turn.
+// Per-session cap on undrained mid-turn messages: a busy turn with no drain
+// point (a long tool-free generation) must not let a client pin unbounded
+// messages in the in-memory queue. Past the cap, `enqueueMidTurnMessage`
+// returns `{ accepted: false }` and the browser keeps the message for the next
+// turn. Intentionally a fixed const for now; if this ever needs tuning, promote
+// it to a `BridgeOptions` knob the same way `maxPendingPromptsPerSession`
+// (the analogous bound `/prompt` enforces, default 5) is wired.
 const MAX_MID_TURN_QUEUE_DEPTH = 20;
 const DEFAULT_MAX_SESSIONS = 20;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
@@ -4071,9 +4074,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     },
 
-    enqueueMidTurnMessage(sessionId, message) {
+    enqueueMidTurnMessage(sessionId, message, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      // Authorize the caller against THIS session before doing anything —
+      // mirrors `/prompt` and `/btw`. Throws `InvalidClientIdError` when the
+      // client-declared id isn't bound to the session, so a token-holding
+      // client attached to another session can't push into this turn. Returns
+      // the trusted id (or undefined for anonymous callers) — recorded as the
+      // message's originator so the drain's SSE echo only dedupes that client.
+      const originatorClientId = resolveTrustedClientId(entry, context?.clientId);
       const trimmed = message.trim();
       // Reject empty messages and — critically — messages that arrive while
       // the session is idle. The browser only pushes here when it believes a
@@ -4092,7 +4102,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (entry.midTurnMessageQueue.length >= MAX_MID_TURN_QUEUE_DEPTH) {
         return { accepted: false };
       }
-      entry.midTurnMessageQueue.push(trimmed);
+      entry.midTurnMessageQueue.push({ text: trimmed, originatorClientId });
       return { accepted: true };
     },
 

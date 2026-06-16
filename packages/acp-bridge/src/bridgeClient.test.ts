@@ -41,6 +41,7 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk';
 import { BridgeClient } from './bridgeClient.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
+import type { MidTurnQueueEntry } from './bridgeTypes.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 
@@ -616,7 +617,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     entry:
       | {
           sessionId: string;
-          midTurnMessageQueue: string[];
+          midTurnMessageQueue: MidTurnQueueEntry[];
           events: { publish: ReturnType<typeof vi.fn> };
         }
       | undefined,
@@ -634,7 +635,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const publish = vi.fn().mockReturnValue(true);
     const entry = {
       sessionId: 'sess:drain',
-      midTurnMessageQueue: ['first', 'second'],
+      midTurnMessageQueue: [{ text: 'first' }, { text: 'second' }],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:drain', entry);
@@ -652,13 +653,88 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       type: 'mid_turn_message_injected',
       data: { sessionId: 'sess:drain', messages: ['first', 'second'] },
     });
+    // Anonymous queue entries (no originator) ⇒ no `originatorClientId` on the
+    // frame, so every consumer reconciles it.
+    expect(publish.mock.calls[0][0].originatorClientId).toBeUndefined();
+  });
+
+  it('publishes ONE frame per originator, each carrying its own originatorClientId', async () => {
+    // A mixed-originator drain (two clients pushed into the same window) must
+    // route each client its own echo so a peer can't dedupe a message it did
+    // not queue. Order within an originator is preserved.
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId: 'sess:multi',
+      midTurnMessageQueue: [
+        { text: 'a', originatorClientId: 'client-1' },
+        { text: 'b', originatorClientId: 'client-2' },
+        { text: 'c', originatorClientId: 'client-1' },
+      ],
+      events: { publish },
+    };
+    const client = makeClientWithEntry('sess:multi', entry);
+
+    // The child still receives the full drained set, in queue order.
+    const result = await client.extMethod('craft/drainMidTurnQueue', {
+      sessionId: 'sess:multi',
+    });
+    expect(result).toEqual({ messages: ['a', 'b', 'c'] });
+    expect(entry.midTurnMessageQueue).toEqual([]);
+
+    // One frame per originator: client-1 gets ['a','c'], client-2 gets ['b'].
+    expect(publish).toHaveBeenCalledTimes(2);
+    const frames = publish.mock.calls.map((c) => c[0]);
+    const c1 = frames.find((f) => f.originatorClientId === 'client-1');
+    const c2 = frames.find((f) => f.originatorClientId === 'client-2');
+    expect(c1).toMatchObject({
+      type: 'mid_turn_message_injected',
+      data: { sessionId: 'sess:multi', messages: ['a', 'c'] },
+      originatorClientId: 'client-1',
+    });
+    expect(c2).toMatchObject({
+      type: 'mid_turn_message_injected',
+      data: { sessionId: 'sess:multi', messages: ['b'] },
+      originatorClientId: 'client-2',
+    });
+  });
+
+  it('still returns the drained messages to the child when the echo frame is dropped (bus closed)', async () => {
+    // Teardown-only degradation: `publish()` returns falsy on a closed bus. The
+    // child has already been handed the messages (the model sees them), but the
+    // browser never gets the echo — log it so the resend-next-turn window is
+    // diagnosable. The drain itself must NOT fail.
+    const publish = vi.fn().mockReturnValue(undefined);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      const entry = {
+        sessionId: 'sess:closed',
+        midTurnMessageQueue: [{ text: 'still-delivered' }],
+        events: { publish },
+      };
+      const client = makeClientWithEntry('sess:closed', entry);
+
+      const result = await client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:closed',
+      });
+
+      // (a) the child still receives the message despite the dropped echo.
+      expect(result).toEqual({ messages: ['still-delivered'] });
+      expect(entry.midTurnMessageQueue).toEqual([]);
+      // (b) the dropped-echo degradation is logged.
+      const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+      expect(logged).toContain('echo frame dropped (bus closed)');
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('returns an empty drain and publishes nothing when the queue is empty', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const entry = {
       sessionId: 'sess:empty',
-      midTurnMessageQueue: [] as string[],
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:empty', entry);

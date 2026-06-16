@@ -42,6 +42,14 @@ export type DaemonConnectionStatus =
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   sessionId?: string;
+  /**
+   * Daemon-confirmed client identity bound to this session (the value sent as
+   * `X-Qwen-Client-Id`). Consumers use it to recognize their OWN
+   * originator-stamped frames — e.g. the web-shell dedupes a
+   * `mid_turn_message_injected` batch only when its `originatorClientId`
+   * matches this id (a peer on the same session must keep its own entry).
+   */
+  clientId?: string;
   workspaceCwd?: string;
   commands?: DaemonCommandInfo[];
   skills?: string[];

@@ -262,6 +262,13 @@ export interface DaemonSessionMetadataUpdatedData {
 export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
   messages: string[];
+  /**
+   * Trusted client id that queued these messages, surfaced from the SSE
+   * envelope's `originatorClientId` so a consumer dedupes only its OWN pending
+   * queue — a peer attached to the same session must not drop a
+   * coincidentally-equal entry it didn't queue. Absent for anonymous pushes.
+   */
+  originatorClientId?: string;
   [key: string]: unknown;
 }
 

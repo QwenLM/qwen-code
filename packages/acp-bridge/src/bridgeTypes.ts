@@ -183,6 +183,17 @@ export interface BridgeHeartbeatState {
   clientLastSeenAt: ReadonlyMap<string, number>;
 }
 
+/**
+ * One queued mid-turn message. `originatorClientId` is the trusted client id
+ * that pushed it (from `resolveTrustedClientId`), carried so the drain's SSE
+ * echo can be routed/filtered to that client only — a peer attached to the
+ * same session must not dedupe a message it did not queue.
+ */
+export interface MidTurnQueueEntry {
+  text: string;
+  originatorClientId?: string;
+}
+
 export interface AcpSessionBridge {
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
@@ -487,13 +498,18 @@ export interface AcpSessionBridge {
    * Queue a mid-turn user message for the running turn. The ACP child drains
    * it between tool batches via the `craft/drainMidTurnQueue` ext-method so
    * the model sees it before the turn ends. Accepted only while the session
-   * is busy (a prompt is queued or active); an idle session returns
-   * `{ accepted: false }` so the caller falls back to a normal next-turn
-   * prompt. Throws `SessionNotFoundError` for unknown ids.
+   * is busy (a prompt is queued or active); an idle (or full-queue) session
+   * returns `{ accepted: false }` so the caller falls back to a normal
+   * next-turn prompt. `context.clientId` is authorized against the session
+   * like `/prompt` and `/btw` — throws `InvalidClientIdError` when the id is
+   * not bound to the session, and `SessionNotFoundError` for unknown ids. The
+   * trusted client id is recorded as the message's originator so the drain's
+   * SSE echo only dedupes that client's pending queue.
    */
   enqueueMidTurnMessage(
     sessionId: string,
     message: string,
+    context?: BridgeClientRequestContext,
   ): { accepted: boolean };
 
   /**

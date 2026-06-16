@@ -19,6 +19,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
+import type { MidTurnQueueEntry } from './bridgeTypes.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
@@ -224,7 +225,7 @@ export interface BridgeClientSessionEntry {
    * `SessionEntry` in `bridge.ts`; surfaced on this narrowed view so
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
-  midTurnMessageQueue: string[];
+  midTurnMessageQueue: MidTurnQueueEntry[];
   activePromptOriginatorClientId?: string;
   /**
    * True while the bridge drives a model roundtrip; the
@@ -562,24 +563,39 @@ export class BridgeClient implements Client {
     if (!sessionId) return { messages: [] };
     const entry = this.resolveEntry(sessionId);
     if (!entry) return { messages: [] };
-    const messages = entry.midTurnMessageQueue.splice(0);
-    if (messages.length > 0) {
+    const drained = entry.midTurnMessageQueue.splice(0);
+    const messages = drained.map((item) => item.text);
+    if (drained.length > 0) {
       // `publish()` never throws — it returns `undefined` on a closed bus (see
       // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
       // around publish()"). Capture the result instead. A dropped frame is
       // teardown-only: the child still gets the spliced messages below, but the
       // browser won't receive the echo and would resend them next turn — so log
-      // it. One line per non-empty drain also makes the (rare) drain path and
-      // any duplicate-delivery mode diagnosable from the daemon stderr.
-      const published = entry.events.publish({
-        type: MID_TURN_MESSAGE_INJECTED_EVENT,
-        data: { sessionId: entry.sessionId, messages },
-      });
-      writeStderrLine(
-        published
-          ? `[mid-turn] session=${entry.sessionId} drained=${messages.length} injected into running turn`
-          : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echo frame dropped (bus closed); browser may resend next turn`,
-      );
+      // it.
+      //
+      // Publish ONE frame per originator client. The frame is broadcast to every
+      // SSE subscriber on the session, so it carries `originatorClientId` for
+      // clients to filter on — a peer that didn't queue the message must not
+      // dedupe its own coincidentally-equal entry. A mixed-originator batch (two
+      // clients pushing in the same window) is rare but still routed correctly.
+      const byOriginator = new Map<string | undefined, string[]>();
+      for (const item of drained) {
+        const group = byOriginator.get(item.originatorClientId);
+        if (group) group.push(item.text);
+        else byOriginator.set(item.originatorClientId, [item.text]);
+      }
+      for (const [originatorClientId, texts] of byOriginator) {
+        const published = entry.events.publish({
+          type: MID_TURN_MESSAGE_INJECTED_EVENT,
+          data: { sessionId: entry.sessionId, messages: texts },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+        writeStderrLine(
+          published
+            ? `[mid-turn] session=${entry.sessionId} drained=${texts.length}${originatorClientId ? ` originator=${originatorClientId}` : ''} injected into running turn`
+            : `[mid-turn] session=${entry.sessionId} drained=${texts.length} echo frame dropped (bus closed); browser may resend next turn`,
+        );
+      }
     }
     return { messages };
   }

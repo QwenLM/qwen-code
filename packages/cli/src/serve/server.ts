@@ -2734,8 +2734,18 @@ export function createServeApp(
       });
       return;
     }
+    // Forward the client id so the bridge authorizes it against the session
+    // (like `/prompt` and `/btw`) — a token-holding client bound to another
+    // session must not push into this one — and records it as the message's
+    // originator for SSE echo routing. `null` = malformed id (already answered).
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      const result = bridge.enqueueMidTurnMessage(sessionId, trimmed);
+      const result = bridge.enqueueMidTurnMessage(
+        sessionId,
+        trimmed,
+        clientId !== undefined ? { clientId } : undefined,
+      );
       res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err, {

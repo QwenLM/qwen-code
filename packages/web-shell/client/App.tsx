@@ -1312,17 +1312,29 @@ export function App({
   useEffect(() => {
     const sessionId = connection.sessionId;
     if (!sessionId || midTurnInjectedBatches.length === 0) return;
+    // Pass OUR client id so only batches the daemon stamped with it (or
+    // anonymous ones) are deduped. The daemon stamps every drained frame with
+    // the originator's client id, and the web-shell always sends one, so
+    // omitting this would skip every batch — leaving our own messages in the
+    // queue to be resent next turn (double delivery). A peer on the same
+    // session keeps its own coincidentally-equal entry.
     const next = removeInjectedFromQueue(
       queuedPromptsRef.current,
       midTurnInjectedBatches,
       sessionId,
+      connection.clientId,
     );
     if (next) {
       queuedPromptsRef.current = next;
       setQueuedPrompts(next);
     }
     consumeMidTurnInjected();
-  }, [midTurnInjectedBatches, connection.sessionId, consumeMidTurnInjected]);
+  }, [
+    midTurnInjectedBatches,
+    connection.sessionId,
+    connection.clientId,
+    consumeMidTurnInjected,
+  ]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {

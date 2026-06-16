@@ -27,6 +27,32 @@ describe('parseSidechannelMidTurnInjected', () => {
     ).toEqual({ sessionId: 's-1', messages: ['hi', 'there'] });
   });
 
+  it('lifts originatorClientId off the envelope top-level (not data)', () => {
+    // The daemon publishes one frame per originator and carries the id on the
+    // SSE envelope, not inside `data`, so consumers dedupe only their own queue.
+    expect(
+      parseSidechannelMidTurnInjected({
+        type: 'mid_turn_message_injected',
+        originatorClientId: 'client-7',
+        data: { sessionId: 's-1', messages: ['hi'] },
+      }),
+    ).toEqual({
+      sessionId: 's-1',
+      messages: ['hi'],
+      originatorClientId: 'client-7',
+    });
+  });
+
+  it('omits originatorClientId when absent or non-string (anonymous push)', () => {
+    expect(
+      parseSidechannelMidTurnInjected({
+        type: 'mid_turn_message_injected',
+        originatorClientId: 42,
+        data: { sessionId: 's-1', messages: ['hi'] },
+      }),
+    ).toEqual({ sessionId: 's-1', messages: ['hi'] });
+  });
+
   it('filters non-string and empty entries', () => {
     expect(
       parseSidechannelMidTurnInjected({
@@ -73,7 +99,10 @@ describe('mid-turn injected sidechannel pub/sub', () => {
     // overwrite the first — both are retained so multi-batch turns reconcile in
     // full (a single-slot store would drop 'a' → 'a' resent next turn).
     const afterFirst = getSidechannelMidTurnInjected();
-    publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['b', 'c'] });
+    publishSidechannelMidTurnInjected({
+      sessionId: 's-1',
+      messages: ['b', 'c'],
+    });
     expect(listener).toHaveBeenCalledTimes(2);
     expect(getSidechannelMidTurnInjected()).not.toBe(afterFirst); // fresh ref
     expect(getSidechannelMidTurnInjected()).toEqual([
@@ -92,5 +121,18 @@ describe('mid-turn injected sidechannel pub/sub', () => {
     unsubscribe();
     publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['d'] });
     expect(listener).toHaveBeenCalledTimes(3);
+  });
+
+  it('retains per-batch originatorClientId through publish/accumulate', () => {
+    publishSidechannelMidTurnInjected({
+      sessionId: 's-1',
+      messages: ['a'],
+      originatorClientId: 'client-1',
+    });
+    publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['b'] });
+    expect(getSidechannelMidTurnInjected()).toEqual([
+      { sessionId: 's-1', messages: ['a'], originatorClientId: 'client-1' },
+      { sessionId: 's-1', messages: ['b'] },
+    ]);
   });
 });

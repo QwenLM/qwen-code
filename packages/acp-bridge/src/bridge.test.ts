@@ -10420,7 +10420,10 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const prompt = bridge
       .sendPrompt(
         session.sessionId,
-        { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'go' }] },
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
         undefined,
         { clientId: session.clientId },
       )
@@ -10478,9 +10481,11 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     // Turn 1: enqueue, do NOT drain, then settle.
     const t1 = send('t1');
     await new Promise((r) => setTimeout(r, 10));
-    expect(bridge.enqueueMidTurnMessage(session.sessionId, 'leftover')).toEqual({
-      accepted: true,
-    });
+    expect(bridge.enqueueMidTurnMessage(session.sessionId, 'leftover')).toEqual(
+      {
+        accepted: true,
+      },
+    );
     releases[0]!();
     await t1;
 
@@ -10536,6 +10541,81 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
     releases[1]!();
     await Promise.all([p1, p2]);
+    await bridge.shutdown();
+  });
+
+  it('rejects a non-member client id (mirrors /prompt and /btw authorization)', async () => {
+    // The route forwards the client-declared id; the bridge must authorize it
+    // against THIS session before queuing — a token-holding client bound to
+    // another session must not push into this turn. The check runs before the
+    // idle/empty gates, so it throws even on an idle session.
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(() =>
+      bridge.enqueueMidTurnMessage(session.sessionId, 'sneaky', {
+        clientId: 'client-not-issued',
+      }),
+    ).toThrow(InvalidClientIdError);
+    await bridge.shutdown();
+  });
+
+  it('stamps the drained injection frame with the originator client id', async () => {
+    // End-to-end: the trusted client id passed to enqueue is recorded on the
+    // queue entry and surfaces as the published frame's `originatorClientId`, so
+    // only that client dedupes its own pending queue (a peer must keep its copy).
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'hi', {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ accepted: true });
+
+    // Subscribe before the drain so the live injection frame is captured. The
+    // hanging prompt publishes nothing in between, so it is the first frame.
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const drained = await handle.agentConnection.extMethod(
+      'craft/drainMidTurnQueue',
+      { sessionId: session.sessionId },
+    );
+    expect(drained).toEqual({ messages: ['hi'] });
+
+    const it = iter[Symbol.asyncIterator]();
+    const next = await it.next();
+    expect(next.value?.type).toBe('mid_turn_message_injected');
+    expect(next.value?.originatorClientId).toBe(session.clientId);
+    expect(next.value?.data).toMatchObject({ messages: ['hi'] });
+
+    abort.abort();
+    release?.();
+    await prompt;
     await bridge.shutdown();
   });
 });

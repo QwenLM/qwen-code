@@ -482,6 +482,11 @@ export function DaemonSessionProvider({
           setConnection((current) => ({
             status: 'connected',
             sessionId: activeSession.sessionId,
+            // Surface the bound client id so consumers can recognize their own
+            // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+            ...(activeSession.clientId
+              ? { clientId: activeSession.clientId }
+              : {}),
             workspaceCwd: activeSession.workspaceCwd,
             commands,
             skills,

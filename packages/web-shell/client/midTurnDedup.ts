@@ -12,6 +12,8 @@ export interface MidTurnQueueItem {
 export interface MidTurnInjectedBatch {
   sessionId: string;
   messages: readonly string[];
+  /** Trusted client id that queued the messages (from the SSE envelope). */
+  originatorClientId?: string;
 }
 
 /**
@@ -25,6 +27,12 @@ export interface MidTurnInjectedBatch {
  * carrying images are never matched: image messages aren't pushed mid-turn (the
  * drain channel carries plain strings), so they stay queued for the next turn.
  *
+ * Skips a batch whose `originatorClientId` is some OTHER client: the daemon
+ * broadcasts the injection frame to every client on the session, but only the
+ * client that queued the message should drop it — a peer with a coincidentally
+ * equal text must keep its own entry. Batches with no originator (anonymous
+ * push) are reconciled regardless.
+ *
  * Returns a NEW array when something was removed, or `null` when nothing matched
  * (so the caller can skip a redundant state update).
  */
@@ -32,11 +40,18 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
   prompts: readonly T[],
   batches: readonly MidTurnInjectedBatch[],
   sessionId: string,
+  clientId?: string,
 ): T[] | null {
   const remaining = [...prompts];
   let changed = false;
   for (const batch of batches) {
     if (batch.sessionId !== sessionId) continue;
+    if (
+      batch.originatorClientId !== undefined &&
+      batch.originatorClientId !== clientId
+    ) {
+      continue;
+    }
     for (const message of batch.messages) {
       const index = remaining.findIndex(
         (prompt) =>
