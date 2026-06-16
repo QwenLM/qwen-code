@@ -63,11 +63,19 @@ jobs:
             exit 0
           fi
           # Fail closed: any API error or non-write permission denies the run.
-          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>/dev/null)"; then
-            echo "Failed to check permission for ${principal}; denying." >> "$GITHUB_STEP_SUMMARY"
+          api_error_file="$(mktemp)"
+          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+            api_error="$(cat "$api_error_file")"
+            rm -f "$api_error_file"
+            api_error="${api_error:-unknown error}"
+            api_error="${api_error//$'\r'/ }"
+            api_error="${api_error//$'\n'/ }"
+            echo "::error::Permission API call failed for ${principal}: ${api_error}"
+            echo "Failed to check permission for ${principal} (API error: ${api_error}); denying." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          rm -f "$api_error_file"
           case "$permission" in
             admin|maintain|write)
               echo "should_run=true" >> "$GITHUB_OUTPUT"
