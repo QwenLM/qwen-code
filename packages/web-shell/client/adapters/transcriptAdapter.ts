@@ -24,12 +24,18 @@ export function extractPendingPermission(
       typeof toolCallRecord?.['kind'] === 'string'
         ? toolCallRecord['kind']
         : undefined;
+    const metaRecord = getRecord(toolCallRecord?.['_meta']);
+    const toolName =
+      typeof metaRecord?.['toolName'] === 'string'
+        ? metaRecord['toolName']
+        : undefined;
     return {
       id: perm.requestId,
       sessionId: perm.sessionId,
       toolCallId,
       title: perm.title,
       toolKind,
+      toolName,
       content: [
         {
           type: 'text',

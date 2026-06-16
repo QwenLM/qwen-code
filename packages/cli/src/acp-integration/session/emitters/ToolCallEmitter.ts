@@ -171,7 +171,10 @@ export class ToolCallEmitter extends BaseEmitter {
     };
 
     // Add rawOutput from resultDisplay
-    if (params.resultDisplay !== undefined) {
+    if (
+      params.resultDisplay !== undefined &&
+      !this.isTruncatedSessionDiffDisplay(params.resultDisplay)
+    ) {
       (update as Record<string, unknown>)['rawOutput'] = params.resultDisplay;
     }
 
@@ -353,7 +356,7 @@ export class ToolCallEmitter extends BaseEmitter {
 
     // Check if this is a diff display (edit tool result)
     if ('fileName' in obj && 'newContent' in obj) {
-      if (obj['truncatedForSession'] === true) {
+      if (this.isTruncatedSessionDiffDisplay(resultDisplay)) {
         return {
           type: 'content',
           content: {
@@ -372,6 +375,17 @@ export class ToolCallEmitter extends BaseEmitter {
     }
 
     return null;
+  }
+
+  private isTruncatedSessionDiffDisplay(resultDisplay: unknown): boolean {
+    if (!resultDisplay || typeof resultDisplay !== 'object') return false;
+
+    const obj = resultDisplay as Record<string, unknown>;
+    return (
+      obj['truncatedForSession'] === true &&
+      'fileName' in obj &&
+      'newContent' in obj
+    );
   }
 
   /**

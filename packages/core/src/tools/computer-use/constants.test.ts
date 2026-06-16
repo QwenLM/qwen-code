@@ -13,6 +13,7 @@ import {
   resolveAssetTarget,
   resolveAssetUrls,
   resolveChecksumUrls,
+  resolveMaxImageDimension,
 } from './constants.js';
 
 describe('CUA_DRIVER_VERSION', () => {
@@ -133,5 +134,69 @@ describe('approvalKey', () => {
   it('encodes the pinned version so a bump forces re-approval', () => {
     expect(approvalKey()).toBe(`cua-driver-rs@${CUA_DRIVER_VERSION}`);
     expect(approvalKey('9.9.9')).toBe('cua-driver-rs@9.9.9');
+  });
+});
+
+describe('resolveMaxImageDimension', () => {
+  it('returns undefined (no override → cua-driver default) when nothing is set', () => {
+    expect(resolveMaxImageDimension(undefined, {})).toBeUndefined();
+  });
+
+  it('uses the setting when no env var is present', () => {
+    expect(resolveMaxImageDimension(1024, {})).toBe(1024);
+  });
+
+  it('treats 0 as an explicit "no resize" override (full resolution)', () => {
+    expect(resolveMaxImageDimension(0, {})).toBe(0);
+    expect(
+      resolveMaxImageDimension(undefined, {
+        QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION: '0',
+      }),
+    ).toBe(0);
+  });
+
+  it('treats the -1 sentinel (and any negative) as "use cua-driver default"', () => {
+    expect(resolveMaxImageDimension(-1, {})).toBeUndefined();
+    expect(resolveMaxImageDimension(-50, {})).toBeUndefined();
+  });
+
+  it('lets the env var override the setting', () => {
+    expect(
+      resolveMaxImageDimension(1024, {
+        QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION: '768',
+      }),
+    ).toBe(768);
+  });
+
+  it('falls back to the setting when the env var is invalid (NaN / float / empty / negative)', () => {
+    for (const bad of ['abc', '12.5', '', '   ', '-1']) {
+      expect(
+        resolveMaxImageDimension(1024, {
+          QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION: bad,
+        }),
+      ).toBe(1024);
+    }
+  });
+
+  it('rejects a non-integer / non-finite setting value (no override)', () => {
+    expect(resolveMaxImageDimension(12.5, {})).toBeUndefined();
+    expect(resolveMaxImageDimension(Number.NaN, {})).toBeUndefined();
+    expect(
+      resolveMaxImageDimension(Number.POSITIVE_INFINITY, {}),
+    ).toBeUndefined();
+  });
+
+  it('reads process.env by default', () => {
+    const prev = process.env['QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION'];
+    try {
+      process.env['QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION'] = '640';
+      expect(resolveMaxImageDimension(undefined)).toBe(640);
+    } finally {
+      if (prev === undefined) {
+        delete process.env['QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION'];
+      } else {
+        process.env['QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION'] = prev;
+      }
+    }
   });
 });

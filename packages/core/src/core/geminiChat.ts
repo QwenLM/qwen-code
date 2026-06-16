@@ -11,6 +11,7 @@ import type {
   GenerateContentResponse,
   Content,
   GenerateContentConfig,
+  FunctionCall,
   SendMessageParameters,
   Part,
   Tool,
@@ -27,6 +28,7 @@ import {
   isRateLimitError,
   type RetryInfo,
 } from '../utils/rateLimit.js';
+import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
 import {
   DEFAULT_TOKEN_LIMIT,
@@ -57,6 +59,7 @@ import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
 import {
   estimateContentTokens,
   estimatePromptTokens,
+  getUsageOutputTokenCountForPromptEstimate,
 } from '../services/tokenEstimation.js';
 import {
   microcompactHistory,
@@ -74,8 +77,46 @@ import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import { isSystemReminderContent } from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
+import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
+import {
+  collectToolCallIdsFromHistory,
+  normalizeModelToolCallIds,
+} from './toolCallIdUtils.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+
+function syncFunctionCallsField(
+  response: GenerateContentResponse,
+  parts: readonly Part[],
+): void {
+  const functionCalls = parts
+    .map((part) => part.functionCall)
+    .filter((call): call is FunctionCall => Boolean(call));
+  const value = functionCalls.length > 0 ? functionCalls : undefined;
+
+  let owner: object | null = response;
+  let descriptor: PropertyDescriptor | undefined;
+  while (owner && !descriptor) {
+    descriptor = Object.getOwnPropertyDescriptor(owner, 'functionCalls');
+    owner = Object.getPrototypeOf(owner);
+  }
+
+  if (descriptor?.set) {
+    (
+      response as GenerateContentResponse & { functionCalls?: FunctionCall[] }
+    ).functionCalls = value;
+    return;
+  }
+
+  if (!descriptor || descriptor.writable || descriptor.get) {
+    Object.defineProperty(response, 'functionCalls', {
+      value,
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    });
+  }
+}
 
 /**
  * Replaces the args on a `structured_output` `functionCall` with the
@@ -208,6 +249,8 @@ export type StreamEvent =
        *  fresh restart (escalation). The UI should keep the accumulated text
        *  buffer so the continuation appends to it. */
       isContinuation?: boolean;
+      /** Set when the retry raised the automatic max output token limit. */
+      maxOutputTokensEscalated?: number;
     }
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo };
 
@@ -264,6 +307,11 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
 const INVALID_STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 2000,
+};
+
+const TRANSPORT_STREAM_RETRY_CONFIG = {
+  maxRetries: 2,
+  initialDelayMs: 1000,
 };
 
 /**
@@ -1323,6 +1371,14 @@ export class GeminiChat {
   private lastPromptTokenCount = 0;
 
   /**
+   * Per-chat output-token count from the previous model response. The
+   * previous response is appended to local history after `promptTokenCount`
+   * was reported, so steady-state prompt estimates add this value to avoid
+   * under-counting the next request near the hard compaction threshold.
+   */
+  private lastOutputTokenCount = 0;
+
+  /**
    * Number of consecutive auto-compaction failures for this chat. The
    * cheap-gate NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3)
    * until a successful compress (forced or not) resets it to 0. Replaces the
@@ -1334,24 +1390,26 @@ export class GeminiChat {
    *   - Auto-compaction failures (cheap-gate path): increment by 1.
    *   - Manual `/compress` failures: skipped (`force=true` → `!force`
    *     guard in the failure branch).
-   *   - Hard-tier rescue failures: skipped (force=true → `!force` guard
-   *     in tryCompress's failure branch). The counter is NOT pre-reset
-   *     before the rescue call — force=true already bypasses the breaker
-   *     check in compress's cheap-gate, and pre-resetting would in fact
-   *     defeat the breaker entirely (hard-rescue failures don't increment
-   *     via tryCompress, and a pre-reset every send would wipe the
-   *     reactive-overflow increment). The forwarded counter value is
-   *     whatever the chat carried; on COMPRESSED success the post-call
-   *     branch in tryCompress's COMPRESSED handler resets to 0, which is
-   *     the correct recovery path for a previously-latched session.
-   *     Reactive overflow remains the explicit-increment safety net for
-   *     the force=true path — its handler bumps the counter by +1 so N
-   *     reactive failures will still trip the breaker.
+   *   - Hard-tier rescue failures: skipped here because force=true bypasses
+   *     this breaker; bounded separately by hardRescueFailureCount.
+   *   - Reactive overflow failures: explicitly incremented in the overflow
+   *     handler so N repeated reactive failures still trip this breaker.
    *
    * If you're debugging "why is hard-rescue firing but the counter is 0",
    * that's by design.
    */
   private consecutiveFailures = 0;
+
+  /**
+   * Number of failed hard-tier rescue attempts for this chat. Hard rescue is
+   * forced and therefore bypasses the cheap-gate breaker, so it needs its own
+   * bound to avoid spending one compression side-query on every send when
+   * history repeatedly cannot shrink. NOOP counts toward this bound because
+   * it leaves the prompt oversized and would otherwise spend one compression
+   * side-query on every send. COMPRESSED resets this unless the
+   * post-compression hard-limit guard still rejects the send.
+   */
+  private hardRescueFailureCount = 0;
 
   /**
    * Partial-push markers — index of the in-memory `model[partial fc]`
@@ -1424,10 +1482,32 @@ export class GeminiChat {
    * history (forks, subagents, speculation). Without this, the auto-compress
    * threshold check sees `0` and refuses to compress — so the first API call
    * can 400 from oversized history. Callers pass the parent chat's
-   * `getLastPromptTokenCount()` here.
+   * `getLastPromptTokenCount()` here. This also clears any remembered
+   * previous-response output token count because the seeded prompt count
+   * comes from a different chat instance and should not inherit this chat's
+   * last response size.
    */
   setLastPromptTokenCount(count: number): void {
     this.lastPromptTokenCount = count;
+    this.lastOutputTokenCount = 0;
+  }
+
+  /**
+   * Seed the restored prompt and previous-response output token counts in one
+   * step. Resume restores chat history plus both counters from the same
+   * assistant usage record, so callers must avoid the normal
+   * setLastPromptTokenCount() clearing behavior.
+   */
+  seedResumeTokenCounts(
+    promptTokenCount: number,
+    outputTokenCount: number,
+  ): void {
+    this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
+      ? Math.max(0, promptTokenCount)
+      : 0;
+    this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
+      ? Math.max(0, outputTokenCount)
+      : 0;
   }
 
   /**
@@ -1476,11 +1556,13 @@ export class GeminiChat {
       this.config.getFileReadCache().clear();
       clearDetailedSpanState();
       this.lastPromptTokenCount = info.newTokenCount;
+      this.lastOutputTokenCount = 0;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
       // tripped.
       this.consecutiveFailures = 0;
+      this.hardRescueFailureCount = 0;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only count if not forced) so we stop spending
       // compression-API calls on a chat that can't shrink after
@@ -1677,18 +1759,10 @@ export class GeminiChat {
       // cheap-gate inside tryCompress used the user's resolved value.
       // (review #4168 R1.3 + R1.4)
       //
-      // The consecutive-failure counter is NOT pre-reset here. force=true
-      // already bypasses the breaker (the `!force` check in
-      // `chatCompressionService.compress`'s cheap-gate), so a latched session
-      // can still attempt hard-rescue; pre-resetting would defeat the breaker
-      // entirely because hard-rescue failures don't increment via tryCompress
-      // (force=true skips the `if (!force)` increment in the failure branch),
-      // and only the reactive overflow handler explicitly increments. With a
-      // pre-reset the counter would oscillate 0↔1 across sends and never trip.
-      // On COMPRESSED success, the post-call branch in `tryCompress` (the
-      // `consecutiveFailures = 0` line in the COMPRESSED handler) still resets
-      // to 0, which is the correct recovery path for a previously-latched
-      // session.
+      // The cheap-gate consecutive-failure counter is NOT pre-reset here.
+      // force=true already bypasses that breaker, while hard-rescue itself is
+      // bounded by hardRescueFailureCount so persistent pre-send rescue
+      // failures fall through to reactive overflow after a few strikes.
       const contextLimit =
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
@@ -1697,9 +1771,10 @@ export class GeminiChat {
         this.config.getChatCompression(),
       ).imageTokenEstimate;
       // When lastPromptTokenCount > 0, estimatePromptTokens uses the
-      // API-authoritative count + a tiny estimate of just the new user
-      // message — it does NOT touch the history at all in that branch, so
-      // skip the costly `getHistory(true)` clone on the steady-state path.
+      // API-authoritative previous prompt count + the previous response's
+      // output token count + a tiny estimate of just the new user message.
+      // It does NOT touch the history at all in that branch, so skip the
+      // costly `getHistory(true)` clone on the steady-state path.
       // The lastPromptTokenCount=0 branch (first send after --continue
       // restore / subagent inheritance) walks history with a char/4
       // heuristic that can under-count by ~15-20K tokens; the reactive
@@ -1711,47 +1786,59 @@ export class GeminiChat {
         this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
         userContent,
         this.lastPromptTokenCount,
+        this.lastOutputTokenCount,
         imageTokenEstimate,
       );
-      const shouldForceFromHard = effectiveTokens >= hard;
+      const isHardTier = effectiveTokens >= hard;
+      const shouldForceFromHard =
+        isHardTier && this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
       const historyBeforeHardRescue = shouldForceFromHard
         ? this.getHistoryShallow()
         : undefined;
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
+      const hardRescueFailureCountBeforeHardRescue =
+        this.hardRescueFailureCount;
       if (shouldForceFromHard) {
         debugLogger.warn(
-          `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, consecutiveFailures=${this.consecutiveFailures}.`,
+          `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, hardRescueAttempt=${this.hardRescueFailureCount + 1}, consecutiveFailures=${this.consecutiveFailures}.`,
+        );
+      } else if (isHardTier) {
+        debugLogger.warn(
+          `[compaction] hard-tier rescue skipped after ${this.hardRescueFailureCount} failed attempts; relying on reactive overflow recovery. prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}.`,
         );
       }
 
-      compressionInfo = await this.tryCompress(
-        prompt_id,
-        model,
-        shouldForceFromHard,
-        params.config?.abortSignal,
-        {
-          pendingUserMessage: userContent,
-          precomputedEffectiveTokens: effectiveTokens,
-          deferChatCompressionRecord: shouldForceFromHard,
-          // Hard-rescue is force=true to bypass the cheap-gate breaker
-          // but it remains a semantically AUTOMATIC trigger. Tag the
-          // compactTrigger explicitly as 'auto' so the PostCompact
-          // hook event fires with the correct trigger category (the
-          // default `force=true → 'manual'` mapping would otherwise
-          // misclassify it). The compress() service preserves a
-          // trailing model+functionCall via
-          // composePostCompactHistory's `trailingFunctionCallContent`
-          // handling on its own, so the API request's tool-call /
-          // response pairing stays intact regardless of trigger value.
-          trigger: shouldForceFromHard ? 'auto' : undefined,
-        },
-      );
-
+      if (isHardTier && !shouldForceFromHard) {
+        compressionInfo = {
+          originalTokenCount: effectiveTokens,
+          newTokenCount: effectiveTokens,
+          compressionStatus: CompressionStatus.NOOP,
+        };
+      } else {
+        compressionInfo = await this.tryCompress(
+          prompt_id,
+          model,
+          shouldForceFromHard,
+          params.config?.abortSignal,
+          {
+            pendingUserMessage: userContent,
+            precomputedEffectiveTokens: effectiveTokens,
+            deferChatCompressionRecord: shouldForceFromHard,
+            // Hard-rescue is force=true to bypass the cheap-gate breaker
+            // but it remains a semantically AUTOMATIC trigger. Tag the
+            // compactTrigger explicitly as 'auto' so PostCompact hooks are
+            // classified correctly while the pending user message preserves
+            // any active tool-call / response pairing.
+            trigger: shouldForceFromHard ? 'auto' : undefined,
+          },
+        );
+      }
       const localPromptTokensAfterCompression = shouldForceFromHard
         ? estimatePromptTokens(
             this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
             userContent,
             this.lastPromptTokenCount,
+            this.lastOutputTokenCount,
             imageTokenEstimate,
           )
         : 0;
@@ -1768,6 +1855,10 @@ export class GeminiChat {
           compressionInfo,
           localPromptTokensAfterCompression,
         );
+        if (shouldForceFromHard) {
+          this.hardRescueFailureCount =
+            hardRescueFailureCountBeforeHardRescue + 1;
+        }
         if (
           compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
           historyBeforeHardRescue
@@ -1792,7 +1883,8 @@ export class GeminiChat {
             `hard=${hard}, localPromptTokensAfterCompression=` +
             `${localPromptTokensAfterCompression}, compressionStatus=` +
             `${compressionStatus}, newTokenCount=` +
-            `${compressionInfo.newTokenCount}, consecutiveFailures=` +
+            `${compressionInfo.newTokenCount}, hardRescueFailureCount=` +
+            `${this.hardRescueFailureCount}, consecutiveFailures=` +
             `${this.consecutiveFailures}. ${message}`,
         );
         throw new Error(message);
@@ -1871,6 +1963,7 @@ export class GeminiChat {
         let lastError: unknown = new Error('Request failed after all retries.');
         let rateLimitRetryCount = 0;
         let invalidStreamRetryCount = 0;
+        let transportStreamRetryCount = 0;
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
 
@@ -1896,13 +1989,15 @@ export class GeminiChat {
           attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
           attempt++
         ) {
+          let streamYieldedChunk = false;
           try {
             if (suppressNextRetryEvent) {
               suppressNextRetryEvent = false;
             } else if (
               attempt > 0 ||
               rateLimitRetryCount > 0 ||
-              invalidStreamRetryCount > 0
+              invalidStreamRetryCount > 0 ||
+              transportStreamRetryCount > 0
             ) {
               yield { type: StreamEventType.RETRY };
             }
@@ -1916,6 +2011,7 @@ export class GeminiChat {
 
             lastFinishReason = undefined;
             for await (const chunk of stream) {
+              streamYieldedChunk = true;
               const fr = chunk.candidates?.[0]?.finishReason;
               if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
@@ -1978,52 +2074,123 @@ export class GeminiChat {
             // These arrive as StreamContentError with finish_reason="error_finish"
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
+            // Classify once per failed attempt; reused by the rate-limit
+            // diagnostics below and the transport-retry decision further down.
+            const classification = classifyRetryError(error, {
+              authType: cgConfig?.authType,
+              extraRetryErrorCodes,
+            });
+
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
-            if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
-              popPartialIfPushed();
-              rateLimitRetryCount++;
-              const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
-                ...RATE_LIMIT_RETRY_OPTIONS,
-                error,
-              });
-              const message = parseAndFormatApiError(
-                error instanceof Error ? error.message : String(error),
-              );
+            if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
-              debugLogger.warn('Rate limit retry scheduled', {
-                retryPath: 'stream',
-                retryDecision: 'retry',
-                attempt: rateLimitRetryCount,
-                maxRetries: maxRateLimitRetries,
-                retryDelayMs: delayMs,
+              // The classifier is observation-only here; stream retry control
+              // remains governed by isRateLimitError and the retry budget.
+              const diagnosticFields = {
+                classificationDiagnosis: classification.diagnosis,
+                errorKind: classification.kind,
+                classificationReason: classification.reason,
                 ...details,
-              });
-              const { promise: delayPromise, skip } = delay(
-                delayMs,
-                params.config?.abortSignal,
-              );
-              yield {
-                type: StreamEventType.RETRY,
-                retryInfo: {
-                  message,
+              };
+
+              if (rateLimitRetryCount < maxRateLimitRetries) {
+                // Discard any partial assistant turn from the failed attempt
+                // before scheduling the retry, so a stale partial does not leak
+                // into history or the JSONL transcript.
+                popPartialIfPushed();
+                rateLimitRetryCount++;
+                const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
+                  ...RATE_LIMIT_RETRY_OPTIONS,
+                  error,
+                });
+                const message = parseAndFormatApiError(
+                  error instanceof Error ? error.message : String(error),
+                );
+                debugLogger.warn('Rate limit retry scheduled', {
+                  retryPath: 'stream',
+                  retryDecision: 'retry',
                   attempt: rateLimitRetryCount,
                   maxRetries: maxRateLimitRetries,
+                  retryDelayMs: delayMs,
+                  ...diagnosticFields,
+                });
+                const { promise: delayPromise, skip } = delay(
                   delayMs,
-                  skipDelay: skip,
-                },
-              };
-              // Don't count rate-limit retries against the content retry limit
-              attempt--;
-              await delayPromise;
-              continue;
-            }
-            if (isRateLimit) {
+                  params.config?.abortSignal,
+                );
+                yield {
+                  type: StreamEventType.RETRY,
+                  retryInfo: {
+                    message,
+                    attempt: rateLimitRetryCount,
+                    maxRetries: maxRateLimitRetries,
+                    delayMs,
+                    skipDelay: skip,
+                  },
+                };
+                // Don't count rate-limit retries against the content retry limit
+                attempt--;
+                await delayPromise;
+                continue;
+              }
+
               debugLogger.warn('Rate limit retry exhausted', {
                 retryPath: 'stream',
                 retryDecision: 'exhausted',
                 attempts: rateLimitRetryCount,
                 maxRetries: maxRateLimitRetries,
-                ...getRateLimitErrorDetails(error),
+                ...diagnosticFields,
+              });
+            }
+
+            // Replay only curated socket-level failures before any response
+            // chunk has reached callers.
+            const isRetryableStreamTransportError =
+              classification.kind === 'transport' &&
+              classification.transportCode !== undefined &&
+              RETRYABLE_STREAM_TRANSPORT_CODES.has(
+                classification.transportCode,
+              );
+            if (
+              isRetryableStreamTransportError &&
+              !streamYieldedChunk &&
+              transportStreamRetryCount <
+                TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
+            ) {
+              popPartialIfPushed();
+              transportStreamRetryCount++;
+              const delayMs =
+                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
+                transportStreamRetryCount;
+              debugLogger.warn('Transport stream retry scheduled', {
+                retryPath: 'stream',
+                retryDecision: 'retry',
+                attempt: transportStreamRetryCount,
+                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
+                retryDelayMs: delayMs,
+                errorKind: classification.kind,
+                transportCode: classification.transportCode,
+              });
+              yield { type: StreamEventType.RETRY };
+              suppressNextRetryEvent = true;
+              // Don't count transport retries against the content retry limit.
+              attempt--;
+              await delay(delayMs, params.config?.abortSignal).promise;
+              continue;
+            }
+            if (isRetryableStreamTransportError) {
+              // Reached only when the retry above did not fire: either a chunk
+              // was already yielded (replaying would duplicate output) or the
+              // retry budget is exhausted. Either way the error propagates.
+              debugLogger.warn('Transport stream retry not taken', {
+                retryPath: 'stream',
+                retryDecision: streamYieldedChunk
+                  ? 'skipped_after_chunk'
+                  : 'exhausted',
+                attempts: transportStreamRetryCount,
+                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
+                errorKind: classification.kind,
+                transportCode: classification.transportCode,
               });
             }
 
@@ -2202,19 +2369,29 @@ export class GeminiChat {
         // models.
         // Placed outside the retry loop so that any errors from the
         // escalated stream propagate directly (not caught by retry logic).
+        const requestedMaxOutputTokens = params.config?.maxOutputTokens;
+        const escalatedLimit = Math.max(
+          ESCALATED_MAX_TOKENS,
+          tokenLimit(model, 'output'),
+        );
+        const shouldEscalateMaxOutputTokens =
+          requestedMaxOutputTokens === undefined ||
+          requestedMaxOutputTokens < escalatedLimit;
+
         if (
           lastError === null &&
           lastFinishReason === FinishReason.MAX_TOKENS &&
           !maxTokensEscalated &&
-          !hasUserMaxTokensOverride
+          !hasUserMaxTokensOverride &&
+          shouldEscalateMaxOutputTokens
         ) {
           maxTokensEscalated = true;
-          const escalatedLimit = Math.max(
-            ESCALATED_MAX_TOKENS,
-            tokenLimit(model, 'output'),
-          );
+          const startingLimitLabel =
+            requestedMaxOutputTokens === undefined
+              ? 'capped default'
+              : `${requestedMaxOutputTokens} tokens`;
           debugLogger.info(
-            `Output truncated at capped default. Escalating to ${escalatedLimit} tokens.`,
+            `Output truncated at ${startingLimitLabel}. Escalating to ${escalatedLimit} tokens.`,
           );
           // Remove partial model response from history
           // (processStreamResponse already pushed it)
@@ -2225,7 +2402,10 @@ export class GeminiChat {
             self.history.pop();
           }
           // Signal UI to discard partial output
-          yield { type: StreamEventType.RETRY };
+          yield {
+            type: StreamEventType.RETRY,
+            maxOutputTokensEscalated: escalatedLimit,
+          };
           // Retry with escalated max_tokens
           const escalatedParams: SendMessageParameters = {
             ...params,
@@ -2434,6 +2614,8 @@ export class GeminiChat {
         },
         prompt_id,
       );
+    const cgConfig = this.config.getContentGeneratorConfig();
+    const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof Error) {
@@ -2446,9 +2628,15 @@ export class GeminiChat {
         if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
 
+        // Honor provider-specific rate-limit codes (e.g. DashScope) so a custom
+        // predicate does not silently drop them — the default path checks these
+        // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
+        if (isRateLimitError(error, extraRetryErrorCodes)) return true;
+
         return false;
       },
-      authType: this.config.getContentGeneratorConfig()?.authType,
+      authType: cgConfig?.authType,
+      extraRetryErrorCodes,
       persistentMode: isUnattendedMode(),
       signal: params.config?.abortSignal,
       heartbeatFn: (info) => {
@@ -2781,6 +2969,8 @@ export class GeminiChat {
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
+    const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
+    const rawToolCallIdsInCurrentTurn = new Set<string>();
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let coercedUsage:
       | {
@@ -2788,6 +2978,7 @@ export class GeminiChat {
           totalTokenCount: number;
           candidatesTokenCount: number;
           cachedContentTokenCount: number;
+          thoughtsTokenCount: number;
         }
       | undefined;
 
@@ -2812,6 +3003,13 @@ export class GeminiChat {
         if (isValidResponse(chunk)) {
           const content = chunk.candidates?.[0]?.content;
           if (content?.parts) {
+            content.parts = normalizeModelToolCallIds(
+              content.parts,
+              usedToolCallIds,
+              rawToolCallIdsInCurrentTurn,
+            );
+            syncFunctionCallsField(chunk, content.parts);
+
             if (content.parts.some((part) => part.functionCall)) {
               hasToolCall = true;
             }
@@ -2828,6 +3026,14 @@ export class GeminiChat {
           // Coerce hostile-provider values (NaN / Infinity / negative) to 0
           // so the compaction gate arithmetic stays well-defined; see
           // `coerceUsageCount` for the failure modes this guards against.
+          const hasUsablePromptTokenCount =
+            typeof usageMetadata.promptTokenCount === 'number' &&
+            Number.isFinite(usageMetadata.promptTokenCount) &&
+            usageMetadata.promptTokenCount >= 0;
+          const hasUsableTotalTokenCount =
+            typeof usageMetadata.totalTokenCount === 'number' &&
+            Number.isFinite(usageMetadata.totalTokenCount) &&
+            usageMetadata.totalTokenCount >= 0;
           const promptTokenCount = coerceUsageCount(
             usageMetadata.promptTokenCount,
             'promptTokenCount',
@@ -2844,6 +3050,10 @@ export class GeminiChat {
             usageMetadata.cachedContentTokenCount,
             'cachedContentTokenCount',
           );
+          const thoughtsTokenCount = coerceUsageCount(
+            usageMetadata.thoughtsTokenCount,
+            'thoughtsTokenCount',
+          );
           // Stash coerced values so recordAssistantTurn can reuse them
           // without re-calling coerceUsageCount inline.
           coercedUsage = {
@@ -2851,12 +3061,23 @@ export class GeminiChat {
             totalTokenCount,
             candidatesTokenCount,
             cachedContentTokenCount,
+            thoughtsTokenCount,
           };
-          const lastPromptTokenCount = promptTokenCount || totalTokenCount;
+          const lastPromptTokenCount = hasUsablePromptTokenCount
+            ? promptTokenCount
+            : totalTokenCount;
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
             this.lastPromptTokenCount = lastPromptTokenCount;
+            this.lastOutputTokenCount = hasUsablePromptTokenCount
+              ? getUsageOutputTokenCountForPromptEstimate({
+                  promptTokenCount,
+                  ...(hasUsableTotalTokenCount ? { totalTokenCount } : {}),
+                  candidatesTokenCount,
+                  thoughtsTokenCount,
+                })
+              : 0;
             // Mirror to the global telemetry only when wired — subagents
             // pass `telemetryService=undefined` to keep their context usage
             // out of the main session's UI counters.

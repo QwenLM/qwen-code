@@ -212,7 +212,7 @@ Use the `/mcp auth` command to manage OAuth authentication:
 
 OAuth tokens are automatically:
 
-- **Stored securely** in `~/.qwen/mcp-oauth-tokens.json`
+- **Stored securely** in `~/.qwen/mcp-oauth-tokens-v2.json` (AES-256-GCM encrypted), with keychain storage preferred when available
 - **Refreshed** when expired (if refresh tokens are available)
 - **Validated** before each connection attempt
 - **Cleaned up** when invalid or expired

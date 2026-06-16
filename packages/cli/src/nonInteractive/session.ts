@@ -209,6 +209,10 @@ class Session {
       if (this.isShuttingDown || this.abortController.signal.aborted) {
         return;
       }
+      if (meta.status === 'running' && typeof registry.get === 'function') {
+        const entry = registry.get(meta.monitorId);
+        if (!entry || entry.status !== 'running') return;
+      }
       this.enqueueMonitorNotification({
         displayText,
         modelText,
@@ -521,29 +525,34 @@ class Session {
     }
   }
 
-  private async processMonitorNotification(
-    notification: MonitorQueueItem,
+  private async processMonitorNotificationBatch(
+    batch: MonitorQueueItem[],
   ): Promise<void> {
     await this.waitForInitialization();
 
-    this.outputAdapter.emitUserMessage([{ text: notification.displayText }]);
-    this.outputAdapter.emitSystemMessage(
-      'task_notification',
-      notification.sdkNotification,
-    );
+    for (const item of batch) {
+      this.outputAdapter.emitUserMessage([{ text: item.displayText }]);
+      this.outputAdapter.emitSystemMessage(
+        'task_notification',
+        item.sdkNotification,
+      );
+    }
+
+    const combinedModelText = batch.map((n) => n.modelText).join('\n\n');
+    const combinedDisplayText = batch.map((n) => n.displayText).join('; ');
 
     const promptId = this.getNextPromptId();
     await runNonInteractive(
       this.config,
       this.settings,
-      notification.modelText,
+      combinedModelText,
       promptId,
       {
         abortController: this.abortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         sendMessageType: SendMessageType.Notification,
-        notificationDisplayText: notification.displayText,
+        notificationDisplayText: combinedDisplayText,
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
       },
@@ -591,15 +600,15 @@ class Session {
         continue;
       }
 
-      const notification = this.monitorQueue.shift();
-      if (!notification) {
+      if (this.monitorQueue.length === 0) {
         continue;
       }
+      const batch = this.monitorQueue.splice(0);
       try {
-        await this.processMonitorNotification(notification);
+        await this.processMonitorNotificationBatch(batch);
       } catch (error) {
         debugLogger.error(
-          '[Session] Error processing monitor notification:',
+          '[Session] Error processing monitor notification batch:',
           error,
         );
         this.emitErrorResult(error);

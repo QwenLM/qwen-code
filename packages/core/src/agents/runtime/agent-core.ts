@@ -51,6 +51,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { dedupeToolCallsById } from '../../core/toolCallIdUtils.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -654,6 +655,7 @@ export class AgentCore {
     let turnCounter = 0;
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
+    let stickyMaxOutputTokens: number | undefined;
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -689,6 +691,9 @@ export class AgentCore {
           config: {
             abortSignal: roundAbortController.signal,
             tools: [{ functionDeclarations: toolsList }],
+            ...(stickyMaxOutputTokens !== undefined
+              ? { maxOutputTokens: stickyMaxOutputTokens }
+              : {}),
           },
         };
 
@@ -728,6 +733,9 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            if (streamEvent.maxOutputTokensEscalated !== undefined) {
+              stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
+            }
             functionCalls.length = 0;
             roundText = '';
             roundThoughtText = '';
@@ -1092,13 +1100,14 @@ export class AgentCore {
     wasOutputTruncated = false,
   ): Promise<Content[]> {
     const toolResponseParts: Part[] = [];
+    const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
 
     // Filter unauthorized tool calls before scheduling
     const authorizedCalls: FunctionCall[] = [];
-    for (const fc of functionCalls) {
+    for (const fc of uniqueFunctionCalls) {
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
 
       if (!allowedToolNames.has(fc.name)) {

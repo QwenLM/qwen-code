@@ -13,7 +13,11 @@ import { SubAgentPanel } from './tools/SubAgentPanel';
 import { DiffView } from './tools/DiffView';
 import { ToolApproval } from './ToolApproval';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
-import { extractTodosFromToolCall, getTodoStatusIcon } from '../../utils/todos';
+import {
+  extractTodosFromToolCall,
+  isTodoWriteToolName,
+} from '../../utils/todos';
+import { TodoEventSummary, TodoFullList } from './TodoView';
 import {
   formatDurationMs,
   formatElapsed,
@@ -37,7 +41,7 @@ import {
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
-import { CompactModeContext } from '../../App';
+import { CompactModeContext, TodoTimelineContext } from '../../App';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,
@@ -64,7 +68,7 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
   if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
   // write_file shows content from args even before completion
   if (name === 'write_file' || name === 'writefile') {
-    return !!getWriteContent(tool);
+    return !!getWriteContent(tool) || hasEditContent(tool);
   }
   if (tool.status !== 'completed' && tool.status !== 'failed') return false;
   if (isShellToolName(name)) {
@@ -72,7 +76,7 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
     return !!text && text.trim().length > 0 && text.split('\n').length > 1;
   }
   if (name === 'edit' || name === 'write' || name === 'editfile') {
-    return hasDiffContent(tool);
+    return hasEditContent(tool);
   }
   if (name === 'read' || name === 'read_file' || name === 'readfile') {
     const text = extractText(tool);
@@ -104,11 +108,11 @@ function hasDetailView(tool: ACPToolCall): boolean {
 
 function hasDiffContent(tool: ACPToolCall): boolean {
   if (tool.content?.some((b) => b.type === 'diff')) return true;
-  if (tool.rawOutput && typeof tool.rawOutput === 'object') {
-    const raw = tool.rawOutput as Record<string, unknown>;
-    if (typeof raw.fileDiff === 'string' && raw.fileDiff) return true;
-  }
-  return false;
+  return !!getRawFileDiff(tool);
+}
+
+function hasEditContent(tool: ACPToolCall): boolean {
+  return hasDiffContent(tool) || !!extractText(tool);
 }
 
 function extractDiff(tool: ACPToolCall): string {
@@ -118,11 +122,22 @@ function extractDiff(tool: ACPToolCall): string {
       return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
+  return getRawFileDiff(tool);
+}
+
+function getRawFileDiff(tool: ACPToolCall): string {
   if (tool.rawOutput && typeof tool.rawOutput === 'object') {
     const raw = tool.rawOutput as Record<string, unknown>;
+    if (isTruncatedSessionDiff(raw)) return '';
     if (typeof raw.fileDiff === 'string') return raw.fileDiff;
   }
   return '';
+}
+
+function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
+  return (
+    raw.truncatedForSession === true && 'fileName' in raw && 'newContent' in raw
+  );
 }
 
 const MAX_DIFF_PRODUCT = 250_000;
@@ -294,12 +309,17 @@ function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
   );
 }
 
-function ExpandedEditDiff({ tool }: { tool: ACPToolCall }) {
+function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
   const diff = useMemo(() => extractDiff(tool), [tool]);
-  if (!diff) return null;
+  const text = useMemo(() => extractText(tool) || '', [tool]);
+  if (!diff && !text) return null;
   return (
     <div className={styles.expandedEdit}>
-      <DiffView diff={diff} />
+      {diff ? (
+        <DiffView diff={diff} />
+      ) : (
+        <pre className={styles.expandedOutput}>{text}</pre>
+      )}
     </div>
   );
 }
@@ -317,56 +337,31 @@ function getWriteContent(tool: ACPToolCall): string {
   return '';
 }
 
-function TodoWriteContent({ tool }: { tool: ACPToolCall }) {
-  const todos = extractTodosFromToolCall(tool);
-  if (todos) {
-    return (
-      <div className={styles.todoList}>
-        {todos.map((todo, i) => (
-          <div
-            key={todo.id || i}
-            className={`${styles.todoItem} ${getTodoClass(todo.status)}`}
-          >
-            {getTodoStatusIcon(todo.status)} {todo.content}
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  const text = extractText(tool) || '';
-  const lines = text.split('\n').filter((l) => l.trim());
-  if (lines.length === 0) return null;
-
+// Collapsed by default: the diff of this todo_write call (just-completed and
+// just-started items), expanding to the full list on click. The per-snapshot
+// diff comes from the timeline context, so this is isolated in its own
+// component — only todo rows subscribe and re-render when the timeline changes,
+// not every tool row.
+function TodoToolBody({
+  tool,
+  todos,
+  expanded,
+}: {
+  tool: ACPToolCall;
+  todos: TodoItem[];
+  expanded: boolean;
+}) {
+  const timeline = useContext(TodoTimelineContext);
+  const events = timeline.get(tool.callId)?.events ?? [];
   return (
-    <div className={styles.todoList}>
-      {lines.map((line, i) => {
-        const isCompleted = line.startsWith('●');
-        const isInProgress = line.startsWith('◐');
-        const cls = isCompleted
-          ? styles.todoDone
-          : isInProgress
-            ? styles.todoActive
-            : styles.todoPending;
-        return (
-          <div key={i} className={`${styles.todoItem} ${cls}`}>
-            {line}
-          </div>
-        );
-      })}
+    <div className={styles.todoBody}>
+      {expanded ? (
+        <TodoFullList todos={todos} />
+      ) : (
+        <TodoEventSummary todos={todos} events={events} />
+      )}
     </div>
   );
-}
-
-function getTodoClass(status: TodoItem['status']): string {
-  switch (status) {
-    case 'completed':
-      return styles.todoDone;
-    case 'in_progress':
-      return styles.todoActive;
-    case 'pending':
-      return styles.todoPending;
-  }
 }
 
 interface ToolLineProps {
@@ -462,7 +457,7 @@ function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
   if (isSubAgentToolCall(tool)) return 'agent';
   if (isShellToolName(name)) return 'shell';
   if (isWebFetchToolName(name)) return 'fetch';
-  if (name === 'todowrite') return 'todo';
+  if (isTodoWriteToolName(name)) return 'todo';
   if (name === 'read' || name === 'read_file' || name === 'readfile')
     return 'read';
   if (name === 'edit' || name === 'editfile') return 'edit';
@@ -784,13 +779,20 @@ export const ToolLine = memo(function ToolLine({
       : formatElapsed(tool.startTime, tool.endTime);
 
   const name = tool.toolName.toLowerCase();
-  const isTodo = name === 'todowrite';
-  // A row expands when it has detail output (bash/diff/read content) or when
-  // its description is long enough to be ellipsised. When a long description is
-  // expanded we move it out of the header into a wrapped block below, so the
-  // header drops its single-line copy.
+  const isTodo = isTodoWriteToolName(name);
+  const todoItems = isTodo ? extractTodosFromToolCall(tool) : undefined;
+  const hasTodoList = !!todoItems && todoItems.length > 0;
+  const todoCompleted = todoItems
+    ? todoItems.filter((td) => td.status === 'completed').length
+    : 0;
+  // A row expands when it has a todo list to reveal, detail output
+  // (bash/diff/read content), or a description long enough to be ellipsised.
+  // When a long description is expanded we move it out of the header into a
+  // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
-  const expandable = !isTodo && (hasExpandableContent(tool) || descExpandable);
+  const expandable = isTodo
+    ? hasTodoList
+    : hasExpandableContent(tool) || descExpandable;
   const relocateDescription = expanded && descExpandable;
   // Whether the expanded row renders a kind-specific detail view. When it does
   // not (e.g. grep/glob/web_fetch with a long description), keep the result
@@ -821,18 +823,33 @@ export const ToolLine = memo(function ToolLine({
         <ToggleChevron expandable={expandable} expanded={expanded} />
         <StatusIcon status={tool.status} />
         <span className={styles.lineName}>{displayName}</span>
+        {isTodo && hasTodoList && (
+          <span className={styles.todoProgress}>
+            {todoCompleted}/{todoItems!.length}
+          </span>
+        )}
         <ToolHeaderExtra
           info={{
             kind: getToolHeaderKind(tool),
             tool,
             displayName,
-            description: relocateDescription ? '' : description,
-            elapsed,
+            // A todo row carries its checklist in the body below; a redundant
+            // "Update Todos" description and the instant write duration would
+            // only clutter the header next to the progress count.
+            description: isTodo || relocateDescription ? '' : description,
+            elapsed: isTodo ? '' : elapsed,
             workspaceCwd,
           }}
         />
       </div>
-      {isTodo && <TodoWriteContent tool={tool} />}
+      {isTodo && hasTodoList && (
+        <TodoToolBody tool={tool} todos={todoItems!} expanded={expanded} />
+      )}
+      {/* Todo tool whose payload couldn't be parsed (e.g. malformed args):
+          fall back to the raw result summary so the row isn't blank. */}
+      {isTodo && !hasTodoList && result && (
+        <div className={styles.lineOutput}>{result}</div>
+      )}
       {relocateDescription && (
         <div className={styles.lineFullArg}>{description}</div>
       )}
@@ -845,10 +862,10 @@ export const ToolLine = memo(function ToolLine({
             <ExpandedBashOutput tool={tool} maxLines={shellOutputMaxLines} />
           )}
           {(name === 'write_file' || name === 'writefile') && (
-            <ExpandedEditDiff tool={tool} />
+            <ExpandedEditContent tool={tool} />
           )}
           {(name === 'edit' || name === 'write' || name === 'editfile') && (
-            <ExpandedEditDiff tool={tool} />
+            <ExpandedEditContent tool={tool} />
           )}
           {(name === 'read' || name === 'read_file' || name === 'readfile') && (
             <ExpandedReadContent tool={tool} />

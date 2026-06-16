@@ -87,6 +87,13 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
   content: string;
   thinking?: string;
   isStreaming?: boolean;
+  /**
+   * Token usage folded onto this assistant block by the daemon SDK reducer
+   * (summed when several blocks merge into one message). Summed again across a
+   * turn's assistant messages for the per-turn total shown on the fold toggle.
+   * Absent on sessions whose agent predates usage stamping.
+   */
+  usage?: { inputTokens: number; outputTokens: number; cachedTokens?: number };
 }
 
 export interface DaemonToolGroupMessage extends DaemonMessageMeta {
@@ -107,6 +114,8 @@ export interface DaemonSystemMessage extends DaemonMessageMeta {
   content: string;
   variant: 'info' | 'error' | 'warning';
   retryable?: boolean;
+  source?: string;
+  data?: unknown;
 }
 
 export interface DaemonUserShellMessage extends DaemonMessageMeta {

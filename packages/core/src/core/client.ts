@@ -5,6 +5,7 @@
  */
 
 // External dependencies
+import { createUserContent } from '@google/genai';
 import type {
   Content,
   GenerateContentConfig,
@@ -23,6 +24,7 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import {
   microcompactHistory,
   type MicrocompactMeta,
+  type MicrocompactOptions,
 } from '../services/microcompaction/microcompact.js';
 import {
   activeGoalEquals,
@@ -117,7 +119,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
-import { ApiRetryEvent } from '../telemetry/types.js';
+import { ApiRetryEvent, LoopType } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 
 // Hook types and utilities
@@ -296,7 +298,7 @@ export class GeminiClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
-      replayUiTelemetryFromConversation(
+      const resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),
       );
@@ -310,9 +312,17 @@ export class GeminiClient {
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
-      this.getChat().setLastPromptTokenCount(
-        uiTelemetryService.getLastPromptTokenCount(),
-      );
+      const chat = this.getChat();
+      if (resumeTokenCounts) {
+        chat.seedResumeTokenCounts(
+          resumeTokenCounts.promptTokenCount,
+          resumeTokenCounts.outputTokenCount,
+        );
+      } else {
+        chat.setLastPromptTokenCount(
+          uiTelemetryService.getLastPromptTokenCount(),
+        );
+      }
 
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
@@ -1568,31 +1578,50 @@ export class GeminiClient {
     }
   }
 
-  private async microcompactIdleHistory(
+  private async microcompactHistoryBeforeSend(
     lastCompletionTimestamp: number | null,
+    opts?: MicrocompactOptions,
   ): Promise<boolean> {
     try {
       const mcResult = microcompactHistory(
         this.getHistoryShallow(),
         lastCompletionTimestamp,
         this.config.getClearContextOnIdle(),
+        opts,
       );
       if (!mcResult.meta) {
         return false;
       }
 
       const m = mcResult.meta;
-      this.getChat().setHistory(mcResult.history);
-      await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
-      debugLogger.debug(
-        `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-          `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
-          `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
-      );
-      return true;
+      const changed = m.tokensSaved > 0;
+      if (changed) {
+        this.getChat().setHistory(mcResult.history);
+        await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
+      }
+      if (m.triggerReason === 'size') {
+        const pendingNote =
+          m.pendingToolResultChars && m.pendingToolResultChars > 0
+            ? ` (+${m.pendingToolResultChars} pending)`
+            : '';
+        debugLogger.info(
+          `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
+            `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
+            `tool result(s) (~${m.tokensSaved} tokens), history now ` +
+            `${m.toolResultCharsAfter}${pendingNote}, kept ${m.toolsKept} ` +
+            `tool result(s)`,
+        );
+      } else {
+        debugLogger.info(
+          `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+            `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
+            `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
+        );
+      }
+      return changed;
     } catch (err) {
       debugLogger.error(
-        `[TIME-BASED MC] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
+        `[MICROCOMPACTION] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
     }
@@ -1888,10 +1917,11 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        // Idle cleanup: clear old tool results when idle > threshold.
-        // Runs on user and cron messages. ToolResult and Retry are
-        // excluded; Hook continuations use a separate checkpoint below.
-        const compacted = await this.microcompactIdleHistory(
+        // Pre-send microcompaction: user and cron turns can trigger both
+        // idle-based and cumulative-size cleanup. ToolResult and Retry are
+        // excluded here; ToolResult runs a size-only checkpoint after its
+        // pending content is assembled.
+        const compacted = await this.microcompactHistoryBeforeSend(
           this.lastApiCompletionTimestamp,
         );
         if (messageType === SendMessageType.UserQuery || compacted) {
@@ -1901,7 +1931,7 @@ export class GeminiClient {
         this.lastHookMicrocompactionTimestamp ??=
           this.lastApiCompletionTimestamp ?? Date.now();
         const checkpoint = this.lastHookMicrocompactionTimestamp;
-        if (await this.microcompactIdleHistory(checkpoint)) {
+        if (await this.microcompactHistoryBeforeSend(checkpoint)) {
           this.lastHookMicrocompactionTimestamp = Date.now();
         }
       }
@@ -2134,6 +2164,10 @@ export class GeminiClient {
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
         }
+        await this.microcompactHistoryBeforeSend(null, {
+          sizeOnly: true,
+          pendingContent: createUserContent(requestToSend),
+        });
       }
 
       const activeGoalAtTurnStart = getActiveGoal(this.config.getSessionId());
@@ -2169,24 +2203,49 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
-        if (!this.config.getSkipLoopDetection()) {
-          if (this.loopDetector.addAndCheck(event)) {
-            const loopType = this.loopDetector.getLastLoopType();
-            yield {
-              type: GeminiEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
-            };
-            if (arenaAgentClient) {
-              await arenaAgentClient.reportError('Loop detected');
-            }
-            this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction)
-              endInteractionSpan('error', { errorMessage: 'loop detected' });
-            // finally cleanup catches this, but cancel explicitly to match
-            // the cleanup pattern at other early-return sites.
-            this.cancelPendingMemoryPrefetch();
-            return turn;
+        // Loop detection is opt-in: `model.skipLoopDetection` defaults to true
+        // (see settingsSchema) to avoid false-positive interruptions. Keep BOTH
+        // the deterministic identical-tool-call check and the heuristic checks
+        // behind this single flag so the documented `model.skipLoopDetection`
+        // escape hatch stays honest (including the non-interactive hint in
+        // nonInteractiveCli.ts). The deterministic split, retry-reset, and
+        // pending-call splice below still apply once detection is enabled.
+        const skipLoopDetection = this.config.getSkipLoopDetection();
+        const deterministicToolCallLoop =
+          !skipLoopDetection &&
+          this.loopDetector.addAndCheckDeterministicToolCallLoop(event);
+        const heuristicLoop =
+          !deterministicToolCallLoop &&
+          !skipLoopDetection &&
+          this.loopDetector.addAndCheckHeuristicLoops(event);
+        if (deterministicToolCallLoop || heuristicLoop) {
+          const loopType = this.loopDetector.getLastLoopType();
+          if (
+            event.type === GeminiEventType.ToolCallRequest &&
+            loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS
+          ) {
+            const repeatedCount =
+              this.loopDetector.getConsecutiveToolCallCount();
+            const repeatedStartIndex = Math.max(
+              0,
+              turn.pendingToolCalls.length - repeatedCount,
+            );
+            turn.pendingToolCalls.splice(repeatedStartIndex);
           }
+          yield {
+            type: GeminiEventType.LoopDetected,
+            ...(loopType && { value: { loopType } }),
+          };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
+          }
+          this.lastApiCompletionTimestamp = Date.now();
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', { errorMessage: 'loop detected' });
+          // finally cleanup catches this, but cancel explicitly to match
+          // the cleanup pattern at other early-return sites.
+          this.cancelPendingMemoryPrefetch();
+          return turn;
         }
         // Update arena status on Finished events — stats are derived
         // automatically from uiTelemetryService by the reporter.
@@ -2560,6 +2619,7 @@ export class GeminiClient {
       const {
         contentGenerator,
         retryAuthType,
+        retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
 
@@ -2577,6 +2637,7 @@ export class GeminiClient {
       };
       const result = await retryWithBackoff(apiCall, {
         authType: retryAuthType,
+        extraRetryErrorCodes: retryErrorCodes,
         persistentMode: isUnattendedMode(),
         signal: abortSignal,
         heartbeatFn: (info) => {
@@ -2679,7 +2740,7 @@ export class GeminiClient {
    * microcompaction. Falls back to a blanket clear() when any evicted
    * path can't be resolved.
    *
-   * Shared by the time-based microcompaction path and /compress-fast.
+   * Shared by pre-send microcompaction and /compress-fast.
    */
   private async disarmFileReadCacheAfterEviction(
     meta: MicrocompactMeta,

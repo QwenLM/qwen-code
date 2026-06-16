@@ -37,8 +37,6 @@ import {
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
 } from '../utils/truncation.js';
-
-const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
@@ -133,13 +131,34 @@ import {
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 
+const debugLogger = createDebugLogger('TOOL_SCHEDULER');
+
+function dedupeRequestsByCallId(
+  requests: ToolCallRequestInfo[],
+): ToolCallRequestInfo[] {
+  const seenCallIds = new Set<string>();
+  const deduped: ToolCallRequestInfo[] = [];
+  for (const request of requests) {
+    if (request.callId) {
+      if (seenCallIds.has(request.callId)) {
+        debugLogger.debug(
+          `dedupeRequestsByCallId: dropping duplicate callId=${request.callId} name=${request.name}`,
+        );
+        continue;
+      }
+      seenCallIds.add(request.callId);
+    }
+    deduped.push(request);
+  }
+  return deduped;
+}
+
 // Gap between the persistence gate and per-tool truncation thresholds.
 // Tools that self-truncate to ~25K add headers bringing output to ~25.4K;
 // the headroom ensures the gate only fires for genuinely un-truncated output
 // and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
 const GATE_EXEMPT_TOOLS = new Set(['read_file']);
-
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
   if (typeof c === 'string') return c;
@@ -1664,7 +1683,9 @@ export class CoreToolScheduler {
           'Cannot schedule new tool calls while other tool calls are actively running (executing or awaiting approval).',
         );
       }
-      const requestsToProcess = Array.isArray(request) ? request : [request];
+      const requestsToProcess = dedupeRequestsByCallId(
+        Array.isArray(request) ? request : [request],
+      );
 
       // Prune validation retry state per-tool, not wholesale. Keys are
       // "<toolName>:<errorMessage>"; retain counters only for tools actually

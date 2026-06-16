@@ -87,6 +87,7 @@ describe('runNonInteractive', () => {
     setNotificationCallback: ReturnType<typeof vi.fn>;
     setRegisterCallback: ReturnType<typeof vi.fn>;
     getRunning: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
   };
   let mockCoreExecuteToolCall: Mock;
@@ -149,6 +150,7 @@ describe('runNonInteractive', () => {
       setNotificationCallback: vi.fn(),
       setRegisterCallback: vi.fn(),
       getRunning: vi.fn().mockReturnValue([]),
+      get: vi.fn().mockReturnValue({ status: 'running' }),
       abortAll: vi.fn(),
     };
 
@@ -2523,6 +2525,163 @@ describe('runNonInteractive', () => {
         ),
     );
     expect(toolResultMessages.length).toBe(2);
+  });
+
+  it('should execute only the first duplicate tool call id in stream-json format', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const duplicateToolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'dup_id_0001',
+        name: 'read_file',
+        args: { file_path: 'a.ts' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-dup',
+      },
+    };
+    const replayedToolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'dup_id_0001',
+        name: 'read_file',
+        args: { file_path: 'b.ts' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-dup',
+      },
+    };
+
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'dup_id_0001',
+            name: 'read_file',
+            response: { output: 'first' },
+          },
+        },
+      ],
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([duplicateToolCall, replayedToolCall]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'done' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Duplicate tool',
+      'prompt-id-dup',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({
+        callId: 'dup_id_0001',
+        args: { file_path: 'a.ts' },
+      }),
+      expect.any(AbortSignal),
+      expect.any(Object),
+    );
+  });
+
+  it('should execute every tool call with an empty call id in stream-json format', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const firstToolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: '',
+        name: 'read_file',
+        args: { file_path: 'a.ts' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-empty',
+      },
+    };
+    const secondToolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: '',
+        name: 'read_file',
+        args: { file_path: 'b.ts' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-empty',
+      },
+    };
+
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: '',
+            name: 'read_file',
+            response: { output: 'ok' },
+          },
+        },
+      ],
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([firstToolCall, secondToolCall]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'done' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Empty id tools',
+      'prompt-id-empty',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(2);
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      1,
+      mockConfig,
+      expect.objectContaining({
+        callId: '',
+        args: { file_path: 'a.ts' },
+      }),
+      expect.any(AbortSignal),
+      expect.any(Object),
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      2,
+      mockConfig,
+      expect.objectContaining({
+        callId: '',
+        args: { file_path: 'b.ts' },
+      }),
+      expect.any(AbortSignal),
+      expect.any(Object),
+    );
   });
 
   it('should handle userMessage with text content blocks in stream-json input mode', async () => {
