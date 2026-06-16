@@ -144,9 +144,9 @@ async function runAgentWithRetry(
 ): Promise<GateAgentResult | null> {
   // Entry-time check: if the parent signal is already aborted before we start,
   // respect it to avoid launching a 5-minute gate agent for an obvious cancellation.
-  // This is the ONLY place we check signal.aborted — during execution, the gate
-  // agent is signal-isolated (see runGateAgent) to prevent transient parent-side
-  // aborts from cascading.
+  // This is the only synchronous signal.aborted check before calling runGateAgent.
+  // The retry loop remains abort-aware via delay() which rejects on abort,
+  // providing a cancellation point between attempts without monitoring mid-flight.
   if (signal.aborted) {
     debugLogger.warn(
       'Gate agent skipped: parent signal already aborted at entry',

@@ -211,8 +211,11 @@ export async function runGateAgent(
       }
     }
     cleanup();
-    // Abort the gate controller to clean up any remaining listeners
-    gateAbortController.abort();
+    // Abort only if the controller hasn't been aborted yet (i.e., timeout didn't fire)
+    // This ensures no lingering timers or listeners, but avoids unnecessary abort events
+    if (!gateAbortController.signal.aborted) {
+      gateAbortController.abort();
+    }
   }
 }
 
