@@ -1582,7 +1582,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     try {
       try {
         await this.config.getFileHistoryService().trackEdit(edit.filePath);
-      } catch {
+      } catch (err) {
+        debugLogger.warn(
+          `file history trackEdit failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
         // File history is best-effort; never block shell-compatible edits.
       }
 
@@ -1598,7 +1601,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
           edit.originalContent,
           edit.newContent,
         );
-      } catch {
+      } catch (err) {
+        debugLogger.warn(
+          `commit attribution recordEdit failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
         // Attribution is diagnostic metadata; the sed edit already succeeded.
       }
 
@@ -1609,7 +1615,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
             .getFileReadCache()
             .recordWrite(edit.filePath, postWriteStats);
         }
-      } catch {
+      } catch (err) {
+        debugLogger.warn(
+          `file read cache recordWrite failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
         // Non-fatal: a future read can refresh the cache from disk.
       }
 
@@ -1847,6 +1856,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     const sedInfo = this.getSedEditInfo();
     if (sedInfo && !this.sedEditPreviewFailed) {
+      debugLogger.debug('executing simulated sed edit', {
+        command: this.params.command,
+      });
       return this.executeSedEdit(sedInfo);
     }
 

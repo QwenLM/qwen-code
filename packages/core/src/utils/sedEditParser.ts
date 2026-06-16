@@ -5,6 +5,7 @@
  */
 
 import { parse } from 'shell-quote';
+import { getErrorMessage } from './errors.js';
 
 const BRE_OPERATORS = new Set(['+', '?', '|', '(', ')', '{', '}']);
 const SIMPLE_REGEX_QUANTIFIERS = new Set(['*', '+', '?']);
@@ -45,6 +46,18 @@ export function parseSedEditCommand(command: string): SedEditInfo | null {
   let i = 0;
   while (i < args.length) {
     const arg = args[i]!;
+
+    if (isSafeCombinedFlagArg(arg)) {
+      for (const flag of arg.slice(1)) {
+        if (flag === 'i') {
+          hasInPlaceFlag = true;
+        } else {
+          extendedRegex = true;
+        }
+      }
+      i++;
+      continue;
+    }
 
     if (arg === '-i' || arg === '--in-place') {
       hasInPlaceFlag = true;
@@ -129,14 +142,31 @@ export function parseSedEditCommand(command: string): SedEditInfo | null {
   return sedInfo;
 }
 
+function isSafeCombinedFlagArg(arg: string): boolean {
+  if (!arg.startsWith('-') || arg.startsWith('--') || arg.length <= 2) {
+    return false;
+  }
+  const flags = arg.slice(1);
+  if (flags.startsWith('i') || !/^[Eri]+$/u.test(flags)) {
+    return false;
+  }
+  return true;
+}
+
 function hasShellVariableReference(value: string): boolean {
-  return /\$(?:[A-Za-z_][A-Za-z0-9_]*|\{|\d|[#?@$!*])/u.test(value);
+  return (
+    value.includes('`') ||
+    /\$(?:[A-Za-z_][A-Za-z0-9_]*|\{|\(|\d|[#?@$!*])/u.test(value)
+  );
 }
 
 function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
   try {
     const jsPattern = toJavascriptPattern(sedInfo);
-    if (hasPosixBracketExpression(jsPattern)) {
+    if (
+      hasPosixBracketExpression(jsPattern) ||
+      hasSedJavascriptDivergentEscape(jsPattern)
+    ) {
       return false;
     }
     new RegExp(jsPattern);
@@ -148,6 +178,10 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
 
 function hasPosixBracketExpression(pattern: string): boolean {
   return /\[\[:[A-Za-z]+:\]\]/u.test(pattern);
+}
+
+function hasSedJavascriptDivergentEscape(pattern: string): boolean {
+  return /\\[<>dDwWsS]/u.test(pattern);
 }
 
 function hasUnsafeQuantifiedGroup(pattern: string): boolean {
@@ -219,10 +253,7 @@ function skipCharacterClass(pattern: string, start: number): number {
   return pattern.length - 1;
 }
 
-function getRegexQuantifierEnd(
-  pattern: string,
-  start: number,
-): number | null {
+function getRegexQuantifierEnd(pattern: string, start: number): number | null {
   const char = pattern[start];
   if (char === undefined) {
     return null;
@@ -370,8 +401,8 @@ export function applySedSubstitution(
         });
       })
       .join('');
-  } catch {
-    return content;
+  } catch (err) {
+    throw new Error(`sed pattern simulation failed: ${getErrorMessage(err)}`);
   }
 }
 
@@ -438,6 +469,12 @@ function replaceLine(
   );
 
   return line.replace(globalRegex, (...args: unknown[]) => {
+    const match = String(args[0]);
+    const offset = Number(args[args.length - 2]);
+    if (match.length === 0 && offset === line.length && seen > 0) {
+      return '';
+    }
+
     seen++;
     const shouldReplace =
       options.occurrence === null
@@ -452,7 +489,7 @@ function replaceLine(
     const captures = args
       .slice(1, -2)
       .map((value) => (value === undefined ? '' : String(value)));
-    return buildReplacement(String(args[0]), captures, replacement);
+    return buildReplacement(match, captures, replacement);
   });
 }
 

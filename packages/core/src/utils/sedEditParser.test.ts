@@ -40,6 +40,26 @@ describe('sedEditParser', () => {
     });
   });
 
+  it('parses safe combined in-place and extended regex flags', () => {
+    expect(parseSedEditCommand("sed -Ei 's/foo|bar/baz/g' src/a.ts")).toEqual({
+      filePath: 'src/a.ts',
+      pattern: 'foo|bar',
+      replacement: 'baz',
+      flags: 'g',
+      extendedRegex: true,
+    });
+    expect(parseSedEditCommand("sed -ri 's/foo|bar/baz/g' src/a.ts")).toEqual({
+      filePath: 'src/a.ts',
+      pattern: 'foo|bar',
+      replacement: 'baz',
+      flags: 'g',
+      extendedRegex: true,
+    });
+    expect(
+      parseSedEditCommand("sed -iE 's/foo|bar/baz/g' src/a.ts"),
+    ).toBeNull();
+  });
+
   it('parses expression flag forms', () => {
     expect(parseSedEditCommand("sed -i -e 's/foo/bar/' file.txt")).toEqual({
       filePath: 'file.txt',
@@ -84,6 +104,8 @@ describe('sedEditParser', () => {
     expect(parseSedEditCommand("sed -i 's/foo/bar/' $FILE")).toBeNull();
     expect(parseSedEditCommand('sed -i "s/$FOO/bar/" a.ts')).toBeNull();
     expect(parseSedEditCommand('sed -i "s/$1/bar/" a.ts')).toBeNull();
+    expect(parseSedEditCommand('sed -i "s/$(whoami)/root/" a.ts')).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/`whoami`/root/' a.ts")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/[//g' a.ts")).toBeNull();
     expect(parseSedEditCommand("sed -i 's//bar/' a.ts")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/foo/\\n/' a.ts")).toBeNull();
@@ -180,8 +202,16 @@ describe('sedEditParser', () => {
     ).toBeNull();
   });
 
+  it('rejects sed escapes that diverge in JavaScript regexes', () => {
+    expect(parseSedEditCommand("sed -i 's/\\d/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/\\</X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/\\>/X/g' file.txt")).toBeNull();
+  });
+
   it('preserves carriage returns in sed pattern space', () => {
-    const anchoredSedInfo = parseSedEditCommand("sed -i 's/foo$/bar/' file.txt");
+    const anchoredSedInfo = parseSedEditCommand(
+      "sed -i 's/foo$/bar/' file.txt",
+    );
     const crSedInfo = parseSedEditCommand("sed -i 's/\\r$//g' file.txt");
 
     expect(anchoredSedInfo).not.toBeNull();
@@ -215,5 +245,27 @@ describe('sedEditParser', () => {
     expect(applySedSubstitution('foo foo foo foo', sedInfo!)).toBe(
       'foo bar bar bar',
     );
+  });
+
+  it('suppresses trailing zero-width global matches like sed', () => {
+    const starSedInfo = parseSedEditCommand("sed -i 's/a*/X/g' file.txt");
+    const lineSedInfo = parseSedEditCommand("sed -i 's/.*/X/g' file.txt");
+
+    expect(starSedInfo).not.toBeNull();
+    expect(lineSedInfo).not.toBeNull();
+    expect(applySedSubstitution('aaa', starSedInfo!)).toBe('X');
+    expect(applySedSubstitution('aaa', lineSedInfo!)).toBe('X');
+  });
+
+  it('throws when direct sed simulation cannot compile the pattern', () => {
+    expect(() =>
+      applySedSubstitution('foo', {
+        filePath: 'file.txt',
+        pattern: '[',
+        replacement: 'bar',
+        flags: '',
+        extendedRegex: true,
+      }),
+    ).toThrow(/sed pattern simulation failed/);
   });
 });

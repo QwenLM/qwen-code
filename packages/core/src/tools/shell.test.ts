@@ -15,8 +15,15 @@ import {
 } from 'vitest';
 
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+}));
 vi.mock('../services/shellExecutionService.js', () => ({
   ShellExecutionService: { execute: mockShellExecutionService },
+}));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
 }));
 vi.mock('fs');
 vi.mock('os');
@@ -426,6 +433,10 @@ describe('ShellTool', () => {
         const result = await invocation.execute(mockAbortSignal);
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+          'executing simulated sed edit',
+          { command: "sed -i 's/foo/bar/g' file.txt" },
+        );
         expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(
           expectedSedFilePath,
         );
@@ -527,11 +538,53 @@ describe('ShellTool', () => {
         const result = await invocation.execute(mockAbortSignal);
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('file history trackEdit failed for sed edit'),
+        );
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
           path: expectedSedFilePath,
           content: 'bar\n',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
+        expect(result.llmContent).toContain('sed edit applied');
+      });
+
+      it('logs non-fatal sed attribution and read-cache failures', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        vi.spyOn(
+          CommitAttributionService.getInstance(),
+          'recordEdit',
+        ).mockImplementation(() => {
+          throw new Error('attribution failed');
+        });
+        vi.mocked(fs.statSync).mockReturnValue({} as fs.Stats);
+        mockFileReadCache.recordWrite.mockImplementation(() => {
+          throw new Error('cache failed');
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalled();
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'commit attribution recordEdit failed for sed edit',
+          ),
+        );
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'file read cache recordWrite failed for sed edit',
+          ),
+        );
         expect(result.llmContent).toContain('sed edit applied');
       });
 
