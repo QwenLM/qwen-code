@@ -2758,6 +2758,10 @@ export class Session implements SessionContext {
     if (options.persistDefault ?? true) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(persistScope, 'model.name', parsed.modelId);
+      // Id-only switch: clear any baseUrl disambiguator left by a previous
+      // model-picker selection so the next launch resolves to this provider,
+      // not a stale one sharing the same model id.
+      this.settings.setValue(persistScope, 'model.baseUrl', undefined);
       this.settings.setValue(
         persistScope,
         'security.auth.selectedType',

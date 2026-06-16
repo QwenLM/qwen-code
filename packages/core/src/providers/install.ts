@@ -210,6 +210,10 @@ export async function applyProviderInstallPlan(
     currentStep = 'modelSelection';
     if (plan.modelSelection?.modelId) {
       settings.setValue('model.name', plan.modelSelection.modelId);
+      // The plan selects by model id only, so clear any baseUrl disambiguator
+      // left by a previous model-picker selection — otherwise the next launch
+      // could resolve to a stale provider sharing this model id.
+      settings.setValue('model.baseUrl', undefined);
     }
 
     // Provider state metadata
