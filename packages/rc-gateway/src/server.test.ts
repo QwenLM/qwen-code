@@ -1431,4 +1431,77 @@ describe('APNs token-revoke cascade (native-mobile-shells)', () => {
 
     rmSync(apnsDir, { recursive: true, force: true });
   });
+
+  it('delivers a permission.required to a registered APNs device through the wired sender', async () => {
+    const apnsDir = mkdtempSync(join(tmpdir(), 'rc-apns-deliver-'));
+    const apnsStore = await ApnsStore.open(join(apnsDir, 'apns.json'));
+    // Fake the HTTP/2 transport to Apple (the vendor ceiling) and capture POSTs.
+    const posts: Array<{ deviceToken: string; topic: string; jwt: string }> =
+      [];
+    const transport = {
+      post: async (req: {
+        deviceToken: string;
+        topic: string;
+        jwt: string;
+      }) => {
+        posts.push({
+          deviceToken: req.deviceToken,
+          topic: req.topic,
+          jwt: req.jwt,
+        });
+        return { status: 200 };
+      },
+    };
+    const { url, pairing, notifier } = await boot(undefined, {
+      apnsStore,
+      apns: {
+        signer: { token: () => 'fake-jwt' },
+        bundleId: 'dev.qwen.rc',
+        host: 'api.push.apple.com',
+        transport,
+      },
+    });
+
+    // Redeem an approver token (scope gate) and register its APNs device.
+    const approver = pairing.mint([SESSION_READ, APPROVE]);
+    const approverToken = (
+      (await (
+        await fetch(`${url}/rc/pair/redeem`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: approver.code, label: 'phone' }),
+        })
+      ).json()) as { token: string }
+    ).token;
+    await fetch(`${url}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${approverToken}`,
+      },
+      body: JSON.stringify({
+        deviceToken: 'dt-approver',
+        bundleId: 'dev.qwen.rc',
+        shellVersion: '1.0.0',
+      }),
+    });
+
+    // Drive a notification through the gateway's own (wired) notifier.
+    await notifier!.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({
+      deviceToken: 'dt-approver',
+      topic: 'dev.qwen.rc',
+      jwt: 'fake-jwt',
+    });
+
+    rmSync(apnsDir, { recursive: true, force: true });
+  });
 });

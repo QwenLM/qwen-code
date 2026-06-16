@@ -32,6 +32,8 @@ import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
 import { ApnsStore } from './nativePush/apnsStore.js';
+import { ApnsJwtSigner } from './nativePush/apnsJwt.js';
+import { apnsHost } from './nativePush/apnsSender.js';
 import {
   parseNativePushConfig,
   buildNativeShellsCapability,
@@ -218,6 +220,37 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   );
   const expandTilde = (p: string): string =>
     p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
+  // APNs delivery materials (add-native-mobile-shells): built once at boot when
+  // the config is complete AND the P-8 key parses. Absent → the notifier skips
+  // APNs (a registration is harmless storage). NOTE: the SENDER is built from the
+  // key read here, so toggling delivery requires a restart — whereas the
+  // capability's `apnsEnabled` is re-checked live per request.
+  let apnsDelivery:
+    | { signer: { token(): string }; bundleId: string; host: string }
+    | undefined;
+  {
+    const a = nativePushConfig.apns;
+    if (a?.keyPath && a.keyId && a.teamId && a.bundleId) {
+      try {
+        const keyPem = readFileSync(expandTilde(a.keyPath), 'utf8');
+        const signer = new ApnsJwtSigner({
+          keyPem,
+          keyId: a.keyId,
+          teamId: a.teamId,
+          now: () => Date.now(),
+        });
+        signer.token(); // parse-validate the key now; throws on malformed → off
+        apnsDelivery = {
+          signer,
+          bundleId: a.bundleId,
+          host: apnsHost(a.environment ?? 'production'),
+        };
+      } catch {
+        // Unreadable/malformed P-8 key → APNs delivery stays off (plain push only).
+        apnsDelivery = undefined;
+      }
+    }
+  }
   const snooze = await SnoozeStore.open(
     join(homedir(), '.qwen', 'rc', 'snooze.state'),
   );
@@ -298,6 +331,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       vapid,
       pushStore,
       apnsStore,
+      ...(apnsDelivery ? { apns: apnsDelivery } : {}),
       nativeShellsCapability: () => {
         const keyPath = nativePushConfig.apns?.keyPath;
         // apnsEnabled reflects a LOADABLE P-8 key, not mere file presence: parse

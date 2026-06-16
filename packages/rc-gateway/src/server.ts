@@ -47,6 +47,11 @@ import {
   createAssetLinksRoute,
 } from './routes/nativePush.js';
 import type { ApnsStore } from './nativePush/apnsStore.js';
+import {
+  ApnsSender,
+  createHttp2ApnsTransport,
+  type ApnsTransport,
+} from './nativePush/apnsSender.js';
 import type { NativeShellsCapability } from './nativePush/nativeShells.js';
 import type { AggregateQuery } from './cost/usageStore.js';
 import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
@@ -180,6 +185,20 @@ export interface GatewayDeps {
    * token revocation cascade-deletes the token's subscriptions.
    */
   apnsStore?: ApnsStore;
+  /**
+   * APNs delivery materials (`add-native-mobile-shells` delivery pipeline). When
+   * set alongside `apnsStore` and the notifier, push notifications also fan out
+   * to APNs devices. The signer/bundle/host are built by the host (cli) from the
+   * config + P-8 key; the gateway builds the `ApnsSender` here so it can wire its
+   * own audit log and the live-token orphan guard (`isTokenLive`). `transport` is
+   * injectable for tests (defaults to the real HTTP/2 transport to Apple).
+   */
+  apns?: {
+    signer: { token(): string };
+    bundleId: string;
+    host: string;
+    transport?: ApnsTransport;
+  };
   /**
    * `remoteControl.nativeShells` capability block (`add-native-mobile-shells`).
    * When set, `/rc/capabilities` reports it (`apnsEnabled` reflects a loadable
@@ -688,6 +707,25 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     // Always-on digest tracker (cycle 71): records what quiet hours suppressed
     // ("while you were away"); record-only, never affects delivery.
     const digest = new PushDigest();
+    // APNs second transport (add-native-mobile-shells): built here so it shares
+    // the gateway's audit (push_routed{transport:apns}) and the live-token orphan
+    // guard. Only when the host supplied delivery materials AND a store exists.
+    const apns =
+      deps.apns && deps.apnsStore
+        ? {
+            store: deps.apnsStore,
+            sender: new ApnsSender({
+              signer: deps.apns.signer,
+              transport: deps.apns.transport ?? createHttp2ApnsTransport(),
+              store: deps.apnsStore,
+              bundleId: deps.apns.bundleId,
+              host: deps.apns.host,
+              audit,
+              isTokenLive: (tokenId) =>
+                deps.store.scopesFor(tokenId) !== undefined,
+            }),
+          }
+        : undefined;
     notifier = new PushNotifier(
       deps.store,
       deps.pushStore,
@@ -699,6 +737,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       rateLimiter,
       coalescer,
       digest,
+      apns,
     );
     app.use(
       '/rc/push',

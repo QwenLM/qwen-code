@@ -6,15 +6,16 @@ token in the platform keystore, scan QR, pin TLS, etc.). Per "build gateway-side
 support only", the gateway implements just the daemon-facing surface the spec
 assigns it:
 
-| Gateway surface                               | Status            |
-| --------------------------------------------- | ----------------- |
-| `POST /rc/native-push/apns/register`          | Cycle A ✅        |
-| `DELETE /rc/native-push/apns/register/:id`    | Cycle A ✅        |
-| Token-revoke → APNs cascade                   | Cycle A ✅        |
-| `remoteControl.nativeShells` capability block | Cycle B ✅        |
-| `GET /.well-known/assetlinks.json`            | Cycle B ✅        |
-| APNs sender (JWT ES256 + payload + retry)     | Cycle C ✅        |
-| Live HTTP/2 send to Apple + notifier wiring   | Cycle C (ceiling) |
+| Gateway surface                               | Status     |
+| --------------------------------------------- | ---------- |
+| `POST /rc/native-push/apns/register`          | Cycle A ✅ |
+| `DELETE /rc/native-push/apns/register/:id`    | Cycle A ✅ |
+| Token-revoke → APNs cascade                   | Cycle A ✅ |
+| `remoteControl.nativeShells` capability block | Cycle B ✅ |
+| `GET /.well-known/assetlinks.json`            | Cycle B ✅ |
+| APNs sender (JWT ES256 + payload + retry)     | Cycle C ✅ |
+| Notifier wiring (fan-out + routing/coalesce)  | Cycle D ✅ |
+| Live HTTP/2 send to Apple (vendor)            | ceiling    |
 
 Everything else — the `window.qwen` bridge contract, keystore token storage,
 biometric, QR/`scanQR`, `qwen-rc://` URL scheme, TLS pinning, daemon-URL pinning,
@@ -120,8 +121,40 @@ configured (the shell then falls back to a Custom Tab).
     rejects the self-signed server), so prod never skips cert checks.
   - **Remaining ceiling (genuinely un-CI-able):** only Apple's own acceptance of
     the JWT + delivery to a real device (needs an Apple Developer account + a
-    device), and wiring `ApnsSender` into the live notification routing/coalescing
-    loop. Everything up to "bytes correctly sent over real HTTP/2" is now verified.
+    device). Everything up to "bytes correctly sent over real HTTP/2" is verified,
+    and the notifier wiring below routes real events to that boundary.
+
+## Notifier wiring (Cycle D)
+
+`PushNotifier.notify` now drives APNs as a **second transport** alongside web-push:
+the same payload fans out to APNs device subscriptions through the gates that
+apply to a token-bound, field-less APNs record — the event-global gates (snooze,
+routing `drop`), token-level **scope + session-lock** (a session-locked share
+token never receives another session's metadata via APNs), per-subscription
+routing drop, and **same-kind coalescing** (D6, shared coalescer keyed by the APNs
+sub id). `push_routed { transport: apns }` is audited by the sender on `200`.
+
+- **Intentionally not applied:** prefs/quiet-hours (no such field on an APNs
+  record); **working-device** (it keys on `tokenId` so it _could_ run, but a phone
+  whose token merely polled recently is **not** foregrounded — suppressing a
+  `permission.required` there would defeat the point of mobile push); **rate-limit**
+  (a deliberate choice — the spec names only coalescing, and coalescing + the
+  sender's 429 backoff cover bursts; the default-cap path exists if symmetry is
+  wanted later).
+- **Construction.** `cli.ts` builds the `ApnsJwtSigner` (validating the P-8 key
+  parses) + bundle/host once at boot and passes them as `deps.apns`; the gateway
+  builds the `ApnsSender` so it wires its own audit + `isTokenLive`. Absent/malformed
+  key → no sender → APNs simply isn't delivered (plain web-push unaffected).
+- **Two honest caveats.** The sender is built from the key read **at boot**, so
+  toggling APNs delivery requires a **restart** (whereas the capability's
+  `apnsEnabled` is re-checked live per request — they can momentarily disagree).
+  And the APNs fan-out currently rides inside the web-push notifier, so APNs
+  delivery requires web-push (VAPID) to be configured — true in every real
+  deployment, but a coupling worth naming.
+- **Verified:** the notifier→APNs fan-out (incl. the session-lock confinement) is
+  unit-tested with a fake sender, and a server-level test drives `deps.apns` →
+  `ApnsSender` → a fake transport end-to-end (correct device token, topic, JWT).
+  The live HTTP/2 call to Apple remains the vendor ceiling above.
 
 ### Resolved in Cycle C
 
@@ -130,8 +163,7 @@ configured (the shell then falls back to a Custom Tab).
   reads `false` (mirrors bind-security's `createSecureContext`), not just presence.
 - **Orphaned-device safety** — `ApnsSender` provides an `isTokenLive` guard
   (removes the subscription and sends nothing when its token is no longer live).
-  ⚠ This is a _mechanism, not yet an enforcement_: `isTokenLive` defaults to
-  absent, so an unwired/mis-wired sender has NO orphan protection. **REQUIRED when
-  wiring the sender into the notifier:** the caller MUST pass `isTokenLive` (e.g.
-  `(tid) => tokenStore.isLive(tid)`) — otherwise a revoked token's device keeps
-  receiving pushes until the next 410. Do not skip it.
+  As of Cycle D this is **enforced**: the gateway builds the sender with
+  `isTokenLive: (tid) => store.scopesFor(tid) !== undefined` (scopesFor drops
+  expired/revoked tokens), so a revoked token's device is never delivered to and
+  is pruned on the next attempt — independent of the token-revoke cascade.
