@@ -142,8 +142,16 @@ async function runAgentWithRetry(
   signal: AbortSignal,
 ): Promise<GateAgentResult | null> {
   for (let attempt = 1; attempt <= MAX_AGENT_RETRIES; attempt++) {
+    // Check if the parent signal is already aborted before starting.
+    // Note: This check is for genuine user-initiated cancellations.
+    // Transient parent-side aborts (e.g., stream errors) should not
+    // prevent retries since runGateAgent now isolates the gate agent
+    // from parent signal propagation.
     if (signal.aborted) {
-      debugLogger.warn('Gate agent skipped: signal already aborted');
+      debugLogger.warn(
+        `Gate agent skipped on attempt ${attempt}: parent signal already aborted`,
+      );
+      // If the signal is aborted, don't retry — the user/session is gone
       return null;
     }
     try {
@@ -159,6 +167,8 @@ async function runAgentWithRetry(
         );
         return null;
       }
+      // Add a small delay between retries to allow transient issues to settle
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
   return null;
