@@ -35,10 +35,16 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function harness(batches: unknown[]) {
+function harness(batches: unknown[], opts: { park?: boolean } = {}) {
   const sent: Array<{ roomId: string; content: unknown }> = [];
   const joined: string[] = [];
   const prompts: string[] = [];
+  const votes: Array<{
+    sessionId: string;
+    requestId: string;
+    outcome: string;
+    subActor: string;
+  }> = [];
   let nextEvt = 1;
   const ac = new AbortController();
   let i = 0;
@@ -67,7 +73,20 @@ function harness(batches: unknown[]) {
       prompts.push(prompt);
       return { ok: true, status: 200 };
     },
-    vote: async () => ({ ok: true, status: 200 }),
+    redeemInvite: async () => ({
+      ok: true,
+      status: 200,
+      sessionId: 'sess_new',
+    }),
+    vote: async (
+      sessionId: string,
+      requestId: string,
+      outcome: string,
+      subActor: string,
+    ) => {
+      votes.push({ sessionId, requestId, outcome, subActor });
+      return { ok: true, status: 200 };
+    },
     subscribeEvents: async (sessionId: string) => {
       subscribed.push(sessionId);
     },
@@ -81,6 +100,9 @@ function harness(batches: unknown[]) {
     baseUrl: 'http://127.0.0.1:4170',
     syncOnce: async () => {
       if (i >= batches.length) {
+        // `park`: keep the sync loop alive (signal stays live) instead of
+        // aborting, so tests can drive dispatch seams against a running bridge.
+        if (opts.park) return new Promise<unknown>(() => {});
         ac.abort();
         return {};
       }
@@ -102,6 +124,7 @@ function harness(batches: unknown[]) {
     sent,
     joined,
     prompts,
+    votes,
     subscribed,
     registered: () => registered,
     fireTimers: () => {
@@ -386,5 +409,68 @@ describe('MatrixBridge.dispatchDecryptedMessage (E2EE routing seam)', () => {
       body: 'nowhere',
     });
     expect(h.prompts).toEqual([]);
+  });
+
+  it('picks up a session newly bound by a decrypted-path !qwen attach', async () => {
+    // The crypto path has no per-batch reconcile (no fetch syncLoop), so
+    // dispatchDecryptedMessage must reconcile subscriptions after a successful
+    // attach — else the freshly-bound session never gets its SSE echo loop.
+    const h = harness([], { park: true });
+    void h.bridge.start(h.ac.signal);
+    // A moderator (power ≥ 50) attaches in a fresh (unbound) encrypted room.
+    await h.bridge.dispatchDecryptedMessage(
+      { roomId: '!fresh:h', sender: '@mod:h', body: '!qwen attach tok123' },
+      50,
+    );
+    await waitFor(() => h.subscribed.includes('sess_new'));
+    expect(h.subscribed).toContain('sess_new');
+    h.ac.abort();
+  });
+});
+
+describe('MatrixBridge.dispatchReaction (E2EE vote routing seam)', () => {
+  it('routes a 👍 on a tracked permission_request into an allow_once vote', async () => {
+    await rooms.bind('!enc:h', 'sess_e2ee');
+    const h = harness([]);
+    // Render a permission_request so its sent event id is tracked for votes.
+    h.bridge.deliverEvent('sess_e2ee', {
+      type: 'permission_request',
+      data: {
+        requestId: 'req1',
+        bridgeHints: {
+          argsSummaryShort: 'run ls',
+          recommendedSurface: 'inline',
+        },
+      },
+    } as never);
+    await waitFor(() => h.sent.length === 1);
+    const eventId = (h.sent[0].content as { body: string }) && '$evt_1';
+
+    await h.bridge.dispatchReaction({
+      roomId: '!enc:h',
+      sender: '@alice:h',
+      targetEventId: eventId,
+      key: '👍',
+    });
+    expect(h.votes).toEqual([
+      {
+        sessionId: 'sess_e2ee',
+        requestId: 'req1',
+        outcome: 'allow_once',
+        subActor: 'matrix:@alice:h',
+      },
+    ]);
+  });
+
+  it('ignores a reaction on an untracked event (no vote)', async () => {
+    await rooms.bind('!enc:h', 'sess_e2ee');
+    const h = harness([]);
+    await h.bridge.dispatchReaction({
+      roomId: '!enc:h',
+      sender: '@alice:h',
+      targetEventId: '$never-tracked',
+      key: '👍',
+    });
+    expect(h.votes).toEqual([]);
   });
 });

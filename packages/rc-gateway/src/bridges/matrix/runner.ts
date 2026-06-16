@@ -16,6 +16,7 @@ import {
   ENCRYPTED_ROOM_NOTICE,
   type MatrixDispatchDeps,
   type MatrixResponder,
+  type NormalizedMatrixReaction,
   type TrackedEvent,
 } from './dispatch.js';
 import {
@@ -101,6 +102,8 @@ export class MatrixBridge {
   private readonly stream: MatrixStreamRouter;
   private readonly ctx: RoomStateCtx;
   private readonly log: (msg: string) => void;
+  /** The run signal, stored so decrypted-path dispatch can reconcile subscriptions. */
+  private signal?: AbortSignal;
 
   constructor(cfg: MatrixBridgeConfig) {
     this.cfg = cfg;
@@ -176,6 +179,22 @@ export class MatrixBridge {
       },
       this.dispatchDeps(),
     );
+    // A `!qwen attach` this message may have bound a new session. The crypto
+    // path has no per-batch reconcile (the fetch syncLoop is subsumed by the
+    // SDK client), so reconcile here — mirroring syncLoop — or the freshly bound
+    // session never gets its outbound SSE echo loop. Idempotent (subscribed set).
+    if (this.signal) this.reconcileSubscriptions(this.signal);
+  }
+
+  /**
+   * Route a crypto-adapter-decrypted REACTION through the same vote path as the
+   * plain `/sync` reactions (add-matrix-bridge E2EE). The adapter normalizes an
+   * `m.reaction` timeline event into {@link NormalizedMatrixReaction}; this hands
+   * it to the shared {@link handleReaction}, so a 👍/👎 on a tracked
+   * permission_request casts a vote exactly like a cleartext reaction.
+   */
+  async dispatchReaction(reaction: NormalizedMatrixReaction): Promise<void> {
+    await handleReaction(reaction, this.dispatchDeps());
   }
 
   /** Register (or re-register) this bridge's capabilities with the gateway. */
@@ -193,6 +212,7 @@ export class MatrixBridge {
 
   /** Register, heartbeat, subscribe to bound sessions, then run the sync loop. */
   async start(signal: AbortSignal): Promise<void> {
+    this.signal = signal;
     const reg = await this.registerSelf();
     this.log(
       reg.ok
