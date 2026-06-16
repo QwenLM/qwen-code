@@ -175,6 +175,10 @@ function wakeupToJob(wakeup: SessionWakeup): CronJob {
   };
 }
 
+function truncatePrompt(prompt: string): string {
+  return prompt.length > 60 ? prompt.slice(0, 57) + '...' : prompt;
+}
+
 export class CronScheduler {
   // All jobs — session-only and durable — live in this one map.
   private jobs = new Map<string, CronJob>();
@@ -272,13 +276,15 @@ export class CronScheduler {
     wasClamped: boolean;
   } {
     const clampedDelaySeconds = clampWakeupSeconds(delaySeconds);
-    const wasClamped =
-      !Number.isFinite(delaySeconds) ||
-      delaySeconds < WAKEUP_MIN_SECONDS ||
-      delaySeconds > WAKEUP_MAX_SECONDS;
+    // True whenever the stored delay differs from what was asked — covers
+    // non-finite (→ default heartbeat), out-of-range, and in-range fractional
+    // input that rounding changed. Comparing the result (rather than
+    // re-checking the bounds) keeps the flag honest about the rounding case.
+    const wasClamped = clampedDelaySeconds !== delaySeconds;
     const id = generateId();
     const now = Date.now();
     const fireAtMs = now + clampedDelaySeconds * 1000;
+    this.wakeups.clear();
     this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
     return {
       id,
@@ -843,6 +849,7 @@ export class CronScheduler {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    this.wakeups.clear();
     this.onFire = null;
 
     if (this.durableEnabled) {
@@ -1021,17 +1028,23 @@ export class CronScheduler {
    */
   getExitSummary(): string | null {
     const sessionJobs = [...this.jobs.values()].filter((job) => !job.durable);
-    if (sessionJobs.length === 0) return null;
+    const wakeups = [...this.wakeups.values()];
+    if (sessionJobs.length === 0 && wakeups.length === 0) return null;
 
-    const count = sessionJobs.length;
+    const count = sessionJobs.length + wakeups.length;
     const lines = [
       `Session ending. ${count} active loop${count === 1 ? '' : 's'} cancelled:`,
     ];
     for (const job of sessionJobs) {
       const schedule = humanReadableCron(job.cronExpr);
-      const prompt =
-        job.prompt.length > 60 ? job.prompt.slice(0, 57) + '...' : job.prompt;
-      lines.push(`  - [${job.id}] ${schedule}: ${prompt}`);
+      lines.push(`  - [${job.id}] ${schedule}: ${truncatePrompt(job.prompt)}`);
+    }
+    for (const wakeup of wakeups) {
+      lines.push(
+        `  - [${wakeup.id}] wakeup at ${new Date(
+          wakeup.fireAtMs,
+        ).toLocaleString()}: ${truncatePrompt(wakeup.prompt)}`,
+      );
     }
     return lines.join('\n');
   }

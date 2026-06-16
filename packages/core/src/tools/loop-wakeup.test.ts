@@ -83,7 +83,21 @@ describe('LoopWakeupTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.llmContent).toContain('clamped');
-    expect(result.llmContent).toContain('60');
+    expect(result.llmContent).toContain('Scheduled for:');
+    expect(result.llmContent).toContain('(in 60s).');
+    expect(result.llmContent).toContain(
+      'Requested 5s was clamped to the [60, 3600] s range.',
+    );
+  });
+
+  it('does not report a clamp when the delay is in range', async () => {
+    const invocation = tool.build({
+      delaySeconds: 300,
+      prompt: 'continue loop',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.llmContent).not.toContain('clamped');
   });
 
   it('echoes the reason back to the user', async () => {
@@ -131,5 +145,26 @@ describe('LoopWakeupTool', () => {
       prompt: 'continue loop',
       reason: '',
     });
+  });
+
+  it('surfaces a scheduler failure as a structured tool error', async () => {
+    const failingConfig = {
+      getCronScheduler: () => ({
+        scheduleWakeup: () => {
+          throw new Error('scheduler boom');
+        },
+      }),
+      getProjectRoot: () => tmpDir,
+    } as unknown as Config;
+    const failingTool = new LoopWakeupTool(failingConfig);
+    const invocation = failingTool.build({
+      delaySeconds: 300,
+      prompt: 'continue loop',
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.message).toBe('scheduler boom');
+    expect(result.llmContent).toContain('Error scheduling loop wakeup:');
   });
 });

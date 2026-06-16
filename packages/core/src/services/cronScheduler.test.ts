@@ -440,10 +440,34 @@ describe('CronScheduler', () => {
       expect(scheduler.scheduleWakeup(300, 'p').wasClamped).toBe(false);
     });
 
+    it('treats 60 and 3600 as in-range boundaries (not clamped)', () => {
+      expect(scheduler.scheduleWakeup(60, 'p').wasClamped).toBe(false);
+      expect(scheduler.scheduleWakeup(3600, 'p').wasClamped).toBe(false);
+    });
+
+    it('flags in-range fractional input that rounding changed as clamped', () => {
+      const w = scheduler.scheduleWakeup(60.4, 'p');
+      expect(w.clampedDelaySeconds).toBe(60);
+      expect(w.wasClamped).toBe(true);
+    });
+
     it('falls back to the default heartbeat for non-finite delays', () => {
       const w = scheduler.scheduleWakeup(Infinity, 'p');
       expect(w.clampedDelaySeconds).toBe(1200);
       expect(w.wasClamped).toBe(true);
+    });
+
+    it('treats NaN as non-finite and uses the default heartbeat', () => {
+      const w = scheduler.scheduleWakeup(Number.NaN, 'p');
+      expect(w.clampedDelaySeconds).toBe(1200);
+      expect(w.wasClamped).toBe(true);
+    });
+
+    it('destroy() clears pending wakeups', () => {
+      scheduler.scheduleWakeup(300, 'p');
+      scheduler.destroy();
+      expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.hasPendingWork).toBe(false);
     });
 
     it('fires a due wakeup through onFire exactly once, then removes it', () => {
@@ -461,6 +485,7 @@ describe('CronScheduler', () => {
       scheduler.tick(new Date(2025, 0, 15, 10, 33, 0)); // already fired+removed
       expect(fired).toHaveLength(1);
       expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.hasPendingWork).toBe(false);
     });
 
     it('is separate from the cron jobs map (not in list/size)', () => {
@@ -469,19 +494,90 @@ describe('CronScheduler', () => {
       expect(scheduler.size).toBe(0);
     });
 
+    it('does not count wakeups against the cron job limit', () => {
+      for (let i = 0; i < 50; i++) {
+        scheduler.create('*/1 * * * *', `job-${i}`, true);
+      }
+
+      expect(() => scheduler.scheduleWakeup(300, 'wake up')).not.toThrow();
+      expect(scheduler.size).toBe(50);
+      expect(scheduler.sessionSize).toBe(51);
+    });
+
+    it('keeps only one pending wakeup per session', () => {
+      scheduler.scheduleWakeup(120, 'first');
+      const second = scheduler.scheduleWakeup(240, 'second');
+
+      expect(scheduler.sessionSize).toBe(1);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 32, 0));
+      expect(fired).toHaveLength(0);
+
+      scheduler.tick(new Date(second.scheduledFor));
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.prompt).toBe('second');
+    });
+
     it('cancelWakeup removes a pending wakeup', () => {
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
       const w = scheduler.scheduleWakeup(300, 'p');
+
       expect(scheduler.cancelWakeup(w.id)).toBe(true);
       expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.hasPendingWork).toBe(false);
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 35, 0));
+      expect(fired).toHaveLength(0);
       expect(scheduler.cancelWakeup(w.id)).toBe(false);
     });
 
-    it('cancelAllWakeups cancels every pending wakeup and returns the count', () => {
+    it('cancelAllWakeups cancels the pending wakeup and returns the count', () => {
       scheduler.scheduleWakeup(120, 'a');
       scheduler.scheduleWakeup(240, 'b');
-      expect(scheduler.cancelAllWakeups()).toBe(2);
+      expect(scheduler.cancelAllWakeups()).toBe(1);
       expect(scheduler.sessionSize).toBe(0);
       expect(scheduler.cancelAllWakeups()).toBe(0);
+    });
+
+    it('reports pending wakeups in the exit summary', () => {
+      scheduler.scheduleWakeup(300, 'continue checking the deployment status');
+
+      const summary = scheduler.getExitSummary()!;
+
+      expect(summary).toContain('1 active loop cancelled:');
+      expect(summary).toContain('wakeup');
+      expect(summary).toContain('continue checking the deployment status');
+    });
+
+    it('stop clears pending wakeups so they cannot fire after restart', () => {
+      const fired: CronJob[] = [];
+      scheduler.scheduleWakeup(300, 'stale wakeup');
+      scheduler.start((job) => fired.push(job));
+
+      scheduler.stop();
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 35, 0));
+
+      expect(fired).toHaveLength(0);
+      expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.hasPendingWork).toBe(false);
+    });
+
+    it('does not persist wakeups as durable cron tasks', async () => {
+      const tmpDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'wakeup-durable-'),
+      );
+      try {
+        const projectScheduler = new CronScheduler(tmpDir);
+        projectScheduler.scheduleWakeup(300, 'session wakeup');
+
+        await expect(readCronTasks(tmpDir)).resolves.toEqual([]);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
