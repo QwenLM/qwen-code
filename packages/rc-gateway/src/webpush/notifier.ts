@@ -436,7 +436,22 @@ export class PushNotifier {
             return;
           }
         }
-        await apns.sender.send(rec, payload);
+        // Best-effort, like the web-push sender: the LIVE APNs transport REJECTS
+        // on a connection/TLS/DNS error (Apple unreachable — not a 429/5xx, so the
+        // sender's retry loop never sees it). Swallow it here so a transient Apple
+        // outage can never reject `notify()` (web-push already sent above) or
+        // surface as an unhandled rejection. Audited as push_send_failed.
+        await apns.sender.send(rec, payload).catch(() => {
+          void this.audit?.record({
+            action: 'push_send_failed',
+            target: ctx.sessionId,
+            detail: {
+              kind: payload.kind,
+              transport: 'apns',
+              subscriptionId: rec.id,
+            },
+          });
+        });
       }),
     );
   }

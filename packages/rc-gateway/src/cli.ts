@@ -230,7 +230,10 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     | undefined;
   {
     const a = nativePushConfig.apns;
-    if (a?.keyPath && a.keyId && a.teamId && a.bundleId) {
+    // Same predicate as resolveApnsEnabled (the capability flag) minus the live
+    // key re-check — so `enabled: false` turns delivery OFF, not just the
+    // capability. (Key loadability is validated by signer.token() below.)
+    if (a?.enabled && a.keyPath && a.keyId && a.teamId && a.bundleId) {
       try {
         const keyPem = readFileSync(expandTilde(a.keyPath), 'utf8');
         const signer = new ApnsJwtSigner({

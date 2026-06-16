@@ -1418,6 +1418,45 @@ describe('PushNotifier — APNs fan-out', () => {
     expect(apns.sends).toHaveLength(0);
   });
 
+  it('a rejecting APNs send never rejects notify() (best-effort; audits push_send_failed)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
+    await apnsStore.register({
+      tokenId: approver.id,
+      deviceToken: 'app-dev',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    // The LIVE transport rejects when Apple is unreachable; the sender propagates.
+    const rejectingApns: ApnsNotifier = {
+      send: async () => {
+        throw new Error('ECONNRESET to api.push.apple.com');
+      },
+    };
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: apnsStore, sender: rejectingApns },
+    );
+    await expect(
+      notifier.notify(PERM, { sessionId: 's1' }),
+    ).resolves.toBeUndefined();
+    expect(
+      audit.calls.some(
+        (c) =>
+          c.action === 'push_send_failed' && c.detail?.transport === 'apns',
+      ),
+    ).toBe(true);
+  });
+
   it('coalesces a same-(kind,session) burst to the APNs device within the window', async () => {
     const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
     const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
