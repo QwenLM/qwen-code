@@ -100,10 +100,11 @@ function persistModelSelection(
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'model.name', modelId);
   // Persist the paired baseUrl so the correct provider is restored on next
-  // launch when multiple providers share the same model id. Clear it when the
-  // selection has no baseUrl, otherwise a stale value would override the
-  // resolved provider.
-  settings.setValue(scope, 'model.baseUrl', baseUrl);
+  // launch when multiple providers share the same model id. When the selection
+  // has no baseUrl, write an empty-string tombstone (not undefined): undefined
+  // is dropped from JSON, so it would not override a stale model.baseUrl left
+  // in a lower-priority scope, whereas '' is a present value that does.
+  settings.setValue(scope, 'model.baseUrl', baseUrl ?? '');
 }
 
 function persistAuthTypeSelection(

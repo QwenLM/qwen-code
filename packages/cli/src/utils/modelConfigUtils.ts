@@ -194,10 +194,13 @@ export function resolveCliGenerationConfig(
       //
       // Note: `settings` is already merged across user/workspace/system scopes.
       // Every writer of model.name (the picker, /model, ACP, provider install)
-      // writes model.baseUrl to the SAME scope, so the pair stays consistent.
-      // The only way they desync is a hand-edited config that sets model.name
-      // in a higher-priority scope without its paired baseUrl; the id-only
-      // fallback bounds the blast radius (it can only pick a same-id provider).
+      // also writes model.baseUrl in the SAME scope — a real URL, or an empty
+      // string tombstone when there is none. The tombstone matters because an
+      // omitted key cannot override a stale model.baseUrl in a lower-priority
+      // scope on merge, but '' (a present value) can. Empty string is treated
+      // as "no disambiguator" here. The only remaining desync is a hand-edited
+      // config that sets model.name in a higher scope with no baseUrl key at
+      // all; the id-only fallback bounds the blast radius to a same-id provider.
       const persistedBaseUrl = settings.model?.baseUrl;
       if (resolvedFromSettings && persistedBaseUrl) {
         modelProvider =

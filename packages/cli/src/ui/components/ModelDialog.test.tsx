@@ -308,11 +308,12 @@ describe('<ModelDialog />', () => {
       'model.name',
       'gpt-4',
     );
-    // The selected provider has no baseUrl, so the disambiguator must be cleared.
+    // The selected provider has no baseUrl, so the disambiguator must be
+    // cleared with an empty-string tombstone (overrides any lower-scope value).
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.baseUrl',
-      undefined,
+      '',
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,

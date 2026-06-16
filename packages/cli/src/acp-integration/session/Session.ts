@@ -2760,8 +2760,10 @@ export class Session implements SessionContext {
       this.settings.setValue(persistScope, 'model.name', parsed.modelId);
       // Id-only switch: clear any baseUrl disambiguator left by a previous
       // model-picker selection so the next launch resolves to this provider,
-      // not a stale one sharing the same model id.
-      this.settings.setValue(persistScope, 'model.baseUrl', undefined);
+      // not a stale one sharing the same model id. Empty-string tombstone so
+      // the clear overrides a lower-scope value on merge (undefined is dropped
+      // from JSON and would not override).
+      this.settings.setValue(persistScope, 'model.baseUrl', '');
       this.settings.setValue(
         persistScope,
         'security.auth.selectedType',

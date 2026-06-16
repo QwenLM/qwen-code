@@ -535,6 +535,30 @@ describe('modelConfigUtils', () => {
         );
       });
 
+      it('treats an empty-string tombstone as no disambiguator (first id match)', () => {
+        // A cleared selection persists model.baseUrl: '' so it can override a
+        // stale lower-scope value on merge; the resolver must treat '' as "no
+        // baseUrl" and fall back to the first id match rather than matching a
+        // provider whose baseUrl is literally empty.
+        mockResolved();
+        const settings = makeMockSettings({
+          model: { name: 'qwen3.7-max', baseUrl: '' },
+          modelProviders: {
+            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+          },
+        });
+
+        resolveCliGenerationConfig({
+          argv: {},
+          settings,
+          selectedAuthType: AuthType.USE_OPENAI,
+        });
+
+        expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+          expect.objectContaining({ modelProvider: tokenPlan }),
+        );
+      });
+
       it('ignores the persisted baseUrl when the model comes from argv.model, not settings', () => {
         mockResolved();
         const settings = makeMockSettings({
