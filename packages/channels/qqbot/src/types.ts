@@ -14,12 +14,6 @@ export const OpCode = {
   HEARTBEAT_ACK: 11,
 } as const;
 
-/** QQ Bot WebSocket intents. */
-export const Intent = {
-  C2C_MESSAGE: 1 << 12, // C2C 消息
-  GROUP_AT_MESSAGE: 1 << 25, // 群聊 @ 消息事件
-} as const;
-
 export interface QQMessageEvent {
   id: string;
   author: {
