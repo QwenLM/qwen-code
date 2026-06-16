@@ -5,25 +5,16 @@
  */
 
 import type { Part, PartListUnion } from '@google/genai';
+import { normalizePartList } from './nonInteractiveHelpers.js';
 
 export const MID_TURN_USER_MESSAGE_PREFIX =
   '\n[User message received during tool execution]: ';
-
-export function toPartArray(parts: PartListUnion): Part[] {
-  const partsArray = Array.isArray(parts) ? parts : [parts];
-  return partsArray.map((part): Part => {
-    if (typeof part === 'string') {
-      return { text: part };
-    }
-    return part;
-  });
-}
 
 export function prefixMidTurnUserMessageParts(
   parts: PartListUnion,
   displayText: string,
 ): Part[] {
-  const partArray = toPartArray(parts);
+  const partArray = normalizePartList(parts);
   if (partArray.length === 0) {
     return [{ text: `${MID_TURN_USER_MESSAGE_PREFIX}${displayText}` }];
   }

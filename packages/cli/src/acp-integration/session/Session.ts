@@ -216,36 +216,29 @@ async function withTimeoutSignal<T>(
   timeoutMs: number,
   fn: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
-  if (parentSignal.aborted) {
-    throw new Error('Mid-turn message resolution aborted');
-  }
+  const signal = AbortSignal.any([
+    parentSignal,
+    AbortSignal.timeout(timeoutMs),
+  ]);
 
-  const controller = new AbortController();
-  const abortFromParent = () => controller.abort(parentSignal.reason);
+  const toAbortError = () =>
+    signal.reason instanceof Error
+      ? signal.reason
+      : new Error('Mid-turn message resolution aborted');
+
+  if (signal.aborted) throw toAbortError();
+
   let rejectOnAbort: (() => void) | undefined;
   const abortPromise = new Promise<never>((_, reject) => {
-    rejectOnAbort = () => {
-      reject(
-        controller.signal.reason instanceof Error
-          ? controller.signal.reason
-          : new Error('Mid-turn message resolution aborted'),
-      );
-    };
-    controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+    rejectOnAbort = () => reject(toAbortError());
+    signal.addEventListener('abort', rejectOnAbort, { once: true });
+    if (signal.aborted) rejectOnAbort();
   });
-  const timeoutHandle = setTimeout(() => {
-    controller.abort(new Error('Mid-turn message resolution timed out'));
-  }, timeoutMs);
 
-  parentSignal.addEventListener('abort', abortFromParent, { once: true });
   try {
-    return await Promise.race([fn(controller.signal), abortPromise]);
+    return await Promise.race([fn(signal), abortPromise]);
   } finally {
-    clearTimeout(timeoutHandle);
-    parentSignal.removeEventListener('abort', abortFromParent);
-    if (rejectOnAbort) {
-      controller.signal.removeEventListener('abort', rejectOnAbort);
-    }
+    if (rejectOnAbort) signal.removeEventListener('abort', rejectOnAbort);
   }
 }
 
@@ -257,8 +250,37 @@ function isEmbeddedResourceResource(
   return typeof value['blob'] === 'string';
 }
 
-function isContentBlockArray(value: unknown): value is ContentBlock[] {
-  return Array.isArray(value) && value.every(isContentBlock);
+function getMidTurnItemDisplayTextForLog(displayText: unknown): string {
+  if (typeof displayText !== 'string' || displayText.trim().length === 0) {
+    return '(no display text)';
+  }
+  return JSON.stringify(displayText.trim().slice(0, 120));
+}
+
+function getValidMidTurnContentBlocks(
+  content: unknown,
+  displayText: unknown,
+): ContentBlock[] {
+  if (!Array.isArray(content)) {
+    debugLogger.warn(
+      `Dropped invalid mid-turn item: ${getMidTurnItemDisplayTextForLog(
+        displayText,
+      )}`,
+    );
+    return [];
+  }
+
+  const validBlocks = content.filter(isContentBlock);
+  const invalidBlockCount = content.length - validBlocks.length;
+  if (invalidBlockCount > 0) {
+    debugLogger.warn(
+      `Dropped ${invalidBlockCount} invalid mid-turn content block(s): ${getMidTurnItemDisplayTextForLog(
+        displayText,
+      )}`,
+    );
+  }
+
+  return validBlocks;
 }
 
 function getStructuredMidTurnDisplayText(
@@ -286,15 +308,20 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
 
   if (Array.isArray(response['items']) && response['items'].length > 0) {
     return response['items'].flatMap((item): DrainedMidTurnMessage[] => {
-      if (!isRecord(item) || !isContentBlockArray(item['content'])) {
+      if (!isRecord(item)) {
         return [];
       }
+      const content = getValidMidTurnContentBlocks(
+        item['content'],
+        item['displayText'],
+      );
+      if (content.length === 0) return [];
       return [
         {
           kind: 'structured',
-          content: item['content'],
+          content,
           displayText: getStructuredMidTurnDisplayText(
-            item['content'],
+            content,
             item['displayText'],
           ),
         },

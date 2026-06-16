@@ -2661,6 +2661,17 @@ describe('Session', () => {
           items: [
             {
               content: [
+                { type: 'text', text: 'mixed safe follow-up' },
+                {
+                  type: 'resource_link',
+                  uri: 'file:///etc/passwd',
+                  name: 'passwd',
+                },
+              ],
+              displayText: 'mixed safe follow-up',
+            },
+            {
+              content: [
                 {
                   type: 'resource_link',
                   uri: 'file:///etc/passwd',
@@ -2701,15 +2712,21 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'read file' }],
           });
 
+          const mixedMidTurnPart = {
+            text: '\n[User message received during tool execution]: mixed safe follow-up',
+          };
           const midTurnPart = {
             text: '\n[User message received during tool execution]: safe follow-up',
           };
           const secondCall = vi.mocked(mockChat.sendMessageStream).mock
             .calls[1];
           expect(secondCall?.[1].message).toEqual(
-            expect.arrayContaining([midTurnPart]),
+            expect.arrayContaining([mixedMidTurnPart, midTurnPart]),
           );
           expect(readManyFilesSpy).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([mixedMidTurnPart], 'mixed safe follow-up');
           expect(
             mockChatRecordingService.recordMidTurnUserMessage,
           ).toHaveBeenCalledWith([midTurnPart], 'safe follow-up');
