@@ -8,12 +8,15 @@ import type { Content, PartListUnion } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { InputModalities } from '../../core/contentGenerator.js';
 import { defaultModalities } from '../../core/modalityDefaults.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runSideQuery } from '../../utils/sideQuery.js';
 import {
   collectText,
   splitImageParts,
   validateImagePart,
 } from './imagePartUtils.js';
+
+const debugLogger = createDebugLogger('VISION_BRIDGE');
 
 /** Minimal shape of a registered model needed to auto-pick a bridge model. */
 export interface VisionModelCandidate {
@@ -69,7 +72,10 @@ export function selectVisionBridgeModel(
 export interface VisionBridgeSettings {
   /** Master switch. When false the bridge never runs (default). */
   enabled: boolean;
-  /** Resolved id of the vision model used for conversion. Required to run. */
+  /**
+   * Resolved id of the vision model used for conversion. When unset, the bridge
+   * auto-selects an image-capable model via `Config.getDefaultVisionBridgeModel`.
+   */
   model?: string;
   /** Maximum number of images converted per turn; the rest are reported. */
   maxImages: number;
@@ -140,8 +146,8 @@ export function resolveVisionBridgeSettings(
 /**
  * Outcome of a bridge attempt.
  * - `ok`: conversion succeeded; `parts` carry the description.
- * - `failed`: conversion failed; `parts` may carry a text-only fallback when
- *   the user also asked a real question, otherwise the caller should stop.
+ * - `failed`: conversion failed; `parts` is undefined and the caller stops the
+ *   turn (the failure reason is surfaced via the UI notice).
  * - `skipped`: nothing to do (no usable images); caller proceeds unchanged.
  */
 export type VisionBridgeStatus = 'ok' | 'failed' | 'skipped';
@@ -151,9 +157,9 @@ export interface VisionBridgeResult {
   /** Whether transformed parts should replace the original request. */
   applied: boolean;
   status: VisionBridgeStatus;
-  /** Transformed, image-free parts to send to the primary model. */
+  /** Transformed, image-free parts to send to the primary model (ok only). */
   parts?: PartListUnion;
-  /** Description block (ok) or failure note (failed) for display. */
+  /** Generated description block for display (set on `ok`). */
   transcript?: string;
   /** Total usable images detected in the request. */
   imageCount: number;
@@ -308,7 +314,13 @@ export async function runVisionBridge(params: {
   // model from the registered providers so the bridge works without hand
   // configuration when a multimodal provider is already available.
   const model = settings.model || config.getDefaultVisionBridgeModel?.();
+  debugLogger.debug(
+    `model=${model ?? '(none)'} (explicit=${!!settings.model}), images=${imageParts.length} convert=${toConvert.length} omitted=${omittedCount} invalid=${droppedAsInvalid}`,
+  );
   if (!model) {
+    debugLogger.warn(
+      'no image-capable model is configured/auto-detectable; skipping conversion',
+    );
     return failure(
       'no image-capable model is configured for the vision bridge',
       imageParts.length,
@@ -334,6 +346,7 @@ export async function runVisionBridge(params: {
   ];
 
   try {
+    debugLogger.debug(`calling ${model} (timeout ${settings.timeoutMs}ms)`);
     const { text } = await runSideQuery(config, {
       contents: requestContents,
       abortSignal: combinedSignal,
@@ -345,12 +358,14 @@ export async function runVisionBridge(params: {
 
     const description = stripThinkTags(text ?? '');
     if (description.length === 0) {
+      debugLogger.warn(`${model} returned an empty description`);
       return failure(
         'the vision model returned no description',
         imageParts.length,
         omittedCount,
       );
     }
+    debugLogger.debug(`ok: ${description.length} chars from ${model}`);
 
     const block = buildInterpretationBlock(
       model,
@@ -375,6 +390,7 @@ export async function runVisionBridge(params: {
         : error instanceof Error
           ? error.message
           : String(error);
+    debugLogger.warn(`conversion failed via ${model}: ${reason}`);
     return failure(reason, imageParts.length, omittedCount, model);
   }
 }

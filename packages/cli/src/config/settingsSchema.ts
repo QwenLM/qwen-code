@@ -1147,7 +1147,8 @@ const SETTINGS_SCHEMA = {
         category: 'Model',
         requiresRestart: false,
         default: 4,
-        description: 'Maximum number of images converted per turn.',
+        description:
+          'Maximum number of images converted per turn (clamped to 1–16).',
         showInDialog: false,
       },
       timeoutMs: {
@@ -1156,7 +1157,8 @@ const SETTINGS_SCHEMA = {
         category: 'Model',
         requiresRestart: false,
         default: 30000,
-        description: 'Timeout for the vision model call (milliseconds).',
+        description:
+          'Timeout for the vision model call, in milliseconds (clamped to 1000–120000).',
         showInDialog: false,
       },
       showTranscript: {

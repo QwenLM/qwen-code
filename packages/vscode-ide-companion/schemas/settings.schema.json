@@ -481,12 +481,12 @@
           "default": ""
         },
         "maxImages": {
-          "description": "Maximum number of images converted per turn.",
+          "description": "Maximum number of images converted per turn (clamped to 1–16).",
           "type": "number",
           "default": 4
         },
         "timeoutMs": {
-          "description": "Timeout for the vision model call (milliseconds).",
+          "description": "Timeout for the vision model call, in milliseconds (clamped to 1000–120000).",
           "type": "number",
           "default": 30000
         },

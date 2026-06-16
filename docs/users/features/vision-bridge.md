@@ -79,3 +79,8 @@ The notice always discloses that your image and prompt were sent to the vision m
 ## Failure behavior
 
 If the conversion fails — the vision model times out, returns nothing, or no image-capable model is available — Qwen Code shows the failure reason and **stops the turn**. The primary model is not asked to respond, so it never answers as if it had seen the image. Resolve the cause (a reachable vision model, a higher `timeoutMs`) or describe the image in text yourself, then retry.
+
+## Limitations
+
+- **Interactive only**: the bridge runs in the interactive chat path. Images read by agent tools (`read_file`, `read_many_files`) or in headless / ACP runs are not transcribed — with a text-only model those images are dropped by the model's converter. Use a multimodal model for those flows.
+- **Tool-result images and transcription caching** are not handled yet.

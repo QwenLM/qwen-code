@@ -2631,10 +2631,17 @@ export class Config {
    * endpoint, then same auth type) before falling back to any image-capable
    * model. See {@link selectVisionBridgeModel} for the full precedence.
    *
+   * Uses all configured models (across auth types), not just the current
+   * auth type's, so a vision model registered under a different provider can
+   * still be auto-selected; `runSideQuery` resolves its credentials.
+   *
    * @returns A registered image-capable model id, or `undefined`.
    */
   getDefaultVisionBridgeModel(): string | undefined {
-    return selectVisionBridgeModel(this.getModel(), this.getAvailableModels());
+    return selectVisionBridgeModel(
+      this.getModel(),
+      this.getAllConfiguredModels(),
+    );
   }
 
   /**
