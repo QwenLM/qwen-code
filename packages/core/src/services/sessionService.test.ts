@@ -22,6 +22,7 @@ import {
   SessionService,
   buildApiHistoryFromConversation,
   getResumePromptTokenCount,
+  getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
 import { CompressionStatus } from '../core/turn.js';
@@ -1295,6 +1296,9 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(450);
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 450, outputTokenCount: 0 });
     });
 
     it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
@@ -1310,6 +1314,26 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(200);
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 200, outputTokenCount: 250 });
+    });
+
+    it('should restore disjoint candidate and thought output tokens when total is unavailable', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: {
+          promptTokenCount: 200,
+          candidatesTokenCount: 40,
+          thoughtsTokenCount: 60,
+        },
+      };
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 200, outputTokenCount: 100 });
     });
 
     it('should fall back to compression when latest assistant has zero usage', () => {
@@ -1325,6 +1349,9 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(300);
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 300, outputTokenCount: 0 });
     });
   });
 

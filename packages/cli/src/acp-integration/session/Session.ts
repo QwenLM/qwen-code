@@ -94,6 +94,7 @@ import {
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
   sessionIdContext,
+  dedupeToolCallsById,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -126,6 +127,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
+import { MessageType, type HistoryItemGoalStatus } from '../../ui/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
@@ -133,6 +135,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 // Import modular session components
 import type {
   ApprovalModeValue,
+  CumulativeUsage,
   SessionContext,
   ToolCallStartParams,
 } from './types.js';
@@ -415,6 +418,16 @@ export class Session implements SessionContext {
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
   private readonly createdAt: number = Date.now();
+  /**
+   * Running cumulative usage for this session, snapshotted onto each todo/plan
+   * update by PlanEmitter so the web-shell can show per-task token/API spend.
+   */
+  readonly cumulativeUsage: CumulativeUsage = {
+    promptTokens: 0,
+    cachedTokens: 0,
+    candidateTokens: 0,
+    apiTimeMs: 0,
+  };
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state
@@ -586,6 +599,14 @@ export class Session implements SessionContext {
           `Failed to emit goal terminal update: ${this.#formatError(error)}`,
         );
       });
+    });
+  }
+
+  emitGoalStatus(status: Omit<HistoryItemGoalStatus, 'id' | 'type'>): void {
+    void this.messageEmitter.emitGoalStatus(status).catch((error) => {
+      debugLogger.warn(
+        `Failed to emit goal status update: ${this.#formatError(error)}`,
+      );
     });
   }
 
@@ -2291,8 +2312,14 @@ export class Session implements SessionContext {
         ) {
           break;
         }
+        // ACP processes notifications one-at-a-time (no batch) because each
+        // notification carries distinct task metadata (taskId, status, kind,
+        // toolUseId) used in display and response _meta. Merging would
+        // misattribute the combined response to a single task.
         const item = this.notificationQueue.shift()!;
-        await this.#executeBackgroundNotificationPrompt(item);
+        await sessionIdContext.run(this.config.getSessionId(), () =>
+          this.#executeBackgroundNotificationPromptInner(item),
+        );
       }
     } finally {
       this.notificationProcessing = false;
@@ -2310,15 +2337,6 @@ export class Session implements SessionContext {
         void this.#drainNotificationQueue();
       }
     }
-  }
-
-  async #executeBackgroundNotificationPrompt(
-    item: BackgroundNotificationQueueItem,
-  ): Promise<void> {
-    // Same session-ID binding rationale as #executePrompt.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeBackgroundNotificationPromptInner(item),
-    );
   }
 
   async #executeBackgroundNotificationPromptInner(
@@ -2788,7 +2806,7 @@ export class Session implements SessionContext {
   ): Promise<Part[]> {
     type Batch = { concurrent: boolean; calls: FunctionCall[] };
     const batches: Batch[] = [];
-    for (const fc of functionCalls) {
+    for (const fc of dedupeToolCallsById(functionCalls)) {
       const isAgent = fc.name === ToolNames.AGENT;
       const last = batches[batches.length - 1];
       if (isAgent && last?.concurrent) {
@@ -3306,6 +3324,11 @@ export class Session implements SessionContext {
                   locations: invocation.toolLocations(),
                   kind: mappedKind,
                   rawInput: args,
+                  // Carry the tool name so consumers can give specific tools
+                  // (e.g. the Agent tool) dedicated permission UI without
+                  // relying on a protocol `kind` ACP can't carry. The tool_call
+                  // frame already ships _meta.toolName; mirror it here.
+                  _meta: { toolName },
                 },
               };
 
@@ -3701,6 +3724,30 @@ export class Session implements SessionContext {
     }
   }
 
+  #emitGoalStatusItems(result: NonInteractiveSlashCommandResult): void {
+    if (!('outputHistoryItems' in result)) {
+      return;
+    }
+    for (const item of result.outputHistoryItems ?? []) {
+      if (item.type === MessageType.GOAL_STATUS) {
+        this.emitGoalStatus({
+          kind: item.kind,
+          condition: item.condition,
+          ...(item.iterations !== undefined
+            ? { iterations: item.iterations }
+            : {}),
+          ...(item.setAt !== undefined ? { setAt: item.setAt } : {}),
+          ...(item.durationMs !== undefined
+            ? { durationMs: item.durationMs }
+            : {}),
+          ...(item.lastReason !== undefined
+            ? { lastReason: item.lastReason }
+            : {}),
+        });
+      }
+    }
+  }
+
   /**
    * Processes the result of a slash command execution.
    *
@@ -3721,6 +3768,8 @@ export class Session implements SessionContext {
     result: NonInteractiveSlashCommandResult,
     originalPrompt: ContentBlock[],
   ): Promise<Part[] | null> {
+    this.#emitGoalStatusItems(result);
+
     switch (result.type) {
       case 'submit_prompt':
         // Command wants to submit a prompt to the model

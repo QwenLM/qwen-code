@@ -192,6 +192,9 @@ describe('BuiltinCommandLoader', () => {
     const ideCmd = commands.find((c) => c.name === 'ide');
     expect(ideCmd).toBeDefined();
 
+    const importConfigCmd = commands.find((c) => c.name === 'import-config');
+    expect(importConfigCmd).toBeDefined();
+
     const mcpCmd = commands.find((c) => c.name === 'mcp');
     expect(mcpCmd).toBeDefined();
 

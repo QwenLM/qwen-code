@@ -37,8 +37,6 @@ import {
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
 } from '../utils/truncation.js';
-
-const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
@@ -132,6 +130,28 @@ import {
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
+
+const debugLogger = createDebugLogger('TOOL_SCHEDULER');
+
+function dedupeRequestsByCallId(
+  requests: ToolCallRequestInfo[],
+): ToolCallRequestInfo[] {
+  const seenCallIds = new Set<string>();
+  const deduped: ToolCallRequestInfo[] = [];
+  for (const request of requests) {
+    if (request.callId) {
+      if (seenCallIds.has(request.callId)) {
+        debugLogger.debug(
+          `dedupeRequestsByCallId: dropping duplicate callId=${request.callId} name=${request.name}`,
+        );
+        continue;
+      }
+      seenCallIds.add(request.callId);
+    }
+    deduped.push(request);
+  }
+  return deduped;
+}
 
 // Gap between the persistence gate and per-tool truncation thresholds.
 // Tools that self-truncate to ~25K add headers bringing output to ~25.4K;
@@ -1663,7 +1683,9 @@ export class CoreToolScheduler {
           'Cannot schedule new tool calls while other tool calls are actively running (executing or awaiting approval).',
         );
       }
-      const requestsToProcess = Array.isArray(request) ? request : [request];
+      const requestsToProcess = dedupeRequestsByCallId(
+        Array.isArray(request) ? request : [request],
+      );
 
       // Prune validation retry state per-tool, not wholesale. Keys are
       // "<toolName>:<errorMessage>"; retain counters only for tools actually

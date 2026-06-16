@@ -25,6 +25,7 @@ import {
   type ExecutionMode,
 } from './ui/commands/types.js';
 import { createNonInteractiveUI } from './ui/noninteractive/nonInteractiveUi.js';
+import type { HistoryItemWithoutId } from './ui/types.js';
 import type { LoadedSettings } from './config/settings.js';
 import type { SessionStatsState } from './ui/contexts/SessionContext.js';
 import { t } from './i18n/index.js';
@@ -50,11 +51,13 @@ export type NonInteractiveSlashCommandResult =
   | {
       type: 'submit_prompt';
       content: PartListUnion;
+      outputHistoryItems?: HistoryItemWithoutId[];
     }
   | {
       type: 'message';
       messageType: 'info' | 'warning' | 'error';
       content: string;
+      outputHistoryItems?: HistoryItemWithoutId[];
     }
   | {
       type: 'stream_messages';
@@ -88,12 +91,14 @@ export type NonInteractiveSlashCommandResult =
  */
 function handleCommandResult(
   result: SlashCommandActionReturn,
+  outputHistoryItems?: HistoryItemWithoutId[],
 ): NonInteractiveSlashCommandResult {
   switch (result.type) {
     case 'submit_prompt':
       return {
         type: 'submit_prompt',
         content: result.content,
+        ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 
     case 'message':
@@ -101,6 +106,7 @@ function handleCommandResult(
         type: 'message',
         messageType: result.messageType,
         content: result.content,
+        ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 
     case 'stream_messages':
@@ -399,6 +405,13 @@ export const handleSlashCommand = async (
 
   const logger = new Logger(config?.getSessionId() || '', config?.storage);
 
+  const outputHistoryItems: HistoryItemWithoutId[] = [];
+  const ui = createNonInteractiveUI();
+  ui.addItem = (item) => {
+    outputHistoryItems.push(item);
+    return 0;
+  };
+
   const context: CommandContext = {
     executionMode,
     services: {
@@ -406,7 +419,7 @@ export const handleSlashCommand = async (
       settings,
       logger,
     },
-    ui: createNonInteractiveUI(),
+    ui,
     session: {
       stats: sessionStats,
       sessionShellAllowlist: new Set(),
@@ -440,11 +453,14 @@ export const handleSlashCommand = async (
     if (hookResult.blockedResult) {
       return hookResult.blockedResult;
     }
-    return handleCommandResult({ ...result, content: hookResult.content });
+    return handleCommandResult(
+      { ...result, content: hookResult.content },
+      outputHistoryItems,
+    );
   }
 
   // Handle different result types
-  return handleCommandResult(result);
+  return handleCommandResult(result, outputHistoryItems);
 };
 
 /**

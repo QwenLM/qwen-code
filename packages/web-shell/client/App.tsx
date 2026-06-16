@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import {
   useActions,
@@ -20,6 +21,10 @@ import {
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonTranscriptBlock,
+  DaemonSessionTaskStatus,
+} from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
@@ -70,6 +75,7 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
 import { usePanelActive } from './hooks/usePanelActive';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
@@ -113,12 +119,21 @@ import {
 } from './components/messages/McpStatusMessage';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
+  parseGoalStatusMessage,
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
 import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
-import { getFloatingTodos } from './utils/todos';
+import {
+  computeTodoDetails,
+  computeTodoTimeline,
+  getFloatingTodos,
+  todoDetailSignature,
+  todoTimelineSignature,
+  type TodoDetail,
+  type TodoSnapshotDiff,
+} from './utils/todos';
 import { ThemeProvider } from './themeContext';
 import {
   WebShellThemeId,
@@ -129,14 +144,60 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellComposerApi,
+  type WebShellComposerInput,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
   type WelcomeHeaderRenderer,
+  type FooterRenderer,
+  type WebShellTaskInfo,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
+
+/**
+ * Per-snapshot status diffs (keyed by tool callId or plan message id), so a
+ * history row can render what changed in that snapshot without re-deriving it
+ * from the whole transcript. Empty by default so a row rendered outside the
+ * provider still falls back gracefully.
+ */
+export const TodoTimelineContext = createContext<Map<string, TodoSnapshotDiff>>(
+  new Map(),
+);
+
+/**
+ * Per-todo timing and resource detail keyed by todoStateKey, consumed by the
+ * expanded todo list so a finished task can reveal when it ran and what it
+ * spent. Empty by default so a row rendered outside the provider (or in tests)
+ * simply shows no expander.
+ */
+export const TodoDetailContext = createContext<Map<string, TodoDetail>>(
+  new Map(),
+);
+
+/**
+ * Provides both todo contexts in one wrapper so the message list stays at a
+ * single nesting level (one provider in the tree, not two).
+ */
+function TodoContextsProvider({
+  timeline,
+  details,
+  children,
+}: {
+  timeline: Map<string, TodoSnapshotDiff>;
+  details: Map<string, TodoDetail>;
+  children: ReactNode;
+}) {
+  return (
+    <TodoTimelineContext.Provider value={timeline}>
+      <TodoDetailContext.Provider value={details}>
+        {children}
+      </TodoDetailContext.Provider>
+    </TodoTimelineContext.Provider>
+  );
+}
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
@@ -177,6 +238,41 @@ interface QueuedPrompt {
 interface ActiveGoalStatus {
   condition: string;
   setAt: number;
+}
+
+interface SendPromptOptionsWithRetry {
+  optimisticUserMessage?: boolean;
+  images?: PromptImage[];
+  retry?: boolean;
+}
+
+type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
+  text: string;
+  source?: string;
+  data?: unknown;
+};
+
+function getLatestActiveGoalFromBlocks(
+  blocks: readonly DaemonTranscriptBlock[],
+): ActiveGoalStatus | null {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
+    if (block.kind !== 'status') continue;
+    const statusBlock = block as GoalStatusTranscriptBlock;
+    const status =
+      statusBlock.source === 'goal'
+        ? parseGoalStatusMessage(statusBlock.data)
+        : parseGoalStatusMessage(statusBlock.text);
+    if (!status) continue;
+    if (status.kind === 'set' || status.kind === 'checking') {
+      return {
+        condition: status.condition,
+        setAt: status.setAt ?? block.serverTimestamp ?? block.createdAt,
+      };
+    }
+    return null;
+  }
+  return null;
 }
 
 interface LocalAnchoredMessage {
@@ -229,14 +325,45 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
+  renderFooter?: FooterRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
+  /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
+  collapseCompletedTurns?: boolean;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
   onToast?: (tone: ToastTone, message: string) => void;
+  /** Imperative handle for externally controlling the composer input. */
+  composerRef?: React.Ref<WebShellComposerApi>;
+  /** Declarative composer input value. Increment composerInputVersion to replay the same value. */
+  composerInput?: WebShellComposerInput;
+  /** Replay key for composerInput. */
+  composerInputVersion?: number;
+}
+
+const emptyComposerApi: WebShellComposerApi = {
+  insertText: () => {},
+  setText: () => {},
+  addTags: () => {},
+  removeTag: () => {},
+  clear: () => {},
+  submit: () => {},
+};
+
+function assignComposerRef(
+  ref: React.Ref<WebShellComposerApi> | undefined,
+  value: WebShellComposerApi,
+): void {
+  if (!ref) return;
+  if (typeof ref === 'function') {
+    ref(value);
+    return;
+  }
+  (ref as React.MutableRefObject<WebShellComposerApi | null>).current = value;
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -442,6 +569,53 @@ function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
   return parts.join('|');
 }
 
+function mapToWebShellTaskInfo(
+  task: DaemonSessionTaskStatus,
+): WebShellTaskInfo {
+  const base = {
+    id: task.id,
+    label: task.label,
+    description: task.description,
+    runtimeMs: task.runtimeMs,
+    startTime: task.startTime,
+    endTime: task.endTime,
+    error: task.error,
+  };
+
+  switch (task.kind) {
+    case 'agent':
+      return {
+        ...base,
+        kind: 'agent',
+        status: task.status,
+        subagentType: task.subagentType,
+        isBackgrounded: task.isBackgrounded,
+        prompt: task.prompt,
+      };
+    case 'shell':
+      return {
+        ...base,
+        kind: 'shell',
+        status: task.status,
+        command: task.command,
+        cwd: task.cwd,
+        pid: task.pid,
+        exitCode: task.exitCode,
+      };
+    case 'monitor':
+      return {
+        ...base,
+        kind: 'monitor',
+        status: task.status,
+        command: task.command,
+        pid: task.pid,
+        exitCode: task.exitCode,
+      };
+    default:
+      return task satisfies never;
+  }
+}
+
 function translateCopyMessage(
   message: string,
   t: ReturnType<typeof getTranslator>,
@@ -522,10 +696,15 @@ export function App({
   slashCommandCategoryOrder,
   renderToolHeaderExtra,
   renderWelcomeHeader,
+  renderFooter,
   compactThinking = false,
+  collapseCompletedTurns = true,
   virtualScrollThreshold,
   markdown,
   onToast,
+  composerRef,
+  composerInput,
+  composerInputVersion,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
@@ -538,11 +717,21 @@ export function App({
     () => ({
       renderToolHeaderExtra,
       renderWelcomeHeader,
+      renderFooter,
       compactThinking,
+      collapseCompletedTurns,
       markdown,
     }),
-    [renderToolHeaderExtra, renderWelcomeHeader, compactThinking, markdown],
+    [
+      renderToolHeaderExtra,
+      renderWelcomeHeader,
+      renderFooter,
+      compactThinking,
+      collapseCompletedTurns,
+      markdown,
+    ],
   );
+  const CustomFooter = renderFooter;
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
@@ -635,6 +824,41 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
+  // Keep the timeline Map referentially stable across streaming ticks that
+  // don't touch any todo snapshot. The Map is a context value, so a fresh
+  // reference would re-render every todo/plan row regardless of memoization;
+  // only rebuild when the todo snapshots themselves change.
+  const todoTimelineRef = useRef<{
+    signature: string;
+    timeline: Map<string, TodoSnapshotDiff>;
+  } | null>(null);
+  const todoTimeline = useMemo(() => {
+    const signature = todoTimelineSignature(messages);
+    const cached = todoTimelineRef.current;
+    if (cached && cached.signature === signature) return cached.timeline;
+    const timeline = computeTodoTimeline(messages);
+    todoTimelineRef.current = { signature, timeline };
+    return timeline;
+  }, [messages]);
+  // Per-todo detail (start/end + token/API/tool spend) is derived entirely from
+  // the transcript: the agent stamps a cumulative-usage snapshot on each todo
+  // update and the web-shell diffs consecutive snapshots, so this works live and
+  // on resume with no polling. Kept referentially stable like the timeline
+  // above (rebuilt only when a relevant snapshot, timestamp, stat, or tool span
+  // changes) so an unrelated streaming tick doesn't re-render every expanded
+  // todo row that consumes TodoDetailContext.
+  const todoDetailRef = useRef<{
+    signature: string;
+    details: Map<string, TodoDetail>;
+  } | null>(null);
+  const todoDetails = useMemo(() => {
+    const signature = todoDetailSignature(messages);
+    const cached = todoDetailRef.current;
+    if (cached && cached.signature === signature) return cached.details;
+    const details = computeTodoDetails(messages);
+    todoDetailRef.current = { signature, details };
+    return details;
+  }, [messages]);
   const floatingTodos = useStableArray(
     floatingTodosState.todos,
     (t) => `${t.id}:${t.status}:${t.content}`,
@@ -664,8 +888,26 @@ export function App({
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
+  const backgroundTasks = useBackgroundTasks(
+    backgroundTaskActivityKey,
+    connection.status === 'connected',
+  );
+  const footerTasks = useMemo(
+    () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
+    [backgroundTasks, renderFooter],
+  );
   const statusBarRef = useRef<StatusBarHandle>(null);
-  const editorRef = useRef<EditorHandle>(null);
+  const editorRef = useRef<EditorHandle | null>(null);
+  const setEditorHandle = useCallback(
+    (handle: EditorHandle | null) => {
+      editorRef.current = handle;
+      assignComposerRef(composerRef, handle ?? emptyComposerApi);
+    },
+    [composerRef],
+  );
+  useEffect(() => {
+    assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
+  }, [composerRef]);
   const messageListRef = useRef<MessageListHandle>(null);
   const handleLocateFloatingTodos = useCallback(() => {
     if (!floatingTodosState.sourceMessageId) return;
@@ -701,11 +943,17 @@ export function App({
         retriedTurnErrorIdRef.current = null;
       }
       setShowRetryHint(false);
-      return sessionActions.sendPrompt(text, {
+      const promptOptions: SendPromptOptionsWithRetry = {
         images,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
-      });
+      };
+      return (
+        sessionActions.sendPrompt as (
+          promptText: string,
+          options?: SendPromptOptionsWithRetry,
+        ) => ReturnType<typeof sessionActions.sendPrompt>
+      )(text, promptOptions);
     },
     [clearFollowup, sessionActions],
   );
@@ -974,8 +1222,7 @@ export function App({
       if (message.isPending) {
         if (!isPlainEscape && !isCtrlCancel) return;
       } else {
-        const editorHasText =
-          (editorRef.current?.getText().trim().length ?? 0) > 0;
+        const editorHasText = editorRef.current?.hasInput() ?? false;
         const isPlainDismiss =
           !e.ctrlKey &&
           !e.metaKey &&
@@ -1294,6 +1541,20 @@ export function App({
   }, [connection.sessionId, onSessionIdChange]);
 
   useEffect(() => {
+    const nextGoal = getLatestActiveGoalFromBlocks(blocks);
+    setActiveGoal((current) => {
+      if (!nextGoal) return current ? null : current;
+      if (
+        current?.condition === nextGoal.condition &&
+        current.setAt === nextGoal.setAt
+      ) {
+        return current;
+      }
+      return nextGoal;
+    });
+  }, [blocks]);
+
+  useEffect(() => {
     const onGoalStatusActive = (event: Event) => {
       const detail = (
         event as CustomEvent<{
@@ -1446,18 +1707,13 @@ export function App({
 
   const handleBusyGoalClear = useCallback(
     (text: string) => {
-      const goalToClear = activeGoalRef.current;
       store.appendLocalUserMessage(text);
-      dispatchGoalCleared(goalToClear);
       sessionActions.clearGoal().catch((error: unknown) => {
-        if (goalToClear) {
-          dispatchGoalSet(goalToClear.condition, goalToClear.setAt);
-        }
         reportError(error, 'Failed to clear /goal');
       });
       return true;
     },
-    [dispatchGoalCleared, dispatchGoalSet, reportError, sessionActions, store],
+    [reportError, sessionActions, store],
   );
 
   const handleGoalSlashCommand = useCallback(
@@ -1478,10 +1734,9 @@ export function App({
         }
         return handleBusyGoalClear(text);
       } else if (goalArg) {
-        const optimisticGoal = { condition: goalArg, setAt: Date.now() };
         store.appendLocalUserMessage(text);
-        dispatchGoalSet(optimisticGoal.condition, optimisticGoal.setAt);
         if (!sendToDaemon) {
+          dispatchGoalSet(goalArg, Date.now());
           return true;
         }
         sendPrompt(text, images, { optimisticUserMessage: false }).catch(
@@ -1545,10 +1800,6 @@ export function App({
             if (promptBlocked) {
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
-              }
-              const goalArg = text.replace(/^\/goal\b/i, '').trim();
-              if (goalArg) {
-                setActiveGoal({ condition: goalArg, setAt: Date.now() });
               }
               return enqueuePrompt(text, images);
             }
@@ -2289,8 +2540,7 @@ export function App({
         return;
       }
 
-      const text = editorRef.current?.getText() ?? '';
-      if (text.length > 0) {
+      if (editorRef.current?.hasInput()) {
         e.preventDefault();
         if (escPressCountRef.current === 0) {
           escPressCountRef.current = 1;
@@ -2302,7 +2552,7 @@ export function App({
             resetEscapeState();
           }, 500);
         } else {
-          editorRef.current?.clearText();
+          editorRef.current?.clear();
           resetEscapeState();
         }
         return;
@@ -2505,138 +2755,144 @@ export function App({
 
           <WebShellCustomizationProvider value={customization}>
             <CompactModeContext.Provider value={compactMode}>
-              <div
-                className={
-                  showFloatingTodos
-                    ? `${styles.content} ${styles.contentHasMessages}`
-                    : styles.content
-                }
-                style={dialogOpen ? { visibility: 'hidden' } : undefined}
+              <TodoContextsProvider
+                timeline={todoTimeline}
+                details={todoDetails}
               >
-                <MessageList
-                  ref={messageListRef}
-                  messages={displayMessages}
-                  pendingApproval={pendingApproval}
-                  onConfirm={handleConfirm}
-                  onShowContextDetail={handleShowContextDetail}
-                  catchingUp={connection.catchingUp}
-                  workspaceCwd={connection.workspaceCwd || ''}
-                  shellOutputMaxLines={shellOutputMaxLines}
-                  showRetryHint={showRetryHint}
-                  onRetryClick={handleRetry}
-                  welcomeHeader={welcomeHeader}
-                  tailContent={
-                    agentsInlineMode ||
-                    memoryInlineOpen ||
-                    modelInlineMode ||
-                    authInlineOpen ||
-                    approvalModeInlineOpen ||
-                    settingsInlineOpen ? (
-                      <>
-                        {authInlineOpen && (
-                          <AuthMessage
-                            onMessage={(text, type = 'status') => {
-                              store.dispatch([
-                                type === 'error'
-                                  ? { type: 'error', text }
-                                  : { type: 'status', text },
-                              ]);
-                            }}
-                            onClose={() => setAuthInlineOpen(false)}
-                          />
-                        )}
-                        {approvalModeInlineOpen && (
-                          <ApprovalModeMessage
-                            currentMode={currentMode}
-                            onSelect={handleSetMode}
-                            onClose={() => setApprovalModeInlineOpen(false)}
-                          />
-                        )}
-                        {modelInlineMode && (
-                          <ModelMessage
-                            mode={modelInlineMode}
-                            onSelect={
-                              modelInlineMode === 'fast'
-                                ? handleFastModelSelect
-                                : handleModelSelect
-                            }
-                            onClose={() => setModelInlineMode(null)}
-                          />
-                        )}
-                        {agentsInlineMode && (
-                          <AgentsMessage
-                            mode={agentsInlineMode}
-                            onMessage={(text) =>
-                              store.dispatch([{ type: 'status', text }])
-                            }
-                            onClose={() => setAgentsInlineMode(null)}
-                          />
-                        )}
-                        {memoryInlineOpen && (
-                          <MemoryMessage
-                            refreshSignal={memoryRefreshSignal}
-                            addSignal={memoryAddSignal}
-                            addScope={memoryAddScope}
-                            portalHost={memoryPortalHost}
-                            onMessage={(text, type = 'status') => {
-                              store.dispatch([{ type, text }]);
-                            }}
-                            onClose={() => setMemoryInlineOpen(false)}
-                          />
-                        )}
-                        {settingsInlineOpen && (
-                          <SettingsMessage
-                            settingsState={workspaceSettingsState}
-                            onClose={() => setSettingsInlineOpen(false)}
-                            onLanguageChange={handleSettingsLanguageChange}
-                            onThemeChange={handleThemeChange}
-                            onSubDialog={(key) => {
-                              setSettingsInlineOpen(false);
-                              if (key === 'fastModel')
-                                setModelInlineMode('fast');
-                              else if (key === 'tools.approvalMode')
-                                setApprovalModeInlineOpen(true);
-                            }}
-                          />
-                        )}
-                      </>
-                    ) : undefined
+                <div
+                  className={
+                    showFloatingTodos
+                      ? `${styles.content} ${styles.contentHasMessages}`
+                      : styles.content
                   }
-                  tailKey={
-                    agentsInlineMode ||
-                    memoryInlineOpen ||
-                    modelInlineMode ||
-                    authInlineOpen ||
-                    approvalModeInlineOpen ||
-                    settingsInlineOpen
-                      ? `inline-${authInlineOpen ? 'auth' : 'none'}-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
-                      : undefined
-                  }
-                  // The approval-mode/model pickers and the settings panel are
-                  // reachable by mouse from the status bar, so they reveal
-                  // themselves when opened while the user is scrolled up; the
-                  // agents/memory panels keep the user's scroll position.
-                  autoScrollTailIntoView={
-                    approvalModeInlineOpen ||
-                    modelInlineMode !== null ||
-                    settingsInlineOpen
-                  }
-                  virtualScrollThreshold={virtualScrollThreshold}
-                />
+                  style={dialogOpen ? { visibility: 'hidden' } : undefined}
+                >
+                  <MessageList
+                    ref={messageListRef}
+                    messages={displayMessages}
+                    pendingApproval={pendingApproval}
+                    onConfirm={handleConfirm}
+                    onShowContextDetail={handleShowContextDetail}
+                    catchingUp={connection.catchingUp}
+                    isResponding={streamingState !== 'idle'}
+                    workspaceCwd={connection.workspaceCwd || ''}
+                    shellOutputMaxLines={shellOutputMaxLines}
+                    showRetryHint={showRetryHint}
+                    onRetryClick={handleRetry}
+                    welcomeHeader={welcomeHeader}
+                    tailContent={
+                      agentsInlineMode ||
+                      memoryInlineOpen ||
+                      modelInlineMode ||
+                      authInlineOpen ||
+                      approvalModeInlineOpen ||
+                      settingsInlineOpen ? (
+                        <>
+                          {authInlineOpen && (
+                            <AuthMessage
+                              onMessage={(text, type = 'status') => {
+                                store.dispatch([
+                                  type === 'error'
+                                    ? { type: 'error', text }
+                                    : { type: 'status', text },
+                                ]);
+                              }}
+                              onClose={() => setAuthInlineOpen(false)}
+                            />
+                          )}
+                          {approvalModeInlineOpen && (
+                            <ApprovalModeMessage
+                              currentMode={currentMode}
+                              onSelect={handleSetMode}
+                              onClose={() => setApprovalModeInlineOpen(false)}
+                            />
+                          )}
+                          {modelInlineMode && (
+                            <ModelMessage
+                              mode={modelInlineMode}
+                              onSelect={
+                                modelInlineMode === 'fast'
+                                  ? handleFastModelSelect
+                                  : handleModelSelect
+                              }
+                              onClose={() => setModelInlineMode(null)}
+                            />
+                          )}
+                          {agentsInlineMode && (
+                            <AgentsMessage
+                              mode={agentsInlineMode}
+                              onMessage={(text) =>
+                                store.dispatch([{ type: 'status', text }])
+                              }
+                              onClose={() => setAgentsInlineMode(null)}
+                            />
+                          )}
+                          {memoryInlineOpen && (
+                            <MemoryMessage
+                              refreshSignal={memoryRefreshSignal}
+                              addSignal={memoryAddSignal}
+                              addScope={memoryAddScope}
+                              portalHost={memoryPortalHost}
+                              onMessage={(text, type = 'status') => {
+                                store.dispatch([{ type, text }]);
+                              }}
+                              onClose={() => setMemoryInlineOpen(false)}
+                            />
+                          )}
+                          {settingsInlineOpen && (
+                            <SettingsMessage
+                              settingsState={workspaceSettingsState}
+                              onClose={() => setSettingsInlineOpen(false)}
+                              onLanguageChange={handleSettingsLanguageChange}
+                              onThemeChange={handleThemeChange}
+                              onSubDialog={(key) => {
+                                setSettingsInlineOpen(false);
+                                if (key === 'fastModel')
+                                  setModelInlineMode('fast');
+                                else if (key === 'tools.approvalMode')
+                                  setApprovalModeInlineOpen(true);
+                              }}
+                            />
+                          )}
+                        </>
+                      ) : undefined
+                    }
+                    tailKey={
+                      agentsInlineMode ||
+                      memoryInlineOpen ||
+                      modelInlineMode ||
+                      authInlineOpen ||
+                      approvalModeInlineOpen ||
+                      settingsInlineOpen
+                        ? `inline-${authInlineOpen ? 'auth' : 'none'}-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
+                        : undefined
+                    }
+                    // The approval-mode/model pickers and the settings panel are
+                    // reachable by mouse from the status bar, so they reveal
+                    // themselves when opened while the user is scrolled up; the
+                    // agents/memory panels keep the user's scroll position.
+                    autoScrollTailIntoView={
+                      approvalModeInlineOpen ||
+                      modelInlineMode !== null ||
+                      settingsInlineOpen
+                    }
+                    virtualScrollThreshold={virtualScrollThreshold}
+                  />
 
-                {btwMessage?.role === 'btw' && (
-                  <div className={styles.btwPanel}>
-                    <BtwMessage
-                      question={btwMessage.question}
-                      answer={btwMessage.answer}
-                      isPending={btwMessage.isPending}
-                    />
-                  </div>
-                )}
+                  {btwMessage?.role === 'btw' && (
+                    <div className={styles.btwPanel}>
+                      <BtwMessage
+                        question={btwMessage.question}
+                        answer={btwMessage.answer}
+                        isPending={btwMessage.isPending}
+                      />
+                    </div>
+                  )}
 
-                <StreamingStatus />
-              </div>
-              <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
+                  <StreamingStatus />
+                </div>
+                <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
+              </TodoContextsProvider>
             </CompactModeContext.Provider>
           </WebShellCustomizationProvider>
 
@@ -2663,7 +2919,7 @@ export function App({
               <div className={styles.composer}>
                 <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
                 <Editor
-                  ref={editorRef}
+                  ref={setEditorHandle}
                   onSubmit={handleSubmit}
                   onCycleMode={handleCycleMode}
                   onToggleShortcuts={handleToggleShortcuts}
@@ -2681,6 +2937,8 @@ export function App({
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}
+                  composerInput={composerInput}
+                  composerInputVersion={composerInputVersion}
                   placeholderText={
                     !connected
                       ? t('common.loading')
@@ -2707,6 +2965,34 @@ export function App({
               !tasksPanelMessage &&
               (showShortcuts ? (
                 <ShortcutsPanel onClose={handleCloseShortcuts} />
+              ) : CustomFooter ? (
+                <CustomFooter
+                  connected={connected}
+                  mode={currentMode}
+                  model={currentModel}
+                  streamingState={streamingState}
+                  contextUsageRatio={
+                    (connection.contextWindow ?? 0) > 0
+                      ? (connection.tokenCount ?? 0) /
+                        (connection.contextWindow ?? 0)
+                      : 0
+                  }
+                  activeGoal={activeGoal}
+                  tasks={footerTasks}
+                  availableModes={MODES_CYCLE}
+                  availableModels={(connection.models ?? []).map((m) => ({
+                    id: m.id,
+                    label: m.label,
+                    contextWindow: m.contextWindow,
+                  }))}
+                  skills={loadedSkills}
+                  onSelectMode={(mode) => handleSetMode(mode)}
+                  onSelectModel={(model) => {
+                    sessionActions.setModel(model).then(() => {
+                      setCurrentModel(model);
+                    });
+                  }}
+                />
               ) : (
                 <StatusBar
                   escapeHint={escapeHintVisible}
@@ -2719,7 +3005,7 @@ export function App({
                   ref={statusBarRef}
                   onOpenTasks={() => openTasksPanel()}
                   onReturnToInput={handleReturnToEditor}
-                  taskActivityKey={backgroundTaskActivityKey}
+                  tasks={backgroundTasks}
                   activeGoal={activeGoal}
                   hideSettings={hideSettings}
                   onToggleShortcuts={handleToggleShortcuts}

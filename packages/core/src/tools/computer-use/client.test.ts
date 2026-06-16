@@ -27,6 +27,80 @@ describe('ComputerUseClient', () => {
 });
 
 // ---------------------------------------------------------------------------
+// applyRuntimeConfig — set_config(max_image_dimension) on (re)connect.
+// Exercised directly (it's a private method) with a fake inner MCP client, so
+// it runs without spawning a real cua-driver binary.
+// ---------------------------------------------------------------------------
+
+describe('applyRuntimeConfig (set_config on connect)', () => {
+  type Inner = { callTool: ReturnType<typeof vi.fn> };
+
+  const invokeApply = (
+    c: ComputerUseClient,
+    inner: Inner,
+    progress: (m: string) => void,
+  ) =>
+    (
+      c as unknown as {
+        applyRuntimeConfig: (
+          client: unknown,
+          progress: (m: string) => void,
+        ) => Promise<void>;
+      }
+    ).applyRuntimeConfig(inner, progress);
+
+  it('pushes max_image_dimension via set_config when an override is configured', async () => {
+    const inner: Inner = {
+      callTool: vi.fn().mockResolvedValue({ content: [] }),
+    };
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      maxImageDimension: 1024,
+    });
+    await invokeApply(c, inner, vi.fn());
+    expect(inner.callTool).toHaveBeenCalledWith({
+      name: 'set_config',
+      arguments: { max_image_dimension: 1024 },
+    });
+  });
+
+  it('applies 0 (disable resizing) as an explicit override, not "unset"', async () => {
+    const inner: Inner = {
+      callTool: vi.fn().mockResolvedValue({ content: [] }),
+    };
+    const c = new ComputerUseClient({ binary: '/fake/cua-driver' });
+    c.setMaxImageDimension(0);
+    await invokeApply(c, inner, vi.fn());
+    expect(inner.callTool).toHaveBeenCalledWith({
+      name: 'set_config',
+      arguments: { max_image_dimension: 0 },
+    });
+  });
+
+  it('does nothing when no override is set (driver keeps its built-in default)', async () => {
+    const inner: Inner = { callTool: vi.fn() };
+    const c = new ComputerUseClient({ binary: '/fake/cua-driver' });
+    await invokeApply(c, inner, vi.fn());
+    expect(inner.callTool).not.toHaveBeenCalled();
+  });
+
+  it('never aborts startup when set_config fails — warns via progress and swallows', async () => {
+    const inner: Inner = {
+      callTool: vi.fn().mockRejectedValue(new Error('boom')),
+    };
+    const progress = vi.fn();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      maxImageDimension: 800,
+    });
+    await expect(invokeApply(c, inner, progress)).resolves.toBeUndefined();
+    expect(progress).toHaveBeenCalledWith(
+      expect.stringContaining('max_image_dimension=800'),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // isTransportClosedError unit tests
 // ---------------------------------------------------------------------------
 describe('isTransportClosedError', () => {

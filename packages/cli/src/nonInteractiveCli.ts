@@ -624,6 +624,14 @@ export async function runNonInteractive(
         // originating turn has already completed.
         monitorRegistry.setNotificationCallback(
           (displayText, modelText, meta) => {
+            if (
+              meta.status === 'running' &&
+              typeof monitorRegistry.get === 'function'
+            ) {
+              const entry = monitorRegistry.get(meta.monitorId);
+              if (!entry || entry.status !== 'running') return;
+            }
+
             const queueItem = {
               displayText,
               modelText,
@@ -719,7 +727,7 @@ export async function runNonInteractive(
 
       /**
        * Shared per-turn tool-call dispatch for the main-turn loop and
-       * `drainOneItem`. Both call sites used to reproduce ~120 lines of
+       * `drainBatch`. Both call sites used to reproduce ~120 lines of
        * near-identical logic that filtered `structured_output` to its
        * own pre-scan when `--json-schema` is active, executed each
        * request through `executeToolCall`, captured the `structured_output`
@@ -742,6 +750,19 @@ export async function runNonInteractive(
         setModelOverride: (override: string | undefined) => void,
       ): Promise<Part[]> => {
         const toolResponseParts: Part[] = [];
+        const seenBatchCallIds = new Set<string>();
+        const uniqueBatchRequests = batchRequests.filter((request) => {
+          if (request.callId) {
+            if (seenBatchCallIds.has(request.callId)) {
+              debugLogger.debug(
+                `Dropping duplicate non-interactive tool callId=${request.callId} name=${request.name}`,
+              );
+              return false;
+            }
+            seenBatchCallIds.add(request.callId);
+          }
+          return true;
+        });
 
         // Pre-scan: when --json-schema is active and the model emitted
         // a `structured_output` call alongside other tools in the same
@@ -750,12 +771,14 @@ export async function runNonInteractive(
         // suppress every non-structured sibling. See the multi-shape
         // examples in the main loop's prior comment for the
         // [bad/good/side-effect] permutations.
-        let requestsToExecute = batchRequests;
+        let requestsToExecute = uniqueBatchRequests;
         if (
           config.getJsonSchema() &&
-          batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT)
+          uniqueBatchRequests.some(
+            (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+          )
         ) {
-          requestsToExecute = batchRequests.filter(
+          requestsToExecute = uniqueBatchRequests.filter(
             (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
           );
         }
@@ -886,7 +909,7 @@ export async function runNonInteractive(
         // emitted event log pairs every tool_use with a tool_result
         // AND the retry-turn payload (when reached) doesn't leave
         // Anthropic / OpenAI staring at unpaired tool_use blocks.
-        const unexecutedCalls = batchRequests.filter(
+        const unexecutedCalls = uniqueBatchRequests.filter(
           (r) => !executedCallIds.has(r.callId),
         );
         if (unexecutedCalls.length > 0) {
@@ -1142,11 +1165,35 @@ export async function runNonInteractive(
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
-          const drainOneItem = async () => {
+          const drainBatch = async () => {
             if (localQueue.length === 0) return;
-            const item = localQueue.shift()!;
 
-            emitNotificationToSdk(item);
+            // Batch-drain: take contiguous same-type items from the front
+            // of the queue. Cron prompts run individually — each needs its
+            // own slash/shell/@ preprocessing and approval cycle.
+            const targetType = localQueue[0]!.sendMessageType;
+            let splitIdx = targetType === SendMessageType.Cron ? 1 : 0;
+            if (splitIdx === 0) {
+              while (
+                splitIdx < localQueue.length &&
+                localQueue[splitIdx]!.sendMessageType === targetType
+              ) {
+                splitIdx++;
+              }
+            }
+            const batch = localQueue.splice(0, splitIdx);
+
+            if (batch.length === 0) return;
+
+            for (const queueItem of batch) {
+              emitNotificationToSdk(queueItem);
+            }
+
+            const item = {
+              displayText: batch.map((i) => i.displayText).join('; '),
+              modelText: batch.map((i) => i.modelText).join('\n\n'),
+              sendMessageType: targetType,
+            };
 
             turnCount++;
             if (
@@ -1272,7 +1319,7 @@ export async function runNonInteractive(
                 // call captured the terminal contract — no point running
                 // more queued prompts that can't influence the result.
                 if (structuredSubmission !== undefined) return;
-                await drainOneItem();
+                await drainBatch();
               }
             })();
             drainPromise = p;
@@ -1341,7 +1388,7 @@ export async function runNonInteractive(
 
               // Propagate drain failures. Without this, a rejected
               // drainLocalQueue() (e.g. a text-mode API error surfacing
-              // out of drainOneItem) would be swallowed by `void` and
+              // out of drainBatch) would be swallowed by `void` and
               // checkCronDone would never fire — hanging the run.
               const onDrainError = (err: unknown) => {
                 abortController.signal.removeEventListener('abort', onAbort);

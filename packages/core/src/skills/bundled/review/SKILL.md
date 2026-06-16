@@ -159,7 +159,9 @@ Assign severity based on the tool's own categorization:
 
 ## Step 4: Parallel multi-dimensional review
 
-Launch review agents by invoking all `task` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **9 agents** for same-repo reviews (Agent 6 has three persona variants 6a/6b/6c that each count as a separate parallel agent), or **8 agents** (skip Agent 7: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each agent should focus exclusively on its dimension.
+Launch review agents by invoking all `agent` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **9 agents** for same-repo reviews (Agent 6 has three persona variants 6a/6b/6c that each count as a separate parallel agent), or **8 agents** (skip Agent 7: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each agent should focus exclusively on its dimension.
+
+**Every agent MUST be an awaitable subagent: set `subagent_type: "general-purpose"` on every `agent` call.** Do NOT fork them — do not omit `subagent_type`, and never set `subagent_type: "fork"`. A fork runs fire-and-forget and its findings never come back to you, so the review would stall in Step 5 with nothing to aggregate. You need every agent's findings returned to you inline.
 
 **IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste the full diff — give each agent:
 

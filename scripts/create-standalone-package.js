@@ -44,6 +44,9 @@ const DIST_REQUIRED_PATHS = [
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  // bin wrapper emitted by prepare-package.js that re-spawns `node --expose-gc
+  // cli.js`; ships in dist/ as the package `bin` entry (#4914).
+  'cli-entry.js',
   // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',

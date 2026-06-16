@@ -16,6 +16,9 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       return sanitizeTerminalText(event.text).replace(/\r?\n/g, '\r\n');
     case 'assistant.done':
       return '';
+    case 'assistant.usage':
+      // Metadata only (token counts); no transcript line to render.
+      return '';
     case 'thought.text.delta':
       return terminalLine('thought', event.text, '2');
     case 'tool.update':

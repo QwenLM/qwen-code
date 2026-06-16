@@ -5799,6 +5799,14 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const cleared = unregisterGoalHook(config, sessionId);
+        if (cleared) {
+          session.emitGoalStatus({
+            kind: 'cleared',
+            condition: cleared.condition,
+            iterations: cleared.iterations,
+            durationMs: Date.now() - cleared.setAt,
+          });
+        }
         debugLogger.info(
           `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
         );
@@ -6144,6 +6152,16 @@ class QwenAgent implements Agent {
           config: this.config,
           sendUpdate: async (update) => {
             updates.push(update);
+          },
+          // Fresh accumulator for this replay: MessageEmitter advances it from
+          // replayed usage metadata (tokens only — no per-turn durations) and
+          // PlanEmitter snapshots it onto each todo update, so resumed sessions
+          // recover per-task token spend (API time stays live-only).
+          cumulativeUsage: {
+            promptTokens: 0,
+            cachedTokens: 0,
+            candidateTokens: 0,
+            apiTimeMs: 0,
           },
         };
         let replayError: string | undefined;

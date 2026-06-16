@@ -139,6 +139,9 @@ export { useDaemonFollowupSuggestion } from './daemon/index.js';
 /** Ordered list of approval modes for cycling: `['auto', 'suggest', 'ask']`. */
 export { DAEMON_APPROVAL_MODES } from './daemon/index.js';
 
+/** Canonical Agent (sub-agent) tool name + predicate for permission UIs. */
+export { AGENT_TOOL_NAME, isAgentTool } from './constants/toolNames.js';
+
 // ── Types: Connection & Session ───────────────────────────────────
 
 export type {

@@ -369,6 +369,59 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.capabilities).toHaveBeenCalledTimes(1);
   });
 
+  it('adds daemon goal status metadata to the transcript', async () => {
+    const session = createMockSession({
+      events: async function* goalStatusEvents() {
+        yield {
+          id: 11,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalStatus: {
+                  kind: 'set',
+                  condition: 'ship goal sync',
+                  setAt: 1234,
+                },
+              },
+            },
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'status',
+        text: '',
+        source: 'goal',
+        data: {
+          kind: 'set',
+          condition: 'ship goal sync',
+          setAt: 1234,
+        },
+      }),
+    ]);
+  });
+
   it('publishes action error notices when no session is connected', async () => {
     let actions: DaemonUiSessionActions | undefined;
     let blocks: readonly DaemonTranscriptBlock[] = [];

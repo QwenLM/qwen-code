@@ -1923,6 +1923,8 @@ export async function loadCliConfig(
     cronEnabled: settings.experimental?.cron ?? true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
+    computerUseMaxImageDimension:
+      settings.tools?.computerUse?.maxImageDimension,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
