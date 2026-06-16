@@ -52,6 +52,14 @@ export interface MatrixBridgeConfig {
   /** Command prefix (default `!qwen`). */
   commandPrefix?: string;
   syncOnce: SyncOnce;
+  /**
+   * Optional inbound transport that SUBSUMES the fetch `/sync` loop. When the
+   * Matrix E2EE crypto adapter is active it owns the single `/sync` (a second
+   * sync on the same device would race it for the to-device megolm keys), so it
+   * is wired here and `start()` runs it instead of {@link syncLoop}. When absent
+   * (the default, E2EE off), the tested fetch loop runs unchanged.
+   */
+  runInbound?: (signal: AbortSignal) => Promise<void>;
   /** Injectable backoff sleep (tests). Resolves early on abort. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Injectable idle-flush timer for the stream router (tests). */
@@ -230,7 +238,9 @@ export class MatrixBridge {
       log: this.log,
     });
     this.reconcileSubscriptions(signal);
-    await this.syncLoop(signal);
+    // E2EE: the crypto adapter owns /sync (subsumes the fetch loop). Otherwise
+    // the tested fetch sync loop runs unchanged.
+    await (this.cfg.runInbound ?? ((s) => this.syncLoop(s)))(signal);
   }
 
   private async syncLoop(signal: AbortSignal): Promise<void> {

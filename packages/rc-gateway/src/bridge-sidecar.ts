@@ -39,7 +39,6 @@ import {
 } from './bridges/tokenBootstrap.js';
 import { startBridge } from './bridges/start.js';
 import { MatrixRestApi } from './bridges/matrix/restApi.js';
-import { setupMatrixCrypto } from './bridges/matrix/cryptoAdapter.js';
 
 /* eslint-disable no-console */
 
@@ -112,25 +111,10 @@ async function main(): Promise<void> {
     const who = await mxRest.whoami(AbortSignal.timeout(10000));
     const mismatch = checkMxid(who.userId, cfg.userId);
     if (mismatch) fail(mismatch);
-
-    // E2EE crypto transport (opt-in, OFF by default). A PARALLEL path that can
-    // NEVER crash the plain bridge below: setupMatrixCrypto gates on the flag and
-    // degrades any construction failure to null. It is constructed (initializing
-    // the persistent <stateDir>/olm/ store) but NOT started — reconciling the
-    // SDK's /sync with the runner's fetch /sync and routing decrypted events into
-    // dispatch is the documented residual integration (docs/matrix-bridge.md).
-    await setupMatrixCrypto(
-      {
-        e2eeEnabled: cfg.e2eeEnabled,
-        homeserverUrl: cfg.homeserverUrl,
-        accessToken: cfg.accessToken,
-        stateDir: cfg.stateDir,
-      },
-      {
-        log: (m) => console.log(`qwen-rc-bridge: ${m}`),
-        warn: (m) => console.warn(`qwen-rc-bridge: ${m}`),
-      },
-    );
+    // E2EE crypto transport (opt-in via MATRIX_ENABLE_E2EE, OFF by default) is
+    // constructed, wired, and started inside startBridge — when on, the SDK
+    // crypto client owns /sync and outbound; when off, the plain fetch bridge
+    // runs unchanged. Construction failure degrades to the plain bridge.
   }
 
   const bridge = await startBridge(cfg, { token, log: (m) => console.log(m) });

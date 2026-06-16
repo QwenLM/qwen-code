@@ -35,10 +35,17 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function harness(batches: unknown[], opts: { park?: boolean } = {}) {
+function harness(
+  batches: unknown[],
+  opts: {
+    park?: boolean;
+    runInbound?: (signal: AbortSignal) => Promise<void>;
+  } = {},
+) {
   const sent: Array<{ roomId: string; content: unknown }> = [];
   const joined: string[] = [];
   const prompts: string[] = [];
+  let syncCalls = 0;
   const votes: Array<{
     sessionId: string;
     requestId: string;
@@ -99,6 +106,7 @@ function harness(batches: unknown[], opts: { park?: boolean } = {}) {
     botUserId: '@qwenbot:home.example.com',
     baseUrl: 'http://127.0.0.1:4170',
     syncOnce: async () => {
+      syncCalls++;
       if (i >= batches.length) {
         // `park`: keep the sync loop alive (signal stays live) instead of
         // aborting, so tests can drive dispatch seams against a running bridge.
@@ -108,6 +116,7 @@ function harness(batches: unknown[], opts: { park?: boolean } = {}) {
       }
       return batches[i++];
     },
+    ...(opts.runInbound ? { runInbound: opts.runInbound } : {}),
     sleep: () => new Promise<void>(() => {}), // park SSE reconnect after 1 subscribe
     setTimer: (_ms, fn) => {
       timers.push(fn);
@@ -126,6 +135,7 @@ function harness(batches: unknown[], opts: { park?: boolean } = {}) {
     prompts,
     votes,
     subscribed,
+    syncCalls: () => syncCalls,
     registered: () => registered,
     fireTimers: () => {
       for (const fn of timers.splice(0)) fn();
@@ -163,6 +173,24 @@ describe('MatrixBridge runner — sync loop', () => {
       supportsThreads: true, // m.thread relation on long streams
       supportsEdits: true, // m.replace on resolve
     });
+  });
+
+  it('runs the injected inbound transport instead of the fetch syncLoop (E2EE subsume)', async () => {
+    // When the crypto adapter owns /sync (E2EE on), the runner MUST NOT also run
+    // its fetch sync loop — two syncs on one device race for the to-device megolm
+    // keys. A provided runInbound replaces syncLoop entirely.
+    let ranInbound = false;
+    const h = harness(
+      [{ next_batch: 's1', ...textMsg('!r:h', '@a:h', 'hi') }],
+      {
+        runInbound: async () => {
+          ranInbound = true;
+        },
+      },
+    );
+    await h.bridge.start(h.ac.signal);
+    expect(ranInbound).toBe(true);
+    expect(h.syncCalls()).toBe(0); // the fetch sync was never invoked
   });
 
   it('skips replaying timeline history on the initial sync', async () => {

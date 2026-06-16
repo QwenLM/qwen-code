@@ -106,7 +106,7 @@ describe('setupMatrixCrypto (boot safety invariants)', () => {
     ).toBe(true);
   });
 
-  it('adapter constructed → returned, with the honest residual-integration log', async () => {
+  it('adapter constructed → returned, with the honest construction log', async () => {
     const fake: MatrixCryptoAdapter = {
       isReady: () => false,
       joinRoom: async () => ({ ok: true, status: 200 }),
@@ -119,8 +119,8 @@ describe('setupMatrixCrypto (boot safety invariants)', () => {
     const sink = io();
     const r = await setupMatrixCrypto(cfg, sink, create);
     expect(r).toBe(fake);
-    expect(sink.lines.some((l) => l.includes('residual integration'))).toBe(
-      true,
-    );
+    expect(
+      sink.lines.some((l) => l.includes('crypto transport constructed')),
+    ).toBe(true);
   });
 });

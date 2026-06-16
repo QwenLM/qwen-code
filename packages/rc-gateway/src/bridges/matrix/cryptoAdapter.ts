@@ -274,6 +274,10 @@ export async function setupMatrixCrypto(
   cfg: MatrixCryptoSetupCfg,
   io: { log: (m: string) => void; warn: (m: string) => void },
   createAdapter: typeof createMatrixCryptoAdapter = createMatrixCryptoAdapter,
+  callbacks: {
+    onMessage?: (msg: DecryptedMatrixMessage) => void | Promise<void>;
+    onReaction?: (r: NormalizedMatrixReaction) => void | Promise<void>;
+  } = {},
 ): Promise<MatrixCryptoAdapter | null> {
   if (!cfg.e2eeEnabled) return null;
   if (
@@ -290,9 +294,10 @@ export async function setupMatrixCrypto(
       homeserverUrl: cfg.homeserverUrl,
       accessToken: cfg.accessToken,
       stateDir: cfg.stateDir,
-      onMessage: () => {
-        // Residual: route decrypted messages into the bridge dispatch.
-      },
+      // Default to a no-op message sink so a caller that only wants the boot
+      // safety/warn behavior (no live routing) still constructs safely.
+      onMessage: callbacks.onMessage ?? (() => {}),
+      ...(callbacks.onReaction ? { onReaction: callbacks.onReaction } : {}),
       log: io.log,
     });
   } catch (err) {
@@ -309,8 +314,7 @@ export async function setupMatrixCrypto(
   } else {
     io.log(
       'matrix crypto transport constructed + olm store initialized ' +
-        '(compile-checked; live decrypt + dispatch routing are the documented ' +
-        'residual integration — see docs/matrix-bridge.md)',
+        '(the caller wires its callbacks + start() — see startBridge)',
     );
   }
   return adapter;
