@@ -109,10 +109,10 @@ describe('setupMatrixCrypto (boot safety invariants)', () => {
   it('adapter constructed → returned, with the honest residual-integration log', async () => {
     const fake: MatrixCryptoAdapter = {
       isReady: () => false,
-      joinRoom: async () => '!room',
+      joinRoom: async () => ({ ok: true, status: 200 }),
+      sendMessage: async () => ({ ok: true, status: 200, eventId: '$e' }),
       start: async () => {},
       stop: async () => {},
-      sendEncrypted: async () => 'evt',
     };
     const create = (async () =>
       fake) as unknown as typeof import('./cryptoAdapter.js').createMatrixCryptoAdapter;

@@ -23,6 +23,8 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { olmStoreDir, OLM_STORE_MISSING_LOG } from './e2ee.js';
+import { senderPowerLevel, type NormalizedMatrixReaction } from './dispatch.js';
+import type { MatrixInbound } from './runner.js';
 
 /**
  * Does a non-empty olm/megolm store already exist? Drives the healthz
@@ -55,19 +57,28 @@ export interface DecryptedMatrixMessage {
   roomId: string;
   sender: string;
   body: string;
+  /**
+   * The sender's power level in the room, resolved from `m.room.power_levels`
+   * SDK state — so power-gated commands (`!qwen attach`) work in encrypted rooms
+   * exactly as they do over the plain fetch path. Defaults to 0 if unresolved.
+   */
+  powerLevel: number;
 }
 
-export interface MatrixCryptoAdapter {
+/**
+ * The crypto-enabled Matrix client, presented as the SAME {@link MatrixInbound}
+ * the runner's outbound uses — so when E2EE is on, the bridge sends through the
+ * SDK client (which encrypts iff the room is encrypted: no plaintext ever lands
+ * in an encrypted room) and the SDK client is the SOLE `/sync` owner (running a
+ * second sync on the same device would race it for the to-device megolm keys).
+ */
+export interface MatrixCryptoAdapter extends MatrixInbound {
   /** Crypto ready to decrypt/encrypt (after {@link start}). */
   isReady(): boolean;
-  /** Join a room (so its messages sync + its megolm sessions are received). */
-  joinRoom(roomId: string): Promise<string>;
   /** Prepare crypto for the joined rooms, then begin syncing. */
   start(): Promise<void>;
   /** Stop syncing and release the client. */
   stop(): Promise<void>;
-  /** Send an encrypted formatted message; resolves with the event id. */
-  sendEncrypted(roomId: string, text: string, html: string): Promise<string>;
 }
 
 export interface CryptoAdapterDeps {
@@ -77,6 +88,8 @@ export interface CryptoAdapterDeps {
   stateDir: string;
   /** Sink for inbound decrypted room messages (route into the bridge dispatch). */
   onMessage: (msg: DecryptedMatrixMessage) => void | Promise<void>;
+  /** Sink for inbound reactions (👍/👎 → votes), normalized like the fetch path. */
+  onReaction?: (r: NormalizedMatrixReaction) => void | Promise<void>;
   log?: (m: string) => void;
 }
 
@@ -100,6 +113,7 @@ export async function createMatrixCryptoAdapter(
       MatrixClient,
       RustSdkCryptoStorageProvider,
       SimpleFsStorageProvider,
+      AutojoinRoomsMixin,
     } = sdk;
     // matrix-bot-sdk re-exports the store-type enum as a TYPE only
     // (`RustSdkCryptoStoreType` is a `const enum`, erased at runtime → `undefined`
@@ -124,6 +138,30 @@ export async function createMatrixCryptoAdapter(
       storage,
       cryptoStore,
     );
+    // Invites → auto-join, so the bot is in the room (and receives its megolm
+    // sessions) by the time messages arrive — the same effect the fetch
+    // syncLoop's explicit join had, but driven by the SDK's sole sync.
+    AutojoinRoomsMixin.setupOnClient(client);
+
+    // The sender's power level comes from the room's `m.room.power_levels` state
+    // (best-effort: a missing/erroring lookup → 0, sufficient for plain prompts;
+    // gated commands then correctly deny). Mirrors senderPowerLevel on the fetch
+    // path so attach/detach behave identically in encrypted rooms.
+    const resolvePower = async (
+      roomId: string,
+      sender: string,
+    ): Promise<number> => {
+      try {
+        const pl = await client.getRoomStateEvent(
+          roomId,
+          'm.room.power_levels',
+          '',
+        );
+        return senderPowerLevel(pl, sender);
+      } catch {
+        return 0;
+      }
+    };
 
     // matrix-bot-sdk decrypts `m.room.encrypted` events IN PLACE and re-emits the
     // plaintext as `room.message` (MatrixClient processSync: decrypt → fall through
@@ -132,16 +170,74 @@ export async function createMatrixCryptoAdapter(
     client.on('room.message', (roomId: string, event: unknown) => {
       const e = event as { sender?: string; content?: { body?: string } };
       if (typeof e.content?.body !== 'string') return;
-      void deps.onMessage({
-        roomId,
-        sender: e.sender ?? '',
-        body: e.content.body,
-      });
+      const sender = e.sender ?? '';
+      const body = e.content.body;
+      void (async () => {
+        const powerLevel = await resolvePower(roomId, sender);
+        await deps.onMessage({ roomId, sender, body, powerLevel });
+      })();
+    });
+
+    // Reactions are plain `m.reaction` timeline events (annotations are not
+    // encrypted), delivered via the generic `room.event` emit. Normalize 👍/👎
+    // on a tracked permission_request into the dispatcher's reaction shape.
+    client.on('room.event', (roomId: string, event: unknown) => {
+      const e = event as {
+        type?: string;
+        sender?: string;
+        content?: Record<string, unknown>;
+      };
+      if (e.type !== 'm.reaction') return;
+      const relates = e.content?.['m.relates_to'] as
+        | { event_id?: unknown; key?: unknown }
+        | undefined;
+      if (
+        typeof e.sender === 'string' &&
+        typeof relates?.event_id === 'string' &&
+        typeof relates?.key === 'string'
+      ) {
+        void deps.onReaction?.({
+          roomId,
+          sender: e.sender,
+          targetEventId: relates.event_id,
+          key: relates.key,
+        });
+      }
     });
 
     return {
       isReady: () => client.crypto?.isReady ?? false,
-      joinRoom: (roomId) => client.joinRoom(roomId),
+      // MatrixInbound.joinRoom (the runner's contract) — `{ok,status}`, not the
+      // SDK's raw roomId string; never throws (degrade to a failed result).
+      joinRoom: async (roomId) => {
+        try {
+          await client.joinRoom(roomId);
+          return { ok: true, status: 200 };
+        } catch (err) {
+          deps.log?.(
+            `matrix crypto join failed: ${(err as Error).message ?? err}`,
+          );
+          return { ok: false, status: 0 };
+        }
+      },
+      // Outbound: send as `m.room.message`; the SDK encrypts iff the room is
+      // encrypted — so this is the ONE outbound path (correct for plain AND
+      // encrypted rooms) and never leaks plaintext into an encrypted room.
+      sendMessage: async (roomId, content) => {
+        try {
+          const eventId = await client.sendEvent(
+            roomId,
+            'm.room.message',
+            content,
+          );
+          return { ok: true, status: 200, eventId };
+        } catch (err) {
+          deps.log?.(
+            `matrix crypto send failed: ${(err as Error).message ?? err}`,
+          );
+          return { ok: false, status: 0 };
+        }
+      },
       start: async () => {
         const joined = await client.getJoinedRooms();
         await client.crypto.prepare(joined);
@@ -151,13 +247,6 @@ export async function createMatrixCryptoAdapter(
       stop: async () => {
         client.stop();
       },
-      sendEncrypted: (roomId, text, html) =>
-        client.sendMessage(roomId, {
-          msgtype: 'm.text',
-          body: text,
-          format: 'org.matrix.custom.html',
-          formatted_body: html,
-        }),
     };
   } catch (err) {
     deps.log?.(
