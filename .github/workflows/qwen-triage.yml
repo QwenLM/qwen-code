@@ -23,8 +23,8 @@ jobs:
   authorize:
     # Gate PR and /triage-comment triggers on the principal having write+
     # permission: the PR author for PR events, the commenter for /triage
-    # comments. Replaces the same-repo-only fork check and the comment
-    # author_association check, so fork PRs by trusted authors are triaged.
+    # comments. Replaces the old eligibility checks based on same-repo PRs and
+    # comment author_association, so fork PRs by trusted authors are triaged.
     # `issues` and `workflow_dispatch` triggers do not need this gate.
     if: |-
       github.repository == 'QwenLM/qwen-code' &&
@@ -82,19 +82,30 @@ jobs:
     needs: ['authorize']
     timeout-minutes: 30
     concurrency:
-      group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
-      # GitHub evaluates concurrency before the job `if`, and it cannot call
-      # the permission API, so this only controls cancellation (a coarse event
-      # match), not eligibility. The real write-permission gate is the
-      # `authorize` job below.
+      # GitHub evaluates concurrency before the job `if`, but after `needs`.
+      # Keep non-runnable PR/comment triggers out of the shared per-number
+      # group so they cannot cancel or replace an authorized run.
+      group: >-
+        ${{
+          (
+            (github.event_name == 'pull_request_target' &&
+             (github.event.pull_request.draft == true ||
+              needs.authorize.outputs.should_run != 'true')) ||
+            (github.event_name == 'issue_comment' &&
+             needs.authorize.outputs.should_run != 'true')
+          ) &&
+          format('{0}-run-{1}', github.workflow, github.run_id) ||
+          format('{0}-{1}', github.workflow, github.event.issue.number || github.event.pull_request.number || github.event.inputs.number)
+        }}
       cancel-in-progress: >-
         ${{
           github.event_name == 'issues' ||
-          (github.event_name == 'pull_request_target' &&
-           github.event.pull_request.draft == false) ||
           github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'issue_comment' &&
-           startsWith(github.event.comment.body, '@qwen-code /triage'))
+          (((github.event_name == 'pull_request_target' &&
+             github.event.pull_request.draft == false) ||
+            (github.event_name == 'issue_comment' &&
+             startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
+           needs.authorize.outputs.should_run == 'true')
         }}
     runs-on: 'ubuntu-latest'
     # startsWith (not contains) prevents false triggers from comments that
