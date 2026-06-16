@@ -26,7 +26,7 @@ import { isCommandAllowed } from '../utils/shell-utils.js';
 import { ShellTool, type ShellToolInvocation } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
-import { type Config } from '../config/config.js';
+import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import {
   type ShellExecutionResult,
@@ -115,6 +115,7 @@ describe('ShellTool', () => {
         name: 'Qwen-Coder',
         email: 'qwen-coder@alibabacloud.com',
       }),
+      setApprovalMode: vi.fn(),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         register: vi.fn(),
@@ -456,6 +457,24 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('sed edit made no changes');
       });
 
+      it('maps sed execute read ENOENT to file not found', async () => {
+        mockFileSystemService.readTextFile.mockRejectedValue(
+          Object.assign(new Error('missing'), { code: 'ENOENT' }),
+        );
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(result.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
+      });
+
       it.each([
         {
           code: 'EACCES',
@@ -542,6 +561,26 @@ describe('ShellTool', () => {
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
         expect(result.llmContent).toContain('sed edit applied');
+      });
+
+      it('switches approval mode when sed edit confirmation proceeds always', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        await details.onConfirm(ToolConfirmationOutcome.ProceedAlways);
+
+        expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+          ApprovalMode.AUTO_EDIT,
+        );
       });
 
       it('falls back to shell execution for sed backup suffixes', async () => {

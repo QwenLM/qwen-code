@@ -207,4 +207,13 @@ describe('sedEditParser', () => {
       'x x x x x x x x x y x',
     );
   });
+
+  it('supports global substitutions from a numeric occurrence', () => {
+    const sedInfo = parseSedEditCommand("sed -i 's/foo/bar/2g' file.txt");
+
+    expect(sedInfo).not.toBeNull();
+    expect(applySedSubstitution('foo foo foo foo', sedInfo!)).toBe(
+      'foo bar bar bar',
+    );
+  });
 });
