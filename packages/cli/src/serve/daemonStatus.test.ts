@@ -226,22 +226,6 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       input.hooksStatus ?? okStatus({ hooks: [], events: {} }),
     getWorkspaceExtensionsStatus: async () =>
       input.extensionsStatus ?? okStatus({ extensions: [] }),
-    setWorkspaceToolEnabled: async (toolName: string, enabled: boolean) => ({
-      toolName,
-      enabled,
-    }),
-    initWorkspace: async () => ({ path: '/work/status/QWEN.md', action: 'noop' }),
-    restartMcpServer: async (serverName: string) => ({
-      serverName,
-      restarted: false,
-      skipped: true,
-      reason: 'disabled',
-    }),
-    reload: async () => ({
-      env: { changedKeys: [], errors: [] },
-      changedKeys: [],
-      childReloaded: false,
-    }),
   } as unknown as DaemonWorkspaceService;
 
   return {
