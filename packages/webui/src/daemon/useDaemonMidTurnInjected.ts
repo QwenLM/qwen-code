@@ -7,7 +7,7 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import type { DaemonMidTurnMessageInjectedData } from '@qwen-code/sdk/daemon';
 import {
-  clearSidechannelMidTurnInjected,
+  consumeSidechannelMidTurnInjected,
   getSidechannelMidTurnInjected,
   subscribeSidechannelMidTurnInjected,
 } from './midTurnInjectedSidechannel.js';
@@ -21,19 +21,20 @@ export interface UseDaemonMidTurnInjectedResult {
    */
   batches: readonly DaemonMidTurnMessageInjectedData[];
   /**
-   * Clear the batches that were reconciled. Compare-and-swap: it only clears if
-   * the buffer still holds exactly the `batches` snapshot returned above. A
-   * frame that appended between the render snapshot and the (async) effect that
-   * calls this is therefore preserved, not wiped — it is reconciled on the next
-   * effect run instead of being lost (which would resend it next turn).
+   * Drop exactly the batches passed in (by identity) — the consumer passes the
+   * subset it actually reconciled (its active session's batches). Batches for
+   * OTHER sessions, and frames that arrived after the snapshot, are not in that
+   * subset and stay buffered for their own reconcile, so neither a session
+   * switch nor a late frame can wipe an un-reconciled batch (= double delivery).
    */
-  consume: () => void;
+  consume: (handled: readonly DaemonMidTurnMessageInjectedData[]) => void;
 }
 
 /**
  * Subscribe to injected mid-turn batches. Unlike a latest-wins signal, this
  * accumulates every batch so multi-batch turns (one frame per tool batch) are
- * all reconciled; the consumer calls `consume()` after processing.
+ * all reconciled; the consumer calls `consume(handled)` with the batches it
+ * processed.
  */
 export function useDaemonMidTurnInjected(): UseDaemonMidTurnInjectedResult {
   const batches = useSyncExternalStore(
@@ -41,14 +42,12 @@ export function useDaemonMidTurnInjected(): UseDaemonMidTurnInjectedResult {
     getSidechannelMidTurnInjected,
     getSidechannelMidTurnInjected,
   );
-  // Compare-and-swap on the exact snapshot we reconciled, so a frame that
-  // appended between this render and the consuming effect survives. `batches` is
-  // reference-stable between store changes (useSyncExternalStore), so the
-  // `[batches]` dep keeps `consume` stable too — a new snapshot is what makes a
-  // new closure, which is exactly when the consuming effect should re-run.
+  // Stable identity (empty deps): `consume` removes exactly the batches it is
+  // handed, so it needs no closure over the current snapshot.
   const consume = useCallback(
-    () => clearSidechannelMidTurnInjected(batches),
-    [batches],
+    (handled: readonly DaemonMidTurnMessageInjectedData[]) =>
+      consumeSidechannelMidTurnInjected(handled),
+    [],
   );
   return { batches, consume };
 }

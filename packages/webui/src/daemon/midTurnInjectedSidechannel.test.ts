@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   clearSidechannelMidTurnInjected,
+  consumeSidechannelMidTurnInjected,
   getSidechannelMidTurnInjected,
   parseSidechannelMidTurnInjected,
   publishSidechannelMidTurnInjected,
@@ -136,22 +137,45 @@ describe('mid-turn injected sidechannel pub/sub', () => {
     ]);
   });
 
-  it('compare-and-swap clear preserves a batch appended after the snapshot', () => {
-    // Models the render→effect race: the consumer reconciles `snapshot`, but a
-    // new frame appends before its clear runs. A snapshot-scoped clear must NOT
-    // wipe the new batch (else it is resent next turn = double delivery).
+  it('consume removes only the handled batches, leaving a later-arrived frame (race)', () => {
+    // Models the render→effect race: the consumer reconciles `snapshot`, then a
+    // new frame appends before its consume runs. Identity-removal must drop only
+    // the snapshot and leave the new batch (else it is resent next turn).
     publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['a'] });
     const snapshot = getSidechannelMidTurnInjected();
     publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['b'] }); // races in
 
-    clearSidechannelMidTurnInjected(snapshot); // stale ref ⇒ no-op
+    consumeSidechannelMidTurnInjected(snapshot); // drops only ['a']
     expect(getSidechannelMidTurnInjected()).toEqual([
-      { sessionId: 's-1', messages: ['a'] },
       { sessionId: 's-1', messages: ['b'] },
     ]);
 
-    // Clearing with the CURRENT ref succeeds.
-    clearSidechannelMidTurnInjected(getSidechannelMidTurnInjected());
+    consumeSidechannelMidTurnInjected(getSidechannelMidTurnInjected());
+    expect(getSidechannelMidTurnInjected()).toEqual([]);
+  });
+
+  it('consume leaves OTHER-session batches buffered (no cross-session wipe)', () => {
+    // A late frame for a previous session must survive an active-session consume,
+    // or it is lost on switch-back (resent next turn = double delivery).
+    publishSidechannelMidTurnInjected({ sessionId: 's-old', messages: ['x'] });
+    publishSidechannelMidTurnInjected({ sessionId: 's-new', messages: ['y'] });
+    const all = getSidechannelMidTurnInjected();
+    const activeForNew = all.filter((b) => b.sessionId === 's-new');
+
+    consumeSidechannelMidTurnInjected(activeForNew); // only the s-new batch
+    expect(getSidechannelMidTurnInjected()).toEqual([
+      { sessionId: 's-old', messages: ['x'] },
+    ]);
+  });
+
+  it('consume is a no-op for batches not in the buffer (already evicted/cleared)', () => {
+    publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['a'] });
+    const snapshot = getSidechannelMidTurnInjected();
+    clearSidechannelMidTurnInjected(); // wipe out from under it
+    const listener = vi.fn();
+    subscribeSidechannelMidTurnInjected(listener);
+    consumeSidechannelMidTurnInjected(snapshot); // nothing matches ⇒ no notify
+    expect(listener).not.toHaveBeenCalled();
     expect(getSidechannelMidTurnInjected()).toEqual([]);
   });
 

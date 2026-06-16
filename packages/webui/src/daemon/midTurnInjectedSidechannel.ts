@@ -73,20 +73,36 @@ export function publishSidechannelMidTurnInjected(
 }
 
 /**
- * Clear the buffer. Pass `expected` (the exact snapshot the consumer just
- * reconciled) for a compare-and-swap clear: `useDaemonMidTurnInjected` reads
- * `pending` during render and reconciles it in an async effect, so a new frame
- * can append in the window between the read and the effect. Clearing
- * unconditionally would wipe that newly-arrived batch before it is reconciled —
- * its messages stay in the browser's pending queue and are resent next turn (the
- * double delivery this feature exists to prevent). When a frame arrived,
- * `pending !== expected`, so we no-op and leave it for the next reconcile.
- * Omitting `expected` clears unconditionally (e.g. test teardown).
+ * Remove exactly the `handled` batches (by object identity) from the buffer.
+ *
+ * The consumer reconciles a SESSION-SCOPED subset of the buffer (the batches for
+ * the active session) and passes that same subset here. Two classes of batch are
+ * therefore deliberately NOT removed and survive for their own reconcile:
+ *
+ * - Batches for a DIFFERENT session — the buffer is a cross-session singleton, so
+ *   on an in-place session switch a frame for the previous session can still be
+ *   buffered. It was never reconciled against this session's queue, so wiping it
+ *   would lose it on switch-back (resent next turn = double delivery).
+ * - Batches that arrived AFTER the consumer's render snapshot (the render→effect
+ *   window) — they aren't in `handled`, so a blanket clear would drop them
+ *   unreconciled. Identity-removal leaves them for the next effect run.
+ *
+ * Clearing only what was reconciled is what makes the dedupe exactly-once across
+ * both the multi-session and the late-frame races.
  */
-export function clearSidechannelMidTurnInjected(
-  expected?: readonly DaemonMidTurnMessageInjectedData[],
+export function consumeSidechannelMidTurnInjected(
+  handled: readonly DaemonMidTurnMessageInjectedData[],
 ): void {
-  if (expected !== undefined && pending !== expected) return;
+  if (handled.length === 0 || pending.length === 0) return;
+  const handledSet = new Set(handled);
+  const next = pending.filter((batch) => !handledSet.has(batch));
+  if (next.length === pending.length) return; // nothing matched — no notify
+  pending = next.length === 0 ? EMPTY : next;
+  notifyMidTurnInjectedListeners();
+}
+
+/** Drop the entire buffer (e.g. test teardown). */
+export function clearSidechannelMidTurnInjected(): void {
   if (pending.length === 0) return;
   pending = EMPTY;
   notifyMidTurnInjectedListeners();

@@ -263,10 +263,18 @@ export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
   messages: string[];
   /**
-   * Trusted client id that queued these messages, surfaced from the SSE
-   * envelope's `originatorClientId` so a consumer dedupes only its OWN pending
-   * queue — a peer attached to the same session must not drop a
+   * Trusted client id that queued these messages, so a consumer dedupes only its
+   * OWN pending queue — a peer attached to the same session must not drop a
    * coincidentally-equal entry it didn't queue. Absent for anonymous pushes.
+   *
+   * IMPORTANT — wire location: unlike the permission/settings events (which the
+   * session reducer's `mergeOriginator` step copies from the envelope INTO
+   * `data`), this event is NOT reduced, so the daemon leaves the id ONLY on the
+   * SSE envelope (`event.originatorClientId`) and never populates it here. A raw
+   * SDK consumer must read `event.originatorClientId`; `data.originatorClientId`
+   * is filled in only by a consumer that lifts it off the envelope itself (the
+   * web-shell's `parseSidechannelMidTurnInjected` does this). The field lives on
+   * this shape so that lifted representation is well-typed.
    */
   originatorClientId?: string;
   [key: string]: unknown;

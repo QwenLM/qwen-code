@@ -1355,7 +1355,15 @@ export function App({
       queuedPromptsRef.current = next;
       setQueuedPrompts(next);
     }
-    consumeMidTurnInjected();
+    // Consume ONLY this session's batches. The reconcile above is session-
+    // scoped, so a batch for another session (a late frame after an in-place
+    // session switch) must NOT be cleared here — it was never reconciled and
+    // would otherwise be lost on switch-back (resent next turn = double
+    // delivery). Identity-removal also leaves any frame that arrived after this
+    // render's snapshot for the next effect run.
+    consumeMidTurnInjected(
+      midTurnInjectedBatches.filter((b) => b.sessionId === sessionId),
+    );
   }, [
     midTurnInjectedBatches,
     connection.sessionId,
