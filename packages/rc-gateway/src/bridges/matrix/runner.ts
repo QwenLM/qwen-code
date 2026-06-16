@@ -177,9 +177,9 @@ export class MatrixBridge {
    *
    * `powerLevel` defaults to 0 — sufficient for plain prompts (un-gated); command
    * power-gating (`!qwen attach`) needs the room's `m.room.power_levels`, which the
-   * residual live wiring supplies. Connecting a STARTED adapter's `onMessage` to
-   * this method, and reconciling the SDK's `/sync` with the runner's fetch `/sync`,
-   * is the documented residual integration — this seam itself is unit-tested.
+   * adapter resolves and passes. `startBridge` wires a STARTED adapter's `onMessage`
+   * to this method and lets the SDK client SUBSUME the fetch `/sync` (one sync owner
+   * — see startBridge); this seam is also unit-tested directly.
    */
   async dispatchDecryptedMessage(
     m: { roomId: string; sender: string; body: string },

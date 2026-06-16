@@ -44,13 +44,14 @@ export interface BindSecurity {
   tls?: { certPath: string; keyPath: string };
   /**
    * Whether a CLIENT must use TLS to reach this gateway — `false` only for the
-   * loopback-http default. Drives the mDNS `tlsRequired` TXT key (next slice):
-   * native TLS and a fronting proxy both mean clients connect over TLS.
+   * loopback-http default. Drives the mDNS `tlsRequired` TXT key: native TLS and a
+   * fronting proxy both mean clients connect over TLS.
    *
-   * TODO(mdns): in insecure-proxy mode the gateway's own bind is cleartext while
-   * the *advertised* endpoint is the proxy's TLS port — so mDNS must advertise
-   * the proxy host/port, not the cleartext bind. Don't blindly map this flag to
-   * the advertised endpoint; reconcile it with the proxy address in that slice.
+   * NOTE(mdns): the cleartext-bind-vs-advertised-endpoint mismatch this once
+   * flagged for insecure-proxy mode does not arise — mDNS advertising is SUPPRESSED
+   * on a non-native-TLS bind (only a `tls` bind advertises; see mdns/advert.ts
+   * `mdnsDecision`). If advertising were ever enabled behind a proxy, the
+   * advertised endpoint must be the proxy host/port, not this cleartext bind.
    */
   tlsRequired: boolean;
 }

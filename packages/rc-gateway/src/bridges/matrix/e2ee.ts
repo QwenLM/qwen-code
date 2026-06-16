@@ -23,12 +23,9 @@
  * (see {@link MatrixTransport} / {@link decideMatrixTransport}, used by the fetch
  * dispatch).
  *
- * Deferred (separate cycles, not blocking E2EE in the sidecar path):
- *   - the IN-PROCESS `cli.ts` bridge path does not yet honor the flag (it is
- *     sidecar-only); it folds into the cli.ts→startBridge de-dup, which is
- *     deferred for lack of CI coverage of that path;
- *   - expose `olmStorePresent` on a bridge healthz (spec "Healthz reflects olm
- *     store status") — the in-process bridge has no HTTP listener yet.
+ * Both the sidecar and the in-process `cli.ts` bridge honor the flag (both build
+ * through the shared `startBridge`), and `olmStorePresent` is surfaced on the
+ * Matrix bridge's `GET /healthz` (see {@link ./health.js}).
  */
 
 import { join } from 'node:path';

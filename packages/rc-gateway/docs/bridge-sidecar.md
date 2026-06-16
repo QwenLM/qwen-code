@@ -23,32 +23,34 @@ The sidecar reads its configuration **exclusively** from environment variables
 and **fails fast with exit code 1** if a required one is missing (the error names
 the variable, e.g. `TELEGRAM_BOT_TOKEN is required`).
 
-| Variable                   | Bridges  | Required | Notes                                                                           |
-| -------------------------- | -------- | -------- | ------------------------------------------------------------------------------- |
-| `QWEN_DAEMON_URL`          | all      | yes      | Base URL of the gateway — both the transport target and deeplink base.          |
-| `QWEN_BRIDGE_TOKEN`        | all      | one of   | A `bridge`-scope token (`POST /rc/tokens {scopes:['bridge']}`).                 |
-| `QWEN_BRIDGE_PAIRING_CODE` | all      | one of   | A one-time pairing code, redeemed on first boot (see below).                    |
-| `QWEN_BRIDGE_STATE_DIR`    | all      | no       | Persistent storage root. Default `~/.qwen/rc/bridges/<kind>`.                   |
-| `TELEGRAM_BOT_TOKEN`       | telegram | yes      | Bot token from BotFather.                                                       |
-| `DISCORD_BOT_TOKEN`        | discord  | yes      | Bot token from the Discord Developer Portal.                                    |
-| `DISCORD_APPLICATION_ID`   | discord  | yes      | Application id (for slash-command registration).                                |
-| `DISCORD_GUILD_ID`         | discord  | no       | When set, slash commands register guild-scoped instead of globally.             |
-| `MATRIX_HOMESERVER_URL`    | matrix   | yes      | e.g. `https://home.example.com`.                                                |
-| `MATRIX_USER_ID`           | matrix   | yes      | Fully-qualified bot MXID; must match the access token's `whoami`.               |
-| `MATRIX_ACCESS_TOKEN`      | matrix   | yes      | From a one-time `/login`.                                                       |
-| `MATRIX_COMMAND_PREFIX`    | matrix   | no       | Default `!qwen`.                                                                |
-| `MATRIX_ENABLE_E2EE`       | matrix   | no       | Opt-in encrypted-room support (default OFF). Adapter not yet built — see below. |
+| Variable                   | Bridges  | Required | Notes                                                                  |
+| -------------------------- | -------- | -------- | ---------------------------------------------------------------------- |
+| `QWEN_DAEMON_URL`          | all      | yes      | Base URL of the gateway — both the transport target and deeplink base. |
+| `QWEN_BRIDGE_TOKEN`        | all      | one of   | A `bridge`-scope token (`POST /rc/tokens {scopes:['bridge']}`).        |
+| `QWEN_BRIDGE_PAIRING_CODE` | all      | one of   | A one-time pairing code, redeemed on first boot (see below).           |
+| `QWEN_BRIDGE_STATE_DIR`    | all      | no       | Persistent storage root. Default `~/.qwen/rc/bridges/<kind>`.          |
+| `TELEGRAM_BOT_TOKEN`       | telegram | yes      | Bot token from BotFather.                                              |
+| `DISCORD_BOT_TOKEN`        | discord  | yes      | Bot token from the Discord Developer Portal.                           |
+| `DISCORD_APPLICATION_ID`   | discord  | yes      | Application id (for slash-command registration).                       |
+| `DISCORD_GUILD_ID`         | discord  | no       | When set, slash commands register guild-scoped instead of globally.    |
+| `MATRIX_HOMESERVER_URL`    | matrix   | yes      | e.g. `https://home.example.com`.                                       |
+| `MATRIX_USER_ID`           | matrix   | yes      | Fully-qualified bot MXID; must match the access token's `whoami`.      |
+| `MATRIX_ACCESS_TOKEN`      | matrix   | yes      | From a one-time `/login`.                                              |
+| `MATRIX_COMMAND_PREFIX`    | matrix   | no       | Default `!qwen`.                                                       |
+| `MATRIX_ENABLE_E2EE`       | matrix   | no       | Opt-in encrypted-room support (default OFF). Live-wired — see below.   |
 
 Exactly one of `QWEN_BRIDGE_TOKEN` / `QWEN_BRIDGE_PAIRING_CODE` must be present.
 For Matrix the sidecar also exits 1 with `MXID mismatch` if the access token
 resolves to an MXID other than `MATRIX_USER_ID`.
 
 `MATRIX_ENABLE_E2EE` opts into encrypted-room support and is **OFF by default**.
-The crypto adapter is not built in this release, so setting it currently only logs
-a notice and the bridge still refuses encrypted rooms — see
+When set, the `matrix-bot-sdk` + olm crypto adapter becomes the bridge's transport
+(it owns `/sync`, decrypts encrypted rooms transparently, and sends encrypted
+replies) — verified end-to-end against a real Synapse; see
 [matrix-bridge.md](./matrix-bridge.md) "End-to-end encryption". The flag is honored
-by the sidecar only for now (the in-process bridge does not yet read it). The olm
-store lives at `$QWEN_BRIDGE_STATE_DIR/olm/`.
+on **both** the sidecar and the in-process bridge (both construct via the shared
+`startBridge`). The olm store lives at `$QWEN_BRIDGE_STATE_DIR/olm/`. The Matrix
+sidecar also serves `GET /healthz` (default port 9100; `QWEN_BRIDGE_HEALTHZ_PORT`).
 
 ## Token bootstrap (pairing code → persisted token)
 

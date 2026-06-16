@@ -7,22 +7,18 @@
 /**
  * Shared bridge wiring: construct and start ONE bridge runner from a resolved
  * {@link SidecarConfig} + a bridge-scope token, over the loopback/daemon HTTP+SSE
- * contract. This is the construction the standalone sidecar entrypoint and (in a
- * follow-up) the in-process `cli.ts` blocks share — the runner only ever reaches
- * the gateway through the injected {@link BridgeClient} (bearer token), so the
- * same code runs in-process or out-of-process by changing only `gatewayUrl`.
+ * contract. BOTH the standalone sidecar entrypoint and the in-process `cli.ts`
+ * path go through here (cli.ts resolves which bridges to start via the unit-tested
+ * `resolveInProcessBridges`, then hands each plan to `startBridge`) — the runner
+ * only ever reaches the gateway through the injected {@link BridgeClient} (bearer
+ * token), so the same code runs in-process or out-of-process by changing only
+ * `gatewayUrl` (transport) and `deeplinkUrl`.
  *
  * Thin glue: the bug-prone logic lives in the pure resolver / token bootstrap and
  * in each runner (all unit-tested). This switch is exercised end-to-end by the
- * sidecar spawn smoke (a bad token draws a 401 from the gateway's own auth).
- *
- * TODO (follow-up cycle): route the in-process bridge blocks in `cli.ts` through
- * this `startBridge` so the construction isn't duplicated. Deferred because the
- * cli.ts bridge path is not CI-exercised (its env gates are unset under test), so
- * that edit needs its own verification. The discord/matrix branches below are
- * verbatim copies of cli.ts construction (tsc guards option-name drift); only the
- * telegram branch is covered by the spawn smoke today — extend the smoke when the
- * de-dup lands.
+ * sidecar spawn smoke (a bad token draws a 401 from the gateway's own auth); the
+ * telegram branch is the one the smoke spawns, and tsc guards option-name drift
+ * across the discord/matrix branches.
  */
 
 import { join } from 'node:path';
