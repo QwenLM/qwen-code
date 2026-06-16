@@ -756,7 +756,9 @@ describe('useGeminiStream', () => {
     };
     const resolvedTextPart: Part = { text: 'inspect @/tmp/screenshot.png' };
     const recordMidTurnUserMessage = vi.fn();
+    const recordAtCommand = vi.fn();
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordAtCommand,
       recordMidTurnUserMessage,
     });
     const resolveAtCommandQuerySpy = vi
@@ -764,6 +766,10 @@ describe('useGeminiStream', () => {
       .mockResolvedValue({
         processedQuery: [resolvedTextPart, resolvedImagePart],
         shouldProceed: true,
+        recording: {
+          filesRead: ['/tmp/screenshot.png'],
+          status: 'success',
+        },
       });
     const toolCallResponseParts: Part[] = [
       {
@@ -863,11 +869,146 @@ describe('useGeminiStream', () => {
       expectedMidTurnParts,
       queuedPrompt,
     );
+    expect(recordAtCommand).toHaveBeenCalledWith({
+      filesRead: ['/tmp/screenshot.png'],
+      status: 'success',
+      userText: queuedPrompt,
+    });
     expect(handleAtCommandSpy).not.toHaveBeenCalled();
     expect(mockSendMessageStream).toHaveBeenCalledWith(
       [...toolCallResponseParts, ...expectedMidTurnParts],
       expect.any(AbortSignal),
       'prompt-id-midturn-image',
+      { type: SendMessageType.ToolResult },
+    );
+  });
+
+  it('falls back to text when mid-turn @ resolution should not proceed', async () => {
+    const queuedPrompt = 'inspect @/tmp/missing.png';
+    const recordMidTurnUserMessage = vi.fn();
+    const recordAtCommand = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordAtCommand,
+      recordMidTurnUserMessage,
+    });
+    const resolveAtCommandQuerySpy = vi
+      .spyOn(atCommandProcessor, 'resolveAtCommandQuery')
+      .mockResolvedValue({
+        processedQuery: null,
+        shouldProceed: false,
+        recording: {
+          filesRead: ['/tmp/missing.png'],
+          status: 'error',
+          message: 'Error reading files (/tmp/missing.png): not found',
+        },
+      });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-at-error',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    const expectedMidTurnParts: Part[] = [
+      {
+        text: `\n[User message received during tool execution]: ${queuedPrompt}`,
+      },
+    ];
+    expect(resolveAtCommandQuerySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: queuedPrompt,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(recordAtCommand).toHaveBeenCalledWith({
+      filesRead: ['/tmp/missing.png'],
+      status: 'error',
+      message: 'Error reading files (/tmp/missing.png): not found',
+      userText: queuedPrompt,
+    });
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      expectedMidTurnParts,
+      queuedPrompt,
+    );
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [...toolCallResponseParts, ...expectedMidTurnParts],
+      expect.any(AbortSignal),
+      'prompt-id-midturn-at-error',
       { type: SendMessageType.ToolResult },
     );
   });

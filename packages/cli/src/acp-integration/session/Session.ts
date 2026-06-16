@@ -120,6 +120,7 @@ import type {
 import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
   getAvailableCommands,
@@ -169,8 +170,6 @@ type AutoCompressionSendResult =
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
-const MID_TURN_USER_MESSAGE_PREFIX =
-  '\n[User message received during tool execution]: ';
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
 // means the client silently drops unknown methods; without a deadline the
@@ -237,9 +236,10 @@ function getStructuredMidTurnDisplayText(
   }
 
   const text = content
-    .filter((part): part is Extract<ContentBlock, { type: 'text' }> => {
-      return part.type === 'text';
-    })
+    .filter(
+      (part): part is Extract<ContentBlock, { type: 'text' }> =>
+        part.type === 'text',
+    )
     .map((part) => part.text)
     .join('\n')
     .trim();
@@ -250,7 +250,7 @@ function getStructuredMidTurnDisplayText(
 function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
   if (!isRecord(response)) return [];
 
-  if (Array.isArray(response['items'])) {
+  if (Array.isArray(response['items']) && response['items'].length > 0) {
     return response['items'].flatMap((item): DrainedMidTurnMessage[] => {
       if (!isRecord(item) || !isContentBlockArray(item['content'])) {
         return [];
@@ -276,25 +276,6 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
         typeof message === 'string' && message.trim().length > 0,
     )
     .map((message) => ({ kind: 'text', message }));
-}
-
-function prefixMidTurnUserParts(parts: Part[], displayText: string): Part[] {
-  if (parts.length === 0) {
-    return [{ text: `${MID_TURN_USER_MESSAGE_PREFIX}${displayText}` }];
-  }
-
-  const [firstPart, ...rest] = parts;
-  if ('text' in firstPart && typeof firstPart.text === 'string') {
-    return [
-      {
-        ...firstPart,
-        text: `${MID_TURN_USER_MESSAGE_PREFIX}${firstPart.text}`,
-      },
-      ...rest,
-    ];
-  }
-
-  return [{ text: `${MID_TURN_USER_MESSAGE_PREFIX}${displayText}` }, ...parts];
 }
 
 class MidTurnDrainTimeoutError extends Error {
@@ -2010,7 +1991,7 @@ export class Session implements SessionContext {
                 message.content,
                 new AbortController().signal,
               );
-        const parts = prefixMidTurnUserParts(rawParts, displayText);
+        const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
         this.config
           .getChatRecordingService()
           ?.recordMidTurnUserMessage(parts, displayText);

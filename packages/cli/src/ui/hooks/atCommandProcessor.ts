@@ -41,13 +41,13 @@ export interface HandleAtCommandResult {
   filesRead?: string[];
 }
 
-interface AtCommandRecording {
+export interface AtCommandRecording {
   filesRead: string[];
   status: 'success' | 'error';
   message?: string;
 }
 
-interface ResolveAtCommandResult extends HandleAtCommandResult {
+export interface ResolveAtCommandResult extends HandleAtCommandResult {
   recording?: AtCommandRecording;
 }
 
@@ -455,6 +455,10 @@ export async function handleAtCommand(
     params.addItem(toolGroupItem, params.messageId);
   }
 
-  const { recording, ...publicResult } = result;
-  return publicResult;
+  return {
+    processedQuery: result.processedQuery,
+    shouldProceed: result.shouldProceed,
+    toolDisplays: result.toolDisplays,
+    filesRead: result.filesRead,
+  };
 }

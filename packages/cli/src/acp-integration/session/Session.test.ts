@@ -2509,6 +2509,7 @@ describe('Session', () => {
         mockToolRegistry.getTool.mockReturnValue(tool);
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [],
           messages: ['  please also check tests  '],
         });
         mockChat.sendMessageStream = vi
