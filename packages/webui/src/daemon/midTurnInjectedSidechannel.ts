@@ -7,22 +7,33 @@
 import type { DaemonMidTurnMessageInjectedData } from '@qwen-code/sdk/daemon';
 
 /**
- * Side channel for `mid_turn_message_injected` daemon events. Mirrors
- * {@link ./followupSidechannel.ts}: the session event pump parses the raw
- * frame and publishes here, and a consumer (`useDaemonMidTurnInjected`) reads
- * the latest batch via `useSyncExternalStore`. Kept out of the transcript
- * reducer because it is a transient UX signal — the consumer moves the matching
- * messages out of its own pending queue (so they are not resent as the next
- * turn) rather than rendering anything from it.
+ * Side channel for `mid_turn_message_injected` daemon events. Patterned on
+ * {@link ./followupSidechannel.ts}, but ACCUMULATING rather than latest-wins:
+ * the session event pump parses each raw frame and publishes here, appending to
+ * a buffer that a consumer (`useDaemonMidTurnInjected`) drains via
+ * `useSyncExternalStore` and then clears. Kept out of the transcript reducer
+ * because it is a transient UX signal — the consumer moves the matching messages
+ * out of its own pending queue (so they are not resent as the next turn) rather
+ * than rendering anything from it. (Followup can be latest-wins because only the
+ * newest suggestion matters; mid-turn drains are cumulative — every batch must
+ * be reconciled or its messages get double-delivered.)
  */
 
 const listeners = new Set<() => void>();
-let lastInjected: DaemonMidTurnMessageInjectedData | undefined;
+// Accumulating buffer — NOT latest-wins. A turn can drain in more than one
+// tool batch, so the daemon publishes one frame per non-empty drain, and the
+// event pump delivers buffered frames back-to-back with no await between them.
+// Two frames can therefore land before the consumer's effect runs; a single-
+// slot store would drop the first, and its messages would never be removed from
+// the browser's pending queue (⇒ resent next turn = the double delivery this
+// feature prevents). Every batch is retained until the consumer reconciles it
+// and calls `clearSidechannelMidTurnInjected`. `EMPTY` is a shared frozen ref so
+// the empty snapshot is reference-stable for `useSyncExternalStore`.
+const EMPTY: readonly DaemonMidTurnMessageInjectedData[] = Object.freeze([]);
+let pending: readonly DaemonMidTurnMessageInjectedData[] = EMPTY;
 
-export function getSidechannelMidTurnInjected():
-  | DaemonMidTurnMessageInjectedData
-  | undefined {
-  return lastInjected;
+export function getSidechannelMidTurnInjected(): readonly DaemonMidTurnMessageInjectedData[] {
+  return pending;
 }
 
 export function subscribeSidechannelMidTurnInjected(
@@ -37,15 +48,18 @@ export function subscribeSidechannelMidTurnInjected(
 export function publishSidechannelMidTurnInjected(
   data: DaemonMidTurnMessageInjectedData,
 ): void {
-  // Fresh object every publish so `useSyncExternalStore` sees a new snapshot
-  // and re-fires consumers even when two batches carry identical text.
-  lastInjected = { ...data, messages: [...data.messages] };
+  // Append (new array ref so `useSyncExternalStore` re-fires). Copy the batch so
+  // a later mutation of the source can't change what the consumer reconciles.
+  pending = [
+    ...pending,
+    { sessionId: data.sessionId, messages: [...data.messages] },
+  ];
   notifyMidTurnInjectedListeners();
 }
 
 export function clearSidechannelMidTurnInjected(): void {
-  if (lastInjected === undefined) return;
-  lastInjected = undefined;
+  if (pending.length === 0) return;
+  pending = EMPTY;
   notifyMidTurnInjectedListeners();
 }
 

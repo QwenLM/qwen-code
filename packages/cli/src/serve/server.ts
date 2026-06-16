@@ -2702,9 +2702,17 @@ export function createServeApp(
   // Queue a user message typed while the session's turn is still running. The
   // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
   // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted }`: `false` when the session is idle, so the browser
-  // keeps the message in its own queue and sends it as a normal next-turn
-  // prompt. Synchronous — the bridge only pushes onto an in-memory queue.
+  // Returns `{ accepted }`: `false` when the session is idle (or the per-session
+  // queue is full), so the browser keeps the message in its own queue and sends
+  // it as a normal next-turn prompt. Synchronous — the bridge only pushes onto
+  // an in-memory queue.
+  //
+  // Per-message abuse guard. The sibling `/btw` caps its field; without this
+  // only the global 10 MB body limit applies. Not a UX limit — a rejected
+  // message stays in the browser's own queue and is sent as the (uncapped)
+  // next-turn prompt — it only bounds how much a single mid-turn push can pin in
+  // the in-memory queue (the queue DEPTH is bounded in `enqueueMidTurnMessage`).
+  const MID_TURN_MESSAGE_MAX_LENGTH = 16 * 1024;
   app.post('/session/:id/mid-turn-message', mutate(), (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
@@ -2713,6 +2721,12 @@ export function createServeApp(
     if (typeof message !== 'string' || message.trim().length === 0) {
       res.status(400).json({
         error: '`message` is required and must be a non-empty string',
+      });
+      return;
+    }
+    if (message.length > MID_TURN_MESSAGE_MAX_LENGTH) {
+      res.status(400).json({
+        error: `\`message\` must be at most ${MID_TURN_MESSAGE_MAX_LENGTH} characters`,
       });
       return;
     }

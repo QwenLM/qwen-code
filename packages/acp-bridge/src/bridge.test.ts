@@ -10404,4 +10404,138 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     );
     await bridge.shutdown();
   });
+
+  it('drains the queue through the child connection; a second drain is empty', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'go' }] },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    bridge.enqueueMidTurnMessage(session.sessionId, 'm1');
+    bridge.enqueueMidTurnMessage(session.sessionId, 'm2');
+
+    // The child pulls them via the ext-method the real Session calls between
+    // tool batches — exercising bridge queue ⇄ BridgeClient.extMethod end to end.
+    const drained = await handle.agentConnection.extMethod(
+      'craft/drainMidTurnQueue',
+      { sessionId: session.sessionId },
+    );
+    expect(drained).toEqual({ messages: ['m1', 'm2'] });
+    // Spliced out, so the next batch's drain is empty.
+    expect(
+      await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+        sessionId: session.sessionId,
+      }),
+    ).toEqual({ messages: [] });
+
+    release?.();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('clears undrained messages at settle — not re-drained on the next turn', async () => {
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          releases.push(r);
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const send = (text: string) =>
+      bridge
+        .sendPrompt(
+          session.sessionId,
+          { sessionId: session.sessionId, prompt: [{ type: 'text', text }] },
+          undefined,
+          { clientId: session.clientId },
+        )
+        .catch(() => {});
+    const drain = () =>
+      handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+        sessionId: session.sessionId,
+      });
+
+    // Turn 1: enqueue, do NOT drain, then settle.
+    const t1 = send('t1');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(bridge.enqueueMidTurnMessage(session.sessionId, 'leftover')).toEqual({
+      accepted: true,
+    });
+    releases[0]!();
+    await t1;
+
+    // Turn 2: the drain must be empty — the leftover was dropped at turn-1
+    // settle, NOT carried into turn 2's first batch. (Deleting the settle-clear
+    // line makes this return ['leftover'].)
+    const t2 = send('t2');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await drain()).toEqual({ messages: [] });
+
+    releases[1]!();
+    await t2;
+    await bridge.shutdown();
+  });
+
+  it('keeps the queue across a back-to-back prompt FIFO, clearing only at true idle', async () => {
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          releases.push(r);
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const send = (text: string) =>
+      bridge
+        .sendPrompt(
+          session.sessionId,
+          { sessionId: session.sessionId, prompt: [{ type: 'text', text }] },
+          undefined,
+          { clientId: session.clientId },
+        )
+        .catch(() => {});
+
+    const p1 = send('p1');
+    await new Promise((r) => setTimeout(r, 10));
+    const p2 = send('p2'); // queued behind p1 ⇒ pendingPromptCount = 2
+    expect(bridge.enqueueMidTurnMessage(session.sessionId, 'x')).toEqual({
+      accepted: true,
+    });
+
+    releases[0]!(); // settle p1 — session still busy (p2 pending), so NOT idle
+    await new Promise((r) => setTimeout(r, 10));
+    // Survived the p1→p2 boundary: the clear only fires at true idle.
+    expect(
+      await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+        sessionId: session.sessionId,
+      }),
+    ).toEqual({ messages: ['x'] });
+
+    releases[1]!();
+    await Promise.all([p1, p2]);
+    await bridge.shutdown();
+  });
 });

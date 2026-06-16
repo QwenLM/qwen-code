@@ -27,6 +27,7 @@ import type {
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
+import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
 import type { PromptImage } from './adapters/promptTypes';
@@ -1299,32 +1300,29 @@ export function App({
   }, [store, t]);
 
   // When the daemon drains queued messages into the running turn it emits
-  // `mid_turn_message_injected`. Drop the matching (text-only) entries from the
-  // local queue so the idle-time drain doesn't ALSO resend them as the next
-  // turn — the SSE frame is delivered in-order ahead of the turn-complete frame
-  // that flips streamingState to idle, so this runs before that resend fires.
-  const midTurnInjected = useDaemonMidTurnInjected();
+  // `mid_turn_message_injected` (one frame per tool batch). Drop the matching
+  // (text-only) entries from the local queue so the idle-time drain doesn't ALSO
+  // resend them as the next turn. Reconcile EVERY accumulated batch, not just the
+  // newest — a multi-batch turn can publish several frames back-to-back, and the
+  // first must not be lost before this runs. The frames arrive in-order ahead of
+  // the turn-complete frame that flips streamingState to idle, so this runs
+  // before that resend fires; `consume()` then clears the reconciled batches.
+  const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
+    useDaemonMidTurnInjected();
   useEffect(() => {
-    if (!midTurnInjected) return;
-    if (midTurnInjected.sessionId !== connection.sessionId) return;
-    const remaining = [...queuedPromptsRef.current];
-    let changed = false;
-    for (const message of midTurnInjected.messages) {
-      const index = remaining.findIndex(
-        (prompt) =>
-          prompt.text === message &&
-          (!prompt.images || prompt.images.length === 0),
-      );
-      if (index >= 0) {
-        remaining.splice(index, 1);
-        changed = true;
-      }
+    const sessionId = connection.sessionId;
+    if (!sessionId || midTurnInjectedBatches.length === 0) return;
+    const next = removeInjectedFromQueue(
+      queuedPromptsRef.current,
+      midTurnInjectedBatches,
+      sessionId,
+    );
+    if (next) {
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
     }
-    if (changed) {
-      queuedPromptsRef.current = remaining;
-      setQueuedPrompts(remaining);
-    }
-  }, [midTurnInjected, connection.sessionId]);
+    consumeMidTurnInjected();
+  }, [midTurnInjectedBatches, connection.sessionId, consumeMidTurnInjected]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {

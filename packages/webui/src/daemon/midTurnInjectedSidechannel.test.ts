@@ -60,30 +60,37 @@ describe('parseSidechannelMidTurnInjected', () => {
 });
 
 describe('mid-turn injected sidechannel pub/sub', () => {
-  it('notifies listeners, exposes the latest batch, and clear resets', () => {
+  it('ACCUMULATES batches across publishes (does not coalesce) and clear resets', () => {
     const listener = vi.fn();
     const unsubscribe = subscribeSidechannelMidTurnInjected(listener);
 
+    expect(getSidechannelMidTurnInjected()).toEqual([]);
+
     publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['a'] });
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(getSidechannelMidTurnInjected()).toEqual({
-      sessionId: 's-1',
-      messages: ['a'],
-    });
 
-    // A fresh reference every publish so `useSyncExternalStore` re-fires even
-    // for identical text.
-    const first = getSidechannelMidTurnInjected();
-    publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['a'] });
+    // Critical: a second batch published before the consumer clears must NOT
+    // overwrite the first — both are retained so multi-batch turns reconcile in
+    // full (a single-slot store would drop 'a' → 'a' resent next turn).
+    const afterFirst = getSidechannelMidTurnInjected();
+    publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['b', 'c'] });
     expect(listener).toHaveBeenCalledTimes(2);
-    expect(getSidechannelMidTurnInjected()).not.toBe(first);
+    expect(getSidechannelMidTurnInjected()).not.toBe(afterFirst); // fresh ref
+    expect(getSidechannelMidTurnInjected()).toEqual([
+      { sessionId: 's-1', messages: ['a'] },
+      { sessionId: 's-1', messages: ['b', 'c'] },
+    ]);
 
     clearSidechannelMidTurnInjected();
     expect(listener).toHaveBeenCalledTimes(3);
-    expect(getSidechannelMidTurnInjected()).toBeUndefined();
+    expect(getSidechannelMidTurnInjected()).toEqual([]);
+
+    // Clearing an already-empty buffer is a no-op (no spurious notify).
+    clearSidechannelMidTurnInjected();
+    expect(listener).toHaveBeenCalledTimes(3);
 
     unsubscribe();
-    publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['b'] });
+    publishSidechannelMidTurnInjected({ sessionId: 's-1', messages: ['d'] });
     expect(listener).toHaveBeenCalledTimes(3);
   });
 });

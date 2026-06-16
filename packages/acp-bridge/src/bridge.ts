@@ -663,6 +663,12 @@ const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
+// Per-session cap on undrained mid-turn messages. Mirrors the bound `/prompt`
+// gets from `maxPendingPromptsPerSession`: a busy turn with no drain point (a
+// long tool-free generation) must not let a client pin unbounded messages in
+// the in-memory queue. Past the cap, `enqueueMidTurnMessage` returns
+// `{ accepted: false }` and the browser keeps the message for the next turn.
+const MAX_MID_TURN_QUEUE_DEPTH = 20;
 const DEFAULT_MAX_SESSIONS = 20;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
@@ -4078,6 +4084,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // double delivery. Rejecting keeps the browser's next-turn fallback the
       // single delivery path in that race.
       if (trimmed.length === 0 || entry.pendingPromptCount === 0) {
+        return { accepted: false };
+      }
+      // Bound queue depth (see MAX_MID_TURN_QUEUE_DEPTH). Full → reject so the
+      // browser keeps the message in its own queue for the next turn rather than
+      // pinning it here unboundedly when the turn has no drain point.
+      if (entry.midTurnMessageQueue.length >= MAX_MID_TURN_QUEUE_DEPTH) {
         return { accepted: false };
       }
       entry.midTurnMessageQueue.push(trimmed);

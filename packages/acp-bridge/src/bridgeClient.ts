@@ -562,15 +562,22 @@ export class BridgeClient implements Client {
     if (!entry) return { messages: [] };
     const messages = entry.midTurnMessageQueue.splice(0);
     if (messages.length > 0) {
-      try {
-        entry.events.publish({
-          type: MID_TURN_MESSAGE_INJECTED_EVENT,
-          data: { sessionId: entry.sessionId, messages },
-        });
-      } catch {
-        // Bus already closed (session tearing down). The child still receives
-        // the messages below; only the browser-side echo is lost.
-      }
+      // `publish()` never throws — it returns `undefined` on a closed bus (see
+      // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
+      // around publish()"). Capture the result instead. A dropped frame is
+      // teardown-only: the child still gets the spliced messages below, but the
+      // browser won't receive the echo and would resend them next turn — so log
+      // it. One line per non-empty drain also makes the (rare) drain path and
+      // any duplicate-delivery mode diagnosable from the daemon stderr.
+      const published = entry.events.publish({
+        type: MID_TURN_MESSAGE_INJECTED_EVENT,
+        data: { sessionId: entry.sessionId, messages },
+      });
+      writeStderrLine(
+        published
+          ? `[mid-turn] session=${entry.sessionId} drained=${messages.length} injected into running turn`
+          : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echo frame dropped (bus closed); browser may resend next turn`,
+      );
     }
     return { messages };
   }

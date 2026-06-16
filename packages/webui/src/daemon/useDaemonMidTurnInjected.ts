@@ -7,23 +7,37 @@
 import { useSyncExternalStore } from 'react';
 import type { DaemonMidTurnMessageInjectedData } from '@qwen-code/sdk/daemon';
 import {
+  clearSidechannelMidTurnInjected,
   getSidechannelMidTurnInjected,
   subscribeSidechannelMidTurnInjected,
 } from './midTurnInjectedSidechannel.js';
 
+export interface UseDaemonMidTurnInjectedResult {
+  /**
+   * All injected mid-turn batches accumulated since the last `consume()`, in
+   * arrival order. The array reference changes on every publish/consume, so a
+   * consumer can run an effect keyed on it to reconcile every batch (not just
+   * the newest) against its pending queue.
+   */
+  batches: readonly DaemonMidTurnMessageInjectedData[];
+  /**
+   * Clear the buffer once the batches have been reconciled. Safe to call from
+   * the effect body: it is synchronous, so no new frame can append between the
+   * read and the clear. Stable reference.
+   */
+  consume: () => void;
+}
+
 /**
- * Returns the most recently injected mid-turn batch, or `undefined` if none.
- * The snapshot reference changes on every publish (even for identical text), so
- * a consumer can run an effect keyed on the return value to process each batch
- * exactly once — typically to drop the matching messages from its own pending
- * queue so they are not resent as the next turn.
+ * Subscribe to injected mid-turn batches. Unlike a latest-wins signal, this
+ * accumulates every batch so multi-batch turns (one frame per tool batch) are
+ * all reconciled; the consumer calls `consume()` after processing.
  */
-export function useDaemonMidTurnInjected():
-  | DaemonMidTurnMessageInjectedData
-  | undefined {
-  return useSyncExternalStore(
+export function useDaemonMidTurnInjected(): UseDaemonMidTurnInjectedResult {
+  const batches = useSyncExternalStore(
     subscribeSidechannelMidTurnInjected,
     getSidechannelMidTurnInjected,
     getSidechannelMidTurnInjected,
   );
+  return { batches, consume: clearSidechannelMidTurnInjected };
 }
