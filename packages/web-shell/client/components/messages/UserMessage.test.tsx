@@ -60,6 +60,34 @@ describe('UserMessage collapse toggle', () => {
     expect(btn.getAttribute('aria-expanded')).toBe('false');
   });
 
+  it('hides collapse metadata for slash commands', () => {
+    const container = render(
+      <UserMessage
+        content="/review"
+        commands={[{ name: 'review', description: 'Review changes' }]}
+        collapse={head({ elapsedMs: 12_400, toolCallCount: 3 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('/review');
+    expect(container.textContent).not.toContain('Execution 5 steps');
+    expect(container.textContent).not.toContain('12.4s');
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('keeps collapse metadata for unknown slash-prefixed text', () => {
+    const container = render(
+      <UserMessage
+        content="/Users/project"
+        commands={[{ name: 'review', description: 'Review changes' }]}
+        collapse={head({ elapsedMs: 12_400, toolCallCount: 3 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('Execution 5 steps');
+    expect(container.textContent).toContain('12.4s');
+  });
+
   it('pluralizes a single execution step as "Execution 1 step"', () => {
     const container = render(
       <UserMessage

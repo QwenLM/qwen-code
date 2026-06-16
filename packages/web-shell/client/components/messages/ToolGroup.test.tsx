@@ -215,6 +215,18 @@ describe('tool description expand toggle', () => {
     expect(container.textContent).toContain(command); // still present, in the block
   });
 
+  it('shows an expand/collapse tooltip on expandable tool rows', () => {
+    const command = `npm run build -- ${'x'.repeat(80)}`;
+    const container = renderTool(makeShellCommandTool(command));
+    const header = getToolHeader(container);
+    expect(header.getAttribute('title')).toBe('Expand');
+    expect(header.getAttribute('role')).toBe('button');
+
+    click(header);
+
+    expect(header.getAttribute('title')).toBe('Collapse');
+  });
+
   it('keeps the result summary when expanding a long-description tool with no detail view', () => {
     // glob with a long pattern: descExpandable but no kind-specific renderer.
     const pattern = `**/${'x'.repeat(80)}/*.ts`;

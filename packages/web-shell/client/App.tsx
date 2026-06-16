@@ -2781,6 +2781,7 @@ export function App({
                     summarizeSteps={summarizeSteps}
                     workspaceCwd={connection.workspaceCwd || ''}
                     shellOutputMaxLines={shellOutputMaxLines}
+                    commands={commands}
                     showRetryHint={showRetryHint}
                     onRetryClick={handleRetry}
                     welcomeHeader={welcomeHeader}

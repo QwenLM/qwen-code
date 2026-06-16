@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { PromptChevron } from '../PromptChevron';
 import { isSafeImageSrc } from './Markdown';
 import { useI18n } from '../../i18n';
-import type { TurnCollapseHead } from '../../adapters/types';
+import type { CommandInfo, TurnCollapseHead } from '../../adapters/types';
 import styles from './UserMessage.module.css';
 
 interface UserMessageImage {
@@ -13,6 +13,7 @@ interface UserMessageImage {
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
+  commands?: readonly CommandInfo[];
   /** When set, renders a toggle that folds/unfolds this turn's steps. */
   collapse?: TurnCollapseHead;
   onToggleCollapse?: (turnId: string) => void;
@@ -93,9 +94,22 @@ function useNowTicker(active: boolean): number {
   return now;
 }
 
+function isKnownSlashCommandPrompt(
+  content: string,
+  commands: readonly CommandInfo[] | undefined,
+): boolean {
+  if (!commands?.length) return false;
+  const trimmed = content.trimStart();
+  if (!trimmed.startsWith('/')) return false;
+  const firstToken = trimmed.split(/\s+/, 1)[0]?.slice(1);
+  if (!firstToken) return false;
+  return commands.some((command) => command.name === firstToken);
+}
+
 export const UserMessage = memo(function UserMessage({
   content,
   images,
+  commands,
   collapse,
   onToggleCollapse,
 }: UserMessageProps) {
@@ -128,6 +142,7 @@ export const UserMessage = memo(function UserMessage({
   // the trailing metrics are inert. A step-less turn has no toggle, just metrics.
   const hasToggle = !!collapse && collapse.hiddenCount > 0;
   const metrics = collapse ? metricsText(collapse, displayElapsedMs, t) : '';
+  const isSlashCommand = isKnownSlashCommandPrompt(content, commands);
 
   return (
     <div
@@ -160,33 +175,39 @@ export const UserMessage = memo(function UserMessage({
           </div>
         )}
         {content}
-        {collapse && onToggleCollapse && (hasToggle || metrics) && (
-          <div className={styles.collapseRow}>
-            {hasToggle && (
-              <button
-                type="button"
-                className={styles.collapseToggle}
-                onClick={() => onToggleCollapse(collapse.turnId)}
-                aria-expanded={!collapse.collapsed}
-                aria-label={
-                  collapse.collapsed ? t('turn.expand') : t('turn.collapse')
-                }
-                title={
-                  collapse.collapsed ? t('turn.expand') : t('turn.collapse')
-                }
-              >
-                {`${collapse.collapsed ? '▸' : '▾'} ${t('turn.executionSteps', {
-                  count: collapse.hiddenCount,
-                })}`}
-              </button>
-            )}
-            {metrics && (
-              <span className={styles.collapseMeta}>
-                {hasToggle ? ` · ${metrics}` : metrics}
-              </span>
-            )}
-          </div>
-        )}
+        {!isSlashCommand &&
+          collapse &&
+          onToggleCollapse &&
+          (hasToggle || metrics) && (
+            <div className={styles.collapseRow}>
+              {hasToggle && (
+                <button
+                  type="button"
+                  className={styles.collapseToggle}
+                  onClick={() => onToggleCollapse(collapse.turnId)}
+                  aria-expanded={!collapse.collapsed}
+                  aria-label={
+                    collapse.collapsed ? t('turn.expand') : t('turn.collapse')
+                  }
+                  title={
+                    collapse.collapsed ? t('turn.expand') : t('turn.collapse')
+                  }
+                >
+                  {`${collapse.collapsed ? '▸' : '▾'} ${t(
+                    'turn.executionSteps',
+                    {
+                      count: collapse.hiddenCount,
+                    },
+                  )}`}
+                </button>
+              )}
+              {metrics && (
+                <span className={styles.collapseMeta}>
+                  {hasToggle ? ` · ${metrics}` : metrics}
+                </span>
+              )}
+            </div>
+          )}
       </div>
     </div>
   );
