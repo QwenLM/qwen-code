@@ -315,8 +315,12 @@ export interface WebShellProps {
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
-  /** Called whenever transcript blocks change. Receives the full blocks array from useTranscriptBlocks(). */
-  onEventChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
+  /**
+   * Called whenever transcript blocks change. Receives the full blocks array
+   * from useTranscriptBlocks(). Fires on every streaming delta during active
+   * generation, so consumers should debounce or throttle expensive work.
+   */
+  onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
   /** Called when a critical error occurs (auth failure, session gone, etc). */
   onError?: (error: Error) => void;
   /** Called when `/bug` is invoked. Receives system info. If omitted, web-shell opens the report URL itself. */
@@ -694,7 +698,6 @@ export function App({
   style: externalStyle,
   onConnectionChange,
   onStreamingStateChange,
-  onEventChange,
   onError,
   onBugReport,
   hiddenSlashCommands,
@@ -706,6 +709,7 @@ export function App({
   collapseCompletedTurns = true,
   virtualScrollThreshold,
   markdown,
+  onTranscriptChange,
   onToast,
   composerRef,
   composerInput,
@@ -1619,8 +1623,8 @@ export function App({
   }, [connection.status, onConnectionChange]);
 
   useEffect(() => {
-    onEventChange?.(blocks);
-  }, [blocks, onEventChange]);
+    onTranscriptChange?.(blocks);
+  }, [blocks, onTranscriptChange]);
 
   useEffect(() => {
     if (connection.error) {

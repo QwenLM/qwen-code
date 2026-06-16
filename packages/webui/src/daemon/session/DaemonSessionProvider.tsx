@@ -633,7 +633,7 @@ export function DaemonSessionProvider({
                 { requireBoundPromptId: true },
               );
             }
-            // If replay has events but no terminal signal
+            // If replay has a user message but no terminal signal
             // (turn_complete/turn_error/prompt_cancelled), the turn was
             // likely still in progress — seed promptStatus so the loading
             // indicator shows immediately instead of flickering.
