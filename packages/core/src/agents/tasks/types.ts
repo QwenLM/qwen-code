@@ -29,15 +29,23 @@
  */
 
 /**
- * Discriminator over the task kinds tracked by the three task registries.
- * Each kind's per-kind state intersects with `TaskBase` to form the
- * union member; see `TaskState`.
+ * Discriminator over the task kinds tracked by the four core task
+ * registries. Each kind's per-kind state intersects with `TaskBase`
+ * to form the union member; see `TaskState`.
  *
- * Dream tasks (`MemoryManager`) are intentionally outside this union
- * for now — they have a separate lifecycle and their inclusion is
- * deferred to a follow-up.
+ * Dream tasks (`MemoryManager`) are intentionally outside this union —
+ * they have a separate lifecycle and their inclusion is deferred to a
+ * follow-up.
+ *
+ * `workflow` (P4b) is registered/observed via `WorkflowRunRegistry` and
+ * differs from the others in that the registry NEVER emits a
+ * `<task-notification>` envelope — `WorkflowTool` already returns its
+ * own llmContent + returnDisplay payload to the model on terminal, so
+ * a second envelope would duplicate the signal. The kind is widened
+ * here so the UI surfaces (pill / dialog / detail body) can switch on
+ * `entry.kind === 'workflow'`.
  */
-export type TaskKind = 'agent' | 'shell' | 'monitor';
+export type TaskKind = 'agent' | 'shell' | 'monitor' | 'workflow';
 
 /**
  * Lifecycle states a task can occupy. `paused` and `cancelled` are
@@ -112,11 +120,12 @@ export type TaskRegistration<T extends TaskBase> = Omit<
 import type { AgentTask } from '../background-tasks.js';
 import type { ShellTask } from '../../services/backgroundShellRegistry.js';
 import type { MonitorTask } from '../../services/monitorRegistry.js';
+import type { WorkflowTask } from '../workflow-run-registry.js';
 
 /**
- * Discriminated union over every task kind tracked by the three
+ * Discriminated union over every task kind tracked by the four
  * registries. Switch on `kind` to narrow to the per-kind shape.
  */
-export type TaskState = AgentTask | ShellTask | MonitorTask;
+export type TaskState = AgentTask | ShellTask | MonitorTask | WorkflowTask;
 
-export type { AgentTask, ShellTask, MonitorTask };
+export type { AgentTask, ShellTask, MonitorTask, WorkflowTask };
