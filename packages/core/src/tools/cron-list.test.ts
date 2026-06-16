@@ -56,11 +56,11 @@ describe('CronListTool', () => {
     expect(tool.name).toBe('cron_list');
   });
 
-  it('returns empty message when no jobs', async () => {
+  it('returns empty message when no jobs or wakeups', async () => {
     const invocation = tool.build({});
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('No active cron jobs');
+    expect(result.llmContent).toContain('No active cron jobs or loop wakeups');
   });
 
   it('lists created jobs', async () => {
@@ -137,6 +137,8 @@ describe('CronListTool', () => {
     const invocation = tool.build({});
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error?.message).toContain('Malformed JSON');
-    expect(result.llmContent).not.toContain('No active cron jobs');
+    expect(result.llmContent).not.toContain(
+      'No active cron jobs or loop wakeups',
+    );
   });
 });

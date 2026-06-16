@@ -71,7 +71,7 @@ class CronListInvocation extends BaseToolInvocation<
     ];
 
     if (jobs.length === 0) {
-      const result = 'No active cron jobs.';
+      const result = 'No active cron jobs or loop wakeups.';
       return { llmContent: result, returnDisplay: result };
     }
 

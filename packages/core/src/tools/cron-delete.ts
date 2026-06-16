@@ -92,7 +92,7 @@ export class CronDeleteTool extends BaseDeclarativeTool<
         properties: {
           id: {
             type: 'string',
-            description: 'Job ID returned by CronCreate.',
+            description: 'Job ID returned by CronCreate or LoopWakeup.',
           },
         },
         required: ['id'],
