@@ -66,10 +66,20 @@ function resolveSelectedModel(
   config?: Config,
 ): { modelId: string | undefined; baseUrl: string | undefined } {
   const modelsConfig = config?.getModelsConfig();
+  if (modelsConfig) {
+    // A live Config is the source of truth: pair its model with its own
+    // resolved baseUrl. Do NOT fall back to settings.model.baseUrl here — that
+    // could pair the runtime-selected model with a stale persisted baseUrl from
+    // a previous selection and validate a different duplicate-id provider.
+    return {
+      modelId: modelsConfig.getModel(),
+      baseUrl: modelsConfig.getGenerationConfig()?.baseUrl,
+    };
+  }
+  // Pre-flight (no Config yet): use the persisted selection as a paired unit.
   return {
-    modelId: modelsConfig?.getModel() ?? settings.model?.name,
-    baseUrl:
-      modelsConfig?.getGenerationConfig()?.baseUrl ?? settings.model?.baseUrl,
+    modelId: settings.model?.name,
+    baseUrl: settings.model?.baseUrl,
   };
 }
 

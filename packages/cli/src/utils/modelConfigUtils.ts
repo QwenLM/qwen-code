@@ -191,6 +191,13 @@ export function resolveCliGenerationConfig(
       // Fall back to the first id match if the paired provider was edited or
       // removed (and for the legacy id-only case where no baseUrl was saved),
       // mirroring auth.ts:findModelConfig.
+      //
+      // Note: `settings` is already merged across user/workspace/system scopes.
+      // Every writer of model.name (the picker, /model, ACP, provider install)
+      // writes model.baseUrl to the SAME scope, so the pair stays consistent.
+      // The only way they desync is a hand-edited config that sets model.name
+      // in a higher-priority scope without its paired baseUrl; the id-only
+      // fallback bounds the blast radius (it can only pick a same-id provider).
       const persistedBaseUrl = settings.model?.baseUrl;
       if (resolvedFromSettings && persistedBaseUrl) {
         modelProvider =
