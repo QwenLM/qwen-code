@@ -52,6 +52,14 @@ describe('LoopWakeupTool', () => {
     await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
   });
 
+  it('shows the clamped delay in the permission description', () => {
+    const invocation = tool.build({ delaySeconds: 5, prompt: 'continue loop' });
+
+    expect(invocation.getDescription()).toBe(
+      '60s (requested 5s): continue loop',
+    );
+  });
+
   it('schedules a session-only one-shot wakeup on the scheduler', async () => {
     const invocation = tool.build({
       delaySeconds: 300,
