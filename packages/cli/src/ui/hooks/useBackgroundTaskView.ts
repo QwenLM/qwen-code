@@ -33,6 +33,7 @@ import {
   type MonitorTask,
   type ShellTask,
   type TaskState,
+  type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
 
 // Cap on retained terminal dream entries surfaced via the dialog.
@@ -116,6 +117,8 @@ export function entryId(entry: DialogEntry): string {
       return entry.shellId;
     case 'monitor':
       return entry.monitorId;
+    case 'workflow':
+      return entry.runId;
     case 'dream':
       return entry.dreamId;
     default: {
@@ -137,6 +140,7 @@ export function useBackgroundTaskView(
     const agentRegistry = config.getBackgroundTaskRegistry();
     const shellRegistry = config.getBackgroundShellRegistry();
     const monitorRegistry = config.getMonitorRegistry();
+    const workflowRegistry = config.getWorkflowRunRegistry();
     const memoryManager = config.getMemoryManager();
     const projectRoot = config.getProjectRoot();
     // Dream snapshot signature, kept as a defense-in-depth dedup for
@@ -161,6 +165,7 @@ export function useBackgroundTaskView(
       const agentEntries: AgentTask[] = [...agentRegistry.getAll()];
       const shellEntries: ShellTask[] = [...shellRegistry.getAll()];
       const monitorEntries: MonitorTask[] = [...monitorRegistry.getAll()];
+      const workflowEntries: WorkflowTask[] = [...workflowRegistry.list()];
       // Dream entries: only surface tasks that actually fired.
       // `pending` is a sub-second transition state and `skipped`
       // records arise from the rare race where the schedule-time
@@ -246,6 +251,7 @@ export function useBackgroundTaskView(
         ...agentEntries,
         ...shellEntries,
         ...monitorEntries,
+        ...workflowEntries,
         ...dreamEntries,
       ].sort((a, b) => {
         const aActive = isActive(a);
@@ -278,6 +284,15 @@ export function useBackgroundTaskView(
     agentRegistry.setStatusChangeCallback(refreshFromRegistry);
     shellRegistry.setStatusChangeCallback(refreshFromRegistry);
     monitorRegistry.setStatusChangeCallback(refreshFromRegistry);
+    workflowRegistry.setStatusChangeCallback(refreshFromRegistry);
+
+    // Permission bubbling: a background agent parking (or resolving) a tool
+    // call for approval mutates `pendingApprovals` without a status change,
+    // so subscribe here too. This keeps the footer pill's "needs approval"
+    // hint and the dialog roster fresh. Unlike activity updates (ignored on
+    // purpose to avoid per-tool-call churn), approval changes are rare and
+    // user-actionable, so refreshing the snapshot on them is worthwhile.
+    agentRegistry.setApprovalChangeCallback(refreshFromRegistry);
 
     // Memory listener fires only on dream-task transitions —
     // `subscribe({ taskType: 'dream' })` skips the per-extract notify
@@ -302,6 +317,8 @@ export function useBackgroundTaskView(
       agentRegistry.setStatusChangeCallback(undefined);
       shellRegistry.setStatusChangeCallback(undefined);
       monitorRegistry.setStatusChangeCallback(undefined);
+      workflowRegistry.setStatusChangeCallback(undefined);
+      agentRegistry.setApprovalChangeCallback(undefined);
       unsubscribeMemory();
     };
   }, [config]);

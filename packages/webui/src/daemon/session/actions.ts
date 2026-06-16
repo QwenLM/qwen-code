@@ -9,6 +9,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionRecapResult,
   DaemonSessionTaskStatus,
   DaemonTranscriptStore,
@@ -153,10 +154,14 @@ export function createDaemonSessionActions({
         if (options?.optimisticUserMessage !== false) {
           store.appendLocalUserMessage(text, normalizedImages);
         }
+        const promptRequest: Record<string, unknown> = {
+          prompt: toDaemonPromptContent(text, normalizedImages),
+        };
+        if (options?.retry) {
+          promptRequest['retry'] = true;
+        }
         const result = await session.prompt(
-          {
-            prompt: toDaemonPromptContent(text, normalizedImages),
-          },
+          promptRequest as Parameters<typeof session.prompt>[0],
           ctrl.signal,
         );
         if (isNonBlockingAccepted(result)) {
@@ -592,6 +597,36 @@ export function createDaemonSessionActions({
           error,
           'btw_session',
         );
+      }
+    },
+
+    async enqueueMidTurnMessage(
+      message: string,
+      opts?: { signal?: AbortSignal },
+    ): Promise<DaemonMidTurnMessageResult> {
+      // Best-effort and silent: no session / idle session / transport failure /
+      // abort all resolve `{ accepted: false }` so the caller falls back to its
+      // own next-turn queue. Never raises a user-facing notice — a queued
+      // message typed mid-turn is an optimization, not a user-initiated action.
+      // `opts.signal` lets the caller abort a still-in-flight push when the turn
+      // it was meant for settles, so a late arrival can't land in the next turn.
+      const session = sessionRef.current;
+      if (!session) return { accepted: false };
+      try {
+        return await session.enqueueMidTurnMessage(message, opts);
+      } catch (err) {
+        // An abort is the designed settle-time cancel (the message stays in the
+        // browser queue for the next turn), not a failure — stay silent. Any
+        // OTHER error (daemon down, 4xx/5xx, network, timeout) silently disables
+        // mid-turn drain for every client, so surface it at debug for DevTools
+        // without raising a user-facing notice.
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          console.debug(
+            '[enqueueMidTurnMessage] push failed; kept for next turn',
+            err,
+          );
+        }
+        return { accepted: false };
       }
     },
 

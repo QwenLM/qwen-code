@@ -213,6 +213,13 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    // TODO(transport-parity): globWorkspace, stat, and listDirectory
+    // bypass the DaemonClient transport layer by calling global fetch()
+    // directly. This means ACP transports (WS, HTTP+JSON-RPC) never
+    // see these requests. DaemonClient exposes client.glob(),
+    // client.fileStat(), and client.dirList() that go through the
+    // transport — migrate to those once the route table covers
+    // /glob, /stat, /list (see acpRouteTable.ts).
     async globWorkspace(pattern, opts) {
       requireClient(getClient, 'Glob workspace failed');
       const url = createDaemonRequestUrl(baseUrl, '/glob');

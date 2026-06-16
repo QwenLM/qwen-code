@@ -11,6 +11,7 @@
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.45;
+  margin-left: 14px;
 }
 
 .title {

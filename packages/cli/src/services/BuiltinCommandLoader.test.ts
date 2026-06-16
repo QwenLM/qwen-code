@@ -133,6 +133,7 @@ describe('BuiltinCommandLoader', () => {
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       isLspEnabled: vi.fn().mockReturnValue(false),
+      isWorkflowsEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     restoreCommandMock.mockReturnValue({
@@ -191,6 +192,9 @@ describe('BuiltinCommandLoader', () => {
 
     const ideCmd = commands.find((c) => c.name === 'ide');
     expect(ideCmd).toBeDefined();
+
+    const importConfigCmd = commands.find((c) => c.name === 'import-config');
+    expect(importConfigCmd).toBeDefined();
 
     const mcpCmd = commands.find((c) => c.name === 'mcp');
     expect(mcpCmd).toBeDefined();

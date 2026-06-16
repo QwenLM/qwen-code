@@ -142,6 +142,39 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
     });
 
+    it('should reset the deterministic tool-call counter on retry', () => {
+      const event = createToolCallRequestEvent('testTool', { param: 'value' });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.addAndCheckDeterministicToolCallLoop(event)).toBe(false);
+      }
+
+      expect(
+        service.addAndCheckDeterministicToolCallLoop({
+          type: GeminiEventType.Retry,
+        } as ServerGeminiStreamEvent),
+      ).toBe(false);
+
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.addAndCheckDeterministicToolCallLoop(event)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('should expose the current consecutive tool-call count', () => {
+      const event = createToolCallRequestEvent('testTool', { param: 'value' });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        service.addAndCheckDeterministicToolCallLoop(event);
+      }
+
+      expect(service.getConsecutiveToolCallCount()).toBe(
+        TOOL_CALL_LOOP_THRESHOLD - 1,
+      );
+      expect(service.addAndCheckDeterministicToolCallLoop(event)).toBe(true);
+      expect(service.getConsecutiveToolCallCount()).toBe(
+        TOOL_CALL_LOOP_THRESHOLD,
+      );
+    });
+
     it('should not detect a loop when disabled for session', () => {
       service.disableForSession();
       expect(loggers.logLoopDetectionDisabled).toHaveBeenCalledTimes(1);

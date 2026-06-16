@@ -28,8 +28,12 @@ import {
   ToolDisplayNames,
   ToolNames,
   type AgentTask,
+  type BackgroundApproval,
   type MonitorTask,
+  type ToolCallConfirmationDetails,
+  type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
+import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
 import {
@@ -169,7 +173,14 @@ function rowLabel(entry: DialogEntry): string {
   switch (entry.kind) {
     case 'agent': {
       const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-      return entry.isBackgrounded ? label : `${FOREGROUND_ROW_PREFIX} ${label}`;
+      const base = entry.isBackgrounded
+        ? label
+        : `${FOREGROUND_ROW_PREFIX} ${label}`;
+      // Flag agents with a parked approval so the user can spot which row to
+      // open from the list without entering each detail view.
+      return entry.pendingApprovals?.length
+        ? `${base} ⚠ ${t('needs approval')}`
+        : base;
     }
     case 'shell':
       // Shell / monitor prefixes mirror the dialog's "section" visual hint
@@ -182,6 +193,15 @@ function rowLabel(entry: DialogEntry): string {
       return `${SHELL_ROW_PREFIX} ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
+    case 'workflow': {
+      const label = entry.meta?.name ?? entry.runId;
+      const phase = entry.currentPhase ? ` · ${entry.currentPhase}` : '';
+      const counts =
+        entry.agentsDispatched > 0
+          ? ` (${entry.agentsCompleted}/${entry.agentsDispatched})`
+          : '';
+      return `[workflow] ${label}${phase}${counts}`;
+    }
     case 'dream':
       return formatDreamRowLabel(entry);
     default: {
@@ -347,6 +367,14 @@ const DetailBody: React.FC<{
     case 'monitor':
       return (
         <MonitorDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'workflow':
+      return (
+        <WorkflowDetailBody
           entry={entry}
           maxHeight={maxHeight}
           maxWidth={maxWidth}
@@ -864,6 +892,156 @@ const MonitorDetailBody: React.FC<{
   );
 };
 
+// ─── Workflow detail body ──────────────────────────────────
+//
+// Shows the workflow's declared meta (name + description + whenToUse),
+// the phase tree with truncation, per-phase dispatch counts, and the
+// log tail. Phase tree is capped at MAX_VISIBLE_PHASES with a "+N more
+// above" header so deeply nested fan-outs don't blow the dialog body.
+// Logs are the most recent tail; the registry caps at 100 lines but
+// the body further truncates to fit the available height.
+
+const MAX_VISIBLE_PHASES = 20;
+const MAX_VISIBLE_LOG_LINES = 10;
+
+const WorkflowDetailBody: React.FC<{
+  entry: WorkflowTask;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = `${t('Workflow')} › ${entry.meta?.name ?? entry.runId}`;
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.agentsDispatched > 0) {
+    dimSubtitleParts.push(
+      `${entry.agentsCompleted}/${entry.agentsDispatched} ${t('agents')}`,
+    );
+  }
+  dimSubtitleParts.push(
+    `${entry.phases.length} ${entry.phases.length === 1 ? t('phase') : t('phases')}`,
+  );
+
+  // Phase tree: collapse the head when over the visible cap, keeping
+  // the most recent N entries (the user almost always wants to see the
+  // current state, not the launch sequence).
+  const phaseOverflow = Math.max(0, entry.phases.length - MAX_VISIBLE_PHASES);
+  const visiblePhases = entry.phases.slice(-MAX_VISIBLE_PHASES);
+
+  // Log tail: similar truncation logic; show "+N more above" header if
+  // the registry has more than the visible window.
+  const logOverflow = Math.max(
+    0,
+    entry.recentLogs.length - MAX_VISIBLE_LOG_LINES,
+  );
+  const visibleLogs = entry.recentLogs.slice(-MAX_VISIBLE_LOG_LINES);
+
+  const hasError = Boolean(entry.error);
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      {entry.meta?.description && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text wrap="wrap">{entry.meta.description}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      <Box />
+      <Box>
+        <Text bold dimColor>
+          {t('Phases')}
+        </Text>
+      </Box>
+      {entry.phases.length === 0 ? (
+        <Box>
+          <Text dimColor>{t('(no phase recorded yet)')}</Text>
+        </Box>
+      ) : (
+        <Fragment>
+          {phaseOverflow > 0 && (
+            <Box>
+              <Text dimColor>{`+${phaseOverflow} ${t('more above')}`}</Text>
+            </Box>
+          )}
+          {visiblePhases.map((phaseTitle, i) => {
+            const isCurrent =
+              entry.status === 'running' &&
+              i === visiblePhases.length - 1 &&
+              entry.currentPhase === phaseTitle;
+            const marker = isCurrent ? '▸' : '·';
+            return (
+              <Box key={`${phaseTitle}-${i}`}>
+                <Text color={isCurrent ? theme.status.success : undefined}>
+                  {`  ${marker} ${phaseTitle}`}
+                </Text>
+              </Box>
+            );
+          })}
+        </Fragment>
+      )}
+
+      {entry.recentLogs.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Logs')}
+            </Text>
+          </Box>
+          {logOverflow > 0 && (
+            <Box>
+              <Text dimColor>{`+${logOverflow} ${t('more above')}`}</Text>
+            </Box>
+          )}
+          {visibleLogs.map((line, i) => (
+            <Box key={`log-${i}`}>
+              <Text wrap="truncate-end" dimColor>
+                {line}
+              </Text>
+            </Box>
+          ))}
+        </Fragment>
+      )}
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              {t('Error')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
+};
+
 // ─── Dialog shell ──────────────────────────────────────────
 
 interface BackgroundTasksDialogProps {
@@ -957,6 +1135,48 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // Activity callback is agent-only — shells don't emit per-tool events.
   const selectedAgentIdForActivity =
     selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
+
+  // Permission bubbling: the oldest tool call this background agent has
+  // parked awaiting user approval. `selectedEntry` is re-read from the
+  // registry above (and useBackgroundTaskView refreshes `entries` on the
+  // registry's approval-change callback), so `pendingApprovals` is current.
+  // When present in detail mode, the dialog renders the shared
+  // ToolConfirmationMessage and yields keyboard focus to it.
+  const selectedApproval: BackgroundApproval | undefined =
+    selectedEntry?.kind === 'agent'
+      ? selectedEntry.pendingApprovals?.[0]
+      : undefined;
+  const approvalActive = isDetailMode && Boolean(selectedApproval);
+  const approvalUsesQuestionDialog =
+    selectedApproval?.confirmationDetails.type === 'ask_user_question';
+
+  // Reconstruct the full confirmation details (the parked approval omits
+  // the runtime-owned `onConfirm`) and route the user's outcome back
+  // through the registry, which invokes the parked call's `respond` to
+  // resume the agent's tool call.
+  const approvalConfirmationDetails: ToolCallConfirmationDetails | undefined =
+    selectedApproval && selectedAgentIdForActivity
+      ? // The spread restores every field except `onConfirm`; the cast is
+        // needed because TS can't prove the discriminated-union shape across
+        // an object spread.
+        ({
+          ...selectedApproval.confirmationDetails,
+          hideAlwaysAllow: true,
+          onConfirm: async (
+            outcome: Parameters<BackgroundApproval['respond']>[0],
+            payload?: Parameters<BackgroundApproval['respond']>[1],
+          ) => {
+            await config
+              .getBackgroundTaskRegistry()
+              .resolvePendingApproval(
+                selectedAgentIdForActivity,
+                selectedApproval.callId,
+                outcome,
+                payload,
+              );
+          },
+        } as ToolCallConfirmationDetails)
+      : undefined;
   useEffect(() => {
     if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity) return;
     const registry = config.getBackgroundTaskRegistry();
@@ -1071,6 +1291,29 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useKeypress(
     (key) => {
       if (!dialogOpen) return;
+      // While a parked approval is shown, the embedded ToolConfirmationMessage
+      // owns the selection keys (↑/↓/numbers/Enter, Esc = deny this call).
+      // Keep two escape hatches for compact approvals that don't have their
+      // own free-text or tab-navigation UI:
+      //   ← : back to the list (the approval stays parked; the pill keeps
+      //       its "needs approval" marker)
+      //   x : stop the agent entirely (also auto-rejects its parked calls)
+      // Everything else yields so the dialog's own Enter/Esc handlers don't
+      // double-fire against the confirmation's.
+      if (approvalActive && !approvalUsesQuestionDialog) {
+        if (key.name === 'left') {
+          exitDetail();
+          return;
+        }
+        if (key.sequence === 'x' && !key.ctrl && !key.meta) {
+          handleCancelKey();
+          return;
+        }
+        return;
+      }
+      if (approvalActive && approvalUsesQuestionDialog) {
+        return;
+      }
 
       if (dialogMode === 'list') {
         if (keyMatchers[Command.SELECTION_UP](key)) {
@@ -1157,7 +1400,16 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const showCancelConfirmHint =
     pendingCancelEntryId !== null && pendingCancelEntryId === selectedEntryKey;
   const hints: string[] = [];
-  if (showCancelConfirmHint) {
+  if (approvalActive) {
+    // The embedded ToolConfirmationMessage renders its own selectable
+    // options; for free-text question dialogs, yield every key to the
+    // embedded dialog so typing and navigation cannot also trigger the
+    // background-task dialog's shortcuts.
+    hints.push(t('Approve or deny the request above'));
+    if (!approvalUsesQuestionDialog) {
+      hints.push('← back', 'x stop');
+    }
+  } else if (showCancelConfirmHint) {
     // Force the confirmation step into the hint row so the user sees
     // exactly what the next `x` will do. Phrasing matches the
     // `[blocking]` row prefix \u2014 "blocking turn" reads as "your input
@@ -1198,7 +1450,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           </Text>
         </Box>
       )}
-      <Box marginTop={dialogMode === 'list' ? 1 : 0}>
+      <Box marginTop={dialogMode === 'list' ? 1 : 0} flexDirection="column">
         {dialogMode === 'list' ? (
           <ListBody
             entries={entries}
@@ -1208,12 +1460,36 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         ) : selectedEntry ? (
           <DetailBody
             entry={selectedEntry}
-            maxHeight={detailContentHeight}
+            // Halve the detail body budget when an approval banner is shown
+            // below so both fit; the body self-caps internally anyway.
+            maxHeight={
+              approvalActive
+                ? Math.max(6, Math.floor(detailContentHeight / 2))
+                : detailContentHeight
+            }
             maxWidth={detailContentWidth}
           />
         ) : (
           <Box paddingX={1}>
             <Text color={theme.text.secondary}>{t('No entry to show.')}</Text>
+          </Box>
+        )}
+        {approvalActive && approvalConfirmationDetails && (
+          <Box flexDirection="column" marginTop={1} paddingX={1}>
+            <Text bold color={theme.status.warning}>
+              {t('Background agent needs approval')}
+            </Text>
+            <ToolConfirmationMessage
+              confirmationDetails={approvalConfirmationDetails}
+              config={config}
+              isFocused={approvalActive}
+              contentWidth={detailContentWidth - 2}
+              availableTerminalHeight={Math.max(
+                6,
+                Math.floor(detailContentHeight / 2),
+              )}
+              compactMode
+            />
           </Box>
         )}
       </Box>

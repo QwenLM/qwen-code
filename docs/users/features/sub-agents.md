@@ -12,9 +12,9 @@ Subagents are independent AI assistants that:
 - **Work autonomously** - Once given a task, they work independently until completion or failure
 - **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
 
-## Fork Subagent (Implicit Fork)
+## Fork Subagent
 
-In addition to named subagents, Qwen Code supports **implicit forking** — when the AI omits the `subagent_type` parameter, it triggers a fork that inherits the parent's full conversation context.
+In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"` (available in interactive sessions). A fork inherits the parent's full conversation context and runs detached in the background. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent, which runs to completion and returns its result inline.
 
 ### How Fork Differs from Named Subagents
 
@@ -59,7 +59,7 @@ Fork children cannot create further forks. This is enforced at runtime — if a 
 ## How Subagents Work
 
 1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
-2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or implicitly fork when no specific subagent type is needed
+2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or fork itself (`subagent_type: "fork"`) when it wants to inherit the full conversation context and discard the intermediate output
 3. **Execution**: Subagents work independently, using their configured tools to complete tasks
 4. **Results**: They return results and execution summaries back to the main conversation
 
@@ -135,7 +135,7 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 name: agent-name
 description: Brief description of when and how to use this agent
 model: inherit # Optional: inherit, fast, modelId, or authType:modelId
-approvalMode: auto-edit # Optional: default, plan, auto-edit, yolo
+approvalMode: auto-edit # Optional: default, plan, auto-edit, yolo, bubble
 tools:         # Optional: allowlist of tools
   - tool1
   - tool2
@@ -202,6 +202,7 @@ Use the optional `approvalMode` frontmatter field to control how a subagent's to
 - `plan`: Analyze-only mode — the agent plans but does not execute changes
 - `auto-edit`: Tools are auto-approved without prompting (recommended for most agents)
 - `yolo`: All tools auto-approved, including potentially destructive ones
+- `bubble`: Background-agent tool approvals are surfaced in the parent session
 
 If you omit this field, the subagent's permission mode is determined automatically:
 

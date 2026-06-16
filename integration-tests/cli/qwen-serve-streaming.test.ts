@@ -226,6 +226,13 @@ describeLLM('qwen serve — multi-client first-responder permission', () => {
       workspaceCwd: REPO_ROOT,
     });
 
+    // Pin the session to `default` approval mode. The ACP child
+    // inherits the host's user-level settings — a developer machine
+    // with `approvalMode: yolo` auto-approves the write below, no
+    // permission_request ever fires, and this test fails only
+    // locally. CI passes because its HOME has no user settings.
+    await client.setSessionApprovalMode(session.sessionId, 'default');
+
     const ac1 = new AbortController();
     const ac2 = new AbortController();
     const seen1: DaemonEvent[] = [];
@@ -314,6 +321,21 @@ describeLLM('qwen serve — multi-client first-responder permission', () => {
     await Promise.race([
       promptTask.catch(() => undefined),
       new Promise((r) => setTimeout(r, 30_000)),
+    ]);
+    // The race above tolerates the turn still running (slow model).
+    // But ABANDONING an in-flight turn wedges the shared session: if
+    // the model asks for a SECOND permission after the allow_once
+    // vote, nobody is left to answer it, the pending request blocks
+    // the turn forever, and the per-session prompt FIFO holds every
+    // later prompt behind it — the Last-Event-ID resume test below
+    // then times out waiting for a turn_complete that never comes
+    // (the exact 60s × 3-retry hang from the 2026-06-12 nightly).
+    // Cancel the active prompt so the session is clean for the next
+    // test; harmless when the turn already finished.
+    await client.cancel(session.sessionId).catch(() => undefined);
+    await Promise.race([
+      promptTask.catch(() => undefined),
+      new Promise((r) => setTimeout(r, 5_000)),
     ]);
     ac1.abort();
     ac2.abort();

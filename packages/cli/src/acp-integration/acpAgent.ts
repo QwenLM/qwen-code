@@ -5799,6 +5799,14 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const cleared = unregisterGoalHook(config, sessionId);
+        if (cleared) {
+          session.emitGoalStatus({
+            kind: 'cleared',
+            condition: cleared.condition,
+            iterations: cleared.iterations,
+            durationMs: Date.now() - cleared.setAt,
+          });
+        }
         debugLogger.info(
           `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
         );
@@ -6144,6 +6152,16 @@ class QwenAgent implements Agent {
           config: this.config,
           sendUpdate: async (update) => {
             updates.push(update);
+          },
+          // Fresh accumulator for this replay: MessageEmitter advances it from
+          // replayed usage metadata (tokens only — no per-turn durations) and
+          // PlanEmitter snapshots it onto each todo update, so resumed sessions
+          // recover per-task token spend (API time stays live-only).
+          cumulativeUsage: {
+            promptTokens: 0,
+            cachedTokens: 0,
+            candidateTokens: 0,
+            apiTimeMs: 0,
           },
         };
         let replayError: string | undefined;
@@ -6688,7 +6706,12 @@ class QwenAgent implements Agent {
     resume?: boolean,
   ): Promise<Config> {
     this.settings = loadSettings(cwd);
-    const mergedMcpServers = { ...this.settings.merged.mcpServers };
+    // ACP/IDE-injected servers are session-level: they must outrank a project
+    // `.mcp.json` and stay un-gated. Collect them separately and pass them as
+    // `sessionMcpServers` (top precedence tier) rather than merging into
+    // `settings.mcpServers`, where `assembleMcpServers` would demote them below
+    // `.mcp.json` (#4615).
+    const sessionMcpServers: Record<string, MCPServerConfig> = {};
 
     for (const server of mcpServers) {
       const stdioServer = toStdioServer(server);
@@ -6697,7 +6720,7 @@ class QwenAgent implements Agent {
         for (const { name: envName, value } of stdioServer.env) {
           env[envName] = value;
         }
-        mergedMcpServers[stdioServer.name] = new MCPServerConfig(
+        sessionMcpServers[stdioServer.name] = new MCPServerConfig(
           stdioServer.command,
           stdioServer.args,
           env,
@@ -6712,7 +6735,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of sseServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[sseServer.name] = new MCPServerConfig(
+        sessionMcpServers[sseServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6730,7 +6753,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of httpServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[httpServer.name] = new MCPServerConfig(
+        sessionMcpServers[httpServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6743,7 +6766,7 @@ class QwenAgent implements Agent {
       }
     }
 
-    const settings = { ...this.settings.merged, mcpServers: mergedMcpServers };
+    const settings = this.settings.merged;
     const argvForSession = {
       ...this.argv,
       ...(resume ? { resume: sessionId } : { sessionId }),
@@ -6767,6 +6790,7 @@ class QwenAgent implements Agent {
       // sessions otherwise leak persisted disabled skills into the first
       // <available_skills> at cold start.
       buildDisabledSkillNamesProvider(this.settings),
+      sessionMcpServers,
     );
     // ACP sessions run with piped stdio (non-TTY), so the default
     // interactive-based gating disables file checkpointing. Enable it
@@ -6906,6 +6930,9 @@ class QwenAgent implements Agent {
 
     // Install rewriter AFTER history replay to avoid rewriting historical messages
     session.installRewriter();
+
+    // After replay so a durable cron fire can't interleave with it.
+    session.startCronScheduler();
 
     return session;
   }

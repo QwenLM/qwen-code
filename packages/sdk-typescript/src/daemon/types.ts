@@ -20,6 +20,10 @@ export interface DaemonProtocolVersions {
   supported: string[];
 }
 
+export interface DaemonCapabilitiesLimits {
+  maxPendingPromptsPerSession?: number | null;
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
@@ -39,7 +43,19 @@ export interface DaemonCapabilities {
    * `session_events`). Never gate UI off `mode`.
    */
   features: string[];
+  /**
+   * Numeric daemon limits. `null` means the daemon advertises the limit as
+   * disabled; absence means an older daemon did not advertise it.
+   */
+  limits?: DaemonCapabilitiesLimits;
   modelServices: string[];
+  /**
+   * Transport protocols the daemon advertises. Clients use this to
+   * negotiate the preferred transport (e.g. `['rest-sse', 'acp-ws',
+   * 'acp-http']`). Optional because older v=1 daemons predate
+   * transport negotiation — absence implies `['rest-sse']` only.
+   */
+  transports?: readonly string[];
   /**
    * Absolute canonical workspace path this daemon is bound to
    * (1 daemon = 1 workspace). Clients use this to
@@ -1097,6 +1113,16 @@ export interface DaemonSessionBtwResult {
   answer: string | null;
 }
 
+/**
+ * Result body of `POST /session/:id/mid-turn-message`. `accepted` is `true`
+ * when the message was queued for the running turn (the ACP child drains it
+ * between tool batches); `false` when the session was idle, in which case the
+ * caller should send the message as a normal next-turn prompt instead.
+ */
+export interface DaemonMidTurnMessageResult {
+  accepted: boolean;
+}
+
 export interface DaemonShellCommandResult {
   exitCode: number | null;
   output: string;
@@ -1141,6 +1167,15 @@ export type DaemonMcpRestartResult =
       restarted: false;
       skipped: true;
       reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+    }
+  | {
+      serverName: string;
+      entries: Array<{
+        entryIndex: number;
+        restarted: boolean;
+        durationMs?: number;
+        reason?: string;
+      }>;
     };
 
 export type DaemonMcpManageAction =

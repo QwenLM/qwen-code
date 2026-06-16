@@ -21,6 +21,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
+  'mid_turn_message_injected',
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -247,6 +248,41 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * `mid_turn_message_injected` payload. Emitted when the daemon drains
+ * browser-queued mid-turn messages into the running turn (web-shell mid-turn
+ * drain). It is a transient dedupe signal, not a transcript item: consumers
+ * move these messages out of their pending queue so they aren't resent as the
+ * next turn. They are not rendered from this event — the message already reached
+ * the model mid-turn, and the persisted transcript shows it on reload.
+ */
+export interface DaemonMidTurnMessageInjectedData {
+  sessionId: string;
+  messages: string[];
+  /**
+   * Trusted client id that queued these messages, so a consumer dedupes only its
+   * OWN pending queue — a peer attached to the same session must not drop a
+   * coincidentally-equal entry it didn't queue. Absent for anonymous pushes.
+   *
+   * CONTRACT: a consumer that dedupes on this event MUST compare this id against
+   * its own client id and skip frames originated by a different client. The
+   * daemon broadcasts the frame to every SSE subscriber on the session and does
+   * NOT route by originator, so a consumer that dedupes unconditionally will drop
+   * another client's coincidentally-equal pending message (double delivery).
+   *
+   * IMPORTANT — wire location: unlike the permission/settings events (which the
+   * session reducer's `mergeOriginator` step copies from the envelope INTO
+   * `data`), this event is NOT reduced, so the daemon leaves the id ONLY on the
+   * SSE envelope (`event.originatorClientId`) and never populates it here. A raw
+   * SDK consumer must read `event.originatorClientId`; `data.originatorClientId`
+   * is filled in only by a consumer that lifts it off the envelope itself (the
+   * web-shell's `parseSidechannelMidTurnInjected` does this). The field lives on
+   * this shape so that lifted representation is well-typed.
+   */
+  originatorClientId?: string;
   [key: string]: unknown;
 }
 
@@ -742,6 +778,10 @@ export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
   'session_metadata_updated',
   DaemonSessionMetadataUpdatedData
 >;
+export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
+  'mid_turn_message_injected',
+  DaemonMidTurnMessageInjectedData
+>;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
   'client_evicted',
   DaemonClientEvictedData
@@ -874,6 +914,7 @@ export type DaemonSessionEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
+  | DaemonMidTurnMessageInjectedEvent
   | DaemonSessionBranchedEvent;
 
 export type DaemonControlEvent =
@@ -1318,6 +1359,10 @@ export function asKnownDaemonEvent(
     case 'session_metadata_updated':
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
+        : undefined;
+    case 'mid_turn_message_injected':
+      return isMidTurnMessageInjectedData(event.data)
+        ? (event as DaemonMidTurnMessageInjectedEvent)
         : undefined;
     case 'client_evicted':
       return isClientEvictedData(event.data)
@@ -1799,9 +1844,13 @@ export function reduceDaemonSessionEvent(
         ...base,
         lastTurnError: event.data,
       };
+    // `mid_turn_message_injected` is a transient UX signal (the browser dedupes
+    // its own pending queue); like these mcp/settings notices it carries no
+    // reduced session-view state.
     case 'mcp_server_added':
     case 'mcp_server_removed':
     case 'settings_reloaded':
+    case 'mid_turn_message_injected':
       return base;
     case 'session_rewound':
       return {
@@ -2230,6 +2279,17 @@ function isSessionMetadataUpdatedData(
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
     isOptionalStringOrNull(value['displayName'])
+  );
+}
+
+function isMidTurnMessageInjectedData(
+  value: unknown,
+): value is DaemonMidTurnMessageInjectedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    Array.isArray(value['messages']) &&
+    value['messages'].every((message) => typeof message === 'string')
   );
 }
 

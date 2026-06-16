@@ -9,7 +9,9 @@ import {
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
-import { parseSseStream } from './sse.js';
+import { DaemonHttpError } from './DaemonHttpError.js';
+import type { DaemonTransport } from './DaemonTransport.js';
+import { RestSseTransport } from './RestSseTransport.js';
 import type {
   DaemonAgentMutationResult,
   DaemonAuthProviderId,
@@ -68,6 +70,7 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -121,13 +124,43 @@ export interface DaemonClientOptions {
    * Defaults to 30s. Set to `0` or `Infinity` to disable.
    */
   fetchTimeoutMs?: number;
+  /**
+   * Per-session cap on local `prompt()` calls that have been admitted but
+   * not completed. For 202 daemons the slot is held until the temporary
+   * SSE wait finishes. Defaults to 5. Set to `0` or `Infinity` to
+   * disable; `null` is accepted for direct
+   * `/capabilities.limits` passthrough.
+   */
+  maxPendingPromptsPerSession?: number | null;
+  /**
+   * Pluggable transport. When omitted, a `RestSseTransport` is created
+   * automatically — this preserves the existing REST+SSE behavior with
+   * zero caller-side changes. Pass an `AcpWsTransport` or
+   * `AcpHttpTransport` to use JSON-RPC over WebSocket or HTTP.
+   */
+  transport?: DaemonTransport;
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+// Keep in sync with acp-bridge bridge.ts and CLI serve/server.ts.
+const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 // Server deadline + headroom so the client never races the daemon's own budget.
 const MCP_RESTART_DEFAULT_TIMEOUT_MS =
   MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
+
+export function normalizePendingPromptLimit(
+  value: number | null | undefined,
+): number {
+  if (value === undefined) return DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
+  if (value === null || value === 0 || value === Infinity) {
+    return Infinity;
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    throw new TypeError('bad maxPendingPromptsPerSession');
+  }
+  return value;
+}
 
 /**
  * Strip any trailing slashes from a base URL via plain string ops. The
@@ -182,19 +215,27 @@ function readTokenFromEnv(): string | undefined {
   }
 }
 
+// Re-export DaemonHttpError from its dedicated module so existing
+// `import { DaemonHttpError } from './DaemonClient.js'` continues to
+// work. The class itself lives in DaemonHttpError.ts to break the
+// import chain from RestSseTransport → DaemonClient (browser bundle).
+export { DaemonHttpError } from './DaemonHttpError.js';
+
 /**
- * Thrown for any non-2xx daemon response. `status` and `body` are surfaced
- * so callers can branch on the standard daemon HTTP semantics (404 missing
- * session, 401 bad token, 400 malformed body, 500 agent failure).
+ * SDK-side representation of the daemon's `prompt_queue_full` condition.
+ * Mirrors the bridge-side `PromptQueueFullError` wire data.
  */
-export class DaemonHttpError extends Error {
-  readonly status: number;
-  readonly body: unknown;
-  constructor(status: number, body: unknown, message: string) {
-    super(message);
-    this.name = 'DaemonHttpError';
-    this.status = status;
-    this.body = body;
+export class DaemonPendingPromptLimitError extends Error {
+  declare readonly sessionId: string;
+  declare readonly limit: number;
+  declare readonly pendingCount: number;
+
+  constructor(sessionId: string, limit: number, pendingCount: number) {
+    super(`Pending prompts full: "${sessionId}" (${pendingCount}/${limit})`);
+    this.name = 'DaemonPendingPromptLimitError';
+    this.sessionId = sessionId;
+    this.limit = limit;
+    this.pendingCount = pendingCount;
   }
 }
 
@@ -302,6 +343,14 @@ export class DaemonClient {
   private readonly token: string | undefined;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly fetchTimeoutMs: number;
+  private readonly promptLimit: number;
+  private readonly promptCounts: Record<string, number> = Object.create(null);
+  /**
+   * Pluggable transport layer. Defaults to `RestSseTransport` when
+   * no explicit transport is supplied — preserving the pre-abstraction
+   * REST+SSE behavior with zero breaking changes.
+   */
+  readonly transport: DaemonTransport;
   // Lazy singleton so clients that never touch auth pay no allocation cost.
   // Exposed via the readonly `auth` accessor below.
   private _authFlow?: DaemonAuthFlow;
@@ -337,6 +386,37 @@ export class DaemonClient {
     // it instead of defending the math at every call site.
     const raw = opts.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
     this.fetchTimeoutMs = Number.isFinite(raw) && raw > 0 ? raw : 0;
+    this.promptLimit = normalizePendingPromptLimit(
+      opts.maxPendingPromptsPerSession,
+    );
+    this.transport =
+      opts.transport ??
+      new RestSseTransport(this.baseUrl, this.token, this._fetch);
+  }
+
+  get maxPendingPromptsPerSession(): number {
+    return this.promptLimit;
+  }
+
+  /** @internal */
+  reservePromptSlot(sessionId: string, limit = this.promptLimit): () => void {
+    if (limit === Infinity) return () => {};
+    const promptCounts = this.promptCounts;
+    const pendingCount = promptCounts[sessionId] ?? 0;
+    if (pendingCount >= limit) {
+      throw new DaemonPendingPromptLimitError(sessionId, limit, pendingCount);
+    }
+    promptCounts[sessionId] = pendingCount + 1;
+    let released: boolean | undefined;
+    return () => {
+      if (released) return;
+      released = true;
+      if ((promptCounts[sessionId] ?? 0) <= 1) {
+        delete promptCounts[sessionId];
+      } else {
+        --promptCounts[sessionId]!;
+      }
+    };
   }
 
   /**
@@ -384,7 +464,7 @@ export class DaemonClient {
       effectiveTimeoutMs = perCallTimeoutMs;
     }
     if (!effectiveTimeoutMs || !Number.isFinite(effectiveTimeoutMs)) {
-      const res = await this._fetch(url, init);
+      const res = await this.transport.fetch(url, init);
       if (consume) return consume(res);
       return res as unknown as T;
     }
@@ -399,7 +479,7 @@ export class DaemonClient {
     // body consume callback, if any) settles.
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
-      ctrl.abort(new DOMException('The operation timed out', 'TimeoutError'));
+      ctrl.abort(new DOMException('timeout', 'TimeoutError'));
     }, effectiveTimeoutMs);
     if (typeof timer === 'object' && timer && 'unref' in timer) {
       (timer as { unref: () => void }).unref();
@@ -409,7 +489,7 @@ export class DaemonClient {
       ? composeAbortSignals([callerSignal, ctrl.signal])
       : ctrl.signal;
     try {
-      const res = await this._fetch(url, { ...init, signal });
+      const res = await this.transport.fetch(url, { ...init, signal });
       if (consume) return await consume(res);
       return res as unknown as T;
     } finally {
@@ -432,7 +512,17 @@ export class DaemonClient {
   private async failOnError(
     res: Response,
     label: string,
-  ): Promise<DaemonHttpError> {
+  ): Promise<DaemonHttpError>;
+  private async failOnError(
+    res: Response,
+    label: string,
+    sessionId: string,
+  ): Promise<DaemonHttpError | DaemonPendingPromptLimitError>;
+  private async failOnError(
+    res: Response,
+    label: string,
+    sessionId?: string,
+  ): Promise<DaemonHttpError | DaemonPendingPromptLimitError> {
     // Read the body exactly once. `res.json()` consumes the stream even on
     // parse-failure, leaving a subsequent `res.text()` empty — so go via
     // text() and attempt JSON parsing ourselves; raw text is a useful
@@ -454,6 +544,21 @@ export class DaemonClient {
       body && typeof body === 'object' && 'error' in body
         ? String((body as { error: unknown }).error)
         : `HTTP ${res.status}`;
+    if (sessionId && res.status === 503 && body && typeof body === 'object') {
+      const data = body as {
+        code?: unknown;
+        limit?: unknown;
+        pendingCount?: unknown;
+        sessionId?: unknown;
+      };
+      if (data.code === 'prompt_queue_full') {
+        return new DaemonPendingPromptLimitError(
+          typeof data.sessionId === 'string' ? data.sessionId : sessionId,
+          typeof data.limit === 'number' ? data.limit : 0,
+          typeof data.pendingCount === 'number' ? data.pendingCount : 0,
+        );
+      }
+    }
     return new DaemonHttpError(res.status, body, `${label}: ${detail}`);
   }
 
@@ -1336,7 +1441,7 @@ export class DaemonClient {
     sessionId: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonSessionRecapResult> {
-    const res = await this._fetch(
+    const res = await this.transport.fetch(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/recap`,
       {
         method: 'POST',
@@ -1357,7 +1462,7 @@ export class DaemonClient {
     question: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonSessionBtwResult> {
-    const res = await this._fetch(
+    const res = await this.transport.fetch(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/btw`,
       {
         method: 'POST',
@@ -1373,12 +1478,57 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionBtwResult;
   }
 
+  /**
+   * Queue a user message typed while the session's turn is still running. The
+   * ACP child drains it between tool batches so the model sees it before the
+   * turn ends. Resolves `{ accepted: false }` when the session is idle — the
+   * caller should then send the message as a normal next-turn prompt.
+   */
+  async enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonMidTurnMessageResult> {
+    // Route through `fetchWithTimeout` like every other method so a hung daemon
+    // can't wedge this promise forever (the caller in `actions.ts` awaits it).
+    // The helper composes any caller `signal` (the turn-scoped abort) WITH its
+    // timeout controller, so the mid-turn-settle abort still propagates.
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/mid-turn-message`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ message }),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/mid-turn-message',
+          );
+        }
+        return (await res.json()) as DaemonMidTurnMessageResult;
+      },
+    );
+  }
+
+  /**
+   * Execute a direct daemon-side shell command for a session. The daemon must
+   * be started with direct session shell enabled and bearer auth configured;
+   * callers must also provide a client id already bound to this session.
+   * Prefer `DaemonSessionClient.shellCommand()` when available because it
+   * forwards the session-bound client id automatically.
+   */
   async shellCommand(
     sessionId: string,
     command: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonShellCommandResult> {
-    const res = await this._fetch(
+    const res = await this.transport.fetch(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/shell`,
       {
         method: 'POST',
@@ -1495,14 +1645,21 @@ export class DaemonClient {
    * `timeoutMs` when their threat model needs a tighter cap, or `0`
    * to disable the timeout entirely.
    *
+   * `entryIndex` targets one pooled entry by index. Use `'*'` to
+   * restart all entries for a pooled server.
+   *
    * Pre-flight `caps.features.workspace_mcp_restart` before calling.
    */
   async restartMcpServer(
     serverName: string,
-    opts?: { clientId?: string; timeoutMs?: number },
+    opts?: { clientId?: string; entryIndex?: number | '*'; timeoutMs?: number },
   ): Promise<DaemonMcpRestartResult> {
+    const query =
+      opts?.entryIndex === undefined
+        ? ''
+        : `?entryIndex=${encodeURIComponent(String(opts.entryIndex))}`;
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart`,
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart${query}`,
       {
         method: 'POST',
         headers: this.headers(
@@ -1745,29 +1902,50 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<PromptResult> {
-    const res = await this._fetch(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
-      {
-        method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify(req),
-        signal,
-      },
-    );
-
-    if (res.status === 202) {
-      const accept = (await res.json()) as NonBlockingPromptAccepted;
-      return this._awaitTurnComplete(
-        sessionId,
-        accept.promptId,
-        accept.lastEventId,
-        signal,
-        clientId,
+    signal?.throwIfAborted();
+    const releasePromptSlot = this.reservePromptSlot(sessionId);
+    let releaseOnExit = true;
+    try {
+      const res = await this.transport.fetch(
+        `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
+        {
+          method: 'POST',
+          headers: this.headers(
+            { 'Content-Type': 'application/json' },
+            clientId,
+          ),
+          body: JSON.stringify(req),
+          signal,
+        },
       );
-    }
 
-    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
-    return (await res.json()) as PromptResult;
+      if (res.status === 202) {
+        const accept = (await res.json()) as NonBlockingPromptAccepted;
+        releaseOnExit = false;
+        try {
+          return await this._awaitTurnComplete(
+            sessionId,
+            accept.promptId,
+            accept.lastEventId,
+            signal,
+            clientId,
+          );
+        } finally {
+          releasePromptSlot();
+        }
+      }
+
+      if (!res.ok) {
+        throw await this.failOnError(
+          res,
+          'POST /session/:id/prompt',
+          sessionId,
+        );
+      }
+      return (await res.json()) as PromptResult;
+    } finally {
+      if (releaseOnExit) releasePromptSlot();
+    }
   }
 
   /**
@@ -1783,6 +1961,10 @@ export class DaemonClient {
    * the temporary 202 fallback.
    *
    * Falls back to `prompt()` for legacy 200 daemons.
+   *
+   * Note: this method does not enforce the local pending-prompt cap.
+   * Callers that need early-fail behavior should use {@link prompt} or
+   * reserve a slot before calling this method.
    */
   async promptNonBlocking(
     sessionId: string,
@@ -1790,7 +1972,7 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<NonBlockingPromptAccepted | PromptResult> {
-    const res = await this._fetch(
+    const res = await this.transport.fetch(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
       {
         method: 'POST',
@@ -1804,7 +1986,9 @@ export class DaemonClient {
       return (await res.json()) as NonBlockingPromptAccepted;
     }
 
-    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
+    if (!res.ok) {
+      throw await this.failOnError(res, 'POST /session/:id/prompt', sessionId);
+    }
     return (await res.json()) as PromptResult;
   }
 
@@ -1829,7 +2013,7 @@ export class DaemonClient {
         const result = matchTurnEvent(event, promptId);
         if (result !== undefined) return result;
       }
-      throw new Error('SSE stream ended without turn completion');
+      throw new Error('SSE stream ended');
     } catch (err) {
       if (
         signal?.aborted &&
@@ -1902,87 +2086,16 @@ export class DaemonClient {
     sessionId: string,
     opts: SubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
-    const headers = this.headers({ Accept: 'text/event-stream' });
-    if (opts.lastEventId !== undefined) {
-      headers['Last-Event-ID'] = String(opts.lastEventId);
-    }
-    // Apply `fetchTimeoutMs` to the CONNECT phase only (request → headers
-    // received). The SSE body itself must NOT be timed out — it's
-    // long-lived by design — so once `_fetch` returns the timer is
-    // cleared. Without this, an unresponsive daemon (TCP open but no
-    // headers) blocks `subscribeEvents` indefinitely instead of
-    // failing with the same 30s default the rest of the SDK uses.
-    const connectCtrl = new AbortController();
-    let connectTimer: ReturnType<typeof setTimeout> | undefined;
-    if (this.fetchTimeoutMs && Number.isFinite(this.fetchTimeoutMs)) {
-      connectTimer = setTimeout(
-        () =>
-          connectCtrl.abort(
-            new DOMException('Initial connect timed out', 'TimeoutError'),
-          ),
-        this.fetchTimeoutMs,
-      );
-      if (
-        typeof connectTimer === 'object' &&
-        connectTimer &&
-        'unref' in connectTimer
-      ) {
-        (connectTimer as { unref: () => void }).unref();
-      }
-    }
-    const fetchSignal = opts.signal
-      ? composeAbortSignals([opts.signal, connectCtrl.signal])
-      : connectCtrl.signal;
-    // Build the SSE URL, optionally with `?maxQueued=N`. We don't
-    // validate the value client-side — the daemon's
-    // `parseMaxQueuedQuery` is the source of truth on the range
-    // `[16, 2048]` and returns a structured `400 invalid_max_queued`
-    // for anything outside, so duplicating the bounds here would
-    // diverge if the daemon's range ever shifts.
-    let url = `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`;
-    if (opts.maxQueued !== undefined) {
-      url += `?maxQueued=${encodeURIComponent(String(opts.maxQueued))}`;
-    }
-    let res: Response;
-    try {
-      res = await this._fetch(url, { headers, signal: fetchSignal });
-    } finally {
-      if (connectTimer !== undefined) clearTimeout(connectTimer);
-    }
-    if (!res.ok) {
-      throw await this.failOnError(res, 'GET /session/:id/events');
-    }
-    // A 200 with the wrong content type usually means a misconfigured
-    // proxy or middleware swallowed our SSE response and replaced it
-    // with JSON/HTML. Without this check `parseSseStream` would
-    // silently produce zero frames — a confusing "no events" symptom
-    // that's easy to misdiagnose. Fail fast with the actual mime type.
-    //
-    // Cancel the body before throwing so undici doesn't keep the
-    // underlying socket pinned waiting for the consumer. Same
-    // reasoning as `respondToPermission` — long-running clients
-    // hitting this path repeatedly would otherwise exhaust the
-    // connection pool.
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.toLowerCase().includes('text/event-stream')) {
-      try {
-        await res.body?.cancel();
-      } catch {
-        /* body already consumed or no body */
-      }
-      throw new DaemonHttpError(
-        res.status,
-        ct,
-        `GET /session/:id/events: expected content-type text/event-stream, got "${ct}"`,
-      );
-    }
-    if (!res.body) {
-      throw new Error('SSE response has no body');
-    }
-    // Forward the abort signal so post-200 aborts stop the iteration.
-    // Without this, callers who `controller.abort()` after the response
-    // arrives keep receiving frames until the upstream closes.
-    yield* parseSseStream(res.body, opts.signal);
+    // Delegate entirely to the transport. The transport handles
+    // connect-phase timeout, Last-Event-ID, maxQueued, content-type
+    // validation, and SSE parsing (for REST) or JSON-RPC notification
+    // filtering (for ACP transports).
+    yield* this.transport.subscribeEvents(sessionId, {
+      lastEventId: opts.lastEventId,
+      maxQueued: opts.maxQueued,
+      signal: opts.signal,
+      connectTimeoutMs: this.fetchTimeoutMs || undefined,
+    });
   }
 
   // -- Permissions -------------------------------------------------------
@@ -2271,6 +2384,17 @@ export class DaemonClient {
     );
   }
 
+  // -- Lifecycle / disposal ------------------------------------------------
+
+  /**
+   * Release transport resources (WS close, etc.). Idempotent.
+   * After `dispose()`, further calls to `fetch` / `subscribeEvents`
+   * on the underlying transport throw `DaemonTransportClosedError`.
+   */
+  dispose(): void {
+    this.transport.dispose();
+  }
+
   // -- Session metadata ----------------------------------------------------
 
   /**
@@ -2336,8 +2460,7 @@ export function abortTimeout(ms: number): AbortSignal {
   // `if (err.name === 'TimeoutError')` would see the polyfill
   // differently from the native runtime.
   const handle = setTimeout(
-    () =>
-      ctrl.abort(new DOMException('The operation timed out', 'TimeoutError')),
+    () => ctrl.abort(new DOMException('timeout', 'TimeoutError')),
     ms,
   );
   if (typeof handle === 'object' && handle && 'unref' in handle) {

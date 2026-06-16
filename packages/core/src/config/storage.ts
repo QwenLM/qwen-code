@@ -320,6 +320,10 @@ export class Storage {
     return targetDir;
   }
 
+  getToolResultsDir(): string {
+    return path.join(this.getProjectTempDir(), 'tool-results');
+  }
+
   ensureProjectTempDirExists(): void {
     fs.mkdirSync(this.getProjectTempDir(), { recursive: true });
   }
