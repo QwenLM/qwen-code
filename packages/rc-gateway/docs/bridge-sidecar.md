@@ -89,8 +89,8 @@ MXID-mismatch check (`checkMxid`) are unit-tested. A spawn smoke
 a live gateway and asserts the fail-fast contract (missing var → exit 1 + exact
 message), the pairing-code bootstrap (real `/rc/pair/redeem` → token persisted at
 mode 0600), and the loopback contract (registration succeeds). Only the
-**telegram** branch of the shared wiring is spawn-smoked; the discord/matrix
-branches are verbatim copies (review-only) until the in-process `cli.ts` de-dup
-lands. The live chat-network loops (Telegram long-poll, the discord.js gateway,
+**telegram** branch of the shared `startBridge` wiring is spawn-smoked; the
+discord/matrix branches are structurally identical (tsc-guarded, review-only).
+The live chat-network loops (Telegram long-poll, the discord.js gateway,
 Matrix `/sync`) and the Matrix `whoami` round-trip are not CI-exercised — there is
 no real Telegram/Discord/Matrix homeserver in this environment.
