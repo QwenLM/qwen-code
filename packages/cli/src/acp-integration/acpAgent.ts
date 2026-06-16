@@ -6777,7 +6777,7 @@ class QwenAgent implements Agent {
       settings,
       argvForSession,
       cwd,
-      [],
+      undefined,
       // Pass separated hooks for proper source attribution
       {
         userHooks: this.settings.getUserHooks(),

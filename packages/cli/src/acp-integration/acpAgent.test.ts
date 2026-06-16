@@ -2069,6 +2069,37 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('does not override extensions with an empty list for ACP sessions', async () => {
+    await setupSessionMocks('session-extensions');
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(loadCliConfig).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      '/tmp',
+      undefined,
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('allows cancelling paused agent tasks', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
