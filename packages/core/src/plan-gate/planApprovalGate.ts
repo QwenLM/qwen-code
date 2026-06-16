@@ -28,6 +28,7 @@ import {
 } from './types.js';
 import { runGateAgent } from './gateReviewAgents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { delay } from '../utils/retry.js';
 
 const debugLogger = createDebugLogger('PLAN_APPROVAL_GATE');
 
@@ -160,41 +161,22 @@ async function runAgentWithRetry(
         );
         return null;
       }
-      // Abort-aware delay: wait 1s between retries, but bail out early
-      // if the parent signal is aborted during the wait.
-      await abortableSleep(1000, signal);
+      // Abort-aware delay: wait 1s between retries using the existing
+      // `delay()` from utils/retry.ts, which rejects when the signal
+      // is aborted. A cancellation during the wait breaks the loop
+      // immediately rather than proceeding to another rapid-fire attempt.
+      try {
+        await delay(1000, signal);
+      } catch {
+        // Signal aborted during delay — stop retrying
+        debugLogger.warn(
+          `Gate agent retry loop cancelled during backoff delay (attempt ${attempt}/${MAX_AGENT_RETRIES})`,
+        );
+        return null;
+      }
     }
   }
   return null;
-}
-
-/**
- * Sleep for `ms` milliseconds, but return early if `signal` is aborted.
- * Attaches the abort listener first, then re-checks `signal.aborted` to
- * eliminate the race window between the initial check and listener setup.
- */
-function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
-    // Re-check after attaching listener to close the race window
-    if (signal.aborted) {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }
-  });
 }
 
 // ── Finding id assignment ──────────────────────────────────────────────
