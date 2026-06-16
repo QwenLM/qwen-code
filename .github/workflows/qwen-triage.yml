@@ -11,8 +11,17 @@ on:
     inputs:
       number:
         description: 'Issue or PR number to triage'
-        required: true
+        required: false
         type: 'number'
+      tmux_pr:
+        description: 'PR number to run tmux real-user testing on (instead of triage)'
+        required: false
+        type: 'number'
+      no_comment:
+        description: 'tmux dry-run: run the test but do not post a comment on the PR'
+        required: false
+        default: false
+        type: 'boolean'
 
 permissions:
   contents: 'read'
@@ -30,7 +39,8 @@ jobs:
       github.repository == 'QwenLM/qwen-code' &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'issue_comment' &&
-        startsWith(github.event.comment.body, '@qwen-code /triage')))
+        (startsWith(github.event.comment.body, '@qwen-code /triage') ||
+         startsWith(github.event.comment.body, '@qwen-code /tmux'))))
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -50,11 +60,21 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           COMMENT_USER: '${{ github.event.comment.user.login }}'
+          ISSUE_AUTHOR: '${{ github.event.issue.user.login }}'
+          COMMENT_BODY: '${{ github.event.comment.body }}'
         run: |-
           set -euo pipefail
           case "$EVENT_NAME" in
             pull_request_target) principal="$PR_AUTHOR" ;;
-            issue_comment) principal="$COMMENT_USER" ;;
+            issue_comment)
+              # /tmux executes the PR AUTHOR's code, so gate on the author's
+              # permission (whose code runs), not the commenter's. /triage only
+              # reads content, so the commenter's permission gates it.
+              case "$COMMENT_BODY" in
+                '@qwen-code /tmux'*) principal="$ISSUE_AUTHOR" ;;
+                *) principal="$COMMENT_USER" ;;
+              esac
+              ;;
             *) principal="" ;;
           esac
           if [ -z "$principal" ]; then
@@ -124,7 +144,7 @@ jobs:
       always() &&
       github.repository == 'QwenLM/qwen-code' && (
         github.event_name == 'issues' ||
-        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.number != '') ||
         (
           ((github.event_name == 'pull_request_target' &&
             github.event.pull_request.draft == false) ||
@@ -175,3 +195,218 @@ jobs:
               "sandbox": false
             }
           prompt: '/triage ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'
+
+  # On-demand real-user testing: a write-permission user comments
+  # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and
+  # exercise the affected flow. EXECUTES untrusted PR code, so: gated on the PR
+  # AUTHOR (whose code runs) having write via the authorize job, runs read-only
+  # with NO GitHub token in the agent env, and keeps credentials out of .git.
+  tmux-testing:
+    needs: ['authorize']
+    if: >-
+      always() &&
+      github.repository == 'QwenLM/qwen-code' &&
+      (
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request &&
+         startsWith(github.event.comment.body, '@qwen-code /tmux') &&
+         needs.authorize.outputs.should_run == 'true') ||
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.tmux_pr != '')
+      )
+    timeout-minutes: 25
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    permissions:
+      contents: 'read'
+    outputs:
+      pr_number: '${{ steps.pr.outputs.pr_number }}'
+      verdict: '${{ steps.run.outputs.verdict || steps.na.outputs.verdict }}'
+    steps:
+      - name: 'Resolve PR and check state'
+        id: 'pr'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ github.event.issue.number || github.event.inputs.tmux_pr }}'
+        run: |-
+          set -euo pipefail
+          data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
+          IFS=$'\t' read -r state is_draft <<< "$data"
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
+            echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
+            echo "should_test=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "should_test=true" >> "$GITHUB_OUTPUT"
+          # Only drive the app for PRs that touch a user-facing/TUI surface;
+          # otherwise a real-user test has nothing to exercise (e.g. CI-only PRs).
+          files="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[].path')"
+          if printf '%s\n' "$files" | grep -qE 'packages/cli/src/ui/|packages/cli/.*\.tsx$|windowTitle|packages/web-shell/client/'; then
+            echo "has_tui=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::PR #${PR_NUMBER} touches no TUI surface; tmux testing is not applicable."
+            echo "has_tui=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Mark not applicable (no TUI surface)'
+        id: 'na'
+        if: "steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui != 'true'"
+        run: 'echo "verdict=n/a" >> "$GITHUB_OUTPUT"'
+
+      - name: 'Clean stale review worktrees'
+        if: "steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        run: |-
+          set -uo pipefail
+          [ -e .git ] || exit 0
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          git worktree prune -v || true
+
+      - name: 'Checkout PR merge ref'
+        if: "steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          # Untrusted PR code — keep the token out of .git/config.
+          persist-credentials: false
+          ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
+          fetch-depth: 1
+
+      - name: 'Run tmux real-user testing'
+        if: "steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        id: 'run'
+        # NOTE: no GitHub token here — this step runs untrusted PR code. Only
+        # the model credentials are exposed (same as the review agent).
+        env:
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ steps.pr.outputs.pr_number }}'
+          REPOSITORY: '${{ github.repository }}'
+        run: |-
+          set -euo pipefail
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          # Bypass the runner proxy for the qwen model call only (the proxy cuts
+          # the SSE stream to the model host). Call this right before qwen so
+          # any build steps above keep the proxy for the npm registry.
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host
+            if ! command -v node >/dev/null 2>&1; then
+              echo "::error::node is required to parse OPENAI_BASE_URL"
+              exit 1
+            fi
+            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            if [ -z "$openai_host" ]; then
+              echo "::error::Could not parse a hostname from OPENAI_BASE_URL"
+              exit 1
+            fi
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+            echo "qwen_http_proxy=disabled (host=${openai_host})"
+          }
+          configure_qwen_network
+
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
+          fi
+
+          mkdir -p "$RUNNER_TEMP/tmux-results"
+          set +e
+          timeout --kill-after=10s 20m "${QWEN_CMD[@]}" \
+            --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
+            --output-format stream-json \
+            | tee "$RUNNER_TEMP/tmux-results/output.jsonl"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          # Collect the skill's narrative artifacts (report.md, readable logs)
+          # from the workspace tmp/ into the upload dir.
+          find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec cp -r {} "$RUNNER_TEMP/tmux-results/" \; 2>/dev/null || true
+
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            VERDICT='timeout'
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            VERDICT='fail'
+          else
+            VERDICT='pass'
+          fi
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "tmux verdict: $VERDICT (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Upload tmux results'
+        if: "always() && steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
+        with:
+          name: 'tmux-results-${{ steps.pr.outputs.pr_number }}'
+          path: '${{ runner.temp }}/tmux-results/'
+          retention-days: 7
+
+  # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
+  # with the write PAT and never checks out PR code, so the write credential is
+  # isolated from the untrusted-code execution in tmux-testing above.
+  publish-tmux:
+    needs: ['tmux-testing']
+    if: "always() && needs.tmux-testing.result == 'success' && needs.tmux-testing.outputs.verdict != '' && github.event.inputs.no_comment != 'true'"
+    runs-on: 'ubuntu-latest'
+    permissions:
+      pull-requests: 'write'
+    steps:
+      - name: 'Download tmux results'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
+        with:
+          name: 'tmux-results-${{ needs.tmux-testing.outputs.pr_number }}'
+          path: 'tmux-results'
+        continue-on-error: true
+
+      - name: 'Post tmux result comment'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.tmux-testing.outputs.pr_number }}'
+          VERDICT: '${{ needs.tmux-testing.outputs.verdict }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        # shellcheck disable=SC2016
+        run: |-
+          set -euo pipefail
+          BODY_FILE="${RUNNER_TEMP:-/tmp}/tmux-comment.md"
+          REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
+          TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
+
+          # Embed a file inside a collapsed <details> as a fenced code block.
+          # Fenced (not rendered) on purpose: PR-driven test output must not
+          # render markdown, fire @mentions, or break the comment layout.
+          emit_block() {
+            local summary="$1" file="$2" max="$3"
+            [ -n "$file" ] && [ -f "$file" ] || return 0
+            printf '<details>\n<summary>%s</summary>\n\n```text\n' "$summary"
+            head -c "$max" "$file"
+            if [ "$(wc -c < "$file")" -gt "$max" ]; then
+              printf '\n\n...truncated -- full log in the run artifacts.'
+            fi
+            printf '\n```\n\n</details>\n\n'
+          }
+
+          {
+            printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+            printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT" "$RUN_URL"
+            printf 'Launched the changed app in a real tmux session and exercised the affected flow.\n\n'
+            emit_block 'E2E test report' "$REPORT" 20000
+            emit_block 'Full tmux transcript' "$TRANSCRIPT" 30000
+            printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+          } > "$BODY_FILE"
+
+          # Dedup: update an existing tmux comment if one is already present.
+          EXISTING="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:tmux -->"))] | last | .id // empty'
+          )" || EXISTING=""
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY_FILE" >/dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
+          fi
+          echo "Posted tmux result to PR #${PR_NUMBER} (verdict=${VERDICT})." >> "$GITHUB_STEP_SUMMARY"
