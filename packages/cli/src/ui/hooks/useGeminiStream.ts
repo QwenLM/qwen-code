@@ -99,6 +99,9 @@ import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
+  'Mid-turn @ command resolution timed out';
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -121,6 +124,35 @@ function extractLastAssistantText(history: HistoryItem[]): string | undefined {
 
 function stripLeadingBlankLines(text: string): string {
   return text.replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
+async function resolveWithAbort<T>(
+  signal: AbortSignal,
+  run: () => Promise<T>,
+): Promise<T> {
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new Error('Mid-turn @ command resolution aborted'),
+      );
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([run(), abortPromise]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
 }
 
 /**
@@ -2428,14 +2460,28 @@ export const useGeminiStream = (
             const msg = drained[index];
             let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
             if (isAtCommand(msg)) {
+              const atCommandTimeout = new AbortController();
+              const atCommandSignal = AbortSignal.any([
+                midTurnAbort.signal,
+                atCommandTimeout.signal,
+              ]);
+              const atCommandTimeoutId = setTimeout(() => {
+                atCommandTimeout.abort(
+                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+                );
+              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
               try {
-                const atCommandResult = await resolveAtCommandQuery({
-                  query: msg,
-                  config,
-                  onDebugMessage,
-                  messageId: midTurnTimestamp + index,
-                  signal: midTurnAbort.signal,
-                });
+                const atCommandResult = await resolveWithAbort(
+                  atCommandSignal,
+                  () =>
+                    resolveAtCommandQuery({
+                      query: msg,
+                      config,
+                      onDebugMessage,
+                      messageId: midTurnTimestamp + index,
+                      signal: atCommandSignal,
+                    }),
+                );
                 if (
                   atCommandResult.shouldProceed &&
                   atCommandResult.processedQuery !== null
@@ -2453,9 +2499,24 @@ export const useGeminiStream = (
                   });
                 }
               } catch (error) {
+                const errorMessage = getErrorMessage(error);
                 onDebugMessage(
-                  `Failed to resolve mid-turn @ command: ${error instanceof Error ? error.message : String(error)}`,
+                  `Failed to resolve mid-turn @ command: ${errorMessage}`,
                 );
+                if (
+                  !midTurnAbort.signal.aborted ||
+                  atCommandTimeout.signal.aborted
+                ) {
+                  addItem(
+                    {
+                      type: MessageType.WARNING,
+                      text: `Could not attach file: ${errorMessage}`,
+                    },
+                    Date.now(),
+                  );
+                }
+              } finally {
+                clearTimeout(atCommandTimeoutId);
               }
             }
 
