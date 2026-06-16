@@ -169,6 +169,7 @@ describe('sessions list command', () => {
     expect(parsed.customTitle).toBe('React 组件开发');
     expect(parsed.titleSource).toBe('auto');
     expect(parsed.filePath).toBe(sampleSession.filePath);
+    expect(parsed.cwd).toBe(sampleSession.cwd);
   });
 
   it('should output gitBranch as null in JSON when undefined', async () => {
@@ -269,6 +270,44 @@ describe('sessions list command', () => {
     expect(calls.some((c) => c.includes('Use --limit to show more'))).toBe(
       false,
     );
+  });
+
+  it('should truncate long prompt with ellipsis', async () => {
+    const longPrompt = 'A'.repeat(100);
+    mockedListSessions.mockResolvedValue({
+      items: [{ ...sampleSession, customTitle: undefined, prompt: longPrompt }],
+      hasMore: false,
+    });
+
+    await handleList({});
+
+    const calls = mockedWriteStdout.mock.calls.map((c) => c[0]);
+    const dataLine = calls.find(
+      (c) => c.includes('a1b2c3d4') && !c.includes('SESSION ID'),
+    );
+    expect(dataLine).toBeDefined();
+    // Truncated output should contain ellipsis
+    expect(dataLine).toContain('...');
+    // Full original string must not appear
+    expect(dataLine).not.toContain(longPrompt);
+  });
+
+  it('should truncate CJK characters correctly', async () => {
+    const longCjk = '这是一个非常非常长的中文测试标题文本内容'.repeat(5);
+    mockedListSessions.mockResolvedValue({
+      items: [{ ...sampleSession, customTitle: undefined, prompt: longCjk }],
+      hasMore: false,
+    });
+
+    await handleList({});
+
+    const calls = mockedWriteStdout.mock.calls.map((c) => c[0]);
+    const dataLine = calls.find(
+      (c) => c.includes('a1b2c3d4') && !c.includes('SESSION ID'),
+    );
+    expect(dataLine).toBeDefined();
+    // Full CJK string must not appear (truncated by display width)
+    expect(dataLine).not.toContain(longCjk);
   });
 
   it('should handle initSessionService failure', async () => {

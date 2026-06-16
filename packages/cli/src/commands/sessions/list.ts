@@ -139,11 +139,12 @@ function toJsonItem(item: SessionListItem): Record<string, unknown> {
     sessionId: item.sessionId,
     startTime: item.startTime,
     mtime: item.mtime,
-    prompt: sanitize(item.prompt ?? ''),
-    gitBranch: item.gitBranch != null ? sanitize(item.gitBranch) : null,
-    customTitle: item.customTitle != null ? sanitize(item.customTitle) : null,
+    prompt: item.prompt,
+    gitBranch: item.gitBranch ?? null,
+    customTitle: item.customTitle ?? null,
     titleSource: item.titleSource ?? null,
     filePath: item.filePath,
+    cwd: item.cwd,
   };
 }
 
