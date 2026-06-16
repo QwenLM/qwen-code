@@ -732,6 +732,112 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('allows the next prompt after a turn completes before acceptance returns', async () => {
+    const firstAccepted = createDeferred<NonBlockingPromptAccepted>();
+    const secondAccepted = createDeferred<NonBlockingPromptAccepted>();
+    const firstTurnComplete = createDeferred<void>();
+    const secondTurnComplete = createDeferred<void>();
+    const prompt = vi
+      .fn()
+      .mockReturnValueOnce(firstAccepted.promise)
+      .mockReturnValueOnce(secondAccepted.promise);
+    const session = createMockSession({
+      prompt,
+      events: async function* acceptedPromptEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          firstTurnComplete.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          id: 11,
+          type: 'turn_complete',
+          timestamp: '2025-01-01T00:00:00.000Z',
+          sessionId: 'session-1',
+          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+        };
+        await Promise.race([
+          secondTurnComplete.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          id: 12,
+          type: 'turn_complete',
+          timestamp: '2025-01-01T00:00:01.000Z',
+          sessionId: 'session-1',
+          data: { promptId: 'prompt-2', stopReason: 'end_turn' },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      streamingState = useDaemonStreamingState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    let firstPrompt: Promise<unknown> | undefined;
+    await act(async () => {
+      firstPrompt = providerActions.sendPrompt('/directory');
+      await flushPromises();
+    });
+    expect(streamingState).toBe('waiting');
+
+    await act(async () => {
+      firstTurnComplete.resolve();
+      await flushPromises();
+    });
+    expect(streamingState).toBe('idle');
+
+    let secondPrompt: Promise<unknown> | undefined;
+    await act(async () => {
+      secondPrompt = providerActions.sendPrompt('next prompt');
+      await flushPromises();
+    });
+    expect(prompt).toHaveBeenCalledTimes(2);
+
+    const pendingFirstPrompt = firstPrompt;
+    if (!pendingFirstPrompt) throw new Error('first prompt was not started');
+    await act(async () => {
+      firstAccepted.resolve({ promptId: 'prompt-1', lastEventId: 10 });
+      await expect(pendingFirstPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
+    });
+
+    await act(async () => {
+      secondTurnComplete.resolve();
+      await flushPromises();
+    });
+    const pendingSecondPrompt = secondPrompt;
+    if (!pendingSecondPrompt) throw new Error('second prompt was not started');
+    await act(async () => {
+      secondAccepted.resolve({ promptId: 'prompt-2', lastEventId: 11 });
+      await expect(pendingSecondPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
+    });
+  });
+
   it('sends image prompt content through the daemon action', async () => {
     const prompt = vi.fn(async () => ({ stopReason: 'end_turn' }));
     const session = createMockSession({
