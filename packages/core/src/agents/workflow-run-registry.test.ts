@@ -190,4 +190,86 @@ describe('WorkflowRunRegistry', () => {
     // Must not throw.
     expect(() => r.complete('wf_throw', null, 1)).not.toThrow();
   });
+
+  // P4 Round 7 (wenshao): dialog-initiated cancel marks status='cancelled'
+  // synchronously, then the abort propagates to the tool's catch arm which
+  // calls setRecentLogs(runId, logs). The previous guard rejected this
+  // because status !== 'running', so cancelled workflows showed an empty
+  // Logs section in the dialog. The fix allows setRecentLogs after the
+  // 'cancelled' transition — Ctrl+C (signal.aborted at execute()'s top
+  // before the dialog touches the registry) is unchanged, and the
+  // unchanged guard still rejects logs arriving after 'completed' or
+  // 'failed' (those terminal states are final).
+  it('setRecentLogs after a cancel transition still writes (dialog-initiated)', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_late_logs'));
+    r.cancel('wf_late_logs', 5_000);
+    r.setRecentLogs('wf_late_logs', ['line1', 'line2']);
+    const e = r.get('wf_late_logs')!;
+    expect(e.recentLogs).toEqual(['line1', 'line2']);
+    expect(e.status).toBe('cancelled');
+  });
+
+  it('setRecentLogs after complete/fail is rejected (terminal states are final)', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_done'));
+    r.complete('wf_done', null, 1_000);
+    r.setRecentLogs('wf_done', ['too late']);
+    expect(r.get('wf_done')!.recentLogs).toEqual([]);
+
+    r.register(reg('wf_fail'));
+    r.fail('wf_fail', 'boom', 2_000);
+    r.setRecentLogs('wf_fail', ['too late']);
+    expect(r.get('wf_fail')!.recentLogs).toEqual([]);
+  });
+
+  // P4 Round 7 (wenshao): WorkflowRunRegistry must expose reset() and
+  // abortAll() to match its three sibling registries (agent, shell,
+  // monitor). Without these, /clear and session-resume leak prior-
+  // session workflow state into the next session — pill / dialog /
+  // /workflows listing all show stale rows, and in-flight workflows
+  // keep executing after the user cleared the session.
+  it('reset() drops every entry without aborting controllers', () => {
+    const r = new WorkflowRunRegistry();
+    const ac1 = new AbortController();
+    r.register(reg('wf_1', { abortController: ac1 }));
+    r.register(reg('wf_2'));
+    r.complete('wf_2', null, 1_000);
+    expect(r.list()).toHaveLength(2);
+    r.reset();
+    expect(r.list()).toEqual([]);
+    // Sibling shell registry's reset() does NOT touch processes — same
+    // contract here: reset just drops in-memory entries; abortAll() is
+    // the controller-aborting path.
+    expect(ac1.signal.aborted).toBe(false);
+  });
+
+  it('abortAll() aborts every running entry and marks them cancelled', () => {
+    const r = new WorkflowRunRegistry();
+    const ac1 = new AbortController();
+    const ac2 = new AbortController();
+    const acDone = new AbortController();
+    r.register(reg('wf_run1', { abortController: ac1 }));
+    r.register(reg('wf_run2', { abortController: ac2 }));
+    r.register(reg('wf_done', { abortController: acDone }));
+    r.complete('wf_done', null, 1_000);
+    r.abortAll();
+    expect(ac1.signal.aborted).toBe(true);
+    expect(ac2.signal.aborted).toBe(true);
+    // Already-terminal entry's controller is NOT re-aborted (no-op for
+    // settled entries).
+    expect(acDone.signal.aborted).toBe(false);
+    expect(r.get('wf_run1')!.status).toBe('cancelled');
+    expect(r.get('wf_run2')!.status).toBe('cancelled');
+    expect(r.get('wf_done')!.status).toBe('completed');
+  });
+
+  it('hasRunningEntries() reflects the running subset', () => {
+    const r = new WorkflowRunRegistry();
+    expect(r.hasRunningEntries()).toBe(false);
+    r.register(reg('wf_1'));
+    expect(r.hasRunningEntries()).toBe(true);
+    r.complete('wf_1', null, 1_000);
+    expect(r.hasRunningEntries()).toBe(false);
+  });
 });

@@ -211,12 +211,14 @@ export interface WorkflowRunRequest {
    */
   emitter?: WorkflowOrchestratorEmitter;
   /**
-   * P4b: pre-generated run identifier (shape `wf_<hex>`). Callers that
-   * need the id at register-time (e.g. `WorkflowTool` registering the
-   * run with `WorkflowRunRegistry` before `run()` resolves) must
-   * pre-generate one and pass it here. Omitted by tests and by the
-   * historical contract; orchestrator falls back to its own generator
-   * so existing call sites work unchanged.
+   * P4b: pre-generated run identifier. Callers that need the id at
+   * register-time (e.g. `WorkflowTool` registering the run with
+   * `WorkflowRunRegistry` before `run()` resolves) must pre-generate
+   * one and pass it here. The orchestrator does NOT validate the
+   * shape — it trusts the caller (the production caller uses
+   * `wf_<8hex>` to match `generateRunId()`). Omitted by tests and by
+   * the historical contract; orchestrator falls back to its own
+   * generator so existing call sites work unchanged.
    */
   runId?: string;
 }
@@ -1080,9 +1082,11 @@ export class WorkflowOrchestrator {
     // P4b: callers (`WorkflowTool`) may pre-generate `runId` and pass it
     // in so they can register the run with `WorkflowRunRegistry` BEFORE
     // `run()` resolves — necessary because the registry needs the id at
-    // emit time, not at resolve time. The orchestrator validates the
-    // shape (`wf_<hex>`) but otherwise trusts the caller. When omitted,
-    // the orchestrator generates one as before.
+    // emit time, not at resolve time. The orchestrator trusts the caller
+    // and does not validate the shape — the only production caller
+    // (`WorkflowTool`) uses the same `wf_<8hex>` generator as
+    // `generateRunId()`. When omitted, the orchestrator generates one
+    // as before.
     const runId = req.runId ?? generateRunId();
 
     const maxAgents = resolveMaxAgentsPerRun();

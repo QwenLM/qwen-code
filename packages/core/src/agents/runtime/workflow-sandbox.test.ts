@@ -223,9 +223,12 @@ describe('extractAndStripMeta', () => {
   // (Object.create(null) prototype), so the model cannot reach host
   // primitives during meta evaluation — even ones that the script-side
   // sandbox normally provides (args, agent, phase, log, parallel,
-  // pipeline). Referencing any of them throws ReferenceError.
-  it('rejects meta that references a name that does not exist in the eval context', () => {
-    const src = `export const meta = { name: args.x, description: 'd' }\nreturn 1`;
+  // pipeline). Referencing any of them throws ReferenceError. Two
+  // shapes pinned: a truly unknown identifier (R7 dedup — was a
+  // duplicate of the bridge-global case below) and explicit `args`
+  // bridge-global access.
+  it('rejects meta that references an unknown identifier', () => {
+    const src = `export const meta = { name: totallyUnknown, description: 'd' }\nreturn 1`;
     expect(() => extractAndStripMeta(src)).toThrow(
       /failed to evaluate meta object literal/,
     );
@@ -319,6 +322,24 @@ describe('extractAndStripMeta', () => {
     expect(() => extractAndStripMeta(src)).toThrow(
       /meta values must not be Promises/,
     );
+  });
+
+  // P4 Round 7 (wenshao): `phase('X'); phase('X')` previously yielded
+  // `outcome.phases = ['X','X']` (sandbox unconditional push) while the
+  // registry's onPhaseStarted deduped to `entry.phases = ['X']`. The
+  // two arrays diverged on the same run — terminal display vs live UI
+  // showed different phase lists. Fix at the sandbox layer so the
+  // sandbox is the single source of truth; the docstring on safePhase
+  // / phase() can then promise dedup without lying.
+  it('consecutive identical phase titles dedup at the sandbox layer', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await sandbox.run(
+      `phase('X'); phase('X'); phase('Y'); phase('X'); return 1`,
+    );
+    expect(sandbox.getPhases()).toEqual(['X', 'Y', 'X']);
   });
 
   // P4 Round 4 (wenshao): the R3 thenable walker recursed without a

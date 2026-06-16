@@ -624,6 +624,17 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   const safePhase = (title: string): void => {
     if (phases.length < MAX_PHASE_ENTRIES) {
       const t = String(title);
+      // R7 (wenshao): collapse consecutive identical titles so the
+      // sandbox is the single source of truth for the phase list.
+      // Without this, `outcome.phases` (terminal `returnDisplay` JSON)
+      // carried duplicates while `entry.phases` on the registry
+      // (live UI / `/workflows` detail) was deduped by the registry's
+      // own `onPhaseStarted` collapse — the same run showed different
+      // phase counts in the terminal output vs the live UI. The
+      // `agent({phase})` wrapper already dedups (see the `__b.lastPhase()`
+      // check); this brings the bare `phase()` global into the same
+      // contract.
+      if (phases[phases.length - 1] === t) return;
       phases.push(t);
       // P4b: emit to host-side subscriber. Same defensive try/catch as
       // safeLog — subscriber errors must not bubble into the script.

@@ -151,7 +151,7 @@ export const workflowsCommand: SlashCommand = {
     if (context.executionMode === 'interactive') {
       lines.push(
         t(
-          'Tip: focus the Background tasks pill in the footer (use ↓ from an empty composer) and press Enter for the interactive dialog with phase tree + live updates.',
+          'Tip: use `/workflows <runId>` for the per-run detail view (name, description, phase tree, recent logs).',
         ),
         '',
       );

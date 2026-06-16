@@ -202,10 +202,19 @@ export class WorkflowRunRegistry {
    * `getLogs()` array; we mirror it here for the UI so the dialog
    * doesn't have to thread a sandbox reference. Capped at 100 entries
    * (the tail) so a chatty workflow doesn't bloat the registry.
+   *
+   * R7 (wenshao): allowed after a `'cancelled'` transition too. The
+   * dialog-initiated cancel path calls `registry.cancel()` first
+   * (status flips to `'cancelled'` synchronously), then the abort
+   * propagates to the tool's catch arm which calls `setRecentLogs`.
+   * Without this, dialog-cancelled runs always showed an empty Logs
+   * section. `'completed'` / `'failed'` are still rejected — those
+   * terminal states ARE final (no late-arriving logs to absorb).
    */
   setRecentLogs(runId: string, logs: readonly string[]): void {
     const entry = this.entries.get(runId);
-    if (!entry || entry.status !== 'running') return;
+    if (!entry) return;
+    if (entry.status !== 'running' && entry.status !== 'cancelled') return;
     const tail = logs.length > 100 ? logs.slice(-100) : Array.from(logs);
     entry.recentLogs = tail;
     this.emitStatusChange(entry);
@@ -260,6 +269,75 @@ export class WorkflowRunRegistry {
   /** All entries (running + terminal, no filter). Iteration order = registration order. */
   list(): WorkflowTask[] {
     return Array.from(this.entries.values());
+  }
+
+  /**
+   * R7 (wenshao): true if any entry is still `'running'`. Mirrors the
+   * three sibling registries' `hasUnfinalizedTasks()` /
+   * `hasRunningEntries()` / `getRunning().length > 0` so the unified
+   * `hasBlockingBackgroundWork()` helper (the gate `/clear` and session-
+   * resume both use to refuse a switch with live work) can count
+   * workflow runs the same way.
+   */
+  hasRunningEntries(): boolean {
+    for (const entry of this.entries.values()) {
+      if (entry.status === 'running') return true;
+    }
+    return false;
+  }
+
+  /**
+   * R7 (wenshao): drop every in-memory entry without touching
+   * controllers. Mirrors `BackgroundShellRegistry.reset()` and the
+   * other siblings' contract — callers (`/clear`, session-resume)
+   * MUST verify via `hasRunningEntries()` first that no still-running
+   * work exists before invoking. The companion path that aborts
+   * controllers is `abortAll()`.
+   */
+  reset(): void {
+    if (this.entries.size === 0) return;
+    // Snapshot a sample entry for the statusChange callback so a single
+    // subscriber notify is enough — the only consumer
+    // (`useBackgroundTaskView`) ignores the entry arg and re-pulls
+    // `list()` on every fire.
+    const sample = this.entries.values().next().value as
+      | WorkflowTask
+      | undefined;
+    this.entries.clear();
+    if (sample) this.emitStatusChange(sample);
+  }
+
+  /**
+   * R7 (wenshao): cancel every still-running entry. Called on session/
+   * Config shutdown so workflow runs don't outlive the CLI process and
+   * leak orphaned dispatches. Symmetric with `BackgroundShellRegistry.
+   * abortAll()` and `BackgroundTaskRegistry.abortAll()`.
+   *
+   * Settles each entry inline (status → 'cancelled', abort the
+   * controller) and fires the status-change callback exactly once
+   * after the loop — the per-entry `cancel()` path would have fired
+   * the callback for every running entry, wasteful on shutdown.
+   */
+  abortAll(): void {
+    const endTime = Date.now();
+    let lastCancelled: WorkflowTask | undefined;
+    for (const entry of Array.from(this.entries.values())) {
+      if (entry.status !== 'running') continue;
+      entry.status = 'cancelled';
+      entry.endTime = endTime;
+      entry.notified = true;
+      try {
+        entry.abortController.abort();
+      } catch (error) {
+        debugLogger.error(
+          'abortAll: failed to abort workflow controller:',
+          error,
+        );
+      }
+      lastCancelled = entry;
+    }
+    if (lastCancelled) this.emitStatusChange(lastCancelled);
+    this.evictTerminal();
   }
 
   /**
