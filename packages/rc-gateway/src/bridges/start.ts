@@ -44,6 +44,12 @@ import {
   type DecryptedMatrixMessage,
 } from './matrix/cryptoAdapter.js';
 import type { NormalizedMatrixReaction } from './matrix/dispatch.js';
+import {
+  initialMatrixHealthState,
+  buildMatrixHealthReport,
+  startMatrixHealthServer,
+  type MatrixHealthServer,
+} from './matrix/health.js';
 
 export interface StartBridgeOptions {
   /** The resolved bridge-scope token (from {@link resolveBridgeToken}). */
@@ -57,6 +63,12 @@ export interface StartBridgeOptions {
    * passes `QWEN_DAEMON_URL || loopback` here — distinct from the transport.
    */
   deeplinkUrl?: string;
+  /**
+   * Port for the Matrix bridge's `GET /healthz` server (loopback). When set (the
+   * sidecar defaults it to 9100), the Matrix bridge exposes the spec's healthz;
+   * ignored for non-Matrix bridges. A bind failure never crashes the bridge.
+   */
+  healthzPort?: number;
   /** Injectable crypto-adapter factory (tests); defaults to the real one. */
   createCryptoAdapter?: typeof createMatrixCryptoAdapter;
 }
@@ -141,6 +153,13 @@ export async function startBridge(
   });
   const rooms = await MatrixRoomStore.open(join(cfg.stateDir, 'rooms.json'));
 
+  // Healthz liveness state (only when a healthz port is configured): the runner
+  // updates registeredId/daemonReachable/homeserverReachable; the GET /healthz
+  // server reports it + a fresh olm-store check.
+  const startedAtMs = Date.now();
+  const health =
+    opts.healthzPort != null ? initialMatrixHealthState() : undefined;
+
   // E2EE (opt-in, OFF by default). When the crypto adapter is built it becomes
   // the SOLE /sync owner (a second sync on the same device would race it for the
   // to-device megolm keys) AND the outbound transport (the SDK encrypts iff the
@@ -181,6 +200,7 @@ export async function startBridge(
     botUserId: cfg.userId,
     baseUrl: deeplinkUrl,
     commandPrefix: cfg.commandPrefix,
+    ...(health ? { health } : {}),
     syncOnce: (since, signal) =>
       mxRest.sync(since, 30000, signal).then((r) => r.body),
     // The adapter owns /sync when present; otherwise the fetch syncLoop runs.
@@ -196,6 +216,9 @@ export async function startBridge(
             while (!signal.aborted) {
               try {
                 await adapter.start();
+                // The SDK owns /sync from here; reflect "reachable at start"
+                // (it hides later reconnects from the runner — see health.ts).
+                if (health) health.homeserverReachable = true;
                 return;
               } catch (err) {
                 log?.(
@@ -216,11 +239,31 @@ export async function startBridge(
   sink.onMessage = (m) => runner.dispatchDecryptedMessage(m, m.powerLevel);
   sink.onReaction = (r) => runner.dispatchReaction(r);
   void runner.start(abort.signal);
-  // Stop the adapter's background sync on shutdown.
-  if (adapter) {
-    abort.signal.addEventListener('abort', () => void adapter.stop(), {
-      once: true,
-    });
+
+  // Start the loopback /healthz server (when configured); close it on shutdown.
+  // Never throws — a bind failure degrades to a no-op handle.
+  let healthServer: MatrixHealthServer | undefined;
+  if (health && opts.healthzPort != null) {
+    healthServer = await startMatrixHealthServer(
+      opts.healthzPort,
+      () =>
+        buildMatrixHealthReport(health, {
+          stateDir: cfg.stateDir,
+          startedAtMs,
+          nowMs: Date.now(),
+        }),
+      { log },
+    );
   }
+
+  // Stop the adapter's background sync + the healthz server on shutdown.
+  abort.signal.addEventListener(
+    'abort',
+    () => {
+      if (adapter) void adapter.stop();
+      if (healthServer) void healthServer.close();
+    },
+    { once: true },
+  );
   return { stop: () => abort.abort() };
 }

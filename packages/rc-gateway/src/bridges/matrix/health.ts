@@ -50,6 +50,24 @@ export interface MatrixHealthReport {
   uptimeSec: number;
 }
 
+/**
+ * Resolve the healthz port from `QWEN_BRIDGE_HEALTHZ_PORT`. `fallback` is the
+ * default when the var is unset (9100 for the sidecar per spec; `undefined`
+ * in-process so the gateway process never binds a surprise port). `off`/`none`/`0`
+ * (or empty) explicitly disables; a valid 1–65535 wins; anything else → fallback.
+ */
+export function parseHealthzPort(
+  value: string | undefined,
+  fallback: number | undefined,
+): number | undefined {
+  if (value === undefined) return fallback;
+  const v = value.trim().toLowerCase();
+  if (v === '' || v === 'off' || v === 'none' || v === '0') return undefined;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) return fallback;
+  return n;
+}
+
 /** A fresh health state (nothing reachable until the runner reports success). */
 export function initialMatrixHealthState(): MatrixHealthState {
   return {

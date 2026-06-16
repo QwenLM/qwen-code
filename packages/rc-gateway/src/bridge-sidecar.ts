@@ -39,6 +39,7 @@ import {
 } from './bridges/tokenBootstrap.js';
 import { startBridge } from './bridges/start.js';
 import { MatrixRestApi } from './bridges/matrix/restApi.js';
+import { parseHealthzPort } from './bridges/matrix/health.js';
 
 /* eslint-disable no-console */
 
@@ -117,7 +118,17 @@ async function main(): Promise<void> {
     // runs unchanged. Construction failure degrades to the plain bridge.
   }
 
-  const bridge = await startBridge(cfg, { token, log: (m) => console.log(m) });
+  // Matrix sidecar exposes GET /healthz (spec default 9100); override or disable
+  // via QWEN_BRIDGE_HEALTHZ_PORT (a number, or off/none/0). Non-Matrix: ignored.
+  const healthzPort =
+    cfg.kind === 'matrix'
+      ? parseHealthzPort(process.env.QWEN_BRIDGE_HEALTHZ_PORT, 9100)
+      : undefined;
+  const bridge = await startBridge(cfg, {
+    token,
+    log: (m) => console.log(m),
+    ...(healthzPort != null ? { healthzPort } : {}),
+  });
   console.log(`qwen-rc-bridge: ${kind} bridge started (loopback contract)`);
 
   const shutdown = () => {

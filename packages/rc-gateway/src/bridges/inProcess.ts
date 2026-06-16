@@ -25,6 +25,7 @@
 
 import { join } from 'node:path';
 import { parseE2eeEnabled } from './matrix/e2ee.js';
+import { parseHealthzPort } from './matrix/health.js';
 import type { BridgeKind, Env, SidecarConfig } from './sidecarConfig.js';
 
 /** One bridge to start in-process: its config, token, and deeplink base. */
@@ -34,6 +35,12 @@ export interface InProcessBridgePlan {
   token: string;
   /** User-reachable deeplink base (QWEN_DAEMON_URL || loopback). */
   deeplinkUrl: string;
+  /**
+   * Matrix `/healthz` port. In-process this is OPT-IN (only when
+   * `QWEN_BRIDGE_HEALTHZ_PORT` is set), so the gateway process never binds a
+   * surprise port; undefined for non-Matrix bridges.
+   */
+  healthzPort?: number;
 }
 
 export interface InProcessBridgeResolution {
@@ -138,6 +145,16 @@ export function resolveInProcessBridges(
         },
         token,
         deeplinkUrl,
+        // In-process healthz is opt-in (no default) — avoid a surprise bind.
+        ...(parseHealthzPort(env['QWEN_BRIDGE_HEALTHZ_PORT'], undefined) !==
+        undefined
+          ? {
+              healthzPort: parseHealthzPort(
+                env['QWEN_BRIDGE_HEALTHZ_PORT'],
+                undefined,
+              ),
+            }
+          : {}),
       });
   }
 

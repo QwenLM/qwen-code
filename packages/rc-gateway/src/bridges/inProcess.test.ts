@@ -101,6 +101,20 @@ describe('resolveInProcessBridges', () => {
     });
   });
 
+  it('matrix: healthz is opt-in in-process (only when QWEN_BRIDGE_HEALTHZ_PORT is set)', () => {
+    const base = {
+      MATRIX_HOMESERVER_URL: 'https://hs',
+      MATRIX_USER_ID: '@bot:hs',
+      MATRIX_ACCESS_TOKEN: 'mtok',
+      QWEN_BRIDGE_TOKEN: 't',
+    };
+    expect(resolve(base).plans[0].healthzPort).toBeUndefined();
+    expect(
+      resolve({ ...base, QWEN_BRIDGE_HEALTHZ_PORT: '9123' }).plans[0]
+        .healthzPort,
+    ).toBe(9123);
+  });
+
   it('matrix: homeserver creds but no bridge token → warning mentions homeserver creds', () => {
     const r = resolve({
       MATRIX_HOMESERVER_URL: 'https://hs',

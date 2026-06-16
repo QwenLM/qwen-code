@@ -220,15 +220,33 @@ run. Fixed by sourcing the store-type value from the native
 both type-correct and present at runtime — a reminder that "compile-checked" can
 hide runtime-erased const enums.
 
+## Healthz
+
+The Matrix bridge exposes `GET /healthz` on a small loopback HTTP server,
+returning `{ ok, daemonReachable, homeserverReachable, olmStorePresent,
+registeredId, uptimeSec }` — a liveness/observability probe (e.g. a Docker
+`HEALTHCHECK`). It is the surface that reflects olm-store status.
+
+- **Port.** The standalone sidecar defaults to **9100** (the spec default);
+  override or disable via `QWEN_BRIDGE_HEALTHZ_PORT` (a port number, or
+  `off`/`none`/`0`). In-process it is **opt-in** — set `QWEN_BRIDGE_HEALTHZ_PORT`
+  to enable it, so the gateway process never binds a surprise port.
+- **Loopback only** (`127.0.0.1`): the report is unauthenticated and exposes
+  internal reachability + the registered id, so it is not bound to `0.0.0.0`. A
+  bind failure (port taken) logs and disables healthz — it never crashes the
+  bridge.
+- **Fields.** `olmStorePresent` is a live fs check of `<stateDir>/olm/`.
+  `registeredId`/`daemonReachable` come from a successful gateway registration;
+  `homeserverReachable` is live on the fetch path (flips on sync success/failure)
+  but means "reachable at start" on the E2EE adapter path (the SDK owns `/sync`
+  and hides later reconnects from the bridge).
+
 ## Deferred
 
-- **`MATRIX_ENABLE_E2EE` works on both paths.** The standalone `qwen-rc-bridge
-matrix` sidecar and the in-process bridge both honor the flag — they construct
-  through the shared `startBridge` (`cli.ts` resolves which bridges to start via
-  the unit-tested `resolveInProcessBridges`, then hands each to `startBridge`).
-- **`olmStorePresent` on a bridge healthz** (spec "Healthz reflects olm store
-  status") — the in-process bridge has no HTTP listener; `olmStorePresent` is built
-  and tested and ready to surface when a bridge healthz endpoint is added.
+- **`MATRIX_ENABLE_E2EE` works on both paths** — the standalone `qwen-rc-bridge
+matrix` sidecar and the in-process bridge both honor the flag via the shared
+  `startBridge` (`cli.ts` resolves which bridges to start via the unit-tested
+  `resolveInProcessBridges`, then hands each to `startBridge`).
 - **Un-CI-able:** a _public/federated_ homeserver interop and a fully
   _verified_-device path (our Synapse IT covers same-homeserver + unverified
   devices, the realistic path).

@@ -11,10 +11,28 @@ import { join } from 'node:path';
 import {
   buildMatrixHealthReport,
   initialMatrixHealthState,
+  parseHealthzPort,
   startMatrixHealthServer,
   type MatrixHealthServer,
 } from './health.js';
 import { olmStoreDir } from './e2ee.js';
+
+describe('parseHealthzPort', () => {
+  it('uses the fallback when unset (sidecar 9100, in-process undefined)', () => {
+    expect(parseHealthzPort(undefined, 9100)).toBe(9100);
+    expect(parseHealthzPort(undefined, undefined)).toBeUndefined();
+  });
+  it('off/none/0/empty explicitly disables', () => {
+    for (const v of ['off', 'none', '0', '', '  OFF ']) {
+      expect(parseHealthzPort(v, 9100)).toBeUndefined();
+    }
+  });
+  it('a valid 1–65535 port wins; junk falls back', () => {
+    expect(parseHealthzPort('9123', 9100)).toBe(9123);
+    expect(parseHealthzPort('70000', 9100)).toBe(9100); // out of range → fallback
+    expect(parseHealthzPort('abc', 9100)).toBe(9100);
+  });
+});
 
 let dir: string;
 beforeEach(() => {

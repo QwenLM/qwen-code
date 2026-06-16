@@ -847,6 +847,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         await startBridge(plan.cfg, {
           token: plan.token,
           deeplinkUrl: plan.deeplinkUrl,
+          ...(plan.healthzPort != null
+            ? { healthzPort: plan.healthzPort }
+            : {}),
           // eslint-disable-next-line no-console
           log: (m) => console.log(m),
         }),
