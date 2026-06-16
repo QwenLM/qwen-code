@@ -75,10 +75,6 @@ export interface SessionWakeup {
   createdAt: number;
 }
 
-interface WakeupChain {
-  startedAt: number;
-}
-
 /**
  * Catch-up work detected at owner load/takeover, queued until an onFire
  * channel exists. The kind decides what delivery does afterwards:
@@ -192,7 +188,7 @@ export class CronScheduler {
   // Loop wakeups live separately: second-resolution, never durable, never
   // counted against MAX_JOBS. Delivered through the same onFire as cron.
   private wakeups = new Map<string, SessionWakeup>();
-  private wakeupChains = new Map<string, WakeupChain>();
+  private wakeupChainStartedAt: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private onFire: ((job: CronJob) => void) | null = null;
 
@@ -297,23 +293,19 @@ export class CronScheduler {
     const fireAtMs = now + clampedDelaySeconds * 1000;
     const replacedWakeup = this.wakeups.values().next().value ?? null;
     const replacedId = replacedWakeup?.id ?? null;
-    if (replacedWakeup && replacedWakeup.prompt !== prompt) {
-      this.wakeupChains.delete(replacedWakeup.prompt);
+    if (this.wakeupChainStartedAt === null) {
+      this.wakeupChainStartedAt = now;
     }
-    const chain = this.wakeupChains.get(prompt) ?? {
-      startedAt: now,
-    };
-    if (fireAtMs > chain.startedAt + WAKEUP_CHAIN_MAX_AGE_MS) {
+    if (fireAtMs > this.wakeupChainStartedAt + WAKEUP_CHAIN_MAX_AGE_MS) {
       throw new Error(
         'Loop wakeup chain exceeded the 24h session limit. ' +
-          'Omit LoopWakeup to end this loop, or start a new loop prompt.',
+          'Omit LoopWakeup to end this loop, or start a new session.',
       );
     }
     if (replacedId) {
       debugLogger.debug(`Replacing pending wakeup ${replacedId}`);
     }
     this.wakeups.clear();
-    this.wakeupChains.set(prompt, chain);
     this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
     debugLogger.debug(
       `Wakeup ${id} scheduled for ${new Date(fireAtMs).toISOString()} ` +
@@ -330,10 +322,8 @@ export class CronScheduler {
 
   /** Cancels a single pending wakeup. Returns true if it existed. */
   cancelWakeup(id: string): boolean {
-    const wakeup = this.wakeups.get(id);
     const deleted = this.wakeups.delete(id);
     if (deleted) {
-      if (wakeup) this.wakeupChains.delete(wakeup.prompt);
       debugLogger.debug(`Cancelled wakeup ${id}`);
     }
     return deleted;
@@ -344,9 +334,6 @@ export class CronScheduler {
    * primitive behind a future loop-scoped "cancel all wakeups on abort".
    */
   cancelAllWakeups(): number {
-    for (const wakeup of this.wakeups.values()) {
-      this.wakeupChains.delete(wakeup.prompt);
-    }
     const count = this.wakeups.size;
     this.wakeups.clear();
     if (count > 0) debugLogger.debug(`Cancelled ${count} wakeup(s)`);
@@ -900,7 +887,7 @@ export class CronScheduler {
       debugLogger.debug(`stop() discarding ${this.wakeups.size} wakeup(s)`);
       this.wakeups.clear();
     }
-    this.wakeupChains.clear();
+    this.wakeupChainStartedAt = null;
     this.onFire = null;
 
     if (this.durableEnabled) {
@@ -1109,6 +1096,7 @@ export class CronScheduler {
     this.stop();
     this.jobs.clear();
     this.wakeups.clear();
+    this.wakeupChainStartedAt = null;
     this.pendingRemoval.clear();
     this.pendingAdd.clear();
   }
