@@ -9,6 +9,7 @@ import {
 import { Markdown } from './Markdown';
 import { CompactModeContext } from '../../App';
 import { useWebShellCustomization } from '../../customization';
+import { useI18n } from '../../i18n';
 import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {
@@ -24,6 +25,7 @@ export const AssistantMessage = memo(function AssistantMessage({
 }: AssistantMessageProps) {
   const compactMode = useContext(CompactModeContext);
   const { compactThinking } = useWebShellCustomization();
+  const { t } = useI18n();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
@@ -100,7 +102,7 @@ export const AssistantMessage = memo(function AssistantMessage({
                     className={styles.expandToggle}
                     onClick={handleToggle}
                     aria-expanded={false}
-                    aria-label="Toggle thinking details"
+                    aria-label={t('assistant.toggleThinking')}
                   >
                     ▼
                   </button>
@@ -118,7 +120,7 @@ export const AssistantMessage = memo(function AssistantMessage({
                     className={styles.expandToggle}
                     onClick={handleToggle}
                     aria-expanded={true}
-                    aria-label="Toggle thinking details"
+                    aria-label={t('assistant.toggleThinking')}
                   >
                     ▲
                   </button>

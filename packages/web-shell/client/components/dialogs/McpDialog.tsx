@@ -464,7 +464,7 @@ export function McpDialog({ onClose }: McpDialogProps) {
         <button
           className={dp('resume-picker-close')}
           onClick={onClose}
-          title="Close"
+          title={t('common.close')}
         >
           ESC
         </button>
