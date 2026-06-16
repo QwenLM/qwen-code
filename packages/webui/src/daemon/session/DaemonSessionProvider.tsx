@@ -30,7 +30,7 @@ import {
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
-import { createDaemonSessionActions, promptSettledKey } from './actions.js';
+import { createDaemonSessionActions, getPromptSettledKey } from './actions.js';
 import {
   detachDaemonClient,
   getStableClientId,
@@ -1197,7 +1197,7 @@ function settleActivePromptFromTurnEvent(
       active.resolve(result);
     } else {
       activePrompts.delete(sessionId);
-      settledPrompts.set(promptSettledKey(sessionId, promptId), {
+      settledPrompts.set(getPromptSettledKey(sessionId, promptId), {
         status: 'resolved',
         result,
       });
@@ -1210,7 +1210,7 @@ function settleActivePromptFromTurnEvent(
       active.reject(error);
     } else {
       activePrompts.delete(sessionId);
-      settledPrompts.set(promptSettledKey(sessionId, promptId), {
+      settledPrompts.set(getPromptSettledKey(sessionId, promptId), {
         status: 'rejected',
         error,
       });

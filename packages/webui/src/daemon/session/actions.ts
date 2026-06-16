@@ -790,7 +790,7 @@ function waitForAcceptedPromptCompletion(
     // may have already freed the active slot (allowing a new prompt to start).
     // If we checked activePrompts first, we'd find the NEXT prompt's controller
     // and incorrectly reject this one as aborted.
-    const settledKey = promptSettledKey(sessionId, promptId);
+    const settledKey = getPromptSettledKey(sessionId, promptId);
     const settled = settledPrompts.get(settledKey);
     if (settled) {
       settledPrompts.delete(settledKey);
@@ -846,7 +846,10 @@ function waitForAcceptedPromptCompletion(
   });
 }
 
-export function promptSettledKey(sessionId: string, promptId: string): string {
+export function getPromptSettledKey(
+  sessionId: string,
+  promptId: string,
+): string {
   return `${sessionId}:${promptId}`;
 }
 
