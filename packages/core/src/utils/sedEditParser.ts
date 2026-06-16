@@ -136,11 +136,18 @@ function hasShellVariableReference(value: string): boolean {
 function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
   try {
     const jsPattern = toJavascriptPattern(sedInfo);
+    if (hasPosixBracketExpression(jsPattern)) {
+      return false;
+    }
     new RegExp(jsPattern);
     return !hasUnsafeQuantifiedGroup(jsPattern);
   } catch {
     return false;
   }
+}
+
+function hasPosixBracketExpression(pattern: string): boolean {
+  return /\[\[:[A-Za-z]+:\]\]/u.test(pattern);
 }
 
 function hasUnsafeQuantifiedGroup(pattern: string): boolean {

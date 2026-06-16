@@ -171,6 +171,15 @@ describe('sedEditParser', () => {
     ).toBeNull();
   });
 
+  it('rejects POSIX bracket expressions before simulated edits', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/[[:space:]]*$//' file.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/[[:digit:]]/X/g' file.txt"),
+    ).toBeNull();
+  });
+
   it('preserves carriage returns in sed pattern space', () => {
     const anchoredSedInfo = parseSedEditCommand("sed -i 's/foo$/bar/' file.txt");
     const crSedInfo = parseSedEditCommand("sed -i 's/\\r$//g' file.txt");
