@@ -222,8 +222,8 @@ export class ImageTokenizer {
       const height = ((bits >> 14) & 0x3fff) + 1;
       return { width, height };
     } else if (format === 'VP8X') {
-      const width = (buffer.readUInt32LE(24) & 0xffffff) + 1;
-      const height = (buffer.readUInt32LE(26) & 0xffffff) + 1;
+      const width = buffer.readUIntLE(24, 3) + 1;
+      const height = buffer.readUIntLE(27, 3) + 1;
       return { width, height };
     }
 
