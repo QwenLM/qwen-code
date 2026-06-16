@@ -20,6 +20,7 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
@@ -362,6 +363,22 @@ export class DaemonSessionClient {
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult> {
     return await this.client.btwSession(this.sessionId, question, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /**
+   * Queue a user message typed while this session's turn is still running so
+   * the ACP child can drain it mid-turn. Forwards the client id bound at
+   * create/attach. Resolves `{ accepted: false }` when the session is idle —
+   * the caller should then send the message as a normal next-turn prompt.
+   */
+  async enqueueMidTurnMessage(
+    message: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonMidTurnMessageResult> {
+    return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });

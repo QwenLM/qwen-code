@@ -33,6 +33,10 @@ import {
   type DaemonWorkspaceEventSignals,
 } from './DaemonSessionProvider.js';
 import { DaemonWorkspaceProvider } from '../workspace/DaemonWorkspaceProvider.js';
+import {
+  clearSidechannelMidTurnInjected,
+  getSidechannelMidTurnInjected,
+} from '../midTurnInjectedSidechannel.js';
 
 interface MockSession {
   sessionId: string;
@@ -420,6 +424,51 @@ describe('DaemonSessionProvider', () => {
         },
       }),
     ]);
+  });
+
+  it('routes mid_turn_message_injected frames to the sidechannel, not the transcript', async () => {
+    // Locks the event-pump branch (parse → publishSidechannel → continue): the
+    // frame must seed the dedupe sidechannel and NOT normalize into a transcript
+    // block. Removing the `continue` (or the parse) would misroute it.
+    clearSidechannelMidTurnInjected();
+    const session = createMockSession({
+      events: async function* midTurnEvents() {
+        yield {
+          id: 21,
+          v: 1,
+          type: 'mid_turn_message_injected',
+          originatorClientId: 'client-mt',
+          data: { sessionId: 'mt-session', messages: ['also check the tests'] },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    // Seeded the dedupe sidechannel (with the envelope-level originatorClientId).
+    expect(getSidechannelMidTurnInjected()).toEqual([
+      {
+        sessionId: 'mt-session',
+        messages: ['also check the tests'],
+        originatorClientId: 'client-mt',
+      },
+    ]);
+    // …and was NOT rendered as a transcript block.
+    expect(blocks).toEqual([]);
+    clearSidechannelMidTurnInjected();
   });
 
   it('publishes action error notices when no session is connected', async () => {

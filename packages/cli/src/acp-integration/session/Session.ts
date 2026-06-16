@@ -102,6 +102,9 @@ import {
   dedupeToolCallsById,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+// Single source of truth shared with the daemon-side answerer (BridgeClient),
+// so a rename can't desync caller and answerer into a silent -32601 latch.
+import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
@@ -173,7 +176,6 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
-const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
 // means the client silently drops unknown methods; without a deadline the
