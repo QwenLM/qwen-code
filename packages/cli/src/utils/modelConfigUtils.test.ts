@@ -512,7 +512,7 @@ describe('modelConfigUtils', () => {
         );
       });
 
-      it('falls back to the first id match when the persisted baseUrl no longer matches any provider', () => {
+      it('falls back to the first id match and emits a warning when the persisted baseUrl no longer matches any provider', () => {
         mockResolved();
         const settings = makeMockSettings({
           model: {
@@ -524,7 +524,7 @@ describe('modelConfigUtils', () => {
           },
         });
 
-        resolveCliGenerationConfig({
+        const result = resolveCliGenerationConfig({
           argv: {},
           settings,
           selectedAuthType: AuthType.USE_OPENAI,
@@ -532,6 +532,11 @@ describe('modelConfigUtils', () => {
 
         expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
           expect.objectContaining({ modelProvider: tokenPlan }),
+        );
+        expect(result.warnings).toEqual(
+          expect.arrayContaining([
+            expect.stringContaining('https://removed.example.com/v1'),
+          ]),
         );
       });
 

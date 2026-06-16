@@ -182,6 +182,7 @@ export function resolveCliGenerationConfig(
   // so the resolver correctly uses the settings-selected model (no override occurs).
   // The old candidate-loop code that fell through to OPENAI_MODEL is gone.
   let modelProvider: ProviderModelConfig | undefined;
+  let disambiguationWarning: string | undefined;
   if (resolvedModel && authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
@@ -203,10 +204,19 @@ export function resolveCliGenerationConfig(
       // all; the id-only fallback bounds the blast radius to a same-id provider.
       const persistedBaseUrl = settings.model?.baseUrl;
       if (resolvedFromSettings && persistedBaseUrl) {
+        const exactMatch = providers.find(
+          (p) => p.id === resolvedModel && p.baseUrl === persistedBaseUrl,
+        );
         modelProvider =
-          providers.find(
-            (p) => p.id === resolvedModel && p.baseUrl === persistedBaseUrl,
-          ) ?? providers.find((p) => p.id === resolvedModel);
+          exactMatch ?? providers.find((p) => p.id === resolvedModel);
+        // Surface the silent fallback: the paired provider was removed or its
+        // baseUrl changed, so traffic now routes to a different same-id provider.
+        if (!exactMatch && modelProvider) {
+          disambiguationWarning =
+            `Persisted model.baseUrl '${persistedBaseUrl}' no longer matches any provider ` +
+            `for model '${resolvedModel}' (authType '${authType}'); using the first id match ` +
+            `('${modelProvider.baseUrl ?? '(default baseUrl)'}'). Re-select the model to update it.`;
+        }
       } else {
         modelProvider = providers.find((p) => p.id === resolvedModel);
       }
@@ -298,6 +308,7 @@ export function resolveCliGenerationConfig(
     sources: resolved.sources,
     warnings: [
       ...resolved.warnings,
+      ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]
         : []),
