@@ -888,12 +888,12 @@ export const useGeminiStream = (
         // Vision bridge: opt-in conversion of images to text when the primary
         // model is text-only. No-op unless explicitly enabled in settings and
         // the resolved query actually carries image parts.
-        const visionBridge = config.getVisionBridgeConfig();
+        const visionBridge = config.getVisionBridgeConfig?.();
         if (
-          visionBridge.enabled &&
+          visionBridge?.enabled &&
           localQueryToSendToGemini !== null &&
           hasImageParts(localQueryToSendToGemini) &&
-          config.getEffectiveInputModalities().image !== true
+          config.getEffectiveInputModalities?.().image !== true
         ) {
           const bridgeResult = await runVisionBridge({
             config,
