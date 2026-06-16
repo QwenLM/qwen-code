@@ -20,6 +20,8 @@
 
 ## 🎉 News
 
+- **2026-06-17**: Fixed React error #185 — state update on unmounted component in the CLI UI layer. Added `let cancelled` guards to 5 async hooks (`useShellHistory`, `useLogger`, `useCommandMigration`, `useGitBranchName`, `useWorktreeSession`) and removed unmount-time `setState` from `AgentChatContent`. ([#5199](https://github.com/QwenLM/qwen-code/issues/5199))
+
 - **2026-04-15**: Qwen OAuth free tier has been discontinued. To continue using Qwen Code, switch to [Alibaba Cloud Coding Plan](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index), [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or bring your own API key. Run `qwen auth` to configure.
 
 - **2026-04-13**: Qwen OAuth free tier policy update: daily quota adjusted to 100 requests/day (from 1,000).
