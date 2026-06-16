@@ -17,7 +17,10 @@ import { cpSlice, cpLen } from '../utils/textUtils.js';
 import chalk from 'chalk';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
-import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import {
+  useCommandCompletion,
+  CompletionMode,
+} from '../hooks/useCommandCompletion.js';
 import { useExportCompletion } from '../hooks/useExportCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -1005,9 +1008,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // On Enter for @folder paths, dismiss the completion so the
           // dropdown stays closed. Folder paths don't append a trailing
           // space by design, so the @ completion pattern re-matches and
-          // re-shows the dropdown. Only gate on isDirectory to avoid
+          // re-shows the dropdown. Gate on AT mode + isDirectory to avoid
           // suppressing slash-command sub-suggestions.
-          if (key.name === 'return' && accepted?.isDirectory) {
+          if (
+            key.name === 'return' &&
+            accepted?.isDirectory &&
+            completion.completionMode === CompletionMode.AT
+          ) {
             dismissCompletion();
           }
           // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`

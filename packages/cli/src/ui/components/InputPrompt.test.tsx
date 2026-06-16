@@ -18,7 +18,10 @@ import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type { UseShellHistoryReturn } from '../hooks/useShellHistory.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import type { UseCommandCompletionReturn } from '../hooks/useCommandCompletion.js';
-import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import {
+  useCommandCompletion,
+  CompletionMode,
+} from '../hooks/useCommandCompletion.js';
 import type { UseInputHistoryReturn } from '../hooks/useInputHistory.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
@@ -273,6 +276,7 @@ describe('InputPrompt', () => {
       visibleStartIndex: 0,
       isPerfectMatch: false,
       midInputGhostText: null,
+      completionMode: CompletionMode.IDLE,
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       resetCompletionState: vi.fn(),
@@ -1879,6 +1883,7 @@ describe('InputPrompt', () => {
     // even if the @ token re-glob and produces new suggestions.
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
       showSuggestions: true,
       suggestions: [
         {
@@ -1991,6 +1996,7 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
     unmount();
   });
