@@ -2892,6 +2892,7 @@ export function App({
                     isResponding={streamingState !== 'idle'}
                     workspaceCwd={connection.workspaceCwd || ''}
                     shellOutputMaxLines={shellOutputMaxLines}
+                    commands={commands}
                     showRetryHint={showRetryHint}
                     onRetryClick={handleRetry}
                     welcomeHeader={welcomeHeader}
