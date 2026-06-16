@@ -16,8 +16,9 @@ const debugLogger = createDebugLogger('GATE_REVIEW_AGENTS');
 
 /**
  * Timeout for the gate agent in milliseconds. The gate agent typically
- * completes within 1–2 minutes; this 5-minute ceiling accounts for the
- * runConfig.max_time_minutes limit and provides a safety net against hangs.
+ * completes within 1–2 minutes; this is a fixed 5-minute ceiling that
+ * coincides with the typical runConfig.max_time_minutes setting (5 min)
+ * but is independent of it. Provides a safety net against hangs.
  */
 const GATE_AGENT_TIMEOUT_MS = 5 * 60 * 1000;
 

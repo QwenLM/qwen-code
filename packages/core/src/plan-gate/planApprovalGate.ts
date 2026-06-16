@@ -142,12 +142,19 @@ async function runAgentWithRetry(
   bundle: EvidenceBundle,
   signal: AbortSignal,
 ): Promise<GateAgentResult | null> {
+  // Entry-time check: if the parent signal is already aborted before we start,
+  // respect it to avoid launching a 5-minute gate agent for an obvious cancellation.
+  // This is the ONLY place we check signal.aborted — during execution, the gate
+  // agent is signal-isolated (see runGateAgent) to prevent transient parent-side
+  // aborts from cascading.
+  if (signal.aborted) {
+    debugLogger.warn(
+      'Gate agent skipped: parent signal already aborted at entry',
+    );
+    return null;
+  }
+
   for (let attempt = 1; attempt <= MAX_AGENT_RETRIES; attempt++) {
-    // Note: We deliberately do NOT check signal.aborted here.
-    // The gate agent is signal-isolated (see runGateAgent), so parent-side
-    // aborts are typically transient (stream errors, round cleanup). The
-    // gate agent has its own 5-minute timeout as the safety net. If the
-    // parent is truly gone, the caller will discard the result anyway.
     try {
       return await runGateAgent(config, bundle, signal);
     } catch (error) {
@@ -161,9 +168,9 @@ async function runAgentWithRetry(
         );
         return null;
       }
-      // Abort-aware delay: wait 1s between retries using the existing
-      // `delay()` from utils/retry.ts, which rejects when the signal
-      // is aborted. A cancellation during the wait breaks the loop
+      // Abort-aware delay: wait 1s between retries (not after the final attempt).
+      // Uses the existing `delay()` from utils/retry.ts, which rejects when the
+      // signal is aborted. A cancellation during the wait breaks the loop
       // immediately rather than proceeding to another rapid-fire attempt.
       try {
         await delay(1000, signal);
