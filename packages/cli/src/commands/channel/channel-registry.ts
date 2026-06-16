@@ -6,14 +6,15 @@ let builtinsPromise: Promise<void> | null = null;
 function ensureBuiltins(): Promise<void> {
   if (!builtinsPromise) {
     builtinsPromise = (async () => {
-      const [telegram, weixin, dingtalk, feishu] = await Promise.all([
+      const [telegram, weixin, dingtalk, feishu, qqbot] = await Promise.all([
         import('@qwen-code/channel-telegram'),
         import('@qwen-code/channel-weixin'),
         import('@qwen-code/channel-dingtalk'),
         import('@qwen-code/channel-feishu'),
+        import('@qwen-code/channel-qqbot'),
       ]);
 
-      for (const mod of [telegram, weixin, dingtalk, feishu]) {
+      for (const mod of [telegram, weixin, dingtalk, feishu, qqbot]) {
         registry.set(mod.plugin.channelType, mod.plugin);
       }
     })();
