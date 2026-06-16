@@ -79,6 +79,7 @@ import type {
   CloseSessionOpts,
   AcpSessionBridge,
   MidTurnQueueEntry,
+  BridgeDaemonStatusSnapshot,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -2501,6 +2502,47 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   startSessionReaper();
 
   return {
+    getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot {
+      return {
+        limits: {
+          maxSessions: maxSessions === Infinity ? null : maxSessions,
+          maxPendingPromptsPerSession:
+            maxPendingPromptsPerSession === Infinity
+              ? null
+              : maxPendingPromptsPerSession,
+          eventRingSize,
+          channelIdleTimeoutMs: resolvedChannelIdleTimeoutMs(),
+          sessionIdleTimeoutMs,
+        },
+        sessionCount: byId.size,
+        pendingPermissionCount: permissionMediator.pendingCount,
+        channelLive: !!liveChannelInfo(),
+        permissionPolicy: permissionMediator.policy,
+        sessions: [...byId.values()].map((entry) => ({
+          sessionId: entry.sessionId,
+          workspaceCwd: entry.workspaceCwd,
+          createdAt: entry.createdAt,
+          ...(entry.displayName ? { displayName: entry.displayName } : {}),
+          clientCount: entry.clientIds.size,
+          subscriberCount: entry.events.subscriberCount,
+          attachCount: entry.attachCount,
+          pendingPromptCount: entry.pendingPromptCount,
+          pendingPermissionCount: entry.pendingPermissionIds.size,
+          hasActivePrompt: entry.promptActive,
+          lastEventId: entry.events.lastEventId,
+          ...(entry.sessionLastSeenAt !== undefined
+            ? { lastSeenAt: entry.sessionLastSeenAt }
+            : {}),
+          ...(entry.currentModelId
+            ? { currentModelId: entry.currentModelId }
+            : {}),
+          ...(entry.currentApprovalMode
+            ? { currentApprovalMode: entry.currentApprovalMode }
+            : {}),
+        })),
+      };
+    },
+
     get sessionCount() {
       return byId.size;
     },
