@@ -143,6 +143,7 @@ export type {
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
+export { FORK_SUBAGENT_TYPE } from './tools/agent/fork-subagent.js';
 export type {
   WorkflowTool,
   WorkflowParams,

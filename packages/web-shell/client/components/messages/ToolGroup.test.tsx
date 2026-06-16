@@ -5,14 +5,15 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { ACPToolCall } from '../../adapters/types';
 
-// ToolGroup imports App only for CompactModeContext and TodoTimelineContext;
-// loading the real App module would pull the whole application graph into this
-// unit test.
+// ToolGroup imports App for CompactModeContext and TodoTimelineContext, and its
+// expanded todo list (via TodoFullList) reads TodoDetailContext; loading the
+// real App module would pull the whole application graph into this unit test.
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
   return {
     CompactModeContext: createContext(false),
     TodoTimelineContext: createContext(new Map()),
+    TodoDetailContext: createContext(new Map()),
   };
 });
 

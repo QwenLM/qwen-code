@@ -20,6 +20,7 @@ import {
   dedupeNewestFirst,
   getNextRenderMode,
   isRenderModeToggleKey,
+  mergeStartupWarnings,
 } from './AppContainer.js';
 import ansiEscapes from 'ansi-escapes';
 import {
@@ -607,6 +608,15 @@ describe('AppContainer State Management', () => {
 
       // Should render and unmount cleanly
       expect(() => unmount()).not.toThrow();
+    });
+
+    it('dedupes startup warnings produced during config initialization', () => {
+      expect(
+        mergeStartupWarnings(
+          ['early warning', 'same warning'],
+          ['same warning', 'late memory warning'],
+        ),
+      ).toEqual(['early warning', 'same warning', 'late memory warning']);
     });
 
     it('provides UIStateContext with state management', () => {

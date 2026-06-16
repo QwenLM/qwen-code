@@ -35,7 +35,7 @@ export function parseStatsMessage(content: string): ParsedStats | null {
   }
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   if (ms <= 0) return '0s';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const totalSeconds = ms / 1000;

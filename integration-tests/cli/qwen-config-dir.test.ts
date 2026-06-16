@@ -57,6 +57,7 @@ describe('QWEN_HOME environment variable', () => {
     // Always clean up env vars regardless of test outcome
     delete process.env['QWEN_HOME'];
     delete process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['QWEN_DEBUG_LOG_FILE'];
     await rig.cleanup();
   });
 
@@ -324,6 +325,7 @@ describe('QWEN_HOME environment variable', () => {
 
       process.env['QWEN_HOME'] = customConfigDir;
       process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
 
       try {
         await rig.run('say hello');

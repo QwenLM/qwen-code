@@ -57,6 +57,7 @@ concurrency:
 env:
   BUN_VERSION: '1.3.9'
   CRAFT_BRAND: 'qwen-code'
+  DESKTOP_UPDATE_FEED_TAG: 'desktop-latest'
 
 jobs:
   release_metadata:
@@ -339,13 +340,13 @@ jobs:
         working-directory: 'packages/desktop'
         shell: 'bash'
         env:
-          EXPECTED_REPOSITORY: '${{ github.repository }}'
+          EXPECTED_UPDATE_URL: 'https://github.com/${{ github.repository }}/releases/download/${{ env.DESKTOP_UPDATE_FEED_TAG }}'
         run: |
           set -euo pipefail
 
           bun run electron:builder-config
 
-          actual_repository="$(node <<'NODE'
+          actual_update_url="$(node <<'NODE'
           const fs = require('node:fs');
           const yaml = require('js-yaml');
 
@@ -353,25 +354,28 @@ jobs:
             fs.readFileSync('apps/electron/electron-builder.generated.yml', 'utf8'),
           );
           const publish = config?.publish;
-          if (
-            !publish ||
-            publish.provider !== 'github' ||
-            !publish.owner ||
-            !publish.repo
-          ) {
+          if (!publish || typeof publish.provider !== 'string') {
             process.exit(1);
           }
 
-          console.log(`${publish.owner}/${publish.repo}`);
+          if (publish.provider === 'github') {
+            if (!publish.owner || !publish.repo) process.exit(1);
+            console.log(`https://github.com/${publish.owner}/${publish.repo}/releases`);
+          } else if (publish.provider === 'generic') {
+            if (!publish.url) process.exit(1);
+            console.log(publish.url);
+          } else {
+            process.exit(1);
+          }
           NODE
           )"
 
-          if [ "$actual_repository" != "$EXPECTED_REPOSITORY" ]; then
-            echo "::error::Desktop update feed points to $actual_repository, expected $EXPECTED_REPOSITORY."
+          if [ "$actual_update_url" != "$EXPECTED_UPDATE_URL" ]; then
+            echo "::error::Desktop update feed points to $actual_update_url, expected $EXPECTED_UPDATE_URL."
             exit 1
           fi
 
-          echo "Desktop update feed: https://github.com/${actual_repository}/releases"
+          echo "Desktop update feed: ${actual_update_url}"
 
       - name: 'Configure optional signing secrets'
         shell: 'bash'
@@ -528,6 +532,7 @@ jobs:
           RELEASE_NAME: '${{ inputs.release_name }}'
           RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
           RELEASE_TARGET: '${{ needs.release_metadata.outputs.release_ref }}'
+          UPDATE_FEED_TAG: '${{ env.DESKTOP_UPDATE_FEED_TAG }}'
           UPLOAD_CLOBBER: '${{ inputs.clobber }}'
         run: |
           set -euo pipefail
@@ -591,6 +596,26 @@ jobs:
             fi
             create_args+=(--latest=false)
             gh release create "${create_args[@]}"
+          fi
+
+          feed_title="Qwen Code Desktop latest"
+          feed_notes="Auto-update feed for ${RELEASE_TAG}. See https://github.com/${GH_REPO}/releases/tag/${RELEASE_TAG}."
+          feed_upload_args=("$UPDATE_FEED_TAG" "${assets[@]}" --clobber)
+          if gh release view "$UPDATE_FEED_TAG" >/dev/null 2>&1; then
+            gh release edit "$UPDATE_FEED_TAG" \
+              --draft=false \
+              --prerelease=false \
+              --latest=false \
+              --target "$RELEASE_TARGET" \
+              --title "$feed_title" \
+              --notes "$feed_notes"
+            gh release upload "${feed_upload_args[@]}"
+          else
+            gh release create "$UPDATE_FEED_TAG" "${assets[@]}" \
+              --latest=false \
+              --target "$RELEASE_TARGET" \
+              --title "$feed_title" \
+              --notes "$feed_notes"
           fi
 
   sync-version:

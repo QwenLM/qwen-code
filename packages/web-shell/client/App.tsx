@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import {
   useActions,
@@ -20,7 +21,10 @@ import {
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonTranscriptBlock,
+  DaemonSessionTaskStatus,
+} from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
@@ -71,6 +75,7 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
 import { usePanelActive } from './hooks/usePanelActive';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
@@ -121,9 +126,12 @@ import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMess
 import { BtwMessage } from './components/messages/BtwMessage';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
+  computeTodoDetails,
   computeTodoTimeline,
   getFloatingTodos,
+  todoDetailSignature,
   todoTimelineSignature,
+  type TodoDetail,
   type TodoSnapshotDiff,
 } from './utils/todos';
 import { ThemeProvider } from './themeContext';
@@ -136,9 +144,13 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellComposerApi,
+  type WebShellComposerInput,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
   type WelcomeHeaderRenderer,
+  type FooterRenderer,
+  type WebShellTaskInfo,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -154,6 +166,38 @@ export const CompactModeContext = createContext(false);
 export const TodoTimelineContext = createContext<Map<string, TodoSnapshotDiff>>(
   new Map(),
 );
+
+/**
+ * Per-todo timing and resource detail keyed by todoStateKey, consumed by the
+ * expanded todo list so a finished task can reveal when it ran and what it
+ * spent. Empty by default so a row rendered outside the provider (or in tests)
+ * simply shows no expander.
+ */
+export const TodoDetailContext = createContext<Map<string, TodoDetail>>(
+  new Map(),
+);
+
+/**
+ * Provides both todo contexts in one wrapper so the message list stays at a
+ * single nesting level (one provider in the tree, not two).
+ */
+function TodoContextsProvider({
+  timeline,
+  details,
+  children,
+}: {
+  timeline: Map<string, TodoSnapshotDiff>;
+  details: Map<string, TodoDetail>;
+  children: ReactNode;
+}) {
+  return (
+    <TodoTimelineContext.Provider value={timeline}>
+      <TodoDetailContext.Provider value={details}>
+        {children}
+      </TodoDetailContext.Provider>
+    </TodoTimelineContext.Provider>
+  );
+}
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
@@ -281,14 +325,45 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
+  renderFooter?: FooterRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
+  /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
+  collapseCompletedTurns?: boolean;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
   onToast?: (tone: ToastTone, message: string) => void;
+  /** Imperative handle for externally controlling the composer input. */
+  composerRef?: React.Ref<WebShellComposerApi>;
+  /** Declarative composer input value. Increment composerInputVersion to replay the same value. */
+  composerInput?: WebShellComposerInput;
+  /** Replay key for composerInput. */
+  composerInputVersion?: number;
+}
+
+const emptyComposerApi: WebShellComposerApi = {
+  insertText: () => {},
+  setText: () => {},
+  addTags: () => {},
+  removeTag: () => {},
+  clear: () => {},
+  submit: () => {},
+};
+
+function assignComposerRef(
+  ref: React.Ref<WebShellComposerApi> | undefined,
+  value: WebShellComposerApi,
+): void {
+  if (!ref) return;
+  if (typeof ref === 'function') {
+    ref(value);
+    return;
+  }
+  (ref as React.MutableRefObject<WebShellComposerApi | null>).current = value;
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -494,6 +569,53 @@ function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
   return parts.join('|');
 }
 
+function mapToWebShellTaskInfo(
+  task: DaemonSessionTaskStatus,
+): WebShellTaskInfo {
+  const base = {
+    id: task.id,
+    label: task.label,
+    description: task.description,
+    runtimeMs: task.runtimeMs,
+    startTime: task.startTime,
+    endTime: task.endTime,
+    error: task.error,
+  };
+
+  switch (task.kind) {
+    case 'agent':
+      return {
+        ...base,
+        kind: 'agent',
+        status: task.status,
+        subagentType: task.subagentType,
+        isBackgrounded: task.isBackgrounded,
+        prompt: task.prompt,
+      };
+    case 'shell':
+      return {
+        ...base,
+        kind: 'shell',
+        status: task.status,
+        command: task.command,
+        cwd: task.cwd,
+        pid: task.pid,
+        exitCode: task.exitCode,
+      };
+    case 'monitor':
+      return {
+        ...base,
+        kind: 'monitor',
+        status: task.status,
+        command: task.command,
+        pid: task.pid,
+        exitCode: task.exitCode,
+      };
+    default:
+      return task satisfies never;
+  }
+}
+
 function translateCopyMessage(
   message: string,
   t: ReturnType<typeof getTranslator>,
@@ -574,10 +696,15 @@ export function App({
   slashCommandCategoryOrder,
   renderToolHeaderExtra,
   renderWelcomeHeader,
+  renderFooter,
   compactThinking = false,
+  collapseCompletedTurns = true,
   virtualScrollThreshold,
   markdown,
   onToast,
+  composerRef,
+  composerInput,
+  composerInputVersion,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
@@ -590,11 +717,21 @@ export function App({
     () => ({
       renderToolHeaderExtra,
       renderWelcomeHeader,
+      renderFooter,
       compactThinking,
+      collapseCompletedTurns,
       markdown,
     }),
-    [renderToolHeaderExtra, renderWelcomeHeader, compactThinking, markdown],
+    [
+      renderToolHeaderExtra,
+      renderWelcomeHeader,
+      renderFooter,
+      compactThinking,
+      collapseCompletedTurns,
+      markdown,
+    ],
   );
+  const CustomFooter = renderFooter;
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
@@ -703,6 +840,25 @@ export function App({
     todoTimelineRef.current = { signature, timeline };
     return timeline;
   }, [messages]);
+  // Per-todo detail (start/end + token/API/tool spend) is derived entirely from
+  // the transcript: the agent stamps a cumulative-usage snapshot on each todo
+  // update and the web-shell diffs consecutive snapshots, so this works live and
+  // on resume with no polling. Kept referentially stable like the timeline
+  // above (rebuilt only when a relevant snapshot, timestamp, stat, or tool span
+  // changes) so an unrelated streaming tick doesn't re-render every expanded
+  // todo row that consumes TodoDetailContext.
+  const todoDetailRef = useRef<{
+    signature: string;
+    details: Map<string, TodoDetail>;
+  } | null>(null);
+  const todoDetails = useMemo(() => {
+    const signature = todoDetailSignature(messages);
+    const cached = todoDetailRef.current;
+    if (cached && cached.signature === signature) return cached.details;
+    const details = computeTodoDetails(messages);
+    todoDetailRef.current = { signature, details };
+    return details;
+  }, [messages]);
   const floatingTodos = useStableArray(
     floatingTodosState.todos,
     (t) => `${t.id}:${t.status}:${t.content}`,
@@ -732,8 +888,26 @@ export function App({
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
+  const backgroundTasks = useBackgroundTasks(
+    backgroundTaskActivityKey,
+    connection.status === 'connected',
+  );
+  const footerTasks = useMemo(
+    () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
+    [backgroundTasks, renderFooter],
+  );
   const statusBarRef = useRef<StatusBarHandle>(null);
-  const editorRef = useRef<EditorHandle>(null);
+  const editorRef = useRef<EditorHandle | null>(null);
+  const setEditorHandle = useCallback(
+    (handle: EditorHandle | null) => {
+      editorRef.current = handle;
+      assignComposerRef(composerRef, handle ?? emptyComposerApi);
+    },
+    [composerRef],
+  );
+  useEffect(() => {
+    assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
+  }, [composerRef]);
   const messageListRef = useRef<MessageListHandle>(null);
   const handleLocateFloatingTodos = useCallback(() => {
     if (!floatingTodosState.sourceMessageId) return;
@@ -1048,8 +1222,7 @@ export function App({
       if (message.isPending) {
         if (!isPlainEscape && !isCtrlCancel) return;
       } else {
-        const editorHasText =
-          (editorRef.current?.getText().trim().length ?? 0) > 0;
+        const editorHasText = editorRef.current?.hasInput() ?? false;
         const isPlainDismiss =
           !e.ctrlKey &&
           !e.metaKey &&
@@ -2367,8 +2540,7 @@ export function App({
         return;
       }
 
-      const text = editorRef.current?.getText() ?? '';
-      if (text.length > 0) {
+      if (editorRef.current?.hasInput()) {
         e.preventDefault();
         if (escPressCountRef.current === 0) {
           escPressCountRef.current = 1;
@@ -2380,7 +2552,7 @@ export function App({
             resetEscapeState();
           }, 500);
         } else {
-          editorRef.current?.clearText();
+          editorRef.current?.clear();
           resetEscapeState();
         }
         return;
@@ -2583,7 +2755,10 @@ export function App({
 
           <WebShellCustomizationProvider value={customization}>
             <CompactModeContext.Provider value={compactMode}>
-              <TodoTimelineContext.Provider value={todoTimeline}>
+              <TodoContextsProvider
+                timeline={todoTimeline}
+                details={todoDetails}
+              >
                 <div
                   className={
                     showFloatingTodos
@@ -2599,6 +2774,7 @@ export function App({
                     onConfirm={handleConfirm}
                     onShowContextDetail={handleShowContextDetail}
                     catchingUp={connection.catchingUp}
+                    isResponding={streamingState !== 'idle'}
                     workspaceCwd={connection.workspaceCwd || ''}
                     shellOutputMaxLines={shellOutputMaxLines}
                     showRetryHint={showRetryHint}
@@ -2716,7 +2892,7 @@ export function App({
                   <StreamingStatus />
                 </div>
                 <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
-              </TodoTimelineContext.Provider>
+              </TodoContextsProvider>
             </CompactModeContext.Provider>
           </WebShellCustomizationProvider>
 
@@ -2743,7 +2919,7 @@ export function App({
               <div className={styles.composer}>
                 <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
                 <Editor
-                  ref={editorRef}
+                  ref={setEditorHandle}
                   onSubmit={handleSubmit}
                   onCycleMode={handleCycleMode}
                   onToggleShortcuts={handleToggleShortcuts}
@@ -2761,6 +2937,8 @@ export function App({
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}
+                  composerInput={composerInput}
+                  composerInputVersion={composerInputVersion}
                   placeholderText={
                     !connected
                       ? t('common.loading')
@@ -2787,6 +2965,34 @@ export function App({
               !tasksPanelMessage &&
               (showShortcuts ? (
                 <ShortcutsPanel onClose={handleCloseShortcuts} />
+              ) : CustomFooter ? (
+                <CustomFooter
+                  connected={connected}
+                  mode={currentMode}
+                  model={currentModel}
+                  streamingState={streamingState}
+                  contextUsageRatio={
+                    (connection.contextWindow ?? 0) > 0
+                      ? (connection.tokenCount ?? 0) /
+                        (connection.contextWindow ?? 0)
+                      : 0
+                  }
+                  activeGoal={activeGoal}
+                  tasks={footerTasks}
+                  availableModes={MODES_CYCLE}
+                  availableModels={(connection.models ?? []).map((m) => ({
+                    id: m.id,
+                    label: m.label,
+                    contextWindow: m.contextWindow,
+                  }))}
+                  skills={loadedSkills}
+                  onSelectMode={(mode) => handleSetMode(mode)}
+                  onSelectModel={(model) => {
+                    sessionActions.setModel(model).then(() => {
+                      setCurrentModel(model);
+                    });
+                  }}
+                />
               ) : (
                 <StatusBar
                   escapeHint={escapeHintVisible}
@@ -2799,7 +3005,7 @@ export function App({
                   ref={statusBarRef}
                   onOpenTasks={() => openTasksPanel()}
                   onReturnToInput={handleReturnToEditor}
-                  taskActivityKey={backgroundTaskActivityKey}
+                  tasks={backgroundTasks}
                   activeGoal={activeGoal}
                   hideSettings={hideSettings}
                   onToggleShortcuts={handleToggleShortcuts}
