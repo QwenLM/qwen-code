@@ -500,20 +500,6 @@ function isDescriptionExpandable(description: string): boolean {
   );
 }
 
-function ToggleChevron({
-  expandable,
-  expanded,
-}: {
-  expandable: boolean;
-  expanded: boolean;
-}) {
-  return (
-    <span className={styles.lineToggle} aria-hidden="true">
-      {expandable ? (expanded ? '▾' : '▸') : ''}
-    </span>
-  );
-}
-
 function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
   return (
     tools.find((t) => t.status === 'in_progress') ?? tools[tools.length - 1]
@@ -820,7 +806,6 @@ export const ToolLine = memo(function ToolLine({
             : undefined
         }
       >
-        <ToggleChevron expandable={expandable} expanded={expanded} />
         <StatusIcon status={tool.status} />
         <span className={styles.lineName}>{displayName}</span>
         {isTodo && hasTodoList && (

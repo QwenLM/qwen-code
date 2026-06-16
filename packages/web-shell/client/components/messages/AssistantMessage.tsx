@@ -68,6 +68,8 @@ export const AssistantMessage = memo(function AssistantMessage({
     if (!el || !collapsed) return;
     if (isStreaming) {
       el.scrollTop = el.scrollHeight;
+    } else {
+      el.scrollTop = 0;
     }
   }, [collapsed, isStreaming, thinking]);
 
@@ -89,7 +91,12 @@ export const AssistantMessage = memo(function AssistantMessage({
                     : styles.thinkingPreviewWrap
                 }
               >
-                <div ref={previewRef} className={styles.thinkingPreview}>
+                <div
+                  ref={previewRef}
+                  className={`${styles.thinkingPreview} ${
+                    isStreaming ? styles.thinkingPreviewTail : ''
+                  }`}
+                >
                   <Markdown
                     content={thinking}
                     source="thinking"

@@ -499,7 +499,8 @@ export function applyTurnCollapse(
 
     // Final answer = last assistant-with-content row after the turn's last
     // non-assistant step. Assistant text that is followed by a tool/plan is
-    // narration for the execution trace, not the final answer.
+    // narration for the execution trace, not the final answer; marking it as a
+    // step immediately keeps the trace indentation stable while a turn streams.
     let answerIdx = -1;
     let lastNonAssistantStepIdx = start;
     for (let i = start + 1; i <= end; i++) {
@@ -511,17 +512,6 @@ export function applyTurnCollapse(
         break;
       }
     }
-    // While a turn is still streaming, the trailing assistant row is
-    // provisional: there is no following output yet to prove whether it is a
-    // final answer or execution narration. Keep it outside the trace until the
-    // next row arrives, then the normal rule above can classify it.
-    const tail = items[end];
-    const provisionalAnswerIdx =
-      isActiveTurn &&
-      tail?.type === 'message' &&
-      tail.message.role === 'assistant'
-        ? end
-        : answerIdx;
 
     let hiddenCount = 0;
     let lastStepTs: number | undefined;
@@ -531,13 +521,11 @@ export function applyTurnCollapse(
     let toolCallCount = 0;
     let hasUsage = false;
     for (let i = start + 1; i <= end; i++) {
-      const isStep = isHideableStep(items[i], i === provisionalAnswerIdx);
+      const isStep = isHideableStep(items[i], i === answerIdx);
       if (isStep) hiddenCount++;
       toolCallCount += itemToolCallCount(items[i]);
       const ts =
-        isStep || i === provisionalAnswerIdx
-          ? itemTimestamp(items[i])
-          : undefined;
+        isStep || i === answerIdx ? itemTimestamp(items[i]) : undefined;
       if (ts !== undefined) {
         lastStepTs = lastStepTs === undefined ? ts : Math.max(lastStepTs, ts);
       }
@@ -600,9 +588,7 @@ export function applyTurnCollapse(
       for (let i = start + 1; i <= end; i++) {
         const item = items[i];
         result.push(
-          isHideableStep(item, i === provisionalAnswerIdx)
-            ? withTrace(item)
-            : item,
+          isHideableStep(item, i === answerIdx) ? withTrace(item) : item,
         );
       }
       continue;
@@ -614,10 +600,10 @@ export function applyTurnCollapse(
     // streaming, so fold it away too rather than strand a provisional line.
     for (let i = start + 1; i <= end; i++) {
       const item = items[i];
-      if (i === provisionalAnswerIdx && isActiveTurn) continue;
-      if (isHideableStep(item, i === provisionalAnswerIdx)) continue;
+      if (i === answerIdx && isActiveTurn) continue;
+      if (isHideableStep(item, i === answerIdx)) continue;
       if (
-        i === provisionalAnswerIdx &&
+        i === answerIdx &&
         item.type === 'message' &&
         item.message.role === 'assistant' &&
         item.message.thinking
@@ -1195,11 +1181,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       (index: number, key: string): string | undefined => {
         const classes: string[] = [];
         if (flashKey === key) classes.push(styles.rowFlash);
-        const item = visibleItems[index - headerOffset];
-        if (item?.trace) classes.push(styles.traceRow);
         return classes.length > 0 ? classes.join(' ') : undefined;
       },
-      [flashKey, headerOffset, visibleItems],
+      [flashKey],
     );
 
     // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────

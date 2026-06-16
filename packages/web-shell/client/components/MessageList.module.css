@@ -25,22 +25,6 @@
   animation: row-flash 1.6s ease-out;
 }
 
-.traceRow {
-  position: relative;
-  box-sizing: border-box;
-  padding-left: 34px;
-}
-
-.traceRow::before {
-  content: '';
-  position: absolute;
-  top: -6px;
-  bottom: -6px;
-  left: 20px;
-  width: 1px;
-  background: color-mix(in srgb, var(--border-color) 45%, transparent);
-}
-
 @keyframes row-flash {
   0%,
   30% {

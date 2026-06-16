@@ -40,6 +40,7 @@
   align-items: baseline;
   width: fit-content;
   margin-top: 5px;
+  margin-left: calc(-0.6em - 8px);
   font-size: 12px;
   line-height: 1.2;
 }

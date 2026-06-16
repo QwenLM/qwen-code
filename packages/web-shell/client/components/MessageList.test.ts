@@ -438,44 +438,6 @@ describe('applyTurnCollapse', () => {
     expect(out[2].trace).toBe(true);
   });
 
-  it('keeps the trailing active assistant row outside the trace until another row arrives', () => {
-    const items = groupParallelAgents([
-      makeUserMessage('u1'),
-      {
-        id: 'a0',
-        role: 'assistant',
-        content: '',
-        thinking: 'I am checking the project.',
-        isStreaming: true,
-      },
-    ]);
-    const out = collapseItems(items, {
-      isResponding: true,
-      overrides: new Map([['u1', true]]),
-    });
-    expect(rowIds(out)).toEqual(['u1', 'a0']);
-    expect(out[1].trace).toBeUndefined();
-  });
-
-  it('reclassifies a previous assistant row as trace once a following step arrives', () => {
-    const items = groupParallelAgents([
-      makeUserMessage('u1'),
-      {
-        id: 'a0',
-        role: 'assistant',
-        content: 'I will inspect the project.',
-      },
-      makeMultiToolGroup('g1'),
-    ]);
-    const out = collapseItems(items, {
-      isResponding: true,
-      overrides: new Map([['u1', true]]),
-    });
-    expect(rowIds(out)).toEqual(['u1', 'a0', 'g1']);
-    expect(out[1].trace).toBe(true);
-    expect(out[2].trace).toBe(true);
-  });
-
   it('tags but keeps the active turn expanded while responding', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),

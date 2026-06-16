@@ -62,11 +62,18 @@
 }
 
 .thinkingPreview {
-  max-height: calc(5lh + 4px);
-  overflow-y: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   padding-right: 18px;
-  padding-bottom: 4px;
   line-height: inherit;
+}
+
+.thinkingPreviewTail {
+  display: block;
+  max-height: calc(5 * 1.5em);
+  overflow-y: hidden;
 }
 
 .thinkingPreview > [data-markdown-source='thinking'] {
