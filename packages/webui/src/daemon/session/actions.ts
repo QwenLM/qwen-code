@@ -208,7 +208,10 @@ export function createDaemonSessionActions({
         if (active?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
         }
-        if (sessionRef.current?.sessionId === sessionId) {
+        if (
+          sessionRef.current?.sessionId === sessionId &&
+          !activePromptsRef.current.has(sessionId)
+        ) {
           setPromptStatus('idle');
         }
       }

@@ -823,6 +823,7 @@ describe('DaemonSessionProvider', () => {
         stopReason: 'end_turn',
       });
     });
+    expect(streamingState).toBe('waiting');
 
     await act(async () => {
       secondTurnComplete.resolve();
