@@ -39,6 +39,10 @@ export async function readLoopTaskFile({
 
   for (const filePath of checkedPaths) {
     try {
+      const stat = await fs.lstat(filePath);
+      if (stat.isSymbolicLink()) {
+        continue;
+      }
       const buffer = await fs.readFile(filePath);
       const truncated = buffer.byteLength > LOOP_TASK_FILE_MAX_BYTES;
       let contentBuffer = buffer;

@@ -44,11 +44,11 @@ describe('/loop bundled skill instructions', () => {
     expect(skill).toContain('`5m` → empty prompt → show usage');
   });
 
-  it('advertises optional command metadata while preserving current empty-prompt behavior', () => {
+  it('advertises required prompt metadata while preserving current empty-prompt behavior', () => {
     const skill = readSkill();
 
     expect(skill).toContain(
-      "argument-hint: '[interval] [prompt] | list | clear'",
+      "argument-hint: '[interval] <prompt> | list | clear'",
     );
     expect(skill).toContain(
       'after stripping the `/loop` or `/proactive` prefix',

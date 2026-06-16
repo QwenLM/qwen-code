@@ -60,6 +60,24 @@ describe('readLoopTaskFile', () => {
     });
   });
 
+  it('does not follow symlinked project loop task files', async () => {
+    await fs.mkdir(path.join(projectRoot, '.qwen'), { recursive: true });
+    await fs.mkdir(path.join(homeDir, '.qwen'), { recursive: true });
+    const outside = path.join(tempDir, 'secret.txt');
+    await fs.writeFile(outside, 'secret tasks');
+    await fs.symlink(outside, path.join(projectRoot, '.qwen', 'loop.md'));
+    await fs.writeFile(path.join(homeDir, '.qwen', 'loop.md'), 'user tasks');
+
+    const result = await readLoopTaskFile({ projectRoot, homeDir });
+
+    expect(result).toEqual({
+      status: 'found',
+      path: path.join(homeDir, '.qwen', 'loop.md'),
+      content: 'user tasks',
+      truncated: false,
+    });
+  });
+
   it('returns a missing result when no task file exists', async () => {
     await expect(readLoopTaskFile({ projectRoot, homeDir })).resolves.toEqual({
       status: 'missing',
@@ -91,6 +109,25 @@ describe('readLoopTaskFile', () => {
     }
   });
 
+  it('does not truncate task files at exactly the byte cap', async () => {
+    await fs.mkdir(path.join(projectRoot, '.qwen'), { recursive: true });
+    await fs.writeFile(
+      path.join(projectRoot, '.qwen', 'loop.md'),
+      'x'.repeat(LOOP_TASK_FILE_MAX_BYTES),
+    );
+
+    const result = await readLoopTaskFile({ projectRoot, homeDir });
+
+    expect(result.status).toBe('found');
+    if (result.status === 'found') {
+      expect(Buffer.byteLength(result.content, 'utf8')).toBe(
+        LOOP_TASK_FILE_MAX_BYTES,
+      );
+      expect(result.truncated).toBe(false);
+      expect(result.warning).toBeUndefined();
+    }
+  });
+
   it('truncates on a UTF-8 boundary without exceeding the cap or inserting a replacement char', async () => {
     await fs.mkdir(path.join(projectRoot, '.qwen'), { recursive: true });
     // 3-byte chars make the raw byte cap land mid-character.
@@ -109,5 +146,13 @@ describe('readLoopTaskFile', () => {
       );
       expect(result.content).not.toContain('�');
     }
+  });
+
+  it('re-throws non-ENOENT errors instead of treating them as missing', async () => {
+    await fs.mkdir(path.join(projectRoot, '.qwen', 'loop.md'), {
+      recursive: true,
+    });
+
+    await expect(readLoopTaskFile({ projectRoot, homeDir })).rejects.toThrow();
   });
 });
