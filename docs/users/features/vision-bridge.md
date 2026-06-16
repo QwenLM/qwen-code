@@ -78,5 +78,4 @@ The notice always discloses that your image and prompt were sent to the vision m
 
 ## Failure behavior
 
-- If the conversion fails (e.g. the vision model times out) **and** you also asked a real question, Qwen Code shows the failure and continues with your text question plus a note that the image wasn't interpreted.
-- If the request was image-only and conversion fails, the turn stops so the model never answers as if it had seen the image.
+If the conversion fails — the vision model times out, returns nothing, or no image-capable model is available — Qwen Code shows the failure reason and **stops the turn**. The primary model is not asked to respond, so it never answers as if it had seen the image. Resolve the cause (a reachable vision model, a higher `timeoutMs`) or describe the image in text yourself, then retry.

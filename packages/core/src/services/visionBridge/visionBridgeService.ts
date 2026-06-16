@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content, Part, PartListUnion } from '@google/genai';
+import type { Content, PartListUnion } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { InputModalities } from '../../core/contentGenerator.js';
 import { defaultModalities } from '../../core/modalityDefaults.js';
@@ -167,9 +167,6 @@ export interface VisionBridgeResult {
   error?: string;
 }
 
-/** Minimum trimmed text length treated as a real, answerable question. */
-const MEANINGFUL_TEXT_THRESHOLD = 8;
-
 /**
  * System instruction for the bridge model. Conservative and injection-aware:
  * in-image text is treated as data, never as instructions. The user's question
@@ -260,19 +257,6 @@ function buildInterpretationBlock(
 }
 
 /**
- * Build the text-only failure note used when conversion fails but the user also
- * asked a real question, so the primary model knows it is missing the image.
- */
-function buildFailureNote(reason: string): string {
-  return [
-    `--- Image interpretation failed (${reason}) ---`,
-    'The model did NOT receive the image(s). Answer the text question if',
-    'possible, or ask the user to describe the image or paste the relevant',
-    'text (e.g. the error/stack trace).',
-  ].join('\n');
-}
-
-/**
  * Run the vision bridge: convert inline image parts into a text description via
  * a configured vision model, and return image-free parts for the primary model.
  *
@@ -327,8 +311,6 @@ export async function runVisionBridge(params: {
   if (!model) {
     return failure(
       'no image-capable model is configured for the vision bridge',
-      nonImageParts,
-      fallbackText,
       imageParts.length,
       omittedCount,
     );
@@ -341,13 +323,7 @@ export async function runVisionBridge(params: {
       droppedAsInvalid === imageParts.length
         ? 'no usable image could be read'
         : 'image conversion is disabled (maxImages is 0)';
-    return failure(
-      reason,
-      nonImageParts,
-      fallbackText,
-      imageParts.length,
-      omittedCount,
-    );
+    return failure(reason, imageParts.length, omittedCount);
   }
 
   // The vision call gets its own timeout, linked to the turn's abort signal.
@@ -371,8 +347,6 @@ export async function runVisionBridge(params: {
     if (description.length === 0) {
       return failure(
         'the vision model returned no description',
-        nonImageParts,
-        fallbackText,
         imageParts.length,
         omittedCount,
       );
@@ -401,14 +375,7 @@ export async function runVisionBridge(params: {
         : error instanceof Error
           ? error.message
           : String(error);
-    return failure(
-      reason,
-      nonImageParts,
-      fallbackText,
-      imageParts.length,
-      omittedCount,
-      model,
-    );
+    return failure(reason, imageParts.length, omittedCount, model);
   }
 }
 
@@ -420,24 +387,19 @@ function buildIntentPart(intentText: string): string {
 }
 
 /**
- * Build a failure result, applying the adaptive policy: proceed with the
- * user's text question when one exists, otherwise stop the turn.
+ * Build a failure result. The bridge does not partially apply on failure: the
+ * caller stops the turn so the primary model never answers as if it had seen
+ * the image. The reason is surfaced to the user via the caller's notice.
  */
 function failure(
   reason: string,
-  nonImageParts: Part[],
-  fallbackText: string,
   imageCount: number,
   omittedCount: number,
   modelId?: string,
 ): VisionBridgeResult {
-  const note = buildFailureNote(reason);
-  const hasMeaningfulText = fallbackText.length >= MEANINGFUL_TEXT_THRESHOLD;
   return {
-    applied: hasMeaningfulText,
+    applied: false,
     status: 'failed',
-    parts: hasMeaningfulText ? [...nonImageParts, { text: note }] : undefined,
-    transcript: note,
     imageCount,
     convertedCount: 0,
     omittedCount,

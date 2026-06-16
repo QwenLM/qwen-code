@@ -215,7 +215,7 @@ describe('runVisionBridge', () => {
     expect(mockSideQuery.mock.calls[0][1].model).toBe('explicit-model');
   });
 
-  it('on failure with a real question, proceeds with a failure note', async () => {
+  it('does not apply on failure even when the user also asked a question (turn stops)', async () => {
     mockSideQuery.mockRejectedValue(new Error('boom'));
     const result = await runVisionBridge({
       config,
@@ -224,11 +224,12 @@ describe('runVisionBridge', () => {
       signal: signal(),
     });
     expect(result.status).toBe('failed');
-    expect(result.applied).toBe(true);
-    expect(textOf(result.parts)).toContain('Image interpretation failed');
+    expect(result.applied).toBe(false);
+    expect(result.parts).toBeUndefined();
+    expect(result.error).toContain('boom');
   });
 
-  it('on failure with no usable text, does not apply (caller stops the turn)', async () => {
+  it('on failure with no text either, does not apply (caller stops the turn)', async () => {
     mockSideQuery.mockRejectedValue(new Error('boom'));
     const result = await runVisionBridge({
       config,

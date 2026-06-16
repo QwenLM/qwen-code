@@ -921,8 +921,8 @@ export const useGeminiStream = (
           if (bridgeResult.applied && bridgeResult.parts != null) {
             localQueryToSendToGemini = bridgeResult.parts;
           } else if (bridgeResult.status === 'failed') {
-            // Image-only request we could not convert — stop the turn so the
-            // primary model never answers as if it had seen the image.
+            // Conversion failed — stop the turn so the primary model never
+            // answers as if it had seen the image. The notice above explains why.
             return { queryToSend: null, shouldProceed: false };
           }
         }
