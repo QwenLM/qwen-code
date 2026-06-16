@@ -2828,7 +2828,7 @@ describe('createAcpSessionBridge', () => {
       releaseBranch!();
       await expect(branch).resolves.toMatchObject({
         sessionId: 'branch-1',
-        title: 'Branch 1',
+        displayName: 'Branch 1',
       });
       await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
       await bridge.shutdown();
