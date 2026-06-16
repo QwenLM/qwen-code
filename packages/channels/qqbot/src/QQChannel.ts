@@ -391,6 +391,8 @@ export class QQChannel extends ChannelBase {
       case OpCode.INVALID_SESSION:
         this.sendIdentify();
         break;
+      default:
+        break;
     }
   }
 
