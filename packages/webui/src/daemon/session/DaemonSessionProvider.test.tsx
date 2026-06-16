@@ -838,6 +838,72 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('rejects the prompt when turn_error arrives before acceptance returns', async () => {
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const turnError = createDeferred<void>();
+    const prompt = vi.fn().mockReturnValueOnce(accepted.promise);
+    const session = createMockSession({
+      prompt,
+      events: async function* acceptedPromptEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          turnError.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          id: 11,
+          type: 'turn_error',
+          timestamp: '2025-01-01T00:00:00.000Z',
+          sessionId: 'session-1',
+          data: {
+            promptId: 'prompt-1',
+            message: 'Something went wrong',
+            code: 'internal_error',
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      streamingState = useDaemonStreamingState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = providerActions.sendPrompt('fail me');
+      await flushPromises();
+    });
+    expect(streamingState).toBe('waiting');
+
+    await act(async () => {
+      turnError.resolve();
+      await flushPromises();
+    });
+    expect(streamingState).toBe('idle');
+
+    const pending = promptResult;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      accepted.resolve({ promptId: 'prompt-1', lastEventId: 10 });
+      await expect(pending).rejects.toThrow('Something went wrong');
+    });
+  });
+
   it('sends image prompt content through the daemon action', async () => {
     const prompt = vi.fn(async () => ({ stopReason: 'end_turn' }));
     const session = createMockSession({
