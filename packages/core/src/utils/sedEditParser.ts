@@ -389,13 +389,17 @@ export function applySedSubstitution(
 
   try {
     const regex = new RegExp(jsPattern);
+    const globalRegex = new RegExp(
+      regex.source,
+      regex.flags.includes('g') ? regex.flags : `${regex.flags}g`,
+    );
     return content
       .split(/(\n)/)
       .map((part, index) => {
         if (index % 2 === 1) {
           return part;
         }
-        return replaceLine(part, regex, sedInfo.replacement, {
+        return replaceLine(part, globalRegex, sedInfo.replacement, {
           occurrence,
           replaceAll,
         });
@@ -455,7 +459,7 @@ function getOccurrence(flags: string): number | null {
 
 function replaceLine(
   line: string,
-  regex: RegExp,
+  globalRegex: RegExp,
   replacement: string,
   options: {
     occurrence: number | null;
@@ -463,10 +467,7 @@ function replaceLine(
   },
 ): string {
   let seen = 0;
-  const globalRegex = new RegExp(
-    regex.source,
-    regex.flags.includes('g') ? regex.flags : `${regex.flags}g`,
-  );
+  globalRegex.lastIndex = 0;
 
   return line.replace(globalRegex, (...args: unknown[]) => {
     const match = String(args[0]);

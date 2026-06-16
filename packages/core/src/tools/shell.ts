@@ -1446,6 +1446,33 @@ interface PreparedSedEdit {
   meta: ReadTextFileResponse['_meta'];
 }
 
+class SedEditSimulationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SedEditSimulationError';
+  }
+}
+
+class SedEditCancelledError extends Error {
+  constructor() {
+    super('Command was cancelled by user before it could complete.');
+    this.name = 'SedEditCancelledError';
+  }
+}
+
+function getAbortReasonName(signal: AbortSignal): string | undefined {
+  const reason = signal.reason as unknown;
+  if (
+    typeof reason === 'object' &&
+    reason !== null &&
+    'name' in reason &&
+    typeof reason.name === 'string'
+  ) {
+    return reason.name;
+  }
+  return undefined;
+}
+
 const LEADING_ENV_ASSIGNMENT_RE = /^\s*[A-Za-z_][A-Za-z0-9_]*=/;
 
 export class ShellToolInvocation extends BaseToolInvocation<
@@ -1486,12 +1513,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const { content, _meta } = await this.config
       .getFileSystemService()
       .readTextFile({ path: filePath });
+    let newContent: string;
+    try {
+      newContent = applySedSubstitution(content, sedInfo);
+    } catch (err) {
+      throw new SedEditSimulationError(getErrorMessage(err));
+    }
 
     return {
       filePath,
       fileName: path.basename(filePath),
       originalContent: content,
-      newContent: applySedSubstitution(content, sedInfo),
+      newContent,
       meta: {
         ..._meta,
         lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
@@ -1536,12 +1569,83 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
   }
 
-  private async executeSedEdit(sedInfo: SedEditInfo): Promise<ToolResult> {
+  private sedEditCancelledResult(
+    signal: AbortSignal,
+    effectiveTimeout: number,
+  ): ToolResult {
+    if (getAbortReasonName(signal) === 'TimeoutError') {
+      const message = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
+      return {
+        llmContent: message,
+        returnDisplay: message,
+      };
+    }
+    return {
+      llmContent: 'Command was cancelled by user before it could complete.',
+      returnDisplay: 'Command cancelled by user.',
+    };
+  }
+
+  private waitForSedOperation<T>(
+    operation: () => Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    if (signal.aborted) {
+      return Promise.reject(new SedEditCancelledError());
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        reject(new SedEditCancelledError());
+      };
+      const removeAbortListener = () => {
+        signal.removeEventListener('abort', onAbort);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      let operationPromise: Promise<T>;
+      try {
+        operationPromise = operation();
+      } catch (err) {
+        removeAbortListener();
+        reject(err);
+        return;
+      }
+      operationPromise.then(
+        (value) => {
+          removeAbortListener();
+          resolve(value);
+        },
+        (err: unknown) => {
+          removeAbortListener();
+          reject(err);
+        },
+      );
+    });
+  }
+
+  private async executeSedEdit(
+    sedInfo: SedEditInfo,
+    signal: AbortSignal,
+    effectiveTimeout: number,
+  ): Promise<ToolResult> {
     let edit: PreparedSedEdit;
     try {
-      edit = await this.prepareSedEdit(sedInfo);
+      edit = await this.waitForSedOperation(
+        () => this.prepareSedEdit(sedInfo),
+        signal,
+      );
     } catch (err) {
       const filePath = this.resolveSedFilePath(sedInfo.filePath);
+      if (err instanceof SedEditCancelledError) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      if (err instanceof SedEditSimulationError) {
+        const message = `Error simulating sed edit for file '${filePath}': ${err.message}`;
+        return this.sedEditError(
+          message,
+          ToolErrorType.EDIT_PREPARATION_FAILURE,
+        );
+      }
       const message = `Error reading file for sed edit '${filePath}': ${getErrorMessage(err)}`;
       return this.sedEditError(
         message,
@@ -1571,50 +1675,71 @@ export class ShellToolInvocation extends BaseToolInvocation<
       };
     }
 
-    const display = this.makeSedEditDisplay(edit);
     if (edit.originalContent === edit.newContent) {
+      const message = `sed edit made no changes to ${edit.filePath}.`;
       return {
-        llmContent: `sed edit made no changes to ${edit.filePath}.`,
-        returnDisplay: display,
+        llmContent: message,
+        returnDisplay: message,
       };
     }
 
+    const display = this.makeSedEditDisplay(edit);
+    let fileHistoryBackupRecorded = false;
+    const userModifiedSedContent = this.confirmedSedNewContent !== undefined;
+
     try {
+      if (signal.aborted) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
       try {
-        await this.config.getFileHistoryService().trackEdit(edit.filePath);
+        await this.waitForSedOperation(
+          () => this.config.getFileHistoryService().trackEdit(edit.filePath),
+          signal,
+        );
+        fileHistoryBackupRecorded = true;
       } catch (err) {
+        if (err instanceof SedEditCancelledError) {
+          return this.sedEditCancelledResult(signal, effectiveTimeout);
+        }
         debugLogger.warn(
           `file history trackEdit failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
         );
         // File history is best-effort; never block shell-compatible edits.
       }
 
-      await this.config.getFileSystemService().writeTextFile({
-        path: edit.filePath,
-        content: edit.newContent,
-        _meta: edit.meta,
-      });
+      if (signal.aborted) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      await this.waitForSedOperation(
+        () =>
+          this.config.getFileSystemService().writeTextFile({
+            path: edit.filePath,
+            content: edit.newContent,
+            _meta: edit.meta,
+          }),
+        signal,
+      );
 
-      try {
-        CommitAttributionService.getInstance().recordEdit(
-          edit.filePath,
-          edit.originalContent,
-          edit.newContent,
-        );
-      } catch (err) {
-        debugLogger.warn(
-          `commit attribution recordEdit failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
-        );
-        // Attribution is diagnostic metadata; the sed edit already succeeded.
+      if (!userModifiedSedContent) {
+        try {
+          CommitAttributionService.getInstance().recordEdit(
+            edit.filePath,
+            edit.originalContent,
+            edit.newContent,
+          );
+        } catch (err) {
+          debugLogger.warn(
+            `commit attribution recordEdit failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+          );
+          // Attribution is diagnostic metadata; the sed edit already succeeded.
+        }
       }
 
       try {
         const postWriteStats = fs.statSync(edit.filePath);
-        if (postWriteStats) {
-          this.config
-            .getFileReadCache()
-            .recordWrite(edit.filePath, postWriteStats);
-        }
+        this.config
+          .getFileReadCache()
+          .recordWrite(edit.filePath, postWriteStats);
       } catch (err) {
         debugLogger.warn(
           `file read cache recordWrite failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
@@ -1627,6 +1752,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
         returnDisplay: display,
       };
     } catch (err) {
+      if (err instanceof SedEditCancelledError) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      if (fileHistoryBackupRecorded) {
+        debugLogger.warn(
+          `sed edit write failed after file history backup was recorded for ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
+      }
       let type = ToolErrorType.FILE_WRITE_FAILURE;
       let message = `Error writing sed edit to file '${edit.filePath}': ${getErrorMessage(err)}`;
       if (isNodeError(err)) {
@@ -1854,14 +1987,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return this.executeBackground(signal, shellExecutionConfig);
     }
 
-    const sedInfo = this.getSedEditInfo();
-    if (sedInfo && !this.sedEditPreviewFailed) {
-      debugLogger.debug('executing simulated sed edit', {
-        command: this.params.command,
-      });
-      return this.executeSedEdit(sedInfo);
-    }
-
     const effectiveTimeout =
       this.params.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_MS;
 
@@ -1885,6 +2010,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
         timeoutSignal,
         promoteAbortController.signal,
       ]);
+    }
+
+    const sedInfo = this.getSedEditInfo();
+    if (sedInfo && !this.sedEditPreviewFailed) {
+      if (this.preparedSedEdit) {
+        debugLogger.debug('executing simulated sed edit', {
+          command: this.params.command,
+        });
+        return this.executeSedEdit(sedInfo, combinedSignal, effectiveTimeout);
+      }
+      debugLogger.debug(
+        'falling back to shell execution for sed edit without prepared preview',
+        { command: this.params.command },
+      );
     }
 
     // Add co-author to git commit commands and Qwen Code attribution to

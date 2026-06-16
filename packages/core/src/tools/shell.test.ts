@@ -30,11 +30,19 @@ vi.mock('os');
 vi.mock('crypto');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
-import { ShellTool, type ShellToolInvocation } from './shell.js';
+import {
+  ShellTool,
+  type ShellToolInvocation,
+  type ShellToolParams,
+} from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { ApprovalMode, type Config } from '../config/config.js';
-import { ToolConfirmationOutcome } from './tools.js';
+import {
+  ToolConfirmationOutcome,
+  type ToolInvocation,
+  type ToolResult,
+} from './tools.js';
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,
@@ -391,6 +399,18 @@ describe('ShellTool', () => {
     describe('simulated sed edit', () => {
       const expectedSedFilePath = path.resolve('/test/dir', 'file.txt');
 
+      const confirmSedEdit = async (
+        invocation: ToolInvocation<ShellToolParams, ToolResult>,
+      ) => {
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        expect(details.type).toBe('edit');
+        if (details.type !== 'edit') {
+          throw new Error('expected edit confirmation');
+        }
+        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      };
+
       it('renders a qualifying sed -i command as an edit confirmation', async () => {
         mockFileSystemService.readTextFile.mockResolvedValue({
           content: 'foo\n',
@@ -418,7 +438,7 @@ describe('ShellTool', () => {
         expect(details.fileDiff).toContain('+bar');
       });
 
-      it('applies a qualifying sed -i command without spawning a shell', async () => {
+      it('falls back to shell execution when sed has no prepared preview', async () => {
         mockFileSystemService.readTextFile.mockResolvedValue({
           content: 'foo foo\n',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
@@ -429,6 +449,32 @@ describe('ShellTool', () => {
           directory: '/test/dir',
           is_background: false,
         });
+
+        const resultPromise = invocation.execute(mockAbortSignal);
+
+        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(mockShellExecutionService).toHaveBeenCalled();
+
+        resolveShellExecution({ output: 'done' });
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('Output: done');
+      });
+
+      it('applies a qualifying sed -i command without spawning a shell after preview', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/g' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
 
         const result = await invocation.execute(mockAbortSignal);
 
@@ -459,6 +505,7 @@ describe('ShellTool', () => {
           directory: '/test/dir',
           is_background: false,
         });
+        await confirmSedEdit(invocation);
 
         const result = await invocation.execute(mockAbortSignal);
 
@@ -468,22 +515,35 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('sed edit made no changes');
       });
 
-      it('maps sed execute read ENOENT to file not found', async () => {
-        mockFileSystemService.readTextFile.mockRejectedValue(
-          Object.assign(new Error('missing'), { code: 'ENOENT' }),
-        );
+      it.each([
+        {
+          code: 'ENOENT',
+          type: ToolErrorType.FILE_NOT_FOUND,
+        },
+        {
+          code: 'EACCES',
+          type: ToolErrorType.READ_CONTENT_FAILURE,
+        },
+      ])('maps sed execute read error $code', async ({ code, type }) => {
+        mockFileSystemService.readTextFile
+          .mockResolvedValueOnce({
+            content: 'foo\n',
+            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+          })
+          .mockRejectedValueOnce(Object.assign(new Error(code), { code }));
 
         const invocation = shellTool.build({
           command: "sed -i 's/foo/bar/' file.txt",
           directory: '/test/dir',
           is_background: false,
         });
+        await confirmSedEdit(invocation);
 
         const result = await invocation.execute(mockAbortSignal);
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
-        expect(result.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
+        expect(result.error?.type).toBe(type);
       });
 
       it.each([
@@ -513,11 +573,17 @@ describe('ShellTool', () => {
           directory: '/test/dir',
           is_background: false,
         });
+        await confirmSedEdit(invocation);
 
         const result = await invocation.execute(mockAbortSignal);
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(result.error?.type).toBe(type);
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'sed edit write failed after file history backup was recorded',
+          ),
+        );
       });
 
       it('continues applying a simulated sed edit when file history tracking fails', async () => {
@@ -534,6 +600,7 @@ describe('ShellTool', () => {
           directory: '/test/dir',
           is_background: false,
         });
+        await confirmSedEdit(invocation);
 
         const result = await invocation.execute(mockAbortSignal);
 
@@ -570,6 +637,7 @@ describe('ShellTool', () => {
           directory: '/test/dir',
           is_background: false,
         });
+        await confirmSedEdit(invocation);
 
         const result = await invocation.execute(mockAbortSignal);
 
@@ -593,6 +661,10 @@ describe('ShellTool', () => {
           content: 'foo\n',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
+        const recordEditSpy = vi.spyOn(
+          CommitAttributionService.getInstance(),
+          'recordEdit',
+        );
 
         const invocation = shellTool.build({
           command: "sed -i 's/foo/bar/' file.txt",
@@ -608,12 +680,89 @@ describe('ShellTool', () => {
         const result = await invocation.execute(mockAbortSignal);
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(recordEditSpy).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
           path: expectedSedFilePath,
           content: 'baz\n',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
         expect(result.llmContent).toContain('sed edit applied');
+      });
+
+      it('does not write when sed execution is cancelled after reading', async () => {
+        const abortController = new AbortController();
+        mockFileSystemService.readTextFile
+          .mockResolvedValueOnce({
+            content: 'foo\n',
+            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+          })
+          .mockImplementationOnce(async () => {
+            abortController.abort();
+            return {
+              content: 'foo\n',
+              _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+            };
+          });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        const details = await invocation.getConfirmationDetails(
+          abortController.signal,
+        );
+        expect(details.type).toBe('edit');
+        if (details.type !== 'edit') {
+          throw new Error('expected edit confirmation');
+        }
+        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+        const result = await invocation.execute(abortController.signal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(result.llmContent).toContain('Command was cancelled');
+      });
+
+      it('reports timeout when a prepared sed edit times out before execution', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+          timeout: 5000,
+        });
+        await confirmSedEdit(invocation);
+
+        const originalAbortSignal = globalThis.AbortSignal;
+        const mockTimeoutSignal = {
+          aborted: true,
+          reason: { name: 'TimeoutError' },
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        } as unknown as AbortSignal;
+        vi.stubGlobal('AbortSignal', {
+          ...originalAbortSignal,
+          timeout: vi.fn().mockReturnValue(mockTimeoutSignal),
+          any: vi.fn().mockReturnValue(mockTimeoutSignal),
+        });
+
+        try {
+          const result = await invocation.execute(mockAbortSignal);
+
+          expect(mockShellExecutionService).not.toHaveBeenCalled();
+          expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+          expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+          expect(result.llmContent).toContain('Command timed out after 5000ms');
+        } finally {
+          vi.stubGlobal('AbortSignal', originalAbortSignal);
+        }
       });
 
       it('switches approval mode when sed edit confirmation proceeds always', async () => {
