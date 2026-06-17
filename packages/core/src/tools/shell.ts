@@ -1510,6 +1510,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   private async prepareSedEdit(sedInfo: SedEditInfo): Promise<PreparedSedEdit> {
     const filePath = this.resolveSedFilePath(sedInfo.filePath);
+    if (fs.lstatSync(filePath).isSymbolicLink()) {
+      throw new Error(
+        `sed edit target '${filePath}' is a symlink; falling back to shell execution`,
+      );
+    }
     const { content, _meta } = await this.config
       .getFileSystemService()
       .readTextFile({ path: filePath });
@@ -1710,15 +1715,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (signal.aborted) {
         return this.sedEditCancelledResult(signal, effectiveTimeout);
       }
-      await this.waitForSedOperation(
-        () =>
-          this.config.getFileSystemService().writeTextFile({
-            path: edit.filePath,
-            content: edit.newContent,
-            _meta: edit.meta,
-          }),
-        signal,
-      );
+      // writeTextFile is not cancellation-aware; once the write starts, await
+      // it so the result reflects the on-disk state instead of a stale cancel.
+      await this.config.getFileSystemService().writeTextFile({
+        path: edit.filePath,
+        content: edit.newContent,
+        _meta: edit.meta,
+      });
 
       if (!userModifiedSedContent) {
         try {

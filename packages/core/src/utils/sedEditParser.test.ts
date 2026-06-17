@@ -229,6 +229,15 @@ describe('sedEditParser', () => {
     );
   });
 
+  it('does not process a phantom line after a trailing newline', () => {
+    const sedInfo = parseSedEditCommand("sed -i 's/$/!/g' file.txt");
+
+    expect(sedInfo).not.toBeNull();
+    expect(applySedSubstitution('', sedInfo!)).toBe('');
+    expect(applySedSubstitution('hello\n', sedInfo!)).toBe('hello!\n');
+    expect(applySedSubstitution('\n', sedInfo!)).toBe('!\n');
+  });
+
   it('supports multi-digit numeric occurrences', () => {
     const sedInfo = parseSedEditCommand("sed -i 's/x/y/10' file.txt");
 

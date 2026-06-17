@@ -144,6 +144,9 @@ describe('ShellTool', () => {
 
     // executeBackground writes to disk; stub mkdirSync + createWriteStream.
     vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
+    vi.mocked(fs.lstatSync).mockReturnValue({
+      isSymbolicLink: () => false,
+    } as fs.Stats);
     vi.mocked(fs.createWriteStream).mockReturnValue({
       write: vi.fn(),
       end: vi.fn(),
@@ -726,6 +729,46 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('Command was cancelled');
       });
 
+      it('awaits an in-flight sed write after cancellation starts', async () => {
+        const abortController = new AbortController();
+        let resolveWrite!: () => void;
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        mockFileSystemService.writeTextFile.mockReturnValue(
+          new Promise((resolve) => {
+            resolveWrite = () => resolve({});
+          }),
+        );
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
+
+        const resultPromise = invocation.execute(abortController.signal);
+        await vi.waitFor(() =>
+          expect(mockFileSystemService.writeTextFile).toHaveBeenCalled(),
+        );
+
+        let settled = false;
+        void resultPromise.then(() => {
+          settled = true;
+        });
+        abortController.abort();
+        await Promise.resolve();
+
+        expect(settled).toBe(false);
+
+        resolveWrite();
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('sed edit applied');
+      });
+
       it('reports timeout when a prepared sed edit times out before execution', async () => {
         mockFileSystemService.readTextFile.mockResolvedValue({
           content: 'foo\n',
@@ -855,6 +898,32 @@ describe('ShellTool', () => {
 
         expect(result.llmContent).toContain('Output: done');
         expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      });
+
+      it('falls back to shell execution when the sed target is a symlink', async () => {
+        vi.mocked(fs.lstatSync).mockReturnValue({
+          isSymbolicLink: () => true,
+        } as fs.Stats);
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        const resultPromise = invocation.execute(mockAbortSignal);
+
+        expect(details.type).toBe('exec');
+        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(mockShellExecutionService).toHaveBeenCalled();
+
+        resolveShellExecution({ output: 'done' });
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('Output: done');
       });
 
       it('falls back to shell execution for env-prefixed shell wrappers', async () => {

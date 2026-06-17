@@ -147,6 +147,9 @@ function isSafeCombinedFlagArg(arg: string): boolean {
     return false;
   }
   const flags = arg.slice(1);
+  // GNU sed treats everything after -i in a combined flag as the backup suffix:
+  // -iE means in-place with .E backup, not -i + -E. Only forms with i last
+  // (for example, -Ei/-ri) are safe.
   if (flags.startsWith('i') || !/^[Eri]+$/u.test(flags)) {
     return false;
   }
@@ -383,6 +386,10 @@ export function applySedSubstitution(
   content: string,
   sedInfo: SedEditInfo,
 ): string {
+  if (content.length === 0) {
+    return '';
+  }
+
   const jsPattern = toJavascriptPattern(sedInfo);
   const occurrence = getOccurrence(sedInfo.flags);
   const replaceAll = sedInfo.flags.includes('g');
@@ -393,8 +400,11 @@ export function applySedSubstitution(
       regex.source,
       regex.flags.includes('g') ? regex.flags : `${regex.flags}g`,
     );
-    return content
-      .split(/(\n)/)
+    const parts = content.split(/(\n)/);
+    const processableParts = content.endsWith('\n')
+      ? parts.slice(0, -1)
+      : parts;
+    return processableParts
       .map((part, index) => {
         if (index % 2 === 1) {
           return part;
