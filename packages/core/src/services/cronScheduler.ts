@@ -68,7 +68,7 @@ export interface CronJob {
  * `/loop` (loop_wakeup). Kept separate from cron jobs: never persisted,
  * never counted against MAX_JOBS, fired at an exact ms (not minute-rounded).
  */
-export interface SessionWakeup {
+interface SessionWakeup {
   id: string;
   fireAtMs: number;
   prompt: string;
@@ -289,6 +289,16 @@ export class CronScheduler {
     wasClamped: boolean;
     replacedId: string | null;
   } {
+    // Enforce the disabled invariant at the layer that owns it: a disabled
+    // scheduler never fires, so a wakeup scheduled here would be a silent
+    // zombie. LoopWakeup pre-checks `disabled` for a friendly message; this
+    // guards any other caller.
+    if (this._disabled) {
+      throw new Error(
+        'Cannot schedule a loop wakeup: the scheduler is disabled for this ' +
+          'session. Restart the session to re-enable.',
+      );
+    }
     const clampedDelaySeconds = clampWakeupSeconds(delaySeconds);
     const roundedDelaySeconds = Number.isFinite(delaySeconds)
       ? Math.round(delaySeconds)

@@ -498,6 +498,14 @@ describe('CronScheduler', () => {
       expect(scheduler.running).toBe(false);
     });
 
+    it('scheduleWakeup throws once the scheduler is disabled', () => {
+      scheduler.disable();
+      expect(() => scheduler.scheduleWakeup(300, '/loop check')).toThrow(
+        'scheduler is disabled',
+      );
+      expect(scheduler.sessionSize).toBe(0);
+    });
+
     it('keeps second precision (does not round to the minute)', () => {
       // 90s would round up to 2 min under the old cron path; the timer is exact.
       const w = scheduler.scheduleWakeup(90, 'p');
