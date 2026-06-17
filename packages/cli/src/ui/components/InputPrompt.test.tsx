@@ -578,6 +578,31 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    // Regression for #5145 (wenshao review): `hasTabConsumer` is now gated on
+    // `buffer.text.length === 0` instead of the old sticky `suggestionDismissed`
+    // flag, so it reacts to the *current* buffer. With a promptSuggestion present
+    // but a NON-empty buffer (the user is mid-typing), Tab must NOT be consumed —
+    // Windows approval-mode cycling stays enabled. The old `Boolean(promptSuggestion)`
+    // gate wrongly reported true here. The complementary empty-buffer → true
+    // direction (i.e. restored after deleting back to empty) is pinned by
+    // "reports true immediately when promptSuggestion prop is set" above.
+    it('reports false when a promptSuggestion is set but the buffer is non-empty', async () => {
+      mockBuffer.text = 'commit';
+      const onTabConsumerChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          promptSuggestion="commit this"
+          onTabConsumerChange={onTabConsumerChange}
+        />,
+      );
+      await wait();
+
+      expect(onTabConsumerChange).toHaveBeenCalledWith(false);
+      expect(onTabConsumerChange).not.toHaveBeenCalledWith(true);
+      unmount();
+    });
+
     it('reports true while mid-input ghost text offers an accept', async () => {
       mockCommandCompletion.midInputGhostText = {
         text: 'ile.txt',

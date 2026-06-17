@@ -210,6 +210,7 @@ describe('createFollowupController', () => {
       expect.objectContaining({
         outcome: 'accepted',
         accept_method: 'right',
+        accept_source: 'fallback',
         suggestion_length: 11,
       }),
     );
@@ -218,6 +219,39 @@ describe('createFollowupController', () => {
     await Promise.resolve();
     expect(onAccept).toHaveBeenCalledTimes(1);
     expect(onAccept).toHaveBeenCalledWith('commit this');
+
+    ctrl.cleanup();
+  });
+
+  it('accept prefers the live suggestion over fallbackText and reports source "live"', async () => {
+    const onStateChange = vi.fn();
+    const onOutcome = vi.fn();
+    const onAccept = vi.fn();
+    const ctrl = createFollowupController({
+      onStateChange,
+      onOutcome,
+      getOnAccept: () => onAccept,
+    });
+
+    ctrl.setSuggestion('live suggestion');
+    vi.advanceTimersByTime(300);
+
+    // A live suggestion is present; fallbackText must be ignored. Guards the
+    // `currentState.suggestion ?? options.fallbackText` ordering — a flip would
+    // silently corrupt the accepted text and telemetry length.
+    ctrl.accept('tab', { fallbackText: 'fallback text' });
+
+    expect(onOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'accepted',
+        accept_source: 'live',
+        suggestion_length: 'live suggestion'.length,
+      }),
+    );
+
+    await Promise.resolve();
+    expect(onAccept).toHaveBeenCalledTimes(1);
+    expect(onAccept).toHaveBeenCalledWith('live suggestion');
 
     ctrl.cleanup();
   });

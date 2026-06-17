@@ -104,6 +104,7 @@ export function useFollowupSuggestionsCLI(
     (params: {
       outcome: 'accepted' | 'ignored';
       accept_method?: 'tab' | 'enter' | 'right';
+      accept_source?: 'live' | 'fallback';
       time_ms: number;
       suggestion_length: number;
     }) => {
@@ -114,6 +115,7 @@ export function useFollowupSuggestionsCLI(
         new PromptSuggestionEvent({
           outcome: params.outcome,
           accept_method: params.accept_method,
+          accept_source: params.accept_source,
           ...(params.outcome === 'accepted'
             ? { time_to_accept_ms: params.time_ms }
             : { time_to_ignore_ms: params.time_ms }),

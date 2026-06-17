@@ -59,6 +59,13 @@ export interface FollowupControllerOptions {
   onOutcome?: (params: {
     outcome: 'accepted' | 'ignored';
     accept_method?: 'tab' | 'enter' | 'right';
+    /**
+     * Whether the accepted text came from the live controller suggestion or
+     * from `fallbackText` (no live suggestion — e.g. type-then-delete or
+     * within the show delay). Lets analytics distinguish the two, since a
+     * fallback accept reports `time_ms: 0` (it was never shown via the timer).
+     */
+    accept_source?: 'live' | 'fallback';
     time_ms: number;
     suggestion_length: number;
   }) => void;
@@ -160,6 +167,9 @@ export function createFollowupController(
 
     accepting = true;
 
+    const accept_source: 'live' | 'fallback' = currentState.suggestion
+      ? 'live'
+      : 'fallback';
     const text = currentState.suggestion ?? options?.fallbackText ?? null;
     const { shownAt } = currentState;
     if (!text) {
@@ -171,6 +181,7 @@ export function createFollowupController(
       onOutcome?.({
         outcome: 'accepted',
         accept_method: method,
+        accept_source,
         time_ms: shownAt > 0 ? Date.now() - shownAt : 0,
         suggestion_length: text.length,
       });
