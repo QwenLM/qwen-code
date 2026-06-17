@@ -21,20 +21,34 @@ export const TIME_COL = 16;
 export const TITLE_COL = 24;
 export const BRANCH_COL = 12;
 
+/**
+ * Format an ISO 8601 timestamp to a UTC short form: YYYY-MM-DD HH:MM.
+ * Uses UTC methods so the human output matches the raw data in JSON.
+ */
 function formatTime(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
 /**
  * Sanitize a user-controllable string for terminal output:
- * 1. Strip \r and \n to prevent carriage-return / log-injection attacks.
- * 2. Escape ANSI control sequences that could manipulate the terminal.
+ * 1. Strip \r, \n, and \t to prevent carriage-return / log-injection
+ *    attacks and to keep table columns aligned.
+ * 2. Escape ANSI escape sequences that could manipulate the terminal.
+ * 3. Strip remaining C0 control characters (0x00-0x08, 0x0b, 0x0c,
+ *    0x0e-0x1f) and C1 controls (0x7f-0x9f) that can cause disruptive
+ *    terminal behaviour (bell, backspace, cursor movement, etc.).
  */
 function sanitize(value: string): string {
-  return escapeAnsiCtrlCodes(value.replace(/[\r\n]/g, ''));
+  // Strip \r, \n, \t — these either inject fake newlines or misalign columns.
+  const stripped = value.replace(/[\r\n\t]/g, '');
+  // Neutralize ANSI escape sequences (e.g. colour codes).
+  const escaped = escapeAnsiCtrlCodes(stripped);
+  // Remove remaining C0/C1 controls that escapeAnsiCtrlCodes doesn't cover.
+  // eslint-disable-next-line no-control-regex
+  return escaped.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
 }
 
 /**
@@ -58,28 +72,15 @@ function truncate(str: string, maxLen: number): string {
   const width = stringWidth(str);
   if (width <= maxLen) return str;
 
-  if (maxLen <= 3) {
-    let result = '';
-    let w = 0;
-    for (const char of str) {
-      const cw = stringWidth(char);
-      if (w + cw > maxLen) break;
-      result += char;
-      w += cw;
-    }
-    return result;
-  }
+  const suffix = maxLen > 3 ? '...' : '';
+  const target = maxLen - stringWidth(suffix);
 
-  const suffix = '...';
-  const suffixWidth = 3;
-  const targetWidth = maxLen - suffixWidth;
   let result = '';
   let w = 0;
   for (const char of str) {
-    const cw = stringWidth(char);
-    if (w + cw > targetWidth) break;
+    w += stringWidth(char);
+    if (w > target) break;
     result += char;
-    w += cw;
   }
   return result + suffix;
 }
@@ -100,7 +101,7 @@ function outputHuman(items: SessionListItem[]): void {
   const header =
     padDisplay('SESSION ID', SESSION_COL) +
     ' ' +
-    padDisplay('STARTED (LOCAL)', TIME_COL) +
+    padDisplay('STARTED', TIME_COL) +
     ' ' +
     padDisplay('TITLE', TITLE_COL) +
     ' ' +
@@ -115,18 +116,17 @@ function outputHuman(items: SessionListItem[]): void {
       sanitize(String(item.sessionId ?? '')),
       SESSION_COL,
     );
-    const time = formatTime(item.startTime);
+    const time = truncate(sanitize(formatTime(item.startTime)), TIME_COL);
+    const sanitizedPrompt = sanitize(item.prompt ?? '');
     const title = truncate(
-      item.customTitle != null
-        ? sanitize(item.customTitle)
-        : sanitize(item.prompt ?? ''),
+      item.customTitle != null ? sanitize(item.customTitle) : sanitizedPrompt,
       TITLE_COL,
     );
     const branch = truncate(
       item.gitBranch != null ? sanitize(item.gitBranch) : '-',
       BRANCH_COL,
     );
-    const prompt = truncate(sanitize(item.prompt ?? ''), PROMPT_COL);
+    const prompt = truncate(sanitizedPrompt, PROMPT_COL);
 
     writeStdoutLine(
       `${padDisplay(sessionId, SESSION_COL)} ${padDisplay(time, TIME_COL)} ${padDisplay(title, TITLE_COL)} ${padDisplay(branch, BRANCH_COL)} ${prompt}`,
@@ -183,6 +183,13 @@ export async function handleList(argv: ListArgs): Promise<void> {
   if (argv.json) {
     for (const item of result.items) {
       writeStdoutLine(JSON.stringify(toJsonItem(item)));
+    }
+    // Emit hasMore hint via stderr so it never contaminates the stdout JSON
+    // stream, keeping pipelines like `qwen sessions list --json | jq …` safe.
+    if (result.items.length > 0 && result.hasMore) {
+      writeStderrLine(
+        `Note: ${result.items.length} sessions shown, more available. Use --limit to show more.`,
+      );
     }
   } else {
     outputHuman(result.items);
