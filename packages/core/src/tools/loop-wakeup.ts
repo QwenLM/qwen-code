@@ -9,7 +9,11 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { clampWakeupSeconds } from '../services/cronScheduler.js';
+import {
+  WAKEUP_MAX_SECONDS,
+  WAKEUP_MIN_SECONDS,
+  clampWakeupSeconds,
+} from '../services/cronScheduler.js';
 import { getErrorMessage } from '../utils/errors.js';
 
 export interface LoopWakeupParams {
@@ -35,8 +39,11 @@ class LoopWakeupInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     const clamped = clampWakeupSeconds(this.params.delaySeconds);
+    const roundedDelaySeconds = Number.isFinite(this.params.delaySeconds)
+      ? Math.round(this.params.delaySeconds)
+      : this.params.delaySeconds;
     const prefix =
-      clamped === this.params.delaySeconds
+      clamped === roundedDelaySeconds
         ? `${clamped}s`
         : `${clamped}s (requested ${formatRequested(this.params.delaySeconds)})`;
     return `${prefix}: ${this.params.prompt}`;
@@ -73,7 +80,7 @@ class LoopWakeupInvocation extends BaseToolInvocation<
         `Scheduled loop wakeup ${id}.`,
         `Scheduled for: ${scheduledFor} (in ${clampedDelaySeconds}s).`,
         wasClamped
-          ? `Requested ${formatRequested(this.params.delaySeconds)} was clamped to the [60, 3600] s range.`
+          ? `Requested ${formatRequested(this.params.delaySeconds)} was clamped to the [${WAKEUP_MIN_SECONDS}, ${WAKEUP_MAX_SECONDS}] s range.`
           : null,
         reason ? `Reason: ${reason}.` : null,
         'Session-only one-shot; not persisted. Call LoopWakeup again before ' +
@@ -114,8 +121,7 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
         properties: {
           delaySeconds: {
             type: 'number',
-            description:
-              'Seconds from now to wake up. Clamped to [60, 3600]. Prefer 60-270s for fast-changing state, 1200s+ when there is no reason to check sooner.',
+            description: `Seconds from now to wake up. Clamped to [${WAKEUP_MIN_SECONDS}, ${WAKEUP_MAX_SECONDS}]. Prefer 60-270s for fast-changing state, 1200s+ when there is no reason to check sooner.`,
           },
           prompt: {
             type: 'string',
@@ -154,7 +160,7 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
     params: LoopWakeupParams,
   ): Record<string, unknown> {
     return {
-      delaySeconds: params.delaySeconds,
+      delaySeconds: clampWakeupSeconds(params.delaySeconds),
       prompt: params.prompt,
       reason: params.reason ?? '',
     };

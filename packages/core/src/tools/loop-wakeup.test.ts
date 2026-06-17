@@ -69,6 +69,15 @@ describe('LoopWakeupTool', () => {
     expect(invocation.getDescription()).toBe('300s: continue loop');
   });
 
+  it('does not show a requested suffix when rounding lands in range', () => {
+    const invocation = tool.build({
+      delaySeconds: 59.6,
+      prompt: 'continue loop',
+    });
+
+    expect(invocation.getDescription()).toBe('60s: continue loop');
+  });
+
   it('schedules a session-only one-shot wakeup on the scheduler', async () => {
     const invocation = tool.build({
       delaySeconds: 300,
@@ -151,6 +160,18 @@ describe('LoopWakeupTool', () => {
       delaySeconds: 300,
       prompt: 'continue loop',
       reason: 'CI is still running',
+    });
+  });
+
+  it('projects the clamped delay into AUTO classifier input', () => {
+    expect(
+      tool.toAutoClassifierInput({
+        delaySeconds: 5,
+        prompt: 'continue loop',
+      }),
+    ).toMatchObject({
+      delaySeconds: 60,
+      prompt: 'continue loop',
     });
   });
 

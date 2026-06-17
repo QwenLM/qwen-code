@@ -42,8 +42,8 @@ const FILE_DEBOUNCE_MS = 300;
 // heartbeat for non-finite input. Unlike cron jobs the fire time is exact
 // (second resolution, not minute-rounded) and lives in a separate map — not
 // subject to MAX_JOBS, never durable.
-const WAKEUP_MIN_SECONDS = 60;
-const WAKEUP_MAX_SECONDS = 3600;
+export const WAKEUP_MIN_SECONDS = 60;
+export const WAKEUP_MAX_SECONDS = 3600;
 const WAKEUP_DEFAULT_SECONDS = 1200;
 
 export interface CronJob {
@@ -1048,7 +1048,7 @@ export class CronScheduler {
       lines.push(
         `  - [${wakeup.id}] wakeup at ${new Date(
           wakeup.fireAtMs,
-        ).toLocaleString()}: ${truncatePrompt(wakeup.prompt)}`,
+        ).toISOString()}: ${truncatePrompt(wakeup.prompt)}`,
       );
     }
     return lines.join('\n');
