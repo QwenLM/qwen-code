@@ -18,6 +18,7 @@ import type {
 import {
   AgentEventType,
   ToolConfirmationOutcome,
+  ToolNames,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
@@ -63,6 +64,7 @@ export class SubAgentTracker {
     private readonly client: AgentSideConnection,
     parentToolCallId: string,
     subagentType: string,
+    private readonly onAskUserQuestionCancel?: () => void,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
@@ -226,11 +228,16 @@ export class SubAgentTracker {
             : z
                 .nativeEnum(ToolConfirmationOutcome)
                 .parse(output.outcome.optionId);
-
         // Respond to subagent with the outcome
         await event.respond(outcome, {
           answers: 'answers' in output ? output.answers : undefined,
         });
+        if (
+          outcome === ToolConfirmationOutcome.Cancel &&
+          event.name === ToolNames.ASK_USER_QUESTION
+        ) {
+          this.onAskUserQuestionCancel?.();
+        }
       } catch (error) {
         // If permission request fails, cancel the tool call
         debugLogger.error(
@@ -238,6 +245,9 @@ export class SubAgentTracker {
           error,
         );
         await event.respond(ToolConfirmationOutcome.Cancel);
+        if (event.name === ToolNames.ASK_USER_QUESTION) {
+          this.onAskUserQuestionCancel?.();
+        }
       }
     };
   }

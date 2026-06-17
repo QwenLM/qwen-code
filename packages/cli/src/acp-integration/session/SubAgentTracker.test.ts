@@ -545,6 +545,83 @@ describe('SubAgentTracker', () => {
       });
     });
 
+    it('notifies when nested ask_user_question is cancelled', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+      });
+      const onAskUserQuestionCancel = vi.fn();
+      tracker = new SubAgentTracker(
+        mockContext,
+        mockClient,
+        'parent-call-123',
+        'test-subagent',
+        onAskUserQuestionCancel,
+      );
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: ToolNames.ASK_USER_QUESTION,
+        callId: 'call-ask',
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Question',
+          questions: [{ question: 'Continue?', header: 'Question' }],
+        } as AgentApprovalRequestEvent['confirmationDetails'],
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          {
+            answers: undefined,
+          },
+        );
+      });
+      expect(onAskUserQuestionCancel).toHaveBeenCalledOnce();
+      expect(respondSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        onAskUserQuestionCancel.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('notifies when nested ask_user_question permission request fails', async () => {
+      requestPermissionSpy.mockRejectedValue(new Error('Network error'));
+      const onAskUserQuestionCancel = vi.fn();
+      tracker = new SubAgentTracker(
+        mockContext,
+        mockClient,
+        'parent-call-123',
+        'test-subagent',
+        onAskUserQuestionCancel,
+      );
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: ToolNames.ASK_USER_QUESTION,
+        callId: 'call-ask',
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Question',
+          questions: [{ question: 'Continue?', header: 'Question' }],
+        } as AgentApprovalRequestEvent['confirmationDetails'],
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      });
+      expect(onAskUserQuestionCancel).toHaveBeenCalledOnce();
+      expect(respondSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        onAskUserQuestionCancel.mock.invocationCallOrder[0],
+      );
+    });
+
     it('should forward answers payload from ACP permission responses', async () => {
       requestPermissionSpy.mockResolvedValue({
         outcome: {
