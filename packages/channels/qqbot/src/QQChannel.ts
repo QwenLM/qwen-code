@@ -453,11 +453,12 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.set(chatId, 'group');
     this.replyMsgId.set(chatId, event.id);
     // Strip bot @mention prefix from group messages
-    const text = (event.content || '').replace(/<@!\d+>/g, '').trim();
+    const senderName = event.author.username || event.author.id || 'QQ User';
+    const text = `[${senderName}]: ${(event.content || '').replace(/<@!\d+>/g, '').trim()}`;
     this.handleInbound({
       channelName: this.name,
       senderId: event.author.user_openid || event.author.id,
-      senderName: event.author.username || event.author.id || 'QQ User',
+      senderName,
       chatId,
       text,
       messageId: event.id,
