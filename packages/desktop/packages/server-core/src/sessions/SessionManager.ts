@@ -2868,7 +2868,7 @@ export class SessionManager implements ISessionManager {
   }
 
   private hasNoRenderableLocalMessages(managed: ManagedSession): boolean {
-    const loadedMessageCount = managed.messages.length
+    const loadedMessageCount = managed.messages?.length ?? 0
     const persistedMessageCount = managed.messageCount ?? loadedMessageCount
     return loadedMessageCount === 0 && persistedMessageCount === 0
   }
@@ -2882,16 +2882,11 @@ export class SessionManager implements ISessionManager {
       QWEN_CODE_CONNECTION_SLUG
     )
       return false
-    if (managed.messages.length > 0) return false
-    if (managed.name && !this.isExternalSessionPlaceholderTitle(managed.name))
+    if (!this.hasNoRenderableLocalMessages(managed)) return false
+    const title = typeof managed.name === 'string' ? managed.name : undefined
+    if (title && !this.isExternalSessionPlaceholderTitle(title))
       return false
     if (managed.preview || managed.lastMessageRole) return false
-    if (
-      [managed.createdAt, managed.lastUsedAt, managed.lastMessageAt].some(
-        (timestamp) => typeof timestamp === 'number' && timestamp > 0,
-      )
-    )
-      return false
 
     return true
   }
