@@ -5305,14 +5305,13 @@ describe('Session', () => {
         expect(execute).not.toHaveBeenCalled();
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
         expect(
-          messageBus.request.mock.calls.filter(([request]) => {
-            return (
+          messageBus.request.mock.calls.filter(
+            ([request]) =>
               typeof request === 'object' &&
               request !== null &&
               'eventName' in request &&
-              request.eventName === 'Stop'
-            );
-          }),
+              request.eventName === 'Stop',
+          ),
         ).toHaveLength(1);
         expect(mockChat.addHistory).toHaveBeenCalledWith({
           role: 'user',
