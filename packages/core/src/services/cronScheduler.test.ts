@@ -433,23 +433,54 @@ describe('CronScheduler', () => {
       expect(scheduler.sessionSize).toBe(1);
     });
 
-    it('starts a fresh chain after the last wakeup fires', () => {
+    it('keeps the chain clock across fires (session-level 24h budget)', () => {
+      vi.setSystemTime(new Date(2025, 0, 15, 10, 0, 0));
       const fired: CronJob[] = [];
-      scheduler.create('*/5 * * * *', 'durable cron keeps session alive', true);
       scheduler.start((job) => fired.push(job));
 
       const first = scheduler.scheduleWakeup(3600, '/loop check status');
       scheduler.tick(new Date(first.scheduledFor));
-
-      vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
-
-      expect(() =>
-        scheduler.scheduleWakeup(3600, '/loop check build'),
-      ).not.toThrow();
       expect(fired.some((job) => job.prompt === '/loop check status')).toBe(
         true,
       );
-      expect(scheduler.sessionSize).toBe(2);
+
+      // A fire does NOT reset the chain clock — re-arming within the 24h
+      // budget still works.
+      expect(() =>
+        scheduler.scheduleWakeup(3600, '/loop check build'),
+      ).not.toThrow();
+
+      // The budget runs from the first wakeup and a fire does not restart it,
+      // so re-arming past 24h from the chain start is rejected.
+      vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
+      expect(() => scheduler.scheduleWakeup(3600, '/loop check build')).toThrow(
+        '24h session limit',
+      );
+    });
+
+    it('does not reset the chain clock when a pending wakeup is cancelled', () => {
+      vi.setSystemTime(new Date(2025, 0, 15, 10, 0, 0));
+      const w = scheduler.scheduleWakeup(3600, '/loop check status');
+      scheduler.cancelWakeup(w.id);
+
+      // Cancelling clears the pending wakeup but NOT the 24h chain budget —
+      // re-scheduling past the original 24h window is still rejected.
+      vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
+      expect(() =>
+        scheduler.scheduleWakeup(3600, '/loop check status'),
+      ).toThrow('24h session limit');
+    });
+
+    it('resets the chain clock on stop (new session)', () => {
+      vi.setSystemTime(new Date(2025, 0, 15, 10, 0, 0));
+      scheduler.scheduleWakeup(3600, '/loop check status');
+      scheduler.stop();
+
+      // A new session starts a fresh 24h budget.
+      vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
+      expect(() =>
+        scheduler.scheduleWakeup(3600, '/loop check status'),
+      ).not.toThrow();
     });
 
     it('keeps second precision (does not round to the minute)', () => {

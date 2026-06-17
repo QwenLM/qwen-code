@@ -188,6 +188,11 @@ export class CronScheduler {
   // Loop wakeups live separately: second-resolution, never durable, never
   // counted against MAX_JOBS. Delivered through the same onFire as cron.
   private wakeups = new Map<string, SessionWakeup>();
+  // Start of the self-paced wakeup chain — a session-level 24h budget that
+  // spans the whole session. Deliberately NOT reset when a wakeup fires or
+  // is cancelled: re-arm leaves at most one pending wakeup, so resetting on
+  // an empty map would restart the clock every fire and let a continuous
+  // loop escape the cap. Reset only by stop()/destroy() (a new session).
   private wakeupChainStartedAt: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private onFire: ((job: CronJob) => void) | null = null;
@@ -325,7 +330,6 @@ export class CronScheduler {
     const deleted = this.wakeups.delete(id);
     if (deleted) {
       debugLogger.debug(`Cancelled wakeup ${id}`);
-      if (this.wakeups.size === 0) this.wakeupChainStartedAt = null;
     }
     return deleted;
   }
@@ -337,7 +341,6 @@ export class CronScheduler {
   cancelAllWakeups(): number {
     const count = this.wakeups.size;
     this.wakeups.clear();
-    this.wakeupChainStartedAt = null;
     if (count > 0) debugLogger.debug(`Cancelled ${count} wakeup(s)`);
     return count;
   }
@@ -1001,7 +1004,6 @@ export class CronScheduler {
       debugLogger.debug(`Firing wakeup ${wakeup.id}`);
       if (this.onFire) this.onFire(wakeupToJob(wakeup));
     }
-    if (this.wakeups.size === 0) this.wakeupChainStartedAt = null;
   }
 
   /**
