@@ -25,14 +25,20 @@ environment). So the layers verify like this:
 
 - **Hook logic** (frame→history projection, optionId mapping) — unit-test against a
   **stub** `DaemonSessionClient`, here.
-- **Live daemon round-trip** (attach→prompt→events→vote over loopback SSE) —
-  prerequisites **verified here**: the daemon boots + `/health` 200, AND the
-  configured model backend is an **OpenAI-compatible server on `127.0.0.1:11435`**
-  that answers `/v1/models` 200 from the sandbox (model "egress" is itself loopback —
-  no internet needed). The one link still to prove is that a real model turn
-  actually **streams `session_update`/`tool_call`/`permission_request` frames through
-  `events()`** — which is exactly slice 1's first integration test (fold the proof in
-  there rather than throw away a probe script).
+- **Live daemon round-trip** (attach→prompt→events over loopback SSE) — **PROVEN
+  here** end-to-end (`scripts/capture-daemon-frames.mts`): spawn a real
+  `qwen serve`, `createOrAttach` a session, `prompt`, and the real frame sequence
+  streams back over `events()`. Ground-truth captured for a text turn:
+  `replay_complete` → `session_update/available_commands_update` →
+  `session_update/user_message_chunk` (echo) → N× `session_update/agent_thought_chunk`
+  → N× `session_update/agent_message_chunk` (the terminal chunk carries `_meta.usage`)
+  → top-level `turn_complete {stopReason, promptId}`. Envelope:
+  `{type:'session_update', id, data:{sessionId, update:{sessionUpdate,
+content:{type,text}, _meta?}}}`. (Driven by the operator's configured
+  OpenAI-compatible model endpoint, reachable from the daemon; qwen self-injects
+  the provider key from `settings.env`.) `tool_call`/`permission_request` frames
+  aren't triggered by a text prompt — built against the typed shapes for now,
+  capturable later with a tool-triggering prompt.
 - **Headless TUI render** — `ink-testing-library` renders the TUI to a string for
   assertions; no TTY needed, here.
 - **Interactive acceptance** (the rich TUI feel + the phone handoff) — this is the
