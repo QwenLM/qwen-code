@@ -179,6 +179,18 @@ describe('LoopWakeupTool', () => {
     });
   });
 
+  it('projects the clamped delay into AUTO classifier input', () => {
+    expect(
+      tool.toAutoClassifierInput({
+        delaySeconds: 5,
+        prompt: 'continue loop',
+      }),
+    ).toMatchObject({
+      delaySeconds: 60,
+      prompt: 'continue loop',
+    });
+  });
+
   it('defaults reason to an empty string in classifier input when omitted', () => {
     expect(
       tool.toAutoClassifierInput({

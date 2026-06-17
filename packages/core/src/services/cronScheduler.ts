@@ -42,8 +42,8 @@ const FILE_DEBOUNCE_MS = 300;
 // heartbeat for non-finite input. Unlike cron jobs the fire time is exact
 // (second resolution, not minute-rounded) and lives in a separate map — not
 // subject to MAX_JOBS, never durable.
-const WAKEUP_MIN_SECONDS = 60;
-const WAKEUP_MAX_SECONDS = 3600;
+export const WAKEUP_MIN_SECONDS = 60;
+export const WAKEUP_MAX_SECONDS = 3600;
 const WAKEUP_DEFAULT_SECONDS = 1200;
 const WAKEUP_CHAIN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -864,7 +864,8 @@ export class CronScheduler {
    * is released so another session can take over, and a later
    * `enableDurable()` re-acquires from scratch (a re-enable under a new
    * sessionId must not be blocked by this session's own old lock).
-   * Does not clear jobs — they remain queryable.
+   * Does not clear cron jobs — they remain queryable. Pending wakeups are
+   * cleared because they are session-scoped and meaningless without a timer.
    */
   stop(): void {
     if (this.timer) {
