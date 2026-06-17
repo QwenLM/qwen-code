@@ -1089,13 +1089,13 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Skipped image file');
     });
 
-    it('should keep image inline (not stripped) when the vision bridge is enabled', async () => {
+    it('keeps image inline on the @-path (preserveUnsupportedImage) when the vision bridge is enabled', async () => {
       const fakePngData = Buffer.from('fake png data');
       actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
       mockMimeGetType.mockReturnValue('image/png');
 
-      // Text-only model, but the bridge is enabled — the image must survive so
-      // the bridge can transcribe it downstream instead of being dropped here.
+      // Text-only model, bridge enabled, AND the interactive @-path flag set —
+      // the image must survive so the bridge can transcribe it downstream.
       const mockConfigBridge = {
         ...mockConfig,
         getContentGeneratorConfig: () => ({ modalities: {} }),
@@ -1105,6 +1105,10 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testImageFilePath,
         mockConfigBridge,
+        undefined,
+        undefined,
+        undefined,
+        true, // preserveUnsupportedImage (interactive @-path)
       );
       expect(typeof result.llmContent).toBe('object');
       expect(
@@ -1112,6 +1116,26 @@ describe('fileUtils', () => {
           .mimeType,
       ).toBe('image/png');
       expect(result.returnDisplay).toContain('Read image file');
+    });
+
+    it('still strips image for agent reads (no preserve flag) even when the bridge is enabled', async () => {
+      const fakePngData = Buffer.from('fake png data');
+      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigBridge = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+        getVisionBridgeConfig: () => ({ enabled: true }),
+      } as unknown as Config;
+
+      // No preserve flag (default false) — agent tool read / headless path.
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfigBridge,
+      );
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('does not support image input');
     });
 
     it('still strips audio when the vision bridge is enabled (bridge handles images only)', async () => {

@@ -869,6 +869,11 @@ function unsupportedModalityMessage(
  * @param offset Optional offset for text files (0-based line number).
  * @param limit Optional limit for text files (number of lines to read).
  * @param pages Optional page range for PDF files (e.g. "1-5", "3", "10-20").
+ * @param preserveUnsupportedImage When true and the vision bridge is enabled,
+ *   keep an image inline for a text-only model instead of replacing it with an
+ *   "unsupported" note. Only the interactive `@`-resolution path sets this, so
+ *   the bridge can transcribe it downstream; agent tool reads / headless keep
+ *   the clear "Skipped" behavior.
  * @returns ProcessedFileReadResult object.
  */
 export async function processSingleFileContent(
@@ -877,6 +882,7 @@ export async function processSingleFileContent(
   offset?: number,
   limit?: number,
   pages?: string,
+  preserveUnsupportedImage = false,
 ): Promise<ProcessedFileReadResult> {
   const rootDirectory = config.getTargetDir();
   try {
@@ -968,12 +974,15 @@ export async function processSingleFileContent(
     const modality = mediaModalityKey(fileType);
     if (modality && modality !== 'pdf') {
       if (!modalities[modality]) {
-        // When the vision bridge is enabled, keep image parts inline so the
-        // bridge can transcribe them downstream for a text-only model, instead
-        // of stripping the image to an "unsupported" note here. Other media
-        // (audio/video) are still skipped since the bridge only handles images.
+        // On the interactive @-resolution path, when the vision bridge is
+        // enabled, keep image parts inline so the bridge can transcribe them
+        // downstream for a text-only model, instead of stripping to an
+        // "unsupported" note. Agent tool reads / headless do not set
+        // preserveUnsupportedImage, so they keep the clear "Skipped" behavior.
+        // Other media (audio/video) are always skipped (bridge handles images).
         const bridgeWillHandleImage =
           modality === 'image' &&
+          preserveUnsupportedImage &&
           config.getVisionBridgeConfig?.()?.enabled === true;
         if (!bridgeWillHandleImage) {
           const message = unsupportedModalityMessage(modality, displayName);

@@ -350,6 +350,9 @@ export async function handleAtCommand({
     const result = await readManyFiles(config, {
       paths: pathSpecsToRead,
       signal,
+      // Interactive @-resolution: keep images inline for a text-only model so
+      // the vision bridge can transcribe them (no-op unless the bridge is on).
+      preserveUnsupportedImageForBridge: true,
     });
 
     const parts = Array.isArray(result.contentParts)

@@ -82,5 +82,5 @@ If the conversion fails — the vision model times out, returns nothing, or no i
 
 ## Limitations
 
-- **Interactive only**: the bridge runs in the interactive chat path. Images read by agent tools (`read_file`, `read_many_files`) or in headless / ACP runs are not transcribed — with a text-only model those images are dropped by the model's converter. Use a multimodal model for those flows.
+- **Interactive only**: the bridge runs in the interactive chat path (pasted or `@`-referenced images). Images read by agent tools (`read_file`, `read_many_files`) or in headless / ACP runs are not transcribed — with a text-only model they keep the normal "image input not supported" message. Use a multimodal model for those flows.
 - **Tool-result images and transcription caching** are not handled yet.
