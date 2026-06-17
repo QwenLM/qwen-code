@@ -588,6 +588,53 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
   });
 
+  it('validates mid_turn_message_injected events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: ['check the tests too'] },
+      }),
+    ).toBeDefined();
+
+    // Empty array is structurally valid (the guard only requires a string[]).
+    expect(
+      asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: [] },
+      }),
+    ).toBeDefined();
+
+    // Missing messages, non-string entries, and missing sessionId are rejected.
+    expect(
+      asKnownDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 4,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: ['ok', 42] },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 5,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { messages: ['x'] },
+      }),
+    ).toBeUndefined();
+  });
+
   it('reduces session_closed as terminal and clears pending permissions', () => {
     const state = reduceDaemonSessionEvents([
       {

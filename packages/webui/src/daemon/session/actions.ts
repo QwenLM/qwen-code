@@ -9,6 +9,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionRecapResult,
   DaemonSessionTaskStatus,
   DaemonTranscriptStore,
@@ -33,6 +34,7 @@ import type {
   DaemonNoticeOperation,
   DaemonPromptStatus,
   DaemonSessionActions,
+  SettledPrompt,
   PendingSessionLoad,
 } from './types.js';
 
@@ -44,6 +46,7 @@ export interface CreateDaemonSessionActionsArgs {
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
   activePromptsRef: RefBox<Map<string, ActivePrompt>>;
+  settledPromptsRef: RefBox<Map<string, SettledPrompt>>;
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
   pendingSessionLoadIdRef: RefBox<number>;
   heartbeatSupportedRef: RefBox<boolean>;
@@ -61,6 +64,7 @@ export function createDaemonSessionActions({
   store,
   sessionRef,
   activePromptsRef,
+  settledPromptsRef,
   pendingSessionLoadRef,
   pendingSessionLoadIdRef,
   heartbeatSupportedRef,
@@ -112,6 +116,7 @@ export function createDaemonSessionActions({
       };
     });
     setPromptStatus('idle');
+    settledPromptsRef.current.clear();
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
     store.reset();
     setRestoreMode(mode);
@@ -166,6 +171,7 @@ export function createDaemonSessionActions({
         if (isNonBlockingAccepted(result)) {
           return await waitForAcceptedPromptCompletion(
             activePromptsRef.current,
+            settledPromptsRef.current,
             sessionId,
             ctrl,
             result.promptId,
@@ -202,7 +208,10 @@ export function createDaemonSessionActions({
         if (active?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
         }
-        if (sessionRef.current?.sessionId === sessionId) {
+        if (
+          sessionRef.current?.sessionId === sessionId &&
+          !activePromptsRef.current.has(sessionId)
+        ) {
           setPromptStatus('idle');
         }
       }
@@ -241,7 +250,10 @@ export function createDaemonSessionActions({
         ) {
           activePromptsRef.current.delete(session.sessionId);
         }
-        if (sessionRef.current?.sessionId === session.sessionId) {
+        if (
+          sessionRef.current?.sessionId === session.sessionId &&
+          !activePromptsRef.current.has(session.sessionId)
+        ) {
           setPromptStatus('idle');
         }
       }
@@ -392,6 +404,7 @@ export function createDaemonSessionActions({
         active.controller.abort();
       }
       activePromptsRef.current.clear();
+      settledPromptsRef.current.clear();
       setPromptStatus('idle');
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       if (pendingSessionLoadRef.current) {
@@ -599,6 +612,36 @@ export function createDaemonSessionActions({
       }
     },
 
+    async enqueueMidTurnMessage(
+      message: string,
+      opts?: { signal?: AbortSignal },
+    ): Promise<DaemonMidTurnMessageResult> {
+      // Best-effort and silent: no session / idle session / transport failure /
+      // abort all resolve `{ accepted: false }` so the caller falls back to its
+      // own next-turn queue. Never raises a user-facing notice — a queued
+      // message typed mid-turn is an optimization, not a user-initiated action.
+      // `opts.signal` lets the caller abort a still-in-flight push when the turn
+      // it was meant for settles, so a late arrival can't land in the next turn.
+      const session = sessionRef.current;
+      if (!session) return { accepted: false };
+      try {
+        return await session.enqueueMidTurnMessage(message, opts);
+      } catch (err) {
+        // An abort is the designed settle-time cancel (the message stays in the
+        // browser queue for the next turn), not a failure — stay silent. Any
+        // OTHER error (daemon down, 4xx/5xx, network, timeout) silently disables
+        // mid-turn drain for every client, so surface it at debug for DevTools
+        // without raising a user-facing notice.
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          console.debug(
+            '[enqueueMidTurnMessage] push failed; kept for next turn',
+            err,
+          );
+        }
+        return { accepted: false };
+      }
+    },
+
     async sendShellCommand(command: string) {
       const session = requireSessionForAction(
         addNotice,
@@ -740,11 +783,27 @@ export function createDaemonSessionActions({
 
 function waitForAcceptedPromptCompletion(
   activePrompts: Map<string, ActivePrompt>,
+  settledPrompts: Map<string, SettledPrompt>,
   sessionId: string,
   controller: AbortController,
   promptId: string,
 ): Promise<PromptResult> {
   return new Promise<PromptResult>((resolve, reject) => {
+    // IMPORTANT: Check settledPrompts BEFORE activePrompts. The turn event
+    // may have already freed the active slot (allowing a new prompt to start).
+    // If we checked activePrompts first, we'd find the NEXT prompt's controller
+    // and incorrectly reject this one as aborted.
+    const settledKey = getPromptSettledKey(sessionId, promptId);
+    const settled = settledPrompts.get(settledKey);
+    if (settled) {
+      settledPrompts.delete(settledKey);
+      if (settled.status === 'resolved') {
+        resolve(settled.result);
+      } else {
+        reject(settled.error);
+      }
+      return;
+    }
     const active = activePrompts.get(sessionId);
     if (active?.controller !== controller) {
       reject(new DOMException('Aborted', 'AbortError'));
@@ -752,16 +811,6 @@ function waitForAcceptedPromptCompletion(
     }
     if (active.promptId !== undefined && active.promptId !== promptId) {
       reject(new Error(`Prompt accepted with unexpected id ${promptId}`));
-      return;
-    }
-    if (active.pendingResult !== undefined) {
-      activePrompts.delete(sessionId);
-      resolve(active.pendingResult);
-      return;
-    }
-    if (active.pendingError !== undefined) {
-      activePrompts.delete(sessionId);
-      reject(active.pendingError);
       return;
     }
     if (controller.signal.aborted) {
@@ -798,6 +847,13 @@ function waitForAcceptedPromptCompletion(
     });
     controller.signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+export function getPromptSettledKey(
+  sessionId: string,
+  promptId: string,
+): string {
+  return JSON.stringify([sessionId, promptId]);
 }
 
 function getModeFromSessionContext(

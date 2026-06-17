@@ -20,6 +20,8 @@ import {
   StreamEventType,
   type StreamEvent,
 } from './geminiChat.js';
+import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
+import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
@@ -4438,6 +4440,416 @@ describe('GeminiChat', async () => {
         expect(history.some((h) => h.parts?.some((p) => p.functionCall))).toBe(
           false,
         );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries retryable transport stream errors and succeeds on a later attempt', async () => {
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw transportError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Recovered after transport retry' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retry',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered after transport retry',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops retrying retryable transport stream errors after the retry budget is exhausted', async () => {
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(() =>
+          Promise.resolve(
+            (async function* () {
+              throw transportError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          ),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retry-exhausted',
+        );
+        const events: StreamEvent[] = [];
+        // Collect in the background and capture the terminal error manually:
+        // the rejection only settles after fake timers advance past both retry
+        // delays, so a deferred `expect().rejects` here would either deadlock
+        // (awaited before advancing) or trip `vitest/valid-expect` (not
+        // awaited). Catch-and-assert sidesteps both.
+        let caughtError: unknown;
+        const collecting = (async () => {
+          try {
+            for await (const event of stream) {
+              events.push(event);
+            }
+          } catch (error) {
+            caughtError = error;
+          }
+        })();
+
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await collecting;
+
+        expect(caughtError).toBeInstanceOf(Error);
+        expect((caughtError as Error).message).toContain('terminated');
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(3);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not retry retryable transport stream errors after yielding a chunk', async () => {
+      const transportError = Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('other side closed'), {
+          code: 'UND_ERR_SOCKET',
+        }),
+      });
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'Partial response before socket close' }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw transportError;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-transport-no-retry-after-chunk',
+      );
+      const events: StreamEvent[] = [];
+      await expect(async () => {
+        for await (const event of stream) {
+          events.push(event);
+        }
+      }).rejects.toThrow('terminated');
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(0);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'Partial response before socket close',
+        ),
+      ).toBe(true);
+    });
+
+    it('classifies every allow-listed stream transport code as retryable transport', () => {
+      // Drift guard: the stream allow-list is a hand-curated subset of the
+      // classifier's transport codes. If a code is renamed/removed there, or
+      // a typo is introduced here, this fails instead of silently never
+      // retrying.
+      for (const code of RETRYABLE_STREAM_TRANSPORT_CODES) {
+        expect(classifyRetryError({ code })).toMatchObject({
+          kind: 'transport',
+          diagnosis: 'retryable',
+          transportCode: code,
+        });
+      }
+    });
+
+    it.each([...RETRYABLE_STREAM_TRANSPORT_CODES])(
+      'retries a pre-first-chunk transport error carrying code %s',
+      async (transportCode) => {
+        vi.useFakeTimers();
+        try {
+          const transportError = Object.assign(new TypeError('terminated'), {
+            cause: Object.assign(new Error('socket failure'), {
+              code: transportCode,
+            }),
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                throw transportError;
+
+                yield {} as GenerateContentResponse;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: `Recovered from ${transportCode}` }],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            `prompt-transport-${transportCode}`,
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          expect(
+            events.filter((event) => event.type === StreamEventType.RETRY),
+          ).toHaveLength(1);
+          expect(
+            events.some(
+              (event) =>
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                  `Recovered from ${transportCode}`,
+            ),
+          ).toBe(true);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('retries a transport error whose code is on the error itself (no cause)', async () => {
+      vi.useFakeTimers();
+      try {
+        // getTransportCode checks the direct `error.code` before `cause.code`;
+        // the other tests only exercise the `cause` path.
+        const transportError = Object.assign(new Error('socket reset'), {
+          code: 'ECONNRESET',
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw transportError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Recovered via direct code' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-direct-code',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not retry a transport error that carries an HTTP 4xx status', async () => {
+      // A definitive 4xx is a permanent client error; the socket-level cause
+      // must not relabel it as retryable (classifier keeps 4xx authoritative).
+      const transportError = Object.assign(new TypeError('terminated'), {
+        status: 400,
+        cause: Object.assign(new Error('other side closed'), {
+          code: 'ECONNRESET',
+        }),
+      });
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          throw transportError;
+
+          yield {} as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-transport-4xx-no-retry',
+      );
+      const events: StreamEvent[] = [];
+      await expect(async () => {
+        for await (const event of stream) {
+          events.push(event);
+        }
+      }).rejects.toThrow('terminated');
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(0);
+    });
+
+    it('does not retry a transport code outside the stream allow-list', async () => {
+      // ECONNREFUSED classifies as transport/retryable but is excluded from
+      // RETRYABLE_STREAM_TRANSPORT_CODES (permanent misconfiguration, not a
+      // transient blip), so the stream path must not replay it.
+      const transportError = Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('connection refused'), {
+          code: 'ECONNREFUSED',
+        }),
+      });
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          throw transportError;
+
+          yield {} as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-transport-not-allowlisted',
+      );
+      const events: StreamEvent[] = [];
+      await expect(async () => {
+        for await (const event of stream) {
+          events.push(event);
+        }
+      }).rejects.toThrow('terminated');
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(0);
+    });
+
+    it('surfaces an abort fired during the transport retry delay without retrying again', async () => {
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+        const abortController = new AbortController();
+
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          (async function* () {
+            throw transportError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test', config: { abortSignal: abortController.signal } },
+          'prompt-transport-abort-delay',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        // First event is the RETRY emitted before the 1s transport delay.
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+
+        // Abort while the generator is awaiting the retry delay.
+        const nextPromise = iterator.next();
+        abortController.abort();
+        await expect(nextPromise).rejects.toThrow();
+
+        // Only the initial attempt ran; the abort cut the retry short.
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
       } finally {
         vi.useRealTimers();
       }

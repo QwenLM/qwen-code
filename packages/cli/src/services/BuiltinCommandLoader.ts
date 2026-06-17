@@ -9,6 +9,7 @@ import type { SlashCommand } from '../ui/commands/types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { aboutCommand } from '../ui/commands/aboutCommand.js';
 import { tasksCommand } from '../ui/commands/tasksCommand.js';
+import { workflowsCommand } from '../ui/commands/workflowsCommand.js';
 import { agentsCommand } from '../ui/commands/agentsCommand.js';
 import { arenaCommand } from '../ui/commands/arenaCommand.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
@@ -102,6 +103,12 @@ export class BuiltinCommandLoader implements ICommandLoader {
       aboutCommand,
       agentsCommand,
       tasksCommand,
+      // Gated behind isWorkflowsEnabled — feature flag honors
+      // QWEN_CODE_ENABLE_WORKFLOWS (opt-in) and QWEN_CODE_DISABLE_WORKFLOWS
+      // (kill switch). When the flag is off the command vanishes entirely
+      // from typeahead and help, matching the established convention for
+      // experimental builtins.
+      this.config?.isWorkflowsEnabled() ? workflowsCommand : null,
       arenaCommand,
       approvalModeCommand,
       authCommand,

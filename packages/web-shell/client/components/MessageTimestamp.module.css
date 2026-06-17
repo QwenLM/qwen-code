@@ -15,6 +15,9 @@
   right: 4px;
   z-index: 5;
   color: var(--text-dimmed);
+  background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+  border-radius: 4px;
+  padding: 1px 4px;
   font-size: 11px;
   line-height: 1.4;
   white-space: nowrap;
