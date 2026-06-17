@@ -135,6 +135,7 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
           },
           prompt: {
             type: 'string',
+            maxLength: 10000,
             description:
               'Continuation prompt to enqueue when the wakeup fires. Prefix with `/loop` so the next firing re-invokes the loop skill, e.g. `/loop check the deploy`.',
           },

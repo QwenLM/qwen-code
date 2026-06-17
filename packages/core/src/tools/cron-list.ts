@@ -129,9 +129,9 @@ export class CronListTool extends BaseDeclarativeTool<
     super(
       CronListTool.Name,
       ToolDisplayNames.CRON_LIST,
-      'List all cron jobs scheduled via CronCreate and pending loop ' +
-        'wakeups scheduled via LoopWakeup, both session-only and durable ' +
-        `(${CRON_TASKS_DISPLAY_PATH}).`,
+      'List all cron jobs scheduled via CronCreate (session-only, or ' +
+        `durable under ${CRON_TASKS_DISPLAY_PATH}) and pending loop wakeups ` +
+        'scheduled via LoopWakeup (always session-only).',
       Kind.Other,
       {
         type: 'object',
