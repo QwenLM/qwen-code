@@ -940,6 +940,12 @@ describe('ShellTool', () => {
         const resultPromise = invocation.execute(mockAbortSignal);
 
         expect(details.type).toBe('exec');
+        if (details.type !== 'exec') {
+          throw new Error('expected exec confirmation');
+        }
+        expect(details.warnings).toContain(
+          'Sed edit preview unavailable; showing raw shell command confirmation.',
+        );
         expect(mockFileSystemService.readTextFile).toHaveBeenCalledTimes(1);
         expect(mockShellExecutionService).toHaveBeenCalled();
 

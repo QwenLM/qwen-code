@@ -451,11 +451,7 @@ export function applySedSubstitution(
   const replaceAll = sedInfo.flags.includes('g');
 
   try {
-    const regex = new RegExp(jsPattern);
-    const globalRegex = new RegExp(
-      regex.source,
-      regex.flags.includes('g') ? regex.flags : `${regex.flags}g`,
-    );
+    const globalRegex = new RegExp(jsPattern, 'g');
     const parts = content.split(/(\n)/);
     const processableParts = content.endsWith('\n')
       ? parts.slice(0, -1)
@@ -484,8 +480,27 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
   }
 
   let jsPattern = '';
+  let inCharacterClass = false;
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i]!;
+    if (inCharacterClass) {
+      if (char === '\\') {
+        jsPattern += '\\\\';
+        continue;
+      }
+      if (char === ']') {
+        inCharacterClass = false;
+      }
+      jsPattern += char;
+      continue;
+    }
+
+    if (char === '[') {
+      inCharacterClass = true;
+      jsPattern += char;
+      continue;
+    }
+
     if (char === '\\' && i + 1 < pattern.length) {
       const next = pattern[i + 1]!;
       if (BRE_OPERATORS.has(next)) {
@@ -496,6 +511,15 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
         jsPattern += char + next;
       }
       i++;
+      continue;
+    }
+
+    if (char === '^' && i !== 0) {
+      jsPattern += '\\^';
+      continue;
+    }
+    if (char === '$' && i !== pattern.length - 1) {
+      jsPattern += '\\$';
       continue;
     }
 

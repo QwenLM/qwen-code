@@ -185,6 +185,23 @@ describe('sedEditParser', () => {
     expect(applySedSubstitution('aa a{2} aaa', sedInfo!)).toBe('X a{2} Xa');
   });
 
+  it('keeps BRE operators literal inside bracket expressions', () => {
+    const sedInfo = parseSedEditCommand("sed -i 's/[\\+]/X/g' file.txt");
+
+    expect(sedInfo).not.toBeNull();
+    expect(applySedSubstitution('a + \\ b', sedInfo!)).toBe('a X X b');
+  });
+
+  it('keeps non-position BRE anchors literal', () => {
+    const caretSedInfo = parseSedEditCommand("sed -i 's/a^/X/g' file.txt");
+    const dollarSedInfo = parseSedEditCommand("sed -i 's/a$-/X/g' file.txt");
+
+    expect(caretSedInfo).not.toBeNull();
+    expect(dollarSedInfo).not.toBeNull();
+    expect(applySedSubstitution('a^ a', caretSedInfo!)).toBe('X a');
+    expect(applySedSubstitution('a$- a', dollarSedInfo!)).toBe('X a');
+  });
+
   it('applies non-global substitutions once per line', () => {
     const sedInfo = parseSedEditCommand("sed -i 's/foo/bar/' file.txt");
 

@@ -1875,6 +1875,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const pm = this.config.getPermissionManager?.();
     const cwd = this.params.directory || this.config.getTargetDir();
     const sedInfo = this.getSedEditInfo();
+    let sedEditPreviewWarning: string | undefined;
 
     if (sedInfo) {
       try {
@@ -1910,6 +1911,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
           throw err;
         }
         this.sedEditPreviewFailed = true;
+        sedEditPreviewWarning =
+          'Sed edit preview unavailable; showing raw shell command confirmation.';
         debugLogger.warn(
           `sed edit preview failed, falling back to exec confirmation: ${getErrorMessage(err)}`,
         );
@@ -1978,7 +1981,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // (see issue #4093). Substitution is detected on both the stripped
     // and original command so wrappers like `bash -c "..."` are checked
     // along with their inner contents.
-    const warnings = buildShellExecWarnings(command, this.params.command);
+    const warnings = [
+      ...(buildShellExecWarnings(command, this.params.command) ?? []),
+      ...(sedEditPreviewWarning ? [sedEditPreviewWarning] : []),
+    ];
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
@@ -1993,7 +1999,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
-    if (warnings) {
+    if (warnings.length > 0) {
       confirmationDetails.warnings = warnings;
     }
     return confirmationDetails;
