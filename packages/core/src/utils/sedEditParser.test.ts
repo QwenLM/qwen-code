@@ -18,6 +18,24 @@ describe('sedEditParser', () => {
     });
   });
 
+  it('parses long in-place flag without consuming the expression', () => {
+    expect(parseSedEditCommand("sed --in-place 's/foo/bar/' file.txt")).toEqual(
+      {
+        filePath: 'file.txt',
+        pattern: 'foo',
+        replacement: 'bar',
+        flags: '',
+        extendedRegex: false,
+      },
+    );
+  });
+
+  it('rejects macOS empty suffix after the long in-place flag', () => {
+    expect(
+      parseSedEditCommand("sed --in-place '' 's/foo/bar/' file.txt"),
+    ).toBeNull();
+  });
+
   it('keeps regex end anchors supported', () => {
     expect(parseSedEditCommand("sed -i 's/foo$/bar/' src/a.ts")).toEqual({
       filePath: 'src/a.ts',

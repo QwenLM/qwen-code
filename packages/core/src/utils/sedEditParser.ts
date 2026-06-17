@@ -59,7 +59,7 @@ export function parseSedEditCommand(command: string): SedEditInfo | null {
       continue;
     }
 
-    if (arg === '-i' || arg === '--in-place') {
+    if (arg === '-i') {
       hasInPlaceFlag = true;
       i++;
       if (i < args.length) {
@@ -68,6 +68,11 @@ export function parseSedEditCommand(command: string): SedEditInfo | null {
           i++;
         }
       }
+      continue;
+    }
+    if (arg === '--in-place') {
+      hasInPlaceFlag = true;
+      i++;
       continue;
     }
     if (arg === '--in-place=') {
