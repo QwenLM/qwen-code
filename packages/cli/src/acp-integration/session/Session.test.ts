@@ -2764,6 +2764,121 @@ describe('Session', () => {
         }
       });
 
+      it('stops draining mid-turn messages when structured resolution is aborted', async () => {
+        let promptSignalAborted = false;
+        const clampSpy = vi
+          .spyOn(core, 'clampInlineMediaPart')
+          .mockImplementation(() => {
+            const pendingPrompt = (
+              session as unknown as { pendingPrompt: AbortController | null }
+            ).pendingPrompt;
+            pendingPrompt?.abort();
+            promptSignalAborted = pendingPrompt?.signal.aborted ?? false;
+            const abortError = new Error('aborted');
+            abortError.name = 'AbortError';
+            throw abortError;
+          });
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [{ type: 'text', text: 'already queued' }],
+              displayText: 'already queued',
+            },
+            {
+              content: [
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'iVBORw0KGgo=',
+                },
+              ],
+              displayText: 'inspect this image',
+            },
+            {
+              content: [{ type: 'text', text: 'should not be processed' }],
+              displayText: 'should not be processed',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          const retainedMidTurnPart = {
+            text: '\n[User message received during tool execution]: already queued',
+          };
+          const abortedMidTurnPart = {
+            text: '\n[User message received during tool execution]: inspect this image',
+          };
+          const skippedMidTurnPart = {
+            text: '\n[User message received during tool execution]: should not be processed',
+          };
+          const preservedMessage = vi.mocked(mockChat.addHistory).mock
+            .calls[0]?.[0] as Content | undefined;
+
+          expect(promptSignalAborted).toBe(true);
+          expect(clampSpy).toHaveBeenCalledTimes(1);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(preservedMessage?.parts).toEqual(
+            expect.arrayContaining([retainedMidTurnPart]),
+          );
+          expect(preservedMessage?.parts).not.toEqual(
+            expect.arrayContaining([abortedMidTurnPart]),
+          );
+          expect(preservedMessage?.parts).not.toEqual(
+            expect.arrayContaining([skippedMidTurnPart]),
+          );
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([retainedMidTurnPart], 'already queued');
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).not.toHaveBeenCalledWith(
+            [skippedMidTurnPart],
+            'should not be processed',
+          );
+        } finally {
+          clampSpy.mockRestore();
+        }
+      });
+
       it('logs unrecognized mid-turn drain response fields', async () => {
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',

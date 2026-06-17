@@ -4743,6 +4743,57 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  private createMidTurnMessagesDrainedCallback(
+    managed: ManagedSession,
+  ): (messageIds: string[]) => void {
+    return (messageIds: string[]) => {
+      const drainedEntries: Array<{
+        messageId?: string
+        optimisticMessageId?: string
+      }> = []
+      for (const messageId of messageIds) {
+        const index = managed.messageQueue.findIndex(
+          (entry) =>
+            entry.midTurnPending &&
+            (entry.messageId === messageId ||
+              entry.optimisticMessageId === messageId ||
+              entry.message === messageId),
+        )
+        if (index >= 0) {
+          const [entry] = managed.messageQueue.splice(index, 1)
+          drainedEntries.push({
+            messageId: entry.messageId,
+            optimisticMessageId: entry.optimisticMessageId,
+          })
+        }
+      }
+      if (drainedEntries.length > 0) {
+        sessionLog.info(
+          `Acknowledged ${drainedEntries.length} mid-turn queued message(s) for session ${managed.id}`,
+        )
+        for (const entry of drainedEntries) {
+          if (!entry.messageId) continue
+          const existingMessage = managed.messages.find(
+            (m) => m.id === entry.messageId,
+          )
+          if (!existingMessage) continue
+          existingMessage.isQueued = false
+          this.sendEvent(
+            {
+              type: 'user_message',
+              sessionId: managed.id,
+              message: existingMessage,
+              status: 'accepted',
+              optimisticMessageId: entry.optimisticMessageId,
+            },
+            managed.workspace.id,
+          )
+        }
+        this.persistSession(managed)
+      }
+    }
+  }
+
   private async createAgentForManagedSession(
     managed: ManagedSession,
   ): Promise<AgentInstance> {
@@ -4992,52 +5043,8 @@ export class SessionManager implements ISessionManager {
         })
       }
 
-      const onMidTurnMessagesDrained = (messageIds: string[]) => {
-        const drainedEntries: Array<{
-          messageId?: string
-          optimisticMessageId?: string
-        }> = []
-        for (const messageId of messageIds) {
-          const index = managed.messageQueue.findIndex(
-            (entry) =>
-              entry.midTurnPending &&
-              (entry.messageId === messageId ||
-                entry.optimisticMessageId === messageId ||
-                entry.message === messageId),
-          )
-          if (index >= 0) {
-            const [entry] = managed.messageQueue.splice(index, 1)
-            drainedEntries.push({
-              messageId: entry.messageId,
-              optimisticMessageId: entry.optimisticMessageId,
-            })
-          }
-        }
-        if (drainedEntries.length > 0) {
-          sessionLog.info(
-            `Acknowledged ${drainedEntries.length} mid-turn queued message(s) for session ${managed.id}`,
-          )
-          for (const entry of drainedEntries) {
-            if (!entry.messageId) continue
-            const existingMessage = managed.messages.find(
-              (m) => m.id === entry.messageId,
-            )
-            if (!existingMessage) continue
-            existingMessage.isQueued = false
-            this.sendEvent(
-              {
-                type: 'user_message',
-                sessionId: managed.id,
-                message: existingMessage,
-                status: 'accepted',
-                optimisticMessageId: entry.optimisticMessageId,
-              },
-              managed.workspace.id,
-            )
-          }
-          this.persistSession(managed)
-        }
-      }
+      const onMidTurnMessagesDrained =
+        this.createMidTurnMessagesDrainedCallback(managed)
 
       // ============================================================
       // Construct backend via factory

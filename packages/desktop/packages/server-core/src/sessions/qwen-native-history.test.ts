@@ -1487,6 +1487,97 @@ describe('Qwen native history loading', () => {
     ]);
   });
 
+  it('acknowledges Qwen mid-turn queued messages by messageId', () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-midturn-messageid-ack';
+    const timestamp = Date.now();
+    const storedAttachment: NonNullable<Message['attachments']>[number] = {
+      id: 'attachment-1',
+      type: 'image',
+      name: 'subscription.jpg',
+      mimeType: 'image/jpeg',
+      size: 1024,
+      storedPath: join(
+        workspaceRoot,
+        'sessions',
+        sessionId,
+        'attachments',
+        'subscription.jpg',
+      ),
+      thumbnailBase64: 'data:image/jpeg;base64,thumb',
+    };
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { isProcessing: true, messagesLoaded: true },
+    );
+    managed.messages.push({
+      id: 'message-1',
+      role: 'user',
+      content: '这个是什么图片',
+      timestamp,
+      isQueued: true,
+      attachments: [storedAttachment],
+    });
+    managed.messageQueue.push({
+      message: '这个是什么图片',
+      storedAttachments: [storedAttachment],
+      messageId: 'message-1',
+      optimisticMessageId: 'optimistic-1',
+      midTurnPending: true,
+    });
+
+    const events: unknown[] = [];
+    const manager = new SessionManager();
+    manager.setEventSink((_channel, _target, event) => {
+      events.push(event);
+    });
+    const onMidTurnMessagesDrained = (
+      manager as unknown as {
+        createMidTurnMessagesDrainedCallback: (
+          managedSession: unknown,
+        ) => (messageIds: string[]) => void;
+      }
+    ).createMidTurnMessagesDrainedCallback(managed);
+
+    onMidTurnMessagesDrained(['message-1']);
+
+    expect(managed.messageQueue).toHaveLength(0);
+    expect(managed.messages[0]?.isQueued).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'user_message',
+        sessionId,
+        status: 'accepted',
+        optimisticMessageId: 'optimistic-1',
+        workspaceId: workspace.id,
+        message: expect.objectContaining({
+          id: 'message-1',
+          isQueued: false,
+        }),
+      }),
+    );
+  });
+
   it('offers plain text follow-ups to Qwen mid-turn injection after visual messages', async () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),
