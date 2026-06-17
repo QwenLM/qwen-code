@@ -162,7 +162,6 @@ const EN: Messages = {
   'agent.view': 'View',
   'agents.closed': 'Agents panel closed.',
   'agents.title': 'Agents',
-  'assistant.toggleThinking': 'Toggle thinking details',
   'subagent.toggleStream': 'Toggle agent stream details',
   'toast.dismiss': 'Dismiss notification',
   'toast.dismissShort': 'Dismiss',
@@ -781,9 +780,13 @@ const EN: Messages = {
   'turn.collapse': 'Collapse steps',
   'turn.expand': 'Expand steps',
   'turn.cached': 'cached',
-  'turn.hiddenSteps': (v) => {
+  'turn.executionSteps': (v) => {
     const n = v?.count ?? 0;
-    return `${n} step${n === 1 ? '' : 's'}`;
+    return `Execution ${n} step${n === 1 ? '' : 's'}`;
+  },
+  'turn.toolCalls': (v) => {
+    const n = v?.count ?? 0;
+    return `${n} tool call${n === 1 ? '' : 's'}`;
   },
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
@@ -853,10 +856,14 @@ const EN: Messages = {
   'tools.update.enable': 'Enable',
   'tools.updating': 'Updating...',
   'tool.collapse': '▲ Collapse',
+  'tool.expand': 'Expand',
+  'tool.collapseHint': 'Collapse',
   'tool.showAll': (v) => `▼ Show all (${v?.count ?? 0} lines)`,
   'tool.showLess': '▲ Show less',
   'tool.showFullLines': '▼ Show full lines',
   'tool.linesTotal': (v) => `▼ ${v?.count ?? 0} lines total`,
+  'thinking.expand': 'Expand thinking',
+  'thinking.collapse': 'Collapse thinking',
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
@@ -1019,7 +1026,6 @@ const ZH: Messages = {
   'agent.view': '查看',
   'agents.closed': '智能体面板已关闭。',
   'agents.title': '智能体',
-  'assistant.toggleThinking': '展开/收起思考详情',
   'subagent.toggleStream': '展开/收起子智能体详情',
   'toast.dismiss': '关闭通知',
   'toast.dismissShort': '关闭',
@@ -1608,7 +1614,8 @@ const ZH: Messages = {
   'turn.collapse': '折叠步骤',
   'turn.expand': '展开步骤',
   'turn.cached': '缓存',
-  'turn.hiddenSteps': (v) => `${v?.count ?? 0} 步`,
+  'turn.executionSteps': (v) => `执行过程 ${v?.count ?? 0} 步`,
+  'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
   'tasks.refreshStale': '任务状态可能已过期，正在重连...',
@@ -1677,10 +1684,14 @@ const ZH: Messages = {
   'tools.update.enable': '启用',
   'tools.updating': '更新中...',
   'tool.collapse': '▲ 收起',
+  'tool.expand': '展开',
+  'tool.collapseHint': '收起',
   'tool.showAll': (v) => `▼ 显示全部（${v?.count ?? 0} 行）`,
   'tool.showLess': '▲ 显示更少',
   'tool.showFullLines': '▼ 显示完整行',
   'tool.linesTotal': (v) => `▼ 共 ${v?.count ?? 0} 行`,
+  'thinking.expand': '展开思考',
+  'thinking.collapse': '收起思考',
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
   'settings.title': '设置',

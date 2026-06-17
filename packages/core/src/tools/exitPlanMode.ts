@@ -45,6 +45,7 @@ IMPORTANT: Only use this tool when the task requires planning the implementation
 ## Before Using This Tool
 Ensure your plan is complete and unambiguous:
 - If you have unresolved questions about requirements or approach, use AskUserQuestion first (in earlier phases)
+- The plan parameter MUST contain your actual plan content — empty strings will be rejected
 - Once your plan is finalized, use THIS tool to request approval
 
 **Important:** Do NOT use AskUserQuestion to ask "Is this plan okay?" or "Should I proceed?" - that's exactly what THIS tool does. ExitPlanMode inherently requests user approval of your plan.
@@ -64,7 +65,7 @@ const exitPlanModeToolSchemaData: FunctionDeclaration = {
       plan: {
         type: 'string',
         description:
-          'The plan you came up with, that you want to run by the user for approval. Supports markdown. The plan should be pretty concise.',
+          'The plan you came up with, that you want to run by the user for approval. Supports markdown. The plan should be pretty concise. Must contain your actual plan content — empty strings will be rejected.',
       },
       originalRequest: {
         type: 'string',

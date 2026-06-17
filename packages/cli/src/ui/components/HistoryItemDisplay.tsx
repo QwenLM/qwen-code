@@ -181,20 +181,24 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought' && (
+      {/* TODO(follow-up): wire expanded={compactMode} once Ctrl+O is decoupled */}
+      {itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
           text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
+          expanded={false}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
+          durationMs={itemForDisplay.durationMs}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
+      {itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
           text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
+          expanded={false}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }

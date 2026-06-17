@@ -221,7 +221,7 @@ function SubAgentResult({ content }: { content: string }) {
   const { compactThinking } = useWebShellCustomization();
   return (
     <div className={compactThinking ? styles.scrollWindow : undefined}>
-      <Markdown content={content} />
+      <Markdown content={content} source="assistant" />
     </div>
   );
 }
