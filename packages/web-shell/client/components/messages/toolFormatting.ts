@@ -400,13 +400,16 @@ export function getAgentDescription(agent: ACPToolCall): string {
   return '';
 }
 
-export function getAgentCurrentToolHint(agent: ACPToolCall): string {
+export function getAgentCurrentToolHint(
+  agent: ACPToolCall,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   if (agent.status !== 'in_progress') return '';
   const subs = agent.subTools;
   if (!subs || subs.length === 0) return '';
   const last = subs[subs.length - 1];
   if (last.status !== 'in_progress' && last.status !== 'pending') return '';
-  let hint = last.toolName;
+  let hint = localizeToolDisplayName(last.toolName ?? '', t);
   if (last.title) {
     const colonIdx = last.title.indexOf(': ');
     hint += ' ' + (colonIdx > 0 ? last.title.slice(colonIdx + 2) : last.title);

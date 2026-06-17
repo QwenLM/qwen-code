@@ -674,7 +674,7 @@ export const ToolLine = memo(function ToolLine({
     const info = getAgentDisplayInfo(tool, now);
     const displayName = t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
-    const toolHint = getAgentCurrentToolHint(tool);
+    const toolHint = getAgentCurrentToolHint(tool, t);
     const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
     const runningMeta = [toolHint, progressLabel, info.elapsed]
       .filter(Boolean)
