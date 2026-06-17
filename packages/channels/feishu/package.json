@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-feishu",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "description": "Feishu (Lark) channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",

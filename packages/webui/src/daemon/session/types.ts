@@ -12,6 +12,7 @@ import type {
   DaemonApprovalModeResult,
   DaemonAvailableCommand,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
@@ -41,6 +42,14 @@ export type DaemonConnectionStatus =
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   sessionId?: string;
+  /**
+   * Daemon-confirmed client identity bound to this session (the value sent as
+   * `X-Qwen-Client-Id`). Consumers use it to recognize their OWN
+   * originator-stamped frames — e.g. the web-shell dedupes a
+   * `mid_turn_message_injected` batch only when its `originatorClientId`
+   * matches this id (a peer on the same session must keep its own entry).
+   */
+  clientId?: string;
   workspaceCwd?: string;
   commands?: DaemonCommandInfo[];
   skills?: string[];
@@ -280,6 +289,16 @@ export interface DaemonSessionActions {
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
+  /**
+   * Best-effort: queue a message typed while a turn is running so the daemon
+   * can drain it mid-turn. Resolves `{ accepted: false }` (never throws/raises
+   * a notice) when there is no session, the session is idle, or the push
+   * fails — the caller then keeps the message in its own next-turn queue.
+   */
+  enqueueMidTurnMessage(
+    message: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonMidTurnMessageResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
   cancelTask(
@@ -312,9 +331,11 @@ export interface ActivePrompt {
   promptId?: string;
   resolve?: (result: PromptResult) => void;
   reject?: (error: unknown) => void;
-  pendingResult?: PromptResult;
-  pendingError?: unknown;
 }
+
+export type SettledPrompt =
+  | { status: 'resolved'; result: PromptResult }
+  | { status: 'rejected'; error: unknown };
 
 export interface PendingSessionLoad {
   id: number;

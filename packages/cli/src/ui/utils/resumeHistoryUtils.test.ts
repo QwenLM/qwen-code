@@ -20,11 +20,6 @@ const makeConfig = (tools: Record<string, AnyDeclarativeTool>) =>
     getToolRegistry: () => ({
       getTool: (name: string) => tools[name],
     }),
-    getContentGenerator: () => ({
-      // Default to showing full thinking content during resume unless explicitly
-      // summarized; tests don't care about summarized thinking behavior.
-      useSummarizedThinking: () => false,
-    }),
   }) as unknown as Config;
 
 describe('resumeHistoryUtils', () => {
@@ -150,7 +145,7 @@ describe('resumeHistoryUtils', () => {
     });
   });
 
-  it('marks tool results as error, captures thought text, and falls back when tool is missing', () => {
+  it('marks tool results as error, omits thought text, and falls back when tool is missing', () => {
     const conversation = {
       messages: [
         {
@@ -190,11 +185,6 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}));
 
     expect(items).toEqual([
-      {
-        id: expect.any(Number),
-        type: 'gemini_thought',
-        text: 'should be skipped',
-      },
       { id: expect.any(Number), type: 'gemini', text: 'visible text' },
       {
         id: expect.any(Number),
@@ -210,6 +200,40 @@ describe('resumeHistoryUtils', () => {
           },
         ],
       },
+    ]);
+  });
+
+  it('keeps thought text in standalone previews without config', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          message: {
+            parts: [
+              {
+                text: 'preview thought',
+                thought: true,
+              } as unknown as Part,
+              { text: 'visible text' } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, null);
+
+    expect(items).toEqual([
+      {
+        id: expect.any(Number),
+        type: 'gemini_thought',
+        text: 'preview thought',
+      },
+      { id: expect.any(Number), type: 'gemini', text: 'visible text' },
     ]);
   });
 

@@ -333,7 +333,7 @@ Alibaba Cloud Coding Plan supports two regions:
 | China                | `https://coding.dashscope.aliyuncs.com/v1`      | Mainland China endpoint |
 | Global/International | `https://coding-intl.dashscope.aliyuncs.com/v1` | International endpoint  |
 
-The region is selected during authentication and stored in `settings.json` under `codingPlan.region`. To switch regions, re-run the `/auth` command and select a different region.
+The region is selected during authentication and stored in `settings.json` under the `modelProviders` configuration. To switch regions, re-run the `/auth` command and select a different region.
 
 ### API Key Storage
 

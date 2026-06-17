@@ -291,6 +291,64 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('carries token usage from an assistant block onto the message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'final answer', 1, false, {
+        usage: { inputTokens: 200, outputTokens: 80 },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'final answer',
+        usage: { inputTokens: 200, outputTokens: 80 },
+      },
+    ]);
+  });
+
+  it('sums usage when consecutive assistant blocks merge into one message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'hi ', 1, false, {
+        usage: { inputTokens: 100, outputTokens: 40 },
+      }),
+      textBlock('a2', 'assistant', 'there', 2, false, {
+        usage: { inputTokens: 20, outputTokens: 8 },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'hi there',
+        usage: { inputTokens: 120, outputTokens: 48 },
+      },
+    ]);
+  });
+
+  it('leaves usage undefined when no assistant block reports it', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'no usage here', 1),
+    ]);
+
+    expect((messages[0] as { usage?: unknown }).usage).toBeUndefined();
+  });
+
+  it('carries cached-read tokens through onto the message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'answer', 1, false, {
+        usage: { inputTokens: 200, outputTokens: 80, cachedTokens: 150 },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        usage: { inputTokens: 200, outputTokens: 80, cachedTokens: 150 },
+      },
+    ]);
+  });
+
   it('starts a new tool_group after an intervening thought block', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),

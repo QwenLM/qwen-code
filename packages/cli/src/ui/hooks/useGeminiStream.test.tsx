@@ -2786,7 +2786,7 @@ describe('useGeminiStream', () => {
       expect(result.current.pendingHistoryItems).toEqual([
         expect.objectContaining({
           type: 'gemini_thought',
-          text: 'Thinking',
+          durationMs: expect.any(Number),
         }),
       ]);
       expect(result.current.thought).toEqual({ description: 'Thinking' });
@@ -2857,7 +2857,7 @@ describe('useGeminiStream', () => {
       expect(result.current.pendingHistoryItems).toEqual([
         expect.objectContaining({
           type: 'gemini_thought',
-          text: 'Thinking',
+          durationMs: expect.any(Number),
         }),
       ]);
       expect(result.current.thought).toEqual({ description: 'Thinking' });
@@ -4720,6 +4720,11 @@ describe('useGeminiStream', () => {
     });
 
     it('should accumulate streamed thought descriptions', async () => {
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -4730,6 +4735,7 @@ describe('useGeminiStream', () => {
             type: ServerGeminiEventType.Thought,
             value: { subject: '', description: 'more' },
           };
+          await holdStream;
           yield {
             type: ServerGeminiEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
@@ -4761,15 +4767,35 @@ describe('useGeminiStream', () => {
       );
 
       await act(async () => {
-        await result.current.submitQuery('Streamed thought');
+        void result.current.submitQuery('Streamed thought');
+        await Promise.resolve();
+        await Promise.resolve();
       });
 
       await waitFor(() => {
         expect(result.current.thought?.description).toBe('thinking more');
       });
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          durationMs: expect.any(Number),
+        }),
+      ]);
+
+      await act(async () => {
+        releaseStream();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
     });
 
     it('should render descriptions from subject-bearing thought chunks', async () => {
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -4786,6 +4812,7 @@ describe('useGeminiStream', () => {
               description: ' user mentioned globally installed qwen,',
             },
           };
+          await holdStream;
           yield {
             type: ServerGeminiEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
@@ -4796,22 +4823,298 @@ describe('useGeminiStream', () => {
       const { result } = renderTestHook();
 
       await act(async () => {
-        await result.current.submitQuery('Streamed thought');
+        void result.current.submitQuery('Streamed thought');
+        await Promise.resolve();
+        await Promise.resolve();
       });
 
       await waitFor(() => {
+        expect(result.current.thought).toEqual({
+          subject: 'Evaluating installation approach',
+          description: 'The user mentioned globally installed qwen,',
+        });
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: expect.stringMatching(/^gemini_thought/),
+        }),
+        expect.any(Number),
+      );
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          durationMs: expect.any(Number),
+        }),
+      ]);
+
+      await act(async () => {
+        releaseStream();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+    });
+
+    it('should commit thought to history with durationMs on Finished', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning about the problem' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then finish');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('reasoning about the problem'),
+          durationMs: expect.any(Number),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should commit thought to history when Content arrives', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'analyzing the question' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'The answer is 42',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then answer');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() =>
         expect(mockAddItem).toHaveBeenCalledWith(
           expect.objectContaining({
             type: 'gemini_thought',
-            text: 'The user mentioned globally installed qwen,',
+            text: expect.stringContaining('analyzing the question'),
+            durationMs: expect.any(Number),
+          }),
+          expect.any(Number),
+        ),
+      );
+
+      // Content should also be committed
+      await waitFor(() =>
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: expect.stringContaining('The answer is 42'),
+          }),
+          expect.any(Number),
+        ),
+      );
+    });
+
+    it('should commit thought to history on UserCancelled', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'deep thinking' },
+          };
+          yield { type: ServerGeminiEventType.UserCancelled };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('think then cancel');
+      });
+
+      await waitFor(() =>
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('deep thinking'),
+            durationMs: expect.any(Number),
+          }),
+          expect.any(Number),
+        ),
+      );
+    });
+
+    it('should commit thought to history on Error', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking before error' },
+          };
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { message: 'Something went wrong', retryable: false },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then error');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() =>
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('thinking before error'),
+            durationMs: expect.any(Number),
+          }),
+          expect.any(Number),
+        ),
+      );
+    });
+
+    it('should commit thought to history when ToolCallRequest arrives', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning tool usage' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then tool call');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('planning tool usage'),
+          durationMs: expect.any(Number),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should commit thought to history on non-continuation Retry', async () => {
+      vi.useFakeTimers();
+      try {
+        let emitRetry: (() => void) | undefined;
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'reasoning before retry' },
+            };
+            // Wait for the buffered thought to be flushed to state before
+            // the Retry event discards remaining buffered events.
+            await new Promise<void>((resolve) => {
+              emitRetry = resolve;
+            });
+            yield {
+              type: ServerGeminiEventType.Retry,
+              isContinuation: false,
+            };
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'retried response',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+        const { result } = renderTestHook();
+
+        await act(async () => {
+          void result.current.submitQuery('think then retry');
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        // Advance past STREAM_UPDATE_THROTTLE_MS (60ms) so the thought
+        // buffer flushes and populates pendingThoughtItem state.
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+          await Promise.resolve();
+        });
+
+        // Now emit the Retry event; commitPendingThought should find the
+        // flushed thought in pendingThoughtItemRef.
+        await act(async () => {
+          emitRetry?.();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+          await Promise.resolve();
+        });
+
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before retry'),
+            durationMs: expect.any(Number),
           }),
           expect.any(Number),
         );
-      });
-      expect(result.current.thought).toEqual({
-        subject: 'Evaluating installation approach',
-        description: 'The user mentioned globally installed qwen,',
-      });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should show a retry countdown and update pending history over time', async () => {

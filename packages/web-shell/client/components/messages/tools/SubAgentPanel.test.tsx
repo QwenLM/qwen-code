@@ -55,6 +55,23 @@ function makeAgentWithSubTool(subTool: ACPToolCall): ACPToolCall {
 }
 
 describe('SubAgentPanel sub-tool timestamps', () => {
+  it('renders completed result content through assistant markdown', () => {
+    const container = renderPanel({
+      callId: 'agent-1',
+      toolName: 'Task',
+      status: 'completed',
+      rawOutput: {
+        type: 'task_execution',
+        result: '**done**',
+      },
+    });
+    const markdown = container.querySelector(
+      '[data-markdown-source="assistant"]',
+    );
+    expect(markdown).not.toBeNull();
+    expect(markdown?.querySelector('strong')?.textContent).toBe('done');
+  });
+
   it('renders each sub-tool start time, like the main transcript rows', () => {
     // A past date so formatTimestamp always renders the dated form; the
     // expectation is derived from the same formatter, so it matches

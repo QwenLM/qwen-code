@@ -70,6 +70,7 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -1475,6 +1476,44 @@ export class DaemonClient {
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/btw');
     return (await res.json()) as DaemonSessionBtwResult;
+  }
+
+  /**
+   * Queue a user message typed while the session's turn is still running. The
+   * ACP child drains it between tool batches so the model sees it before the
+   * turn ends. Resolves `{ accepted: false }` when the session is idle — the
+   * caller should then send the message as a normal next-turn prompt.
+   */
+  async enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonMidTurnMessageResult> {
+    // Route through `fetchWithTimeout` like every other method so a hung daemon
+    // can't wedge this promise forever (the caller in `actions.ts` awaits it).
+    // The helper composes any caller `signal` (the turn-scoped abort) WITH its
+    // timeout controller, so the mid-turn-settle abort still propagates.
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/mid-turn-message`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ message }),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/mid-turn-message',
+          );
+        }
+        return (await res.json()) as DaemonMidTurnMessageResult;
+      },
+    );
   }
 
   /**

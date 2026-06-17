@@ -154,4 +154,51 @@ describe('ImageTokenizer', () => {
       }
     });
   });
+
+  describe('TIFF dimension extraction', () => {
+    // Build a minimal single-IFD TIFF whose ImageWidth/ImageLength are stored
+    // as SHORT (type 3) -- the most common TIFF layout for small dimensions.
+    function buildShortTiff(
+      byteOrder: 'II' | 'MM',
+      width: number,
+      height: number,
+    ): string {
+      const buf = Buffer.alloc(38);
+      const le = byteOrder === 'II';
+      buf.write(byteOrder, 0, 'ascii');
+      const w16 = (off: number, v: number) =>
+        le ? buf.writeUInt16LE(v, off) : buf.writeUInt16BE(v, off);
+      const w32 = (off: number, v: number) =>
+        le ? buf.writeUInt32LE(v, off) : buf.writeUInt32BE(v, off);
+      w16(2, 42); // magic
+      w32(4, 8); // IFD starts at offset 8
+      w16(8, 2); // two directory entries
+      // entry 0: ImageWidth (0x0100), SHORT, count 1, value left-justified
+      w16(10, 0x0100);
+      w16(12, 3);
+      w32(14, 1);
+      w16(18, width);
+      // entry 1: ImageLength (0x0101), SHORT, count 1
+      w16(22, 0x0101);
+      w16(24, 3);
+      w32(26, 1);
+      w16(30, height);
+      w32(34, 0); // next-IFD offset
+      return buf.toString('base64');
+    }
+
+    it('reads SHORT dimensions from a big-endian (MM) TIFF', async () => {
+      const tiff = buildShortTiff('MM', 800, 600);
+      const metadata = await tokenizer.extractImageMetadata(tiff, 'image/tiff');
+      expect(metadata.width).toBe(800);
+      expect(metadata.height).toBe(600);
+    });
+
+    it('reads SHORT dimensions from a little-endian (II) TIFF', async () => {
+      const tiff = buildShortTiff('II', 1024, 768);
+      const metadata = await tokenizer.extractImageMetadata(tiff, 'image/tiff');
+      expect(metadata.width).toBe(1024);
+      expect(metadata.height).toBe(768);
+    });
+  });
 });

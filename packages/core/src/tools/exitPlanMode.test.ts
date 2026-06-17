@@ -91,6 +91,25 @@ describe('ExitPlanModeTool', () => {
     });
   });
 
+  describe('non-empty plan constraint in descriptions', () => {
+    it('should mention non-empty constraint in plan parameter description', () => {
+      const schema = tool.schema as {
+        parametersJsonSchema: {
+          properties: { plan: { description: string } };
+        };
+      };
+      expect(schema.parametersJsonSchema.properties.plan.description).toContain(
+        'empty strings will be rejected',
+      );
+    });
+
+    it('should mention non-empty constraint in tool description', () => {
+      expect(tool.schema.description).toContain(
+        'empty strings will be rejected',
+      );
+    });
+  });
+
   describe('validateToolParams', () => {
     it('should accept valid parameters', () => {
       const params: ExitPlanModeParams = {
