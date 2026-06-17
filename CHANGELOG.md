@@ -12,6 +12,66 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.18.2](https://github.com/QwenLM/qwen-code/releases/tag/v0.18.2) - 2026-06-17
+
+### Added
+
+- web-shell: support custom footer renderer ([#5166](https://github.com/QwenLM/qwen-code/pull/5166))
+- web-shell: add imperative composer API for external text, tag, and submit control ([#5161](https://github.com/QwenLM/qwen-code/pull/5161))
+- web-shell: per-turn time & tokens on the collapse seam, below the prompt ([#5163](https://github.com/QwenLM/qwen-code/pull/5163))
+- cli: Add daemon status API ([#5174](https://github.com/QwenLM/qwen-code/pull/5174))
+- core+cli: Workflow P4 — meta + /workflows + phase-tree (#4721) ([#5094](https://github.com/QwenLM/qwen-code/pull/5094))
+- daemon: deliver web-shell mid-turn messages into the running turn ([#5175](https://github.com/QwenLM/qwen-code/pull/5175))
+- tui: collapsible thinking blocks with duration timer ([#4598](https://github.com/QwenLM/qwen-code/pull/4598))
+- web-shell: expose transcript event changes ([#5193](https://github.com/QwenLM/qwen-code/pull/5193))
+- cli: add sessions list command with --json and --limit flags ([#5187](https://github.com/QwenLM/qwen-code/pull/5187))
+
+### Fixed
+
+- warn on oversized context instructions ([#5073](https://github.com/QwenLM/qwen-code/pull/5073))
+- core: simplify edit tool description to path only ([#5140](https://github.com/QwenLM/qwen-code/pull/5140))
+- monitor: batch-drain notifications to reduce token waste ([#5165](https://github.com/QwenLM/qwen-code/pull/5165))
+- core: coerce numeric string params in SchemaValidator for MCP tools ([#4967](https://github.com/QwenLM/qwen-code/pull/4967))
+- channels: match sender id as a full segment in SessionRouter ([#5116](https://github.com/QwenLM/qwen-code/pull/5116))
+- agent: make forking explicit; keep omitted subagent_type awaitable ([#5155](https://github.com/QwenLM/qwen-code/pull/5155))
+- core: auto-retry transport stream errors before the first chunk ([#5171](https://github.com/QwenLM/qwen-code/pull/5171))
+- Qwen PR review proxy bypass, stale-worktree cleanup, and footer line break ([#5168](https://github.com/QwenLM/qwen-code/pull/5168))
+- dingtalk: reopen code fences without inserting a blank line ([#5204](https://github.com/QwenLM/qwen-code/pull/5204))
+- cli: hide unconfigured discontinued OAuth model ([#5167](https://github.com/QwenLM/qwen-code/pull/5167))
+- permissions: do not model /dev/tcp and /dev/udp redirects as file I/O ([#5196](https://github.com/QwenLM/qwen-code/pull/5196))
+- core: strengthen exit_plan_mode descriptions to prevent empty plan parameter ([#5188](https://github.com/QwenLM/qwen-code/pull/5188))
+- desktop: keep latest feed stable-only ([#5149](https://github.com/QwenLM/qwen-code/pull/5149))
+- core: read SHORT-typed TIFF dimensions correctly on big-endian files ([#5209](https://github.com/QwenLM/qwen-code/pull/5209))
+- cli: skip highlightAuto for unlabeled code blocks with box-drawing/CJK content ([#5198](https://github.com/QwenLM/qwen-code/pull/5198))
+- coerce non-string tool params to strings for self-hosted LLMs ([#4793](https://github.com/QwenLM/qwen-code/pull/4793))
+- cli: keep sudo-required npm installs on npm instead of migrating to standalone ([#5207](https://github.com/QwenLM/qwen-code/pull/5207))
+- e2e: add daemon_status to serve capabilities baseline; run E2E on PRs ([#5211](https://github.com/QwenLM/qwen-code/pull/5211))
+- web-shell: localize remaining hardcoded UI strings ([#5189](https://github.com/QwenLM/qwen-code/pull/5189))
+- acp: load extension commands in daemon sessions ([#5216](https://github.com/QwenLM/qwen-code/pull/5216))
+- web-shell: simplify collapse metadata display ([#5223](https://github.com/QwenLM/qwen-code/pull/5223))
+- ci: gate PR review and triage on write permission ([#5191](https://github.com/QwenLM/qwen-code/pull/5191))
+
+### Documentation
+
+- fix stale defaults, CLI syntax, and tool naming drift ([#5158](https://github.com/QwenLM/qwen-code/pull/5158))
+- daemon: Refresh daemon docs in English ([#5144](https://github.com/QwenLM/qwen-code/pull/5144))
+- design: DaemonTransport abstraction — pluggable transport for SDK ([#5026](https://github.com/QwenLM/qwen-code/pull/5026))
+- add Qwen Code Desktop release link ([#5152](https://github.com/QwenLM/qwen-code/pull/5152))
+- fix MCP token path, daemon UI event count, add Feishu channel ([#5172](https://github.com/QwenLM/qwen-code/pull/5172))
+- channels: add screenshots to Feishu setup guide ([#4983](https://github.com/QwenLM/qwen-code/pull/4983))
+- fix missing spaces before parentheses in README ([#4796](https://github.com/QwenLM/qwen-code/pull/4796))
+
+### Other
+
+- ci: publish autofix PRs as qwen-code-ci-bot ([#5137](https://github.com/QwenLM/qwen-code/pull/5137))
+- Polish web-shell execution display ([#5190](https://github.com/QwenLM/qwen-code/pull/5190))
+- Fix completed prompt lifecycle race ([#5192](https://github.com/QwenLM/qwen-code/pull/5192))
+- ci(autofix): prioritize recent unattended bugs over stale ones ([#5178](https://github.com/QwenLM/qwen-code/pull/5178))
+- Revert "fix(core): skip auto-title generation when history has no user message" ([#5200](https://github.com/QwenLM/qwen-code/pull/5200))
+- ci: run CLI integration tests in the merge queue ([#5224](https://github.com/QwenLM/qwen-code/pull/5224))
+- ci(autofix): unify issue-fix and review-response into one lifecycle workflow ([#5233](https://github.com/QwenLM/qwen-code/pull/5233))
+- ci(e2e): stop running the E2E matrix on every PR push ([#5238](https://github.com/QwenLM/qwen-code/pull/5238))
+
 ## [0.18.1](https://github.com/QwenLM/qwen-code/releases/tag/v0.18.1) - 2026-06-15
 
 ### Added
