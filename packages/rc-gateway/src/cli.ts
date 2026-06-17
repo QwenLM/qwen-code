@@ -141,6 +141,16 @@ export interface ServeOptions {
   mdnsWorkspaceName?: string;
   /** Override the mDNS service instance name (default = host-workspace). */
   mdnsInstanceName?: string;
+  /**
+   * Attach to an ALREADY-RUNNING `qwen serve` daemon instead of spawning one
+   * (handoff Phase 1): the gateway shares that daemon's sessions, so a terminal
+   * session becomes reachable from mobile. Requires the daemon's token
+   * (`--daemon-token` / `QWEN_RC_DAEMON_TOKEN`). The gateway never kills a daemon
+   * it did not start.
+   */
+  attachDaemonUrl?: string;
+  /** Token (`QWEN_SERVER_TOKEN`) of the daemon to attach to. */
+  attachDaemonToken?: string;
 }
 
 /** Boot the daemon + gateway and print the owner pairing code. */
@@ -190,7 +200,28 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   if (opts.mdnsInstanceName !== undefined) {
     validateMdnsLabel(opts.mdnsInstanceName, 'instance-name');
   }
-  const handle = await startDaemon({ port: opts.daemonPort ?? 4180 });
+  // Attach to an existing daemon (handoff Phase 1) when a URL is given, else spawn
+  // our own. Attach requires the daemon's token so the gateway can authenticate
+  // against its `--require-auth` surface.
+  if (opts.attachDaemonUrl && !opts.attachDaemonToken) {
+    throw new Error(
+      'attach-daemon requires the daemon token (--daemon-token / QWEN_RC_DAEMON_TOKEN)',
+    );
+  }
+  const handle = opts.attachDaemonUrl
+    ? await startDaemon({
+        attach: {
+          url: opts.attachDaemonUrl,
+          token: opts.attachDaemonToken!,
+        },
+      })
+    : await startDaemon({ port: opts.daemonPort ?? 4180 });
+  if (handle.attached) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `qwen-rc: attached to existing daemon at ${opts.attachDaemonUrl} (will not stop it on exit)`,
+    );
+  }
   const store = await TokenStore.open(
     join(homedir(), '.qwen', 'rc', 'tokens.json'),
   );
@@ -1046,7 +1077,7 @@ async function confirm(question: string): Promise<boolean> {
 if (process.argv[2] === 'serve') {
   // Flags: --host <h> --tls <cert> --tls-key <key> --insecure-behind-proxy
   //        --port <n> --daemon-port <n> --no-mdns --mdns-workspace-name <s>
-  //        --mdns-instance-name <s>
+  //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
   const argv = process.argv.slice(3);
   const flag = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
@@ -1066,6 +1097,9 @@ if (process.argv[2] === 'serve') {
     noMdns: argv.includes('--no-mdns'),
     mdnsWorkspaceName: flag('mdns-workspace-name'),
     mdnsInstanceName: flag('mdns-instance-name'),
+    // Handoff Phase 1: attach to an existing daemon instead of spawning.
+    attachDaemonUrl: flag('attach-daemon') ?? process.env.QWEN_RC_DAEMON_URL,
+    attachDaemonToken: flag('daemon-token') ?? process.env.QWEN_RC_DAEMON_TOKEN,
   };
   runServe(serveOpts).catch((err) => {
     // eslint-disable-next-line no-console

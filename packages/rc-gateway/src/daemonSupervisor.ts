@@ -23,11 +23,21 @@ export interface StartDaemonOptions {
   spawner?: (token: string) => SpawnedDaemon;
   /** Health-poll budget in ms (default 10000). */
   readyTimeoutMs?: number;
+  /**
+   * Attach to an ALREADY-RUNNING daemon instead of spawning one (the handoff
+   * Phase-1 path: a terminal session's `qwen serve` that the gateway shares, so
+   * mobile clients see the SAME sessions). When set, no process is spawned and
+   * `stop()` is a NO-OP — the gateway never kills a daemon it did not start.
+   * `url` is the daemon's base URL; `token` its `QWEN_SERVER_TOKEN`.
+   */
+  attach?: { url: string; token: string };
 }
 
 export interface DaemonHandle {
   daemon: DaemonClient;
   stop: () => Promise<void>;
+  /** True when attached to an externally-managed daemon (`stop()` is a no-op). */
+  attached: boolean;
 }
 
 /**
@@ -72,16 +82,30 @@ function defaultSpawner(
 export async function startDaemon(
   opts: StartDaemonOptions = {},
 ): Promise<DaemonHandle> {
-  const token = randomBytes(32).toString('base64url');
-  const port = opts.port ?? 0;
-  const spawned = opts.spawner
-    ? opts.spawner(token)
-    : defaultSpawner(token, opts.qwenBin ?? 'qwen', port);
-
-  const daemon = new DaemonClient({
-    baseUrl: spawned.baseUrl,
-    token: spawned.token,
-  });
+  const attached = opts.attach !== undefined;
+  // Attach: point at an existing daemon, never spawn, never kill. Spawn: launch
+  // `qwen serve` with a fresh token and own its lifecycle. Both then share the
+  // SAME health-poll + DaemonClient handle below.
+  let daemon: DaemonClient;
+  let kill: () => void;
+  if (opts.attach) {
+    daemon = new DaemonClient({
+      baseUrl: opts.attach.url,
+      token: opts.attach.token,
+    });
+    kill = () => {}; // never kill a daemon we did not start
+  } else {
+    const token = randomBytes(32).toString('base64url');
+    const port = opts.port ?? 0;
+    const spawned = opts.spawner
+      ? opts.spawner(token)
+      : defaultSpawner(token, opts.qwenBin ?? 'qwen', port);
+    daemon = new DaemonClient({
+      baseUrl: spawned.baseUrl,
+      token: spawned.token,
+    });
+    kill = spawned.kill;
+  }
 
   const deadline = Date.now() + (opts.readyTimeoutMs ?? 10000);
   // Poll health until ready or timeout.
@@ -91,8 +115,12 @@ export async function startDaemon(
       break;
     } catch {
       if (Date.now() > deadline) {
-        spawned.kill();
-        throw new Error('Daemon did not become healthy before timeout');
+        kill(); // no-op in attach mode
+        throw new Error(
+          attached
+            ? `Could not reach the daemon at ${opts.attach!.url} before timeout (URL/token/--require-auth?)`
+            : 'Daemon did not become healthy before timeout',
+        );
       }
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -101,7 +129,8 @@ export async function startDaemon(
   return {
     daemon,
     stop: async () => {
-      spawned.kill();
+      kill();
     },
+    attached,
   };
 }

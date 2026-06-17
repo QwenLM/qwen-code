@@ -43,7 +43,36 @@ describe('daemonSupervisor', () => {
     });
     const health = await handle.daemon.health();
     expect(health.status).toBe('ok');
+    expect(handle.attached).toBe(false);
     await handle.stop();
     expect(killed).toBe(true);
+  });
+
+  it('attach mode: shares an existing daemon, never spawns, and stop() does not kill it', async () => {
+    stub = await startStubDaemon();
+    let spawnerCalled = false;
+    const handle = await startDaemon({
+      attach: { url: stub.baseUrl, token: 'shared-token' },
+      // A spawner that would flag if (wrongly) invoked in attach mode.
+      spawner: () => {
+        spawnerCalled = true;
+        throw new Error('spawner must not run in attach mode');
+      },
+    });
+    expect(spawnerCalled).toBe(false);
+    expect(handle.attached).toBe(true);
+    expect((await handle.daemon.health()).status).toBe('ok');
+    // stop() is a no-op: the externally-managed daemon stays reachable.
+    await handle.stop();
+    expect((await handle.daemon.health()).status).toBe('ok');
+  });
+
+  it('attach mode: throws (without spawning) when the daemon is unreachable', async () => {
+    await expect(
+      startDaemon({
+        attach: { url: 'http://127.0.0.1:1', token: 't' },
+        readyTimeoutMs: 150,
+      }),
+    ).rejects.toThrow(/Could not reach the daemon/);
   });
 });
