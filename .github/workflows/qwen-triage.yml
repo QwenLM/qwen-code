@@ -246,7 +246,9 @@ jobs:
       contents: 'read'
     outputs:
       pr_number: '${{ steps.pr.outputs.pr_number }}'
-      verdict: '${{ steps.run.outputs.verdict || steps.na.outputs.verdict }}'
+      # steps.run sets the verdict for an actual test; steps.pr sets 'n/a' when
+      # the PR has no TUI surface. Both empty -> stayed silent (skip case).
+      verdict: '${{ steps.run.outputs.verdict || steps.pr.outputs.verdict }}'
     steps:
       - name: 'Resolve PR and check state'
         id: 'pr'
@@ -255,12 +257,17 @@ jobs:
           PR_NUMBER: '${{ github.event.issue.number || github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
-          data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,mergeable --jq '[.state, .isDraft, .mergeable] | @tsv')"
-          IFS=$'\t' read -r state is_draft mergeable <<< "$data"
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          # One API call for everything the job gates on (state + file list).
+          data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,mergeable,files)"
+          state="$(jq -r '.state' <<< "$data")"
+          is_draft="$(jq -r '.isDraft' <<< "$data")"
+          mergeable="$(jq -r '.mergeable' <<< "$data")"
+          # decision drives every step below: skip (nothing to do, stay silent) |
+          # na (no TUI surface to exercise) | run (drive the app).
           if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
             echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
-            echo "should_test=false" >> "$GITHUB_OUTPUT"
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # The checkout below uses refs/pull/N/merge, which GitHub only keeps
@@ -268,27 +275,21 @@ jobs:
           # stale or missing, so skip rather than test the wrong tree.
           if [ "$mergeable" = "CONFLICTING" ]; then
             echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} has merge conflicts; refs/pull/${PR_NUMBER}/merge is unavailable."
-            echo "should_test=false" >> "$GITHUB_OUTPUT"
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "should_test=true" >> "$GITHUB_OUTPUT"
           # Only drive the app for PRs that touch a user-facing/TUI surface;
           # otherwise a real-user test has nothing to exercise (e.g. CI-only PRs).
-          files="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[].path')"
-          if printf '%s\n' "$files" | grep -qE 'packages/cli/src/ui/|packages/cli/.*\.tsx$|windowTitle|packages/web-shell/client/'; then
-            echo "has_tui=true" >> "$GITHUB_OUTPUT"
+          if jq -r '.files[].path' <<< "$data" | grep -qE 'packages/cli/src/ui/|packages/cli/.*\.tsx$|windowTitle|packages/web-shell/client/'; then
+            echo "decision=run" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::PR #${PR_NUMBER} touches no TUI surface; tmux testing is not applicable."
-            echo "has_tui=false" >> "$GITHUB_OUTPUT"
+            echo "verdict=n/a" >> "$GITHUB_OUTPUT"
+            echo "decision=na" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 'Mark not applicable (no TUI surface)'
-        id: 'na'
-        if: "steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui != 'true'"
-        run: 'echo "verdict=n/a" >> "$GITHUB_OUTPUT"'
-
       - name: 'Clean stale review worktrees'
-        if: "steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        if: "steps.pr.outputs.decision == 'run'"
         run: |-
           set -uo pipefail
           [ -e .git ] || exit 0
@@ -296,7 +297,7 @@ jobs:
           git worktree prune -v || true
 
       - name: 'Checkout PR merge ref'
-        if: "steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        if: "steps.pr.outputs.decision == 'run'"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           # Untrusted PR code — keep the token out of .git/config.
@@ -305,7 +306,7 @@ jobs:
           fetch-depth: 1
 
       - name: 'Run tmux real-user testing'
-        if: "steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        if: "steps.pr.outputs.decision == 'run'"
         id: 'run'
         # NOTE: no GitHub token here — this step runs untrusted PR code. Only
         # the model credentials are exposed (same as the review agent). The
@@ -381,7 +382,7 @@ jobs:
           echo "tmux verdict: $VERDICT (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Upload tmux results'
-        if: "always() && steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        if: "always() && steps.pr.outputs.decision == 'run'"
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
           name: 'tmux-results-${{ steps.pr.outputs.pr_number }}'
@@ -393,7 +394,7 @@ jobs:
         # end and on every outcome. Without it the checked-out PR tree, the
         # skill's tmp/*-tmux-* dirs, and any worktrees accumulate on the
         # persistent self-hosted runner across runs.
-        if: "always() && steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        if: "always() && steps.pr.outputs.decision == 'run'"
         run: |-
           set -uo pipefail
           [ -e .git ] || exit 0
