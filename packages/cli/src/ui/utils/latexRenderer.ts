@@ -11,6 +11,7 @@ import {
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('LATEX_RENDERER');
+const MAX_LOGGED_INPUT_CHARS = 200;
 
 const COMMAND_REPLACEMENTS: Record<string, string> = {
   '\\alpha': 'α',
@@ -206,7 +207,7 @@ export function renderInlineLatex(input: string): string {
     return renderTerminalMathInline(input);
   } catch (error) {
     debugLogger.error(
-      'Terminal inline math render failed; falling back.',
+      `Terminal inline math render failed for input "${summarizeLatexInput(input)}"; falling back.`,
       error,
     );
     return renderInlineLatexFallback(input);
@@ -218,11 +219,23 @@ export function renderBlockLatex(input: string): string[] {
     return renderTerminalMathBlock(input);
   } catch (error) {
     debugLogger.error(
-      'Terminal block math render failed; falling back.',
+      `Terminal block math render failed for input "${summarizeLatexInput(input)}"; falling back.`,
       error,
     );
     return [renderInlineLatexFallback(input)];
   }
+}
+
+function summarizeLatexInput(input: string): string {
+  const sanitized = Array.from(input)
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f || code === 0x9b ? ' ' : char;
+    })
+    .join('');
+  return sanitized.length > MAX_LOGGED_INPUT_CHARS
+    ? `${sanitized.slice(0, MAX_LOGGED_INPUT_CHARS)}...`
+    : sanitized;
 }
 
 function renderInlineLatexFallback(input: string, depth = 0): string {
@@ -271,6 +284,5 @@ function renderInlineLatexFallback(input: string, depth = 0): string {
     .replace(/\\(?:left|right)\./g, '')
     .replace(/\\left|\\right/g, '')
     .replace(/\\,/g, ' ')
-    .replace(/\s+/g, ' ')
     .trim();
 }

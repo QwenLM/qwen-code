@@ -11,6 +11,10 @@ import stringWidth from 'string-width';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
+  renderInlineMathInText,
+  splitInlineMathSegments,
+} from './TerminalMathRenderer.js';
+import {
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
@@ -32,10 +36,7 @@ const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
 const INLINE_MATH_MARKER_LENGTH = 1; // For "$"
 const INLINE_MATH_MAX_CHARS = 1024;
-const INLINE_MATH_PATTERN = new RegExp(
-  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
-  'g',
-);
+const INLINE_MATH_PATTERN_SOURCE = String.raw`(?<![\w$])\$(?![\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`;
 const INLINE_MARKDOWN_REGEX = new RegExp(
   String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
     String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
@@ -43,11 +44,19 @@ const INLINE_MARKDOWN_REGEX = new RegExp(
 );
 const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
   String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)`,
+    String.raw`\`+.+?\`+|${INLINE_MATH_PATTERN_SOURCE}|<u>.*?<\/u>|https?:\/\/\S+)`,
   'g',
 );
 
 const debugLogger = createDebugLogger('INLINE_MARKDOWN');
+
+function getSingleInlineMathSegment(match: string) {
+  const segments = splitInlineMathSegments(match);
+  const segment = segments[0];
+  return segments.length === 1 && segment?.type === 'math'
+    ? segment
+    : undefined;
+}
 
 interface RenderInlineProps {
   text: string;
@@ -219,16 +228,14 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         fullMatch.endsWith('$') &&
         fullMatch.length > INLINE_MATH_MARKER_LENGTH * 2
       ) {
-        renderedNode = (
-          <Text key={key} color={theme.text.accent}>
-            {renderInlineLatex(
-              fullMatch.slice(
-                INLINE_MATH_MARKER_LENGTH,
-                -INLINE_MATH_MARKER_LENGTH,
-              ),
-            )}
-          </Text>
-        );
+        const segment = getSingleInlineMathSegment(fullMatch);
+        if (segment) {
+          renderedNode = (
+            <Text key={key} color={theme.text.accent}>
+              {renderInlineLatex(segment.text)}
+            </Text>
+          );
+        }
       } else if (fullMatch.match(/^https?:\/\//)) {
         // The bare-URL regex greedily eats trailing punctuation (`.`, `)`,
         // `,`, …). Trim that off the OSC 8 *target* so the clickable link
@@ -274,20 +281,16 @@ export const getPlainTextLength = (
   text: string,
   enableInlineMath = false,
 ): number => {
-  const cleanText = text
+  let cleanText = text
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/_(.*?)_/g, '$1')
     .replace(/~~(.*?)~~/g, '$1')
     .replace(/`(.*?)`/g, '$1')
-    .replace(INLINE_MATH_PATTERN, (match: string) =>
-      enableInlineMath
-        ? renderInlineLatex(
-            match.slice(INLINE_MATH_MARKER_LENGTH, -INLINE_MATH_MARKER_LENGTH),
-          )
-        : match,
-    )
     .replace(/<u>(.*?)<\/u>/g, '$1')
     .replace(/.*\[(.*?)\]\(.*\)/g, '$1');
+  if (enableInlineMath) {
+    cleanText = renderInlineMathInText(cleanText);
+  }
   return stringWidth(cleanText);
 };

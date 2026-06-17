@@ -54,4 +54,15 @@ describe('latexRenderer', () => {
     expect(() => renderInlineLatex(nested)).not.toThrow();
     expect(renderInlineLatex(nested)).toContain('x');
   });
+
+  it('falls back instead of throwing for unclosed paired constructs', () => {
+    expect(() => renderInlineLatex(String.raw`\left( x`)).not.toThrow();
+    expect(renderInlineLatex(String.raw`\left( x`)).toContain('x');
+    expect(() =>
+      renderBlockLatex(String.raw`\begin{pmatrix} a & b`),
+    ).not.toThrow();
+    expect(renderBlockLatex(String.raw`\begin{pmatrix} a & b`)[0]).toContain(
+      'a',
+    );
+  });
 });

@@ -57,6 +57,19 @@ describe('<RenderInline />', () => {
     expect(lastFrame()).not.toContain('$\\alpha$');
   });
 
+  it('uses shared inline math detection for spaced math', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline
+        text={String.raw`value $ x $ and function $f(x)$`}
+        enableInlineMath
+      />,
+    );
+
+    expect((lastFrame() ?? '').replace(/\s+/g, ' ')).toContain(
+      'value x and function f(x)',
+    );
+  });
+
   it('does not parse ordinary dollar amounts as inline math', () => {
     const { lastFrame } = renderWithProviders(
       <RenderInline text="cost is $5 and $10 later" enableInlineMath />,

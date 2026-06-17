@@ -11,6 +11,7 @@ import stripAnsi from 'strip-ansi';
 import { getCachedStringWidth } from './textUtils.js';
 import { theme } from '../semantic-colors.js';
 import { renderInlineLatex } from './latexRenderer.js';
+import { splitInlineMathSegments } from './TerminalMathRenderer.js';
 import {
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
@@ -42,7 +43,7 @@ const SAFETY_MARGIN = 4;
 
 const INLINE_MATH_MAX_CHARS = 1024;
 
-const INLINE_MATH_PATTERN = String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`;
+const INLINE_MATH_PATTERN = String.raw`(?<![\w$])\$(?![\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`;
 const INLINE_MARKDOWN_REGEX = new RegExp(
   String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
     String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
@@ -230,6 +231,14 @@ const ansiFmt = {
   strikethrough: (t: string) => `\x1b[9m${t}\x1b[29m`,
 };
 
+function getSingleInlineMathSegment(match: string) {
+  const segments = splitInlineMathSegments(match);
+  const segment = segments[0];
+  return segments.length === 1 && segment?.type === 'math'
+    ? segment
+    : undefined;
+}
+
 /**
  * Convert inline markdown to ANSI-styled text.
  * Mirrors RenderInline's behavior but outputs strings instead of React nodes.
@@ -332,10 +341,13 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
       fullMatch.endsWith('$') &&
       fullMatch.length > 2
     ) {
-      rendered = applyColor(
-        renderInlineLatex(fullMatch.slice(1, -1)),
-        theme.text.accent,
-      );
+      const segment = getSingleInlineMathSegment(fullMatch);
+      if (segment) {
+        rendered = applyColor(
+          renderInlineLatex(segment.text),
+          theme.text.accent,
+        );
+      }
     } else if (
       fullMatch.startsWith('<u>') &&
       fullMatch.endsWith('</u>') &&

@@ -37,6 +37,9 @@ describe('TerminalMathRenderer', () => {
       ' ∑  xᵢ',
       'i=1   ',
     ]);
+    expect(renderTerminalMathBlock('\\sum_{i=1}')).toEqual([' ∑ ', 'i=1']);
+    expect(renderTerminalMathBlock('\\sum^n')).toEqual(['n', '∑']);
+    expect(renderTerminalMathInline('\\int_0^1 f(x) dx')).toBe('∫₀¹ f(x) dx');
   });
 
   it('renders matrix environments with terminal fences', () => {
@@ -45,6 +48,26 @@ describe('TerminalMathRenderer', () => {
         '\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}',
       ),
     ).toEqual(['⎛ a  b ⎞', '⎝ c  d ⎠']);
+    expect(
+      renderTerminalMathBlock(
+        '\\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}',
+      ),
+    ).toEqual(['⎡ a  b ⎤', '⎣ c  d ⎦']);
+    expect(
+      renderTerminalMathBlock(
+        '\\begin{Bmatrix} a & b \\\\ c & d \\end{Bmatrix}',
+      ),
+    ).toEqual(['⎧ a  b ⎫', '⎩ c  d ⎭']);
+    expect(
+      renderTerminalMathBlock(
+        '\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}',
+      ),
+    ).toEqual(['│ a  b │', '│ c  d │']);
+    expect(
+      renderTerminalMathBlock(
+        '\\begin{Vmatrix} a & b \\\\ c & d \\end{Vmatrix}',
+      ),
+    ).toEqual(['║ a  b ║', '║ c  d ║']);
   });
 
   it('keeps nested same-name environments together', () => {
@@ -53,6 +76,18 @@ describe('TerminalMathRenderer', () => {
         [
           '\\begin{pmatrix}',
           '\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix} & e',
+          '\\end{pmatrix}',
+        ].join(' '),
+      ),
+    ).toEqual(['⎛ ⎛ a  b ⎞    ⎞', '⎝ ⎝ c  d ⎠  e ⎠']);
+  });
+
+  it('does not confuse starred and non-starred environments', () => {
+    expect(
+      renderTerminalMathBlock(
+        [
+          '\\begin{pmatrix}',
+          '\\begin{pmatrix*} a & b \\\\ c & d \\end{pmatrix*} & e',
           '\\end{pmatrix}',
         ].join(' '),
       ),
@@ -75,11 +110,38 @@ describe('TerminalMathRenderer', () => {
 
   it('renders underlines and scaled left/right delimiters', () => {
     expect(renderTerminalMathInline('\\underline{x}')).toBe('x̲');
+    expect(renderTerminalMathBlock('\\overline{x}')).toEqual(['─', 'x']);
     expect(renderTerminalMathBlock('\\left(\\frac{a}{b}\\right)')).toEqual([
       '⎛ a ⎞',
       '⎜ ─ ⎟',
       '⎝ b ⎠',
     ]);
+    expect(renderTerminalMathInline('\\left\\| x \\right\\|')).toBe('‖x‖');
+  });
+
+  it('renders additional command forms covered by the parser', () => {
+    expect(renderTerminalMathInline('x^{A}')).toBe('x^{A}');
+    expect(renderTerminalMathInline('\\sqrt[3]{x}')).toBe('³√(x)');
+    expect(renderTerminalMathBlock('\\binom{n}{k}')).toEqual([
+      '⎛ n ⎞',
+      '⎜ ─ ⎟',
+      '⎝ k ⎠',
+    ]);
+    expect(renderTerminalMathBlock('\\hat{\\frac{a}{b}}')).toEqual([
+      '^',
+      'a',
+      '─',
+      'b',
+    ]);
+    expect(renderTerminalMathInline('\\bar{x}')).toBe('x̄');
+    expect(renderTerminalMathInline('\\vec{x}')).toBe('x⃗');
+    expect(renderTerminalMathInline('\\dot{x}')).toBe('ẋ');
+    expect(renderTerminalMathInline('\\ddot{x}')).toBe('ẍ');
+    expect(renderTerminalMathInline('\\tilde{x}')).toBe('x̃');
+    expect(
+      renderTerminalMathInline('\\text{hello} + \\mathrm{R} + \\mathbf{x}'),
+    ).toBe('hello + R + x');
+    expect(renderTerminalMathInline('a \\quad b')).toBe('a      b');
   });
 
   it('splits inline math while leaving prices and shell variables alone', () => {
@@ -100,6 +162,15 @@ describe('TerminalMathRenderer', () => {
 
     expect(() => renderTerminalMathInline(nested)).toThrow(
       'Maximum TeX parse depth exceeded',
+    );
+  });
+
+  it('throws controlled errors for unclosed paired constructs', () => {
+    expect(() => renderTerminalMathInline('\\left( x')).toThrow(
+      'Missing \\right delimiter',
+    );
+    expect(() => renderTerminalMathBlock('\\begin{pmatrix} a & b')).toThrow(
+      'Missing \\end{pmatrix}',
     );
   });
 });

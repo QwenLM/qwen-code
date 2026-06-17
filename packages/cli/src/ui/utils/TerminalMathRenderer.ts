@@ -201,10 +201,6 @@ const LARGE_OPERATORS = new Set([
   'sum',
   'prod',
   'coprod',
-  'int',
-  'iint',
-  'iiint',
-  'oint',
   'lim',
   'limsup',
   'liminf',
@@ -321,6 +317,7 @@ const DELIMITER_MAP: Record<string, string> = {
   '\\rfloor': '⌋',
   '\\vert': '|',
   '\\Vert': '‖',
+  '\\|': '‖',
 };
 
 function visibleWidth(text: string): number {
@@ -441,6 +438,33 @@ function applyAccent(command: string, box: MathBox): MathBox {
   };
   const mark = combining[command];
   if (!mark) return box;
+  if (box.lines.length > 1) {
+    const displayMark: Record<string, string> = {
+      hat: '^',
+      widehat: '^',
+      bar: '─',
+      vec: '→',
+      dot: '·',
+      ddot: '¨',
+      tilde: '~',
+      widetilde: '~',
+    };
+    const width = Math.max(boxWidth(box), 1);
+    const accentMark = displayMark[command] ?? mark;
+    const accentLine = accentMark
+      .repeat(
+        Math.max(1, Math.ceil(width / Math.max(1, stringWidth(accentMark)))),
+      )
+      .slice(0, width);
+    return {
+      lines: [
+        centerLine(accentLine, width),
+        ...box.lines.map((line) => centerLine(line, width)),
+      ],
+      baseline: box.baseline + 1,
+      inline: box.inline + mark,
+    };
+  }
   const accented = box.inline + mark;
   return textBox(accented);
 }
@@ -575,70 +599,71 @@ function readBalanced(
   return null;
 }
 
-function splitRows(input: string): string[] {
-  const rows: string[] = [];
-  let start = 0;
-  let braceDepth = 0;
-  let bracketDepth = 0;
-  let environmentDepth = 0;
+function readEnvironmentMarker(
+  input: string,
+  index: number,
+): { kind: 'begin' | 'end'; name: string; end: number } | null {
+  const begin = '\\begin{';
+  const end = '\\end{';
+  const kind = input.startsWith(begin, index)
+    ? 'begin'
+    : input.startsWith(end, index)
+      ? 'end'
+      : null;
+  if (!kind) return null;
 
-  for (let index = 0; index < input.length; index++) {
-    if (input.startsWith('\\begin{', index)) {
-      environmentDepth++;
-      index += '\\begin{'.length - 1;
-      continue;
-    }
-    if (input.startsWith('\\end{', index)) {
-      environmentDepth = Math.max(0, environmentDepth - 1);
-      index += '\\end{'.length - 1;
-      continue;
-    }
-
-    const char = input[index]!;
-    if (char === '\\') {
-      if (
-        input[index + 1] === '\\' &&
-        braceDepth === 0 &&
-        bracketDepth === 0 &&
-        environmentDepth === 0
-      ) {
-        rows.push(input.slice(start, index));
-        index++;
-        start = index + 1;
-      } else {
-        index++;
-      }
-      continue;
-    }
-    if (char === '{') braceDepth++;
-    if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
-    if (char === '[') bracketDepth++;
-    if (char === ']') bracketDepth = Math.max(0, bracketDepth - 1);
-  }
-  rows.push(input.slice(start));
-  return rows;
+  const nameStart = index + (kind === 'begin' ? begin.length : end.length);
+  const nameEnd = input.indexOf('}', nameStart);
+  if (nameEnd === -1) return null;
+  return {
+    kind,
+    name: input.slice(nameStart, nameEnd),
+    end: nameEnd + 1,
+  };
 }
 
-function splitCells(input: string): string[] {
-  const cells: string[] = [];
+function splitTopLevel(
+  input: string,
+  shouldSplit: (
+    input: string,
+    index: number,
+    braceDepth: number,
+    bracketDepth: number,
+    environmentDepth: number,
+  ) => number,
+): string[] {
+  const parts: string[] = [];
   let start = 0;
   let braceDepth = 0;
   let bracketDepth = 0;
   let environmentDepth = 0;
 
   for (let index = 0; index < input.length; index++) {
-    if (input.startsWith('\\begin{', index)) {
-      environmentDepth++;
-      index += '\\begin{'.length - 1;
-      continue;
-    }
-    if (input.startsWith('\\end{', index)) {
-      environmentDepth = Math.max(0, environmentDepth - 1);
-      index += '\\end{'.length - 1;
+    const marker = readEnvironmentMarker(input, index);
+    if (marker) {
+      environmentDepth =
+        marker.kind === 'begin'
+          ? environmentDepth + 1
+          : Math.max(0, environmentDepth - 1);
+      index = marker.end - 1;
       continue;
     }
 
     const char = input[index]!;
+    const splitLength = shouldSplit(
+      input,
+      index,
+      braceDepth,
+      bracketDepth,
+      environmentDepth,
+    );
+    if (splitLength > 0) {
+      parts.push(input.slice(start, index));
+      index += splitLength - 1;
+      start = index + 1;
+      continue;
+    }
+
     if (char === '\\') {
       index++;
       continue;
@@ -647,18 +672,36 @@ function splitCells(input: string): string[] {
     if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
     if (char === '[') bracketDepth++;
     if (char === ']') bracketDepth = Math.max(0, bracketDepth - 1);
-    if (
-      char === '&' &&
+  }
+  parts.push(input.slice(start));
+  return parts;
+}
+
+function splitRows(input: string): string[] {
+  return splitTopLevel(
+    input,
+    (value, index, braceDepth, bracketDepth, environmentDepth) =>
+      value[index] === '\\' &&
+      value[index + 1] === '\\' &&
       braceDepth === 0 &&
       bracketDepth === 0 &&
       environmentDepth === 0
-    ) {
-      cells.push(input.slice(start, index));
-      start = index + 1;
-    }
-  }
-  cells.push(input.slice(start));
-  return cells;
+        ? 2
+        : 0,
+  );
+}
+
+function splitCells(input: string): string[] {
+  return splitTopLevel(
+    input,
+    (value, index, braceDepth, bracketDepth, environmentDepth) =>
+      value[index] === '&' &&
+      braceDepth === 0 &&
+      bracketDepth === 0 &&
+      environmentDepth === 0
+        ? 1
+        : 0,
+  );
 }
 
 function padBox(box: MathBox, width: number): MathBox {
@@ -862,7 +905,7 @@ class TeXParser {
         return command === 'binom' ? wrapFence(fraction, '(', ')') : fraction;
       }
       case 'sqrt': {
-        const degree = this.parseOptionalBracketArgument();
+        const degree = this.parseOptionalBracketArgument(depth + 1);
         const radical = this.parseRequiredArgument(depth + 1);
         return sqrtBox(radical, degree);
       }
@@ -872,7 +915,7 @@ class TeXParser {
       case 'mathbf':
       case 'mathit':
       case 'operatorname':
-        return textBox(this.readRequiredGroupText());
+        return textBox(stripControlChars(this.readRequiredGroupText()));
       case 'overline':
         return applyOverline(this.parseRequiredArgument(depth + 1));
       case 'underline':
@@ -940,13 +983,14 @@ class TeXParser {
     return this.parseAtom(depth + 1);
   }
 
-  private parseOptionalBracketArgument(): MathBox | undefined {
+  private parseOptionalBracketArgument(depth: number): MathBox | undefined {
+    this.assertDepth(depth);
     this.skipSpaces();
     if (this.input[this.position] !== '[') return undefined;
     const result = readBalanced(this.input, this.position, '[', ']');
     if (!result) return undefined;
     this.position = result.end;
-    return renderMathToBox(result.content);
+    return renderMathToBox(result.content, depth);
   }
 
   private readRequiredGroupText(): string {
@@ -958,34 +1002,29 @@ class TeXParser {
   }
 
   private readEnvironmentContent(environmentName: string): string {
-    const beginToken = `\\begin{${environmentName}}`;
-    const endToken = `\\end{${environmentName}}`;
     let depth = 1;
 
     for (let cursor = this.position; cursor < this.input.length; ) {
-      if (this.input.startsWith(beginToken, cursor)) {
-        depth++;
-        cursor += beginToken.length;
-        continue;
-      }
-
-      if (this.input.startsWith(endToken, cursor)) {
-        depth--;
-        if (depth === 0) {
-          const content = this.input.slice(this.position, cursor);
-          this.position = cursor + endToken.length;
-          return content;
+      const marker = readEnvironmentMarker(this.input, cursor);
+      if (marker?.name === environmentName) {
+        if (marker.kind === 'begin') {
+          depth++;
+        } else {
+          depth--;
+          if (depth === 0) {
+            const content = this.input.slice(this.position, cursor);
+            this.position = marker.end;
+            return content;
+          }
         }
-        cursor += endToken.length;
+        cursor = marker.end;
         continue;
       }
 
       cursor++;
     }
 
-    const content = this.input.slice(this.position);
-    this.position = this.input.length;
-    return content;
+    throw new Error(`Missing \\end{${environmentName}}`);
   }
 
   private parseLeftRight(depth: number): MathBox {
@@ -995,6 +1034,11 @@ class TeXParser {
     let nestedDepth = 1;
 
     for (let cursor = this.position; cursor < this.input.length; ) {
+      if (this.input[cursor] === '\\' && this.input[cursor + 1] === '\\') {
+        cursor += 2;
+        continue;
+      }
+
       if (this.isControlWordAt('left', cursor)) {
         nestedDepth++;
         cursor += '\\left'.length;
@@ -1016,9 +1060,7 @@ class TeXParser {
       cursor++;
     }
 
-    const content = this.input.slice(contentStart);
-    this.position = this.input.length;
-    return wrapFence(renderMathToBox(content, depth + 1), left, '');
+    throw new Error('Missing \\right delimiter');
   }
 
   private isControlWordAt(command: string, position: number): boolean {
@@ -1067,12 +1109,21 @@ function applyUnderline(box: MathBox): MathBox {
   return textBox(`${box.inline}\u0332`);
 }
 
+function stripControlChars(text: string): string {
+  return Array.from(text)
+    .filter((char) => {
+      const code = char.charCodeAt(0);
+      return code > 0x1f && code !== 0x7f && code !== 0x9b;
+    })
+    .join('');
+}
+
 function renderMathToBox(source: string, depth = 0): MathBox {
   return new TeXParser(source.trim()).parse(depth);
 }
 
 export function renderTerminalMathInline(source: string): string {
-  return renderMathToBox(source).inline.replace(/\s+/g, ' ').trim();
+  return renderMathToBox(source).inline.trim();
 }
 
 export function renderTerminalMathBlock(source: string): string[] {
