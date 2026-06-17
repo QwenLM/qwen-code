@@ -11,7 +11,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { CommandKind, type SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import type { Key } from './useKeypress.js';
-import type { UseCommandCompletionReturn } from './useCommandCompletion.js';
+import {
+  CompletionMode,
+  type UseCommandCompletionReturn,
+} from './useCommandCompletion.js';
 import {
   getExportFormatFromInput,
   getNextExportCompletionIndex,
@@ -84,6 +87,7 @@ function createCompletion(
     navigateUp: vi.fn(),
     navigateDown: vi.fn(),
     handleAutocomplete: vi.fn(),
+    completionMode: CompletionMode.IDLE,
     midInputGhostText: null,
     ...overrides,
   };

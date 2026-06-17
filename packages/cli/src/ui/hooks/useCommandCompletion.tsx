@@ -44,6 +44,7 @@ export interface UseCommandCompletionReturn {
   navigateUp: () => void;
   navigateDown: () => void;
   handleAutocomplete: (indexToUse: number) => void;
+  completionMode: CompletionMode;
   /** Inline ghost text for mid-input slash commands (not at line start). */
   midInputGhostText: {
     text: string;
@@ -335,6 +336,7 @@ export function useCommandCompletion(
     navigateUp,
     navigateDown,
     handleAutocomplete,
+    completionMode,
     midInputGhostText,
   };
 }
