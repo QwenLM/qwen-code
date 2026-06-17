@@ -80,10 +80,10 @@ jobs:
               --json number,title,body,labels,createdAt,url \
               | jq -c '[.]' > "${WORKDIR}/candidates.json"
           else
-            CUTOFF="$(date -u -d '14 days ago' +%Y-%m-%d)"
-            echo "🔍 Scanning for stale, unattended bugs (no activity since ${CUTOFF})..."
+            MIN_CREATED="$(date -u -d '2 days ago' +%Y-%m-%d)"
+            echo "🔍 Scanning for recent, unattended bugs created before ${MIN_CREATED} (newest first)..."
             gh issue list --repo "${REPO}" \
-              --search "is:open is:issue label:type/bug no:assignee updated:<${CUTOFF} -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc" \
+              --search "is:open is:issue label:type/bug no:assignee created:<${MIN_CREATED} -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc" \
               --limit 30 --json number,title,body,labels,createdAt,url,comments \
               > "${WORKDIR}/scan.json"
 
@@ -96,6 +96,11 @@ jobs:
 
           COUNT="$(jq length "${WORKDIR}/candidates.json")"
           echo "📋 ${COUNT} candidate(s) found"
+          if [[ "${COUNT}" -gt 0 ]]; then
+            OLDEST_CREATED="$(jq -r 'map(.createdAt) | min' "${WORKDIR}/candidates.json")"
+            NEWEST_CREATED="$(jq -r 'map(.createdAt) | max' "${WORKDIR}/candidates.json")"
+            echo "🕒 Candidate createdAt range: ${OLDEST_CREATED} .. ${NEWEST_CREATED}"
+          fi
           echo "has_candidates=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Assess candidates'
@@ -158,7 +163,9 @@ jobs:
                on that basis alone.
 
             Pick AT MOST ONE issue to fix — the one with the highest
-            confidence, not the oldest. It is fine to pick none.
+            confidence, not simply the oldest. When several are clearly
+            actionable with comparable confidence, prefer the most recently
+            reported. It is fine to pick none.
 
             ## Output
 
@@ -428,11 +435,19 @@ jobs:
         if: |-
           ${{ steps.decision.outputs.go_issue != '' && inputs.dry_run != true }}
         env:
-          # AUTOFIX_BOT_TOKEN (a PAT or GitHub App token) is preferred so the
-          # created PR triggers CI; PRs created with GITHUB_TOKEN do not.
-          GITHUB_TOKEN: '${{ secrets.AUTOFIX_BOT_TOKEN || secrets.GITHUB_TOKEN }}'
+          # The qwen-code-ci-bot PAT (QWEN_CODE_BOT_TOKEN, falling back to
+          # CI_BOT_PAT — the same secrets the issue follow-up bot uses) opens
+          # the PR as qwen-code-ci-bot. This is required: the default
+          # GITHUB_TOKEN is blocked from creating PRs ("GitHub Actions is not
+          # permitted to create or approve pull requests"), and PRs it does
+          # create do not trigger CI. The bot PAT clears both problems.
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
         run: |-
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo '::error::QWEN_CODE_BOT_TOKEN or CI_BOT_PAT is required to publish the PR as qwen-code-ci-bot.'
+            exit 1
+          fi
           BRANCH="autofix/issue-${ISSUE}"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
           git push --force-with-lease origin "${BRANCH}"

@@ -217,6 +217,81 @@
   flex-wrap: wrap;
 }
 
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 5px 0 0;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 22px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.inlineTag {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(44ch, 100%);
+  min-height: 20px;
+  margin: 0 0.25ch;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.2;
+  vertical-align: baseline;
+}
+
+.tagLabel,
+.tagValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tagLabel {
+  padding: 3px 0 3px 7px;
+  color: var(--accent-color);
+}
+
+.tagValue {
+  max-width: 32ch;
+  padding: 3px 0 3px 0.5ch;
+  color: var(--text-secondary);
+}
+
+.tagRemove {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dimmed);
+  font: inherit;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.tagRemove:hover,
+.tagRemove:focus-visible {
+  color: var(--error-color);
+  outline: none;
+}
+
 .imageThumb {
   position: relative;
   width: 48px;

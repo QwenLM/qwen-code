@@ -773,9 +773,14 @@ const EN: Messages = {
   'todo.title': 'Current tasks',
   'turn.collapse': 'Collapse steps',
   'turn.expand': 'Expand steps',
-  'turn.hiddenSteps': (v) => {
+  'turn.cached': 'cached',
+  'turn.executionSteps': (v) => {
     const n = v?.count ?? 0;
-    return `${n} step${n === 1 ? '' : 's'}`;
+    return `Execution ${n} step${n === 1 ? '' : 's'}`;
+  },
+  'turn.toolCalls': (v) => {
+    const n = v?.count ?? 0;
+    return `${n} tool call${n === 1 ? '' : 's'}`;
   },
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
@@ -845,10 +850,14 @@ const EN: Messages = {
   'tools.update.enable': 'Enable',
   'tools.updating': 'Updating...',
   'tool.collapse': '▲ Collapse',
+  'tool.expand': 'Expand',
+  'tool.collapseHint': 'Collapse',
   'tool.showAll': (v) => `▼ Show all (${v?.count ?? 0} lines)`,
   'tool.showLess': '▲ Show less',
   'tool.showFullLines': '▼ Show full lines',
   'tool.linesTotal': (v) => `▼ ${v?.count ?? 0} lines total`,
+  'thinking.expand': 'Expand thinking',
+  'thinking.collapse': 'Collapse thinking',
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
@@ -1592,7 +1601,9 @@ const ZH: Messages = {
   'todo.title': '当前任务',
   'turn.collapse': '折叠步骤',
   'turn.expand': '展开步骤',
-  'turn.hiddenSteps': (v) => `${v?.count ?? 0} 步`,
+  'turn.cached': '缓存',
+  'turn.executionSteps': (v) => `执行过程 ${v?.count ?? 0} 步`,
+  'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
   'tasks.refreshStale': '任务状态可能已过期，正在重连...',
@@ -1661,10 +1672,14 @@ const ZH: Messages = {
   'tools.update.enable': '启用',
   'tools.updating': '更新中...',
   'tool.collapse': '▲ 收起',
+  'tool.expand': '展开',
+  'tool.collapseHint': '收起',
   'tool.showAll': (v) => `▼ 显示全部（${v?.count ?? 0} 行）`,
   'tool.showLess': '▲ 显示更少',
   'tool.showFullLines': '▼ 显示完整行',
   'tool.linesTotal': (v) => `▼ 共 ${v?.count ?? 0} 行`,
+  'thinking.expand': '展开思考',
+  'thinking.collapse': '收起思考',
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
   'settings.title': '设置',

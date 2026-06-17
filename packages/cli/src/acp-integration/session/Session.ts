@@ -97,6 +97,9 @@ import {
   dedupeToolCallsById,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+// Single source of truth shared with the daemon-side answerer (BridgeClient),
+// so a rename can't desync caller and answerer into a silent -32601 latch.
+import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
@@ -176,7 +179,6 @@ type RunToolResult = {
 const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
   'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.';
 
-const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
 // means the client silently drops unknown methods; without a deadline the
@@ -2344,8 +2346,14 @@ export class Session implements SessionContext {
         ) {
           break;
         }
+        // ACP processes notifications one-at-a-time (no batch) because each
+        // notification carries distinct task metadata (taskId, status, kind,
+        // toolUseId) used in display and response _meta. Merging would
+        // misattribute the combined response to a single task.
         const item = this.notificationQueue.shift()!;
-        await this.#executeBackgroundNotificationPrompt(item);
+        await sessionIdContext.run(this.config.getSessionId(), () =>
+          this.#executeBackgroundNotificationPromptInner(item),
+        );
       }
     } finally {
       this.notificationProcessing = false;
@@ -2363,15 +2371,6 @@ export class Session implements SessionContext {
         void this.#drainNotificationQueue();
       }
     }
-  }
-
-  async #executeBackgroundNotificationPrompt(
-    item: BackgroundNotificationQueueItem,
-  ): Promise<void> {
-    // Same session-ID binding rationale as #executePrompt.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeBackgroundNotificationPromptInner(item),
-    );
   }
 
   async #executeBackgroundNotificationPromptInner(

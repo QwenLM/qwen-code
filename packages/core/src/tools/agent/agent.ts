@@ -37,6 +37,7 @@ import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
 import type { Content, FunctionDeclaration } from '@google/genai';
 import {
   FORK_AGENT,
+  FORK_SUBAGENT_TYPE,
   FORK_PLACEHOLDER_RESULT,
   buildForkedMessages,
   buildChildMessage,
@@ -635,7 +636,7 @@ ${subagentDescriptions}
 
 ${
   isForkSubagentEnabled(this.config)
-    ? `When using the Agent tool, specify a subagent_type to use a specialized agent, or omit it to fork yourself — a fork inherits your full conversation context.`
+    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used and returns its result to you inline. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
     : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
 }
 
@@ -663,9 +664,9 @@ ${
     ? `
 ## When to fork
 
-Fork yourself (omit \`subagent_type\`) when the intermediate tool output isn't worth keeping in your context. The criterion is qualitative — "will I need this output again" — not task size.
-- **Research**: fork open-ended questions. If research can be broken into independent questions, launch parallel forks in one message. A fork beats a fresh subagent for this — it inherits context and shares your cache.
-- **Implementation**: prefer to fork implementation work that requires more than a couple of edits. Do research before jumping to implementation.
+A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context, but its findings do NOT come back to you in a form you can act on. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular awaitable subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type); each returns its result to you inline, and several in one message still run concurrently. Omitting \`subagent_type\` does NOT fork.
+
+Fork only when you genuinely won't need the result back — a detached background chore the user asked you to kick off and move on from. The criterion is qualitative: "will I need to read this output?" If yes, don't fork.
 
 Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork — a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can track the fork.
 
@@ -733,6 +734,12 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       };
     };
     if (schema.properties && schema.properties.subagent_type) {
+      // Only real, loadable subagents are advertised in the enum. `fork` is a
+      // deliberate pseudo-type, NOT listed here: dangling it as a casual option
+      // led the model to fork result-bearing work (e.g. review agents), whose
+      // findings a fork never returns. Forking stays reachable for intentional
+      // use — validation accepts `subagent_type: "fork"` and `/fork` passes it
+      // directly — it just isn't offered as a default pick.
       if (subagentNames.length > 0) {
         schema.properties.subagent_type.enum = subagentNames;
       } else {
@@ -773,15 +780,20 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "subagent_type" must be a non-empty string.';
       }
-      // Validate that the subagent exists (case-insensitive)
+      // Validate that the subagent exists (case-insensitive). `fork` is an
+      // explicit pseudo-type resolved by the dispatch logic (not a loadable
+      // subagent), so accept it regardless of the registered list; when
+      // forking is unavailable, dispatch falls back to general-purpose.
       const lowerType = params.subagent_type.toLowerCase();
-      const subagentExists = this.availableSubagents.some(
-        (subagent) => subagent.name.toLowerCase() === lowerType,
-      );
+      if (lowerType !== FORK_SUBAGENT_TYPE) {
+        const subagentExists = this.availableSubagents.some(
+          (subagent) => subagent.name.toLowerCase() === lowerType,
+        );
 
-      if (!subagentExists) {
-        const availableNames = this.availableSubagents.map((s) => s.name);
-        return `Subagent "${params.subagent_type}" not found. Available subagents: ${availableNames.join(', ')}`;
+        if (!subagentExists) {
+          const availableNames = this.availableSubagents.map((s) => s.name);
+          return `Subagent "${params.subagent_type}" not found. Available subagents: ${availableNames.join(', ')}`;
+        }
       }
     }
 
@@ -789,12 +801,15 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       if (params.isolation !== 'worktree') {
         return 'Parameter "isolation" must be "worktree" when set.';
       }
-      // Forks (no subagent_type) reuse the parent's full conversation
-      // context — putting them in a separate worktree would split
-      // intent from working tree and confuse path resolution. Require
-      // an explicit subagent_type when requesting isolation.
-      if (!params.subagent_type) {
-        return 'Parameter "isolation" requires "subagent_type" to be set.';
+      // Isolation puts the agent in a separate git worktree. A fork reuses
+      // the parent's conversation context and working tree, so it can't be
+      // isolated; and the general-purpose default is only worth isolating
+      // when asked for explicitly. Require an explicit, non-fork subagent_type.
+      if (
+        !params.subagent_type ||
+        params.subagent_type.toLowerCase() === FORK_SUBAGENT_TYPE
+      ) {
+        return 'Parameter "isolation" requires an explicit subagent_type (and cannot be "fork").';
       }
     }
 
@@ -1794,13 +1809,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let restoreParentPM: () => void = () => {};
 
     try {
-      // When subagent_type is omitted and fork is available in an interactive
-      // session, use fork. Otherwise fall back to general-purpose.
-      const isFork =
-        !this.params.subagent_type && isForkSubagentEnabled(this.config);
-      const effectiveSubagentType =
-        this.params.subagent_type ??
-        (isFork ? undefined : DEFAULT_BUILTIN_SUBAGENT_TYPE);
+      // Forking is explicit: `subagent_type: "fork"` selects a fork, and only
+      // when forking is available (interactive session). Any other value — or
+      // an omitted subagent_type — resolves to a real, awaitable subagent
+      // (general-purpose by default) whose result is returned inline. This
+      // keeps the long-standing "omit ⇒ awaitable general-purpose" contract
+      // that skills and callers depend on; a fork is opt-in, never the default.
+      const requestedType = this.params.subagent_type;
+      const isForkRequested =
+        requestedType?.toLowerCase() === FORK_SUBAGENT_TYPE;
+      const isFork = isForkRequested && isForkSubagentEnabled(this.config);
+      const effectiveSubagentType = isFork
+        ? undefined
+        : isForkRequested
+          ? // Explicit fork requested but unavailable (non-interactive) →
+            // fall back to the awaitable general-purpose subagent.
+            DEFAULT_BUILTIN_SUBAGENT_TYPE
+          : (requestedType ?? DEFAULT_BUILTIN_SUBAGENT_TYPE);
       let subagentConfig: SubagentConfig;
 
       if (isFork) {
@@ -2448,7 +2473,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // For forks, wrap the body in runInForkContext so the recursive-fork
         // guard in execute() fires if the fork child's model calls `agent`
         // again — otherwise background forks bypass the ALS marker and can
-        // spawn nested implicit forks.
+        // spawn nested forks.
         const bgBody = async (recordSpanOutcome: SubagentOutcomeSink) => {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
@@ -2620,9 +2645,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // `parentAgentId` in the sidecar meta. Also wrap in
         // qwen-code.subagent span (#3731 Phase 3) — background is
         // fire-and-forget, so the span gets a new traceId + `Link` to the
-        // invoking AGENT tool span. `invocationKind` distinguishes the
-        // implicit fork (no subagent_type) from a named background agent;
-        // both are long-lived enough to qualify for the 4h TTL safety net.
+        // invoking AGENT tool span. `invocationKind` distinguishes a fork
+        // (subagent_type: "fork") from a named background agent; both are
+        // long-lived enough to qualify for the 4h TTL safety net.
         const framedBgBody = () =>
           this.runWithSubagentSpan(
             this.buildSubagentSpanSpec(

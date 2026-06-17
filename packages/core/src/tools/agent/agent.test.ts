@@ -338,6 +338,30 @@ describe('AgentTool', () => {
       ]);
     });
 
+    it('does not advertise "fork" in the enum, even when interactive', async () => {
+      // `fork` is intentionally omitted from the enum so the model is not
+      // steered to fork result-bearing work; it stays valid via validation.
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+      const interactiveTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = interactiveTool.schema;
+      const properties = schema.parametersJsonSchema as {
+        properties: {
+          subagent_type: {
+            enum?: string[];
+          };
+        };
+      };
+      expect(properties.properties.subagent_type.enum).toEqual([
+        'file-search',
+        'code-review',
+      ]);
+      expect(properties.properties.subagent_type.enum).not.toContain('fork');
+    });
+
     it('does not expose teammate name when teams are disabled', () => {
       const schema = agentTool.schema;
       const parameters = schema.parametersJsonSchema as {
@@ -454,15 +478,34 @@ describe('AgentTool', () => {
       ).toMatch(/isolation/i);
     });
 
-    it('rejects isolation without subagent_type (fork is not isolatable)', () => {
-      const { subagent_type: _ignored, ...forkParams } = validParams;
+    it('rejects isolation without an explicit subagent_type', () => {
+      const { subagent_type: _ignored, ...noTypeParams } = validParams;
       void _ignored;
       expect(
         agentTool.validateToolParams({
-          ...forkParams,
+          ...noTypeParams,
           isolation: 'worktree',
         }),
       ).toMatch(/subagent_type/i);
+    });
+
+    it('accepts subagent_type "fork" without consulting the registry', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects isolation combined with subagent_type "fork"', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          isolation: 'worktree',
+        }),
+      ).toMatch(/fork/i);
     });
   });
 
@@ -1115,7 +1158,7 @@ describe('AgentTool', () => {
     });
   });
 
-  describe('Fork dispatch (subagent_type omitted)', () => {
+  describe('Fork dispatch (subagent_type: "fork")', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
 
@@ -1185,6 +1228,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'some task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
 
       const invocation = (
@@ -1196,6 +1240,36 @@ describe('AgentTool', () => {
         'general-purpose',
       );
       expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('omitting subagent_type uses general-purpose, not fork', async () => {
+      // Restored contract: omission resolves to the awaitable general-purpose
+      // subagent (inline result), never a fork — even in interactive mode.
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const params: AgentParams = {
+        description: 'some task',
+        prompt: 'do the thing',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
     });
 
     it('falls back to general-purpose when non-interactive', async () => {
@@ -1218,6 +1292,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
 
       const invocation = (
@@ -1236,6 +1311,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
 
       const invocation = (
@@ -1312,6 +1388,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -1324,7 +1401,7 @@ describe('AgentTool', () => {
       expect(stopSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('routes owned monitor notifications and cleanup for implicit forks', async () => {
+    it('routes owned monitor notifications and cleanup for forks', async () => {
       let releaseExecute: (() => void) | undefined;
       vi.mocked(mockAgent.execute).mockImplementation(
         () =>
@@ -1345,6 +1422,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -3028,6 +3106,7 @@ describe('AgentTool', () => {
       const forkParams: AgentParams = {
         description: 'Fork task',
         prompt: 'Investigate issue',
+        subagent_type: 'fork',
         run_in_background: true,
       };
       const generationConfig = {

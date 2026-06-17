@@ -46,7 +46,7 @@ describe('UserMessage collapse toggle', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
-  it('shows the hidden-step count and aria-expanded=false when collapsed', () => {
+  it('shows the step count and aria-expanded=false when collapsed', () => {
     const container = render(
       <UserMessage
         content="hi"
@@ -56,11 +56,39 @@ describe('UserMessage collapse toggle', () => {
     );
     const btn = container.querySelector('button')!;
     expect(btn).not.toBeNull();
-    expect(btn.textContent).toContain('5 steps');
+    expect(container.textContent).toContain('Execution 5 steps');
     expect(btn.getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('pluralizes a single hidden step as "1 step"', () => {
+  it('hides collapse metadata for slash commands', () => {
+    const container = render(
+      <UserMessage
+        content="/review"
+        commands={[{ name: 'review', description: 'Review changes' }]}
+        collapse={head({ elapsedMs: 12_400, toolCallCount: 3 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('/review');
+    expect(container.textContent).not.toContain('Execution 5 steps');
+    expect(container.textContent).not.toContain('12.4s');
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('keeps collapse metadata for unknown slash-prefixed text', () => {
+    const container = render(
+      <UserMessage
+        content="/Users/project"
+        commands={[{ name: 'review', description: 'Review changes' }]}
+        collapse={head({ elapsedMs: 12_400, toolCallCount: 3 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('Execution 5 steps');
+    expect(container.textContent).toContain('12.4s');
+  });
+
+  it('pluralizes a single execution step as "Execution 1 step"', () => {
     const container = render(
       <UserMessage
         content="hi"
@@ -68,8 +96,8 @@ describe('UserMessage collapse toggle', () => {
         onToggleCollapse={() => {}}
       />,
     );
-    const text = container.querySelector('button')!.textContent ?? '';
-    expect(text).toContain('1 step');
+    const text = container.textContent ?? '';
+    expect(text).toContain('Execution 1 step');
     expect(text).not.toContain('1 steps');
   });
 
@@ -86,7 +114,7 @@ describe('UserMessage collapse toggle', () => {
     ).toBe('true');
   });
 
-  it('calls onToggleCollapse with the turn id on click', () => {
+  it('calls onToggleCollapse with the turn id when the chevron is clicked', () => {
     const onToggle = vi.fn();
     const container = render(
       <UserMessage
@@ -97,5 +125,171 @@ describe('UserMessage collapse toggle', () => {
     );
     click(container.querySelector('button')!);
     expect(onToggle).toHaveBeenCalledWith('turn-7');
+  });
+
+  it('appends elapsed and ↑input ↓output tokens when present', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({
+          hiddenCount: 5,
+          elapsedMs: 12_400,
+          toolCallCount: 3,
+          inputTokens: 3100,
+          outputTokens: 5100,
+        })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('Execution 5 steps');
+    expect(text).toContain('12.4s');
+    expect(text).toContain('3 tool calls');
+    expect(text).toContain('↑3.1k');
+    expect(text).toContain('↓5.1k');
+    expect(text.indexOf('↓5.1k')).toBeLessThan(text.indexOf('3 tool calls'));
+  });
+
+  it('puts the chevron + step count in the toggle, metrics inert', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({
+          hiddenCount: 5,
+          elapsedMs: 12_400,
+          inputTokens: 3100,
+          outputTokens: 5100,
+        })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const btn = container.querySelector('button')!;
+    // The toggle carries the chevron AND the step count (a roomy target)…
+    expect(btn.textContent).toMatch(/^[▸▾] Execution 5 steps$/);
+    // …while the metrics live outside the button, in an inert span.
+    expect(btn.textContent).not.toContain('12.4s');
+    const meta = btn.nextElementSibling!;
+    expect(meta.tagName).toBe('SPAN');
+    expect(meta.textContent).toContain('12.4s');
+    expect(meta.textContent).toContain('↑3.1k');
+  });
+
+  it('keeps the toggle + metrics stable collapsed vs expanded (no reflow)', () => {
+    const base = {
+      hiddenCount: 5,
+      elapsedMs: 12_400,
+      inputTokens: 3100,
+      outputTokens: 5100,
+    };
+    const metaOf = (c: HTMLElement) =>
+      c.querySelector('button')!.nextElementSibling!.textContent;
+    const btnOf = (c: HTMLElement) => c.querySelector('button')!.textContent;
+    const collapsed = render(
+      <UserMessage
+        content="hi"
+        collapse={head({ ...base, collapsed: true })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const expanded = render(
+      <UserMessage
+        content="hi"
+        collapse={head({ ...base, collapsed: false })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    // Inert metrics identical; the toggle differs only by the chevron glyph
+    // (same-width in the mono font), so the row never reflows on toggle.
+    expect(metaOf(collapsed)).toBe(metaOf(expanded));
+    expect(btnOf(collapsed)).toBe('▸ Execution 5 steps');
+    expect(btnOf(expanded)).toBe('▾ Execution 5 steps');
+  });
+
+  it('renders only the toggle when no metrics are measured', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({ hiddenCount: 3 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const btn = container.querySelector('button')!;
+    expect(btn.textContent).toContain('Execution 3 steps');
+    // No metrics → no inert span and no stray separator.
+    expect(btn.nextElementSibling).toBeNull();
+    expect(container.textContent).not.toContain('·');
+  });
+
+  it('shows cached reads parenthetically on input, with their share', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({
+          inputTokens: 3100,
+          outputTokens: 5100,
+          cachedTokens: 2800,
+        })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('↑3.1k (2.8k cached, 90%) ↓5.1k');
+  });
+
+  it('ticks elapsed from liveStartedAt on a live turn', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const container = render(
+        <UserMessage
+          content="hi"
+          collapse={head({
+            hiddenCount: 0,
+            liveStartedAt: 7_600,
+            inputTokens: 5,
+            outputTokens: 5,
+          })}
+          onToggleCollapse={() => {}}
+        />,
+      );
+      // now (10_000) − liveStartedAt (7_600) = 2.4s, ticked live.
+      expect(container.textContent).toContain('2.4s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('omits the cached note when there are no cached reads', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({ inputTokens: 3100, outputTokens: 5100 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('↑3.1k ↓5.1k');
+    expect(text).not.toContain('cached');
+  });
+
+  it('renders a chevron-less metrics line for a step-less turn', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({
+          hiddenCount: 0,
+          elapsedMs: 1_200,
+          inputTokens: 1200,
+          outputTokens: 45,
+        })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    // No fold control when there is nothing to fold…
+    expect(container.querySelector('button')).toBeNull();
+    // …but the metrics still show, without a step count.
+    const text = container.textContent ?? '';
+    expect(text).toContain('1.2s');
+    expect(text).toContain('↑1.2k');
+    expect(text).not.toContain('step');
   });
 });

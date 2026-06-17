@@ -72,6 +72,9 @@ export type {
   BridgeClientRequestContext,
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
+  BridgeDaemonStatusLimits,
+  BridgeDaemonSessionDiagnostic,
+  BridgeDaemonStatusSnapshot,
   AcpSessionBridge,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
