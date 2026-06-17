@@ -30,17 +30,26 @@ permissions:
 
 jobs:
   authorize:
-    # Gate PR and /triage-comment triggers on the principal having write+
-    # permission: the PR author for PR events, the commenter for /triage
-    # comments. Replaces the old eligibility checks based on same-repo PRs and
-    # comment author_association, so fork PRs by trusted authors are triaged.
-    # `issues` and `workflow_dispatch` triggers do not need this gate.
+    # Gate the principal on having write+ permission before any agent runs:
+    #   - pull_request_target / `/triage` comment -> gates triage (read-only),
+    #     keyed on the PR author / the commenter respectively.
+    #   - `/tmux` comment / `tmux_pr` dispatch -> gates real-user testing, which
+    #     EXECUTES the PR author's code, so it is keyed on the PR author (whose
+    #     code runs), not the commenter/dispatcher (see principal resolution).
+    # Replaces the old eligibility checks based on same-repo PRs and comment
+    # author_association, so fork PRs by trusted authors are covered.
+    # The `issues` and `workflow_dispatch`-with-`number` (triage) triggers need
+    # no gate: triage is read-only and dispatch already requires write to
+    # invoke. But `tmux_pr` dispatch runs the *PR author's* code, not the
+    # dispatcher's, so it IS gated here on the PR author's permission.
     if: |-
       github.repository == 'QwenLM/qwen-code' &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'issue_comment' &&
         (startsWith(github.event.comment.body, '@qwen-code /triage') ||
-         startsWith(github.event.comment.body, '@qwen-code /tmux'))))
+         startsWith(github.event.comment.body, '@qwen-code /tmux'))) ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.tmux_pr != ''))
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -62,6 +71,7 @@ jobs:
           COMMENT_USER: '${{ github.event.comment.user.login }}'
           ISSUE_AUTHOR: '${{ github.event.issue.user.login }}'
           COMMENT_BODY: '${{ github.event.comment.body }}'
+          TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -74,6 +84,12 @@ jobs:
                 '@qwen-code /tmux'*) principal="$ISSUE_AUTHOR" ;;
                 *) principal="$COMMENT_USER" ;;
               esac
+              ;;
+            workflow_dispatch)
+              # Only the tmux_pr dispatch reaches authorize. It runs the PR
+              # author's code, so resolve and gate on that author (not the
+              # dispatcher). Empty/unresolvable author fails closed below.
+              principal="$(gh pr view "$TMUX_PR" --repo "$GITHUB_REPOSITORY" --json author --jq '.author.login' 2>/dev/null || true)"
               ;;
             *) principal="" ;;
           esac
@@ -144,7 +160,9 @@ jobs:
       always() &&
       github.repository == 'QwenLM/qwen-code' && (
         github.event_name == 'issues' ||
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.number != '') ||
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.number != '' &&
+         github.event.inputs.tmux_pr == '') ||
         (
           ((github.event_name == 'pull_request_target' &&
             github.event.pull_request.draft == false) ||
@@ -212,8 +230,16 @@ jobs:
          startsWith(github.event.comment.body, '@qwen-code /tmux') &&
          needs.authorize.outputs.should_run == 'true') ||
         (github.event_name == 'workflow_dispatch' &&
-         github.event.inputs.tmux_pr != '')
+         github.event.inputs.tmux_pr != '' &&
+         needs.authorize.outputs.should_run == 'true')
       )
+    # One real-user test per PR at a time. Concurrent /tmux runs would share the
+    # same self-hosted runner workspace and git worktrees and clobber each other,
+    # so serialize them (cancel-in-progress: false lets the in-flight test finish
+    # rather than killing it mid-run).
+    concurrency:
+      group: '${{ github.workflow }}-tmux-${{ github.event.issue.number || github.event.inputs.tmux_pr }}'
+      cancel-in-progress: false
     timeout-minutes: 25
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     permissions:
@@ -229,11 +255,19 @@ jobs:
           PR_NUMBER: '${{ github.event.issue.number || github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
-          data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
-          IFS=$'\t' read -r state is_draft <<< "$data"
+          data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,mergeable --jq '[.state, .isDraft, .mergeable] | @tsv')"
+          IFS=$'\t' read -r state is_draft mergeable <<< "$data"
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
             echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
+            echo "should_test=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The checkout below uses refs/pull/N/merge, which GitHub only keeps
+          # current while the PR merges cleanly. For a conflicting PR the ref is
+          # stale or missing, so skip rather than test the wrong tree.
+          if [ "$mergeable" = "CONFLICTING" ]; then
+            echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} has merge conflicts; refs/pull/${PR_NUMBER}/merge is unavailable."
             echo "should_test=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -274,8 +308,12 @@ jobs:
         if: "steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
         id: 'run'
         # NOTE: no GitHub token here — this step runs untrusted PR code. Only
-        # the model credentials are exposed (same as the review agent).
+        # the model credentials are exposed (same as the review agent). The
+        # GITHUB_TOKEN / GH_TOKEN are pinned empty so nothing in the inherited
+        # environment can hand the agent a repo-scoped credential.
         env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
@@ -288,9 +326,13 @@ jobs:
             exit 1
           fi
 
-          # Bypass the runner proxy for the qwen model call only (the proxy cuts
-          # the SSE stream to the model host). Call this right before qwen so
-          # any build steps above keep the proxy for the npm registry.
+          # Bypass the runner proxy before launching qwen: the proxy cuts the
+          # SSE stream to the model host, and qwen reads HTTP(S)_PROXY directly
+          # without honoring NO_PROXY. This drops the proxy for the whole agent
+          # run, including the build it drives — the ecs-qwen runner reaches the
+          # npm registry without the HTTP proxy (validated end-to-end). Unlike
+          # the review job we add no gh/git proxy wrappers: this job carries no
+          # GitHub token, so the agent does no authenticated gh/git network ops.
           # shellcheck disable=SC2016
           configure_qwen_network() {
             local openai_host
@@ -346,12 +388,32 @@ jobs:
           path: '${{ runner.temp }}/tmux-results/'
           retention-days: 7
 
+      - name: 'Clean up runner workspace'
+        # Mirror the stale-worktree cleanup at the start of the job, but at the
+        # end and on every outcome. Without it the checked-out PR tree, the
+        # skill's tmp/*-tmux-* dirs, and any worktrees accumulate on the
+        # persistent self-hosted runner across runs.
+        if: "always() && steps.pr.outputs.should_test == 'true' && steps.pr.outputs.has_tui == 'true'"
+        run: |-
+          set -uo pipefail
+          [ -e .git ] || exit 0
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+          git worktree prune -v || true
+
   # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
   # with the write PAT and never checks out PR code, so the write credential is
   # isolated from the untrusted-code execution in tmux-testing above.
   publish-tmux:
     needs: ['tmux-testing']
-    if: "always() && needs.tmux-testing.result == 'success' && needs.tmux-testing.outputs.verdict != '' && github.event.inputs.no_comment != 'true'"
+    # Post when there is a verdict to report, OR when tmux-testing failed for
+    # infrastructure reasons (checkout/runner/setup error) so the requester gets
+    # an explicit signal instead of a silent void. The empty-verdict success
+    # case (PR closed/draft/conflicting/no-TUI handled upstream) stays silent.
+    if: >-
+      always() && github.event.inputs.no_comment != 'true' &&
+      (needs.tmux-testing.result == 'failure' ||
+       (needs.tmux-testing.result == 'success' && needs.tmux-testing.outputs.verdict != ''))
     runs-on: 'ubuntu-latest'
     permissions:
       pull-requests: 'write'
@@ -368,36 +430,60 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ needs.tmux-testing.outputs.pr_number }}'
           VERDICT: '${{ needs.tmux-testing.outputs.verdict }}'
+          TMUX_RESULT: '${{ needs.tmux-testing.result }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         # shellcheck disable=SC2016
         run: |-
           set -euo pipefail
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "::warning::No PR number resolved; cannot post a tmux result comment."
+            exit 0
+          fi
           BODY_FILE="${RUNNER_TEMP:-/tmp}/tmux-comment.md"
-          REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
-          TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
 
           # Embed a file inside a collapsed <details> as a fenced code block.
           # Fenced (not rendered) on purpose: PR-driven test output must not
           # render markdown, fire @mentions, or break the comment layout.
           emit_block() {
-            local summary="$1" file="$2" max="$3"
+            local summary="$1" file="$2" max="$3" content longest width fence
             [ -n "$file" ] && [ -f "$file" ] || return 0
-            printf '<details>\n<summary>%s</summary>\n\n```text\n' "$summary"
-            head -c "$max" "$file"
+            content="$(head -c "$max" "$file")"
             if [ "$(wc -c < "$file")" -gt "$max" ]; then
-              printf '\n\n...truncated -- full log in the run artifacts.'
+              content="${content}"$'\n\n...truncated -- full log in the run artifacts.'
             fi
-            printf '\n```\n\n</details>\n\n'
+            # The content is untrusted PR output and may contain ``` runs that
+            # would close a 3-backtick fence early and let the rest render as
+            # markdown. Open/close with a fence one backtick longer than the
+            # longest backtick run in the content (min 3).
+            longest="$(printf '%s' "$content" | grep -oE '`+' | awk '{ if (length > m) m = length } END { print m + 0 }')"
+            width=$(( longest >= 3 ? longest + 1 : 3 ))
+            fence="$(printf '%*s' "$width" '' | tr ' ' '`')"
+            printf '<details>\n<summary>%s</summary>\n\n%stext\n' "$summary" "$fence"
+            printf '%s\n' "$content"
+            printf '%s\n\n</details>\n\n' "$fence"
           }
 
-          {
-            printf '%s\n\n' '<!-- qwen-triage:tmux -->'
-            printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT" "$RUN_URL"
-            printf 'Launched the changed app in a real tmux session and exercised the affected flow.\n\n'
-            emit_block 'E2E test report' "$REPORT" 20000
-            emit_block 'Full tmux transcript' "$TRANSCRIPT" 30000
-            printf '%s\n' '— _Qwen Code · tmux real-user testing_'
-          } > "$BODY_FILE"
+          if [ "${TMUX_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
+            # tmux-testing did not finish (infrastructure error): report it so the
+            # requester is not left with silence.
+            {
+              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+              printf '**tmux real-user testing: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The testing job did not complete (checkout, runner, or setup error) and produced no verdict. See the workflow run for details.\n\n'
+              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+            } > "$BODY_FILE"
+          else
+            REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
+            TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
+            {
+              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+              printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT" "$RUN_URL"
+              printf 'Launched the changed app in a real tmux session and exercised the affected flow.\n\n'
+              emit_block 'E2E test report' "$REPORT" 20000
+              emit_block 'Full tmux transcript' "$TRANSCRIPT" 30000
+              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+            } > "$BODY_FILE"
+          fi
 
           # Dedup: update an existing tmux comment if one is already present.
           EXISTING="$(
