@@ -458,14 +458,24 @@ describe('InputPrompt', () => {
     // when `followup.state.suggestion` is null (e.g. after user typed and
     // deleted — the followup controller was dismissed but the placeholder
     // text is still available via the prop).
+    //
+    // These tests deliberately advance LESS than SUGGESTION_DELAY_MS (300ms),
+    // so the followup controller's show-timer never fires and
+    // `followup.state.suggestion` stays null — exercising the prop fallback
+    // branch rather than the normal visible-suggestion path. (Earlier versions
+    // waited 700ms here, which silently tested the normal flow instead.)
     describe('promptSuggestion prop fallback (when followup.state.suggestion is null)', () => {
+      // Comfortably under the 300ms SUGGESTION_DELAY_MS so the controller's
+      // state.suggestion remains null.
+      const BEFORE_SUGGESTION_VISIBLE_MS = 100;
+
       it('accepts promptSuggestion via Tab when followup.state.suggestion is null', async () => {
         vi.useFakeTimers();
         const { stdin, unmount } = renderWithProviders(
           <InputPrompt {...props} promptSuggestion="commit this" />,
         );
         try {
-          await advanceTimers(SUGGESTION_VISIBLE_WAIT_MS);
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
 
           act(() => {
             stdin.write('\t');
@@ -486,7 +496,7 @@ describe('InputPrompt', () => {
           <InputPrompt {...props} promptSuggestion="commit this" />,
         );
         try {
-          await advanceTimers(SUGGESTION_VISIBLE_WAIT_MS);
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
 
           act(() => {
             stdin.write('\x1b[C'); // right arrow
@@ -501,13 +511,13 @@ describe('InputPrompt', () => {
         }
       });
 
-      it('submits promptSuggestion via Enter when followup.state.suggestion is null', async () => {
+      it('fills buffer on Enter (does not submit) when followup.state.suggestion is null', async () => {
         vi.useFakeTimers();
         const { stdin, unmount } = renderWithProviders(
           <InputPrompt {...props} promptSuggestion="commit this" />,
         );
         try {
-          await advanceTimers(SUGGESTION_VISIBLE_WAIT_MS);
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
 
           act(() => {
             stdin.write('\r');

@@ -188,12 +188,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const [recentPasteTime, setRecentPasteTime] = useState<number | null>(null);
   const pasteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Track whether the suggestion has been dismissed by user input (typing).
-  // Used by hasTabConsumer to re-enable Windows Tab cycling after dismiss,
-  // even though promptSuggestion state still holds the text.
-  // Start as false — the suggestion is "available" until the user types.
-  const [suggestionDismissed, setSuggestionDismissed] = useState(false);
-
   // Attachment state for clipboard images
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isAttachmentMode, setIsAttachmentMode] = useState(false);
@@ -657,7 +651,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (followup.state.isVisible || promptSuggestion)
         ) {
           followup.dismiss();
-          setSuggestionDismissed(true);
           onPromptSuggestionDismiss?.();
         }
 
@@ -1000,15 +993,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         (followup.state.isVisible || promptSuggestion) &&
         (followup.state.suggestion ?? promptSuggestion)
       ) {
-        // If followup state has a suggestion, use the normal accept path.
-        // Otherwise use `promptSuggestion` directly (e.g. after user typed
-        // and deleted — the followup controller was dismissed but the
-        // placeholder text is still available).
-        if (followup.state.suggestion) {
-          followup.accept('tab');
-        } else if (promptSuggestion) {
-          buffer.insert(promptSuggestion);
-        }
+        // Use the normal accept path. When the followup controller has no live
+        // suggestion (e.g. after type-then-delete), `fallbackText` carries the
+        // still-available placeholder text so telemetry is logged either way.
+        followup.accept('tab', { fallbackText: promptSuggestion ?? undefined });
         return true;
       }
 
@@ -1021,11 +1009,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         (followup.state.isVisible || promptSuggestion) &&
         (followup.state.suggestion ?? promptSuggestion)
       ) {
-        if (followup.state.suggestion) {
-          followup.accept('right');
-        } else if (promptSuggestion) {
-          buffer.insert(promptSuggestion);
-        }
+        followup.accept('right', {
+          fallbackText: promptSuggestion ?? undefined,
+        });
         return true;
       }
 
@@ -1271,8 +1257,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (followup.state.isVisible || promptSuggestion) &&
           (followup.state.suggestion ?? promptSuggestion)
         ) {
-          const text = followup.state.suggestion ?? promptSuggestion!;
-          buffer.insert(text);
+          followup.accept('enter', {
+            fallbackText: promptSuggestion ?? undefined,
+          });
           return true;
         }
         if (buffer.text.trim()) {
@@ -1373,7 +1360,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ) {
         followup.recordKeystroke();
         followup.dismiss();
-        setSuggestionDismissed(true);
         onPromptSuggestionDismiss?.();
       }
 
@@ -1601,12 +1587,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // consumed (ACCEPT_SUGGESTION_REVERSE_SEARCH). When they are active with no
   // matches, Tab is not consumed — so the bare `reverseSearchActive` /
   // `commandSearchActive` flags are intentionally NOT included here.
+  // Mirror exactly when the Tab/Right/Enter handlers actually consume the key:
+  // the buffer must be empty and a suggestion must be available (either from the
+  // followup controller or the `promptSuggestion` prop after type-then-delete).
+  // Tying this to `buffer.text.length === 0` — the same gate the handlers use —
+  // keeps Windows Tab approval-mode cycling correct: as soon as the user types,
+  // this drops to false; deleting back to empty restores it.
   const hasTabConsumer =
     shouldShowSuggestions ||
-    (followup.state.isVisible &&
-      Boolean(followup.state.suggestion) &&
-      !suggestionDismissed) ||
-    (Boolean(promptSuggestion) && !suggestionDismissed) ||
+    (buffer.text.length === 0 &&
+      ((followup.state.isVisible && Boolean(followup.state.suggestion)) ||
+        Boolean(promptSuggestion))) ||
     Boolean(completion.midInputGhostText?.acceptText);
 
   // Narrow signal — autocomplete dropdown only. Composer hides Footer /
@@ -1629,8 +1620,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Trigger prompt suggestion when prop changes
   useEffect(() => {
     followup.setSuggestion(promptSuggestion ?? null);
-    // Reset dismiss state when a new suggestion arrives
-    setSuggestionDismissed(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only trigger on prop change
   }, [promptSuggestion]);
 

@@ -45,7 +45,7 @@ export interface UseFollowupSuggestionsReturn {
   /** Accept the current suggestion */
   accept: (
     method?: 'tab' | 'enter' | 'right',
-    options?: { skipOnAccept?: boolean },
+    options?: { skipOnAccept?: boolean; fallbackText?: string },
   ) => void;
   /** Dismiss the current suggestion */
   dismiss: () => void;

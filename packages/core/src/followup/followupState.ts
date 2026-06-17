@@ -71,10 +71,17 @@ export interface FollowupControllerOptions {
 export interface FollowupControllerActions {
   /** Set suggestion text (with delayed show). Null clears immediately. */
   setSuggestion: (text: string | null) => void;
-  /** Accept the current suggestion and invoke onAccept callback */
+  /**
+   * Accept the current suggestion and invoke onAccept callback.
+   *
+   * When the controller has no live suggestion (e.g. still within the show
+   * delay, or dismissed after type-then-delete while the placeholder text is
+   * still available), pass `fallbackText` so the accept — including telemetry —
+   * is logged instead of silently bypassing this path.
+   */
   accept: (
     method?: 'tab' | 'enter' | 'right',
-    options?: { skipOnAccept?: boolean },
+    options?: { skipOnAccept?: boolean; fallbackText?: string },
   ) => void;
   /** Dismiss/clear suggestion */
   dismiss: () => void;
@@ -140,7 +147,7 @@ export function createFollowupController(
 
   const accept = (
     method?: 'tab' | 'enter' | 'right',
-    options?: { skipOnAccept?: boolean },
+    options?: { skipOnAccept?: boolean; fallbackText?: string },
   ): void => {
     if (accepting) {
       return;
@@ -153,7 +160,7 @@ export function createFollowupController(
 
     accepting = true;
 
-    const text = currentState.suggestion;
+    const text = currentState.suggestion ?? options?.fallbackText ?? null;
     const { shownAt } = currentState;
     if (!text) {
       accepting = false;
