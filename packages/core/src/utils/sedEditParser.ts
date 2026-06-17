@@ -178,6 +178,14 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
       return false;
     }
     new RegExp(jsPattern);
+    if (
+      hasReplacementBackrefBeyondCaptures(
+        sedInfo.replacement,
+        countCapturingGroups(jsPattern),
+      )
+    ) {
+      return false;
+    }
     return !hasUnsafeQuantifiedGroup(jsPattern);
   } catch {
     return false;
@@ -190,6 +198,49 @@ function hasPosixBracketExpression(pattern: string): boolean {
 
 function hasSedJavascriptDivergentEscape(pattern: string): boolean {
   return /\\[<>dDwWsS]/u.test(pattern);
+}
+
+function hasReplacementBackrefBeyondCaptures(
+  replacement: string,
+  captureCount: number,
+): boolean {
+  for (let i = 0; i < replacement.length; i++) {
+    if (replacement[i] !== '\\') {
+      continue;
+    }
+    const next = replacement[i + 1];
+    if (
+      next !== undefined &&
+      next >= '1' &&
+      next <= '9' &&
+      Number(next) > captureCount
+    ) {
+      return true;
+    }
+    i++;
+  }
+  return false;
+}
+
+function countCapturingGroups(pattern: string): number {
+  let count = 0;
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      i = skipCharacterClass(pattern, i);
+      continue;
+    }
+    if (char === '(' && pattern[i + 1] !== '?') {
+      count++;
+    }
+  }
+
+  return count;
 }
 
 function hasUnsafeQuantifiedGroup(pattern: string): boolean {
@@ -483,6 +534,7 @@ function replaceLine(
 ): string {
   let seen = 0;
   let lastMatchWasNonEmpty = false;
+  let lastMatchEnd = -1;
   globalRegex.lastIndex = 0;
 
   return line.replace(globalRegex, (...args: unknown[]) => {
@@ -490,7 +542,7 @@ function replaceLine(
     const offset = Number(args[args.length - 2]);
     if (
       match.length === 0 &&
-      offset === line.length &&
+      offset === lastMatchEnd &&
       seen > 0 &&
       lastMatchWasNonEmpty
     ) {
@@ -499,6 +551,7 @@ function replaceLine(
 
     seen++;
     lastMatchWasNonEmpty = match.length > 0;
+    lastMatchEnd = offset + match.length;
     const shouldReplace =
       options.occurrence === null
         ? options.replaceAll || seen === 1

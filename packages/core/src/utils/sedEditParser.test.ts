@@ -201,6 +201,17 @@ describe('sedEditParser', () => {
     expect(applySedSubstitution('foo foo foo', sedInfo!)).toBe('foo [foo] foo');
   });
 
+  it('rejects replacement backrefs without matching capture groups', () => {
+    expect(parseSedEditCommand("sed -i 's/foo/\\1/' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/(a)b/\\2/g' file.txt")).toBeNull();
+    expect(
+      parseSedEditCommand("sed -E -i 's/(a)(b)/\\1\\3/g' file.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -E -i 's/(a)(b)/\\2\\1/g' file.txt"),
+    ).not.toBeNull();
+  });
+
   it('rejects nested quantifier patterns before simulated edits', () => {
     expect(parseSedEditCommand("sed -E -i 's/(a*)*b/X/g' file.txt")).toBeNull();
   });
@@ -282,6 +293,19 @@ describe('sedEditParser', () => {
     expect(lineSedInfo).not.toBeNull();
     expect(applySedSubstitution('aaa', starSedInfo!)).toBe('X');
     expect(applySedSubstitution('aaa', lineSedInfo!)).toBe('X');
+  });
+
+  it('suppresses zero-width global matches after non-empty matches like sed', () => {
+    const spacesSedInfo = parseSedEditCommand("sed -i 's/ */_/g' file.txt");
+    const digitsSedInfo = parseSedEditCommand("sed -i 's/[0-9]*/N/g' file.txt");
+    const starSedInfo = parseSedEditCommand("sed -i 's/a*/X/g' file.txt");
+
+    expect(spacesSedInfo).not.toBeNull();
+    expect(digitsSedInfo).not.toBeNull();
+    expect(starSedInfo).not.toBeNull();
+    expect(applySedSubstitution('a  b c', spacesSedInfo!)).toBe('_a_b_c_');
+    expect(applySedSubstitution('x12y3z', digitsSedInfo!)).toBe('NxNyNzN');
+    expect(applySedSubstitution('aabaaa', starSedInfo!)).toBe('XbX');
   });
 
   it('applies trailing zero-width matches after prior zero-width matches', () => {
