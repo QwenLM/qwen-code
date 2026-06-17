@@ -2620,11 +2620,6 @@ describe('AppContainer State Management', () => {
       expect(formatSessionWindowTitle('Fix terminal title')).toBe(
         'Fix terminal title',
       );
-
-      // formatSessionWindowTitle returns the session name directly when set.
-      expect(formatSessionWindowTitle('Fix terminal title')).toBe(
-        'Fix terminal title',
-      );
       // When null, falls back to computeWindowTitle() which returns
       // 'Qwen - qwen' when CLI_TITLE is not set.
       expect(formatSessionWindowTitle(null)).toBe('Qwen - qwen');
