@@ -402,6 +402,12 @@ export const useGeminiStream = (
   const summaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
+  // Streamed model reasoning for the current turn. Rendered (height-limited)
+  // above the answer while thinking, then committed to history as a
+  // collapsible `gemini_thought` block when the answer/tool/turn begins.
+  const [pendingThoughtItem, pendingThoughtItemRef, setPendingThoughtItem] =
+    useStateAndRef<HistoryItemWithoutId | null>(null);
+  const thoughtStartTimeRef = useRef<number | null>(null);
   const [
     pendingRetryErrorItem,
     pendingRetryErrorItemRef,
@@ -1061,93 +1067,67 @@ export const useGeminiStream = (
   );
 
   const handleThoughtEvent = useCallback(
-    (
-      eventValue: ThoughtSummary,
-      currentThoughtBuffer: string,
-      userMessageTimestamp: number,
-    ): string => {
+    (eventValue: ThoughtSummary, currentThoughtBuffer: string): string => {
       if (turnCancelledRef.current) {
         return '';
       }
 
-      // Extract the description text from the thought summary
       const thoughtText = eventValue.description ?? '';
       if (!thoughtText) {
         return currentThoughtBuffer;
       }
 
-      let newThoughtBuffer = currentThoughtBuffer + thoughtText;
-
-      if (debugLogger.isEnabled()) {
-        debugLogger.debug(
-          `[THOUGHT_BUFFER] Buffer growing: ` +
-            `current=${currentThoughtBuffer.length}, ` +
-            `incoming=${thoughtText.length}, ` +
-            `total=${newThoughtBuffer.length}`,
-        );
+      const newThoughtBuffer = currentThoughtBuffer + thoughtText;
+      if (newThoughtBuffer.trim().length === 0) {
+        return newThoughtBuffer;
       }
 
-      const pendingType = pendingHistoryItemRef.current?.type;
-      const isPendingThought =
-        pendingType === 'gemini_thought' ||
-        pendingType === 'gemini_thought_content';
-      let thoughtToMerge = eventValue;
+      const startingNewThought = currentThoughtBuffer.trim().length === 0;
+      const description = startingNewThought
+        ? stripLeadingBlankLines(newThoughtBuffer)
+        : thoughtText;
 
-      // If we're not already showing a thought, start a new one
-      if (!isPendingThought) {
-        if (newThoughtBuffer.trim().length === 0) {
-          return newThoughtBuffer;
-        }
-        // If there's a pending non-thought item, finalize it first
-        if (pendingHistoryItemRef.current) {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
-        }
-        newThoughtBuffer = stripLeadingBlankLines(newThoughtBuffer);
-        thoughtToMerge = {
-          ...eventValue,
-          description: newThoughtBuffer,
-        };
-        setPendingHistoryItem({ type: 'gemini_thought', text: '' });
+      if (startingNewThought) {
+        thoughtStartTimeRef.current = Date.now();
       }
 
-      // Split large thought messages for better rendering performance (same rationale
-      // as regular content streaming). This helps avoid terminal flicker caused by
-      // constantly re-rendering an ever-growing "pending" block.
-      const splitPoint = findLastSafeSplitPoint(newThoughtBuffer);
-      const nextPendingType: 'gemini_thought' | 'gemini_thought_content' =
-        isPendingThought && pendingType === 'gemini_thought_content'
-          ? 'gemini_thought_content'
-          : 'gemini_thought';
+      // Keep the transient `thought` (subject) in sync for the window title.
+      mergeThought({
+        ...eventValue,
+        description,
+      });
 
-      if (splitPoint === newThoughtBuffer.length) {
-        // Update the existing thought message with accumulated content
-        setPendingHistoryItem({
-          type: nextPendingType,
-          text: newThoughtBuffer,
-        });
-      } else {
-        const beforeText = newThoughtBuffer.substring(0, splitPoint);
-        const afterText = newThoughtBuffer.substring(splitPoint);
-        addItem(
-          {
-            type: nextPendingType,
-            text: beforeText,
-          },
-          userMessageTimestamp,
-        );
-        setPendingHistoryItem({
-          type: 'gemini_thought_content',
-          text: afterText,
-        });
-        newThoughtBuffer = afterText;
-      }
+      // Stream the accumulated reasoning into a pending history item so it
+      // renders height-limited above the answer and can later be committed as
+      // a collapsible block.
+      setPendingThoughtItem({
+        type: 'gemini_thought',
+        text: stripLeadingBlankLines(newThoughtBuffer),
+        durationMs: thoughtStartTimeRef.current
+          ? Date.now() - thoughtStartTimeRef.current
+          : 0,
+      });
 
-      // Also update the thought state for the loading indicator
-      mergeThought(thoughtToMerge);
-
-      return newThoughtBuffer;
+      return startingNewThought ? description : newThoughtBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, mergeThought],
+    [mergeThought, setPendingThoughtItem],
+  );
+
+  // Commit the streamed reasoning to history as a collapsible block (or drop
+  // it). Called when the answer/tool/turn begins, or on cancel/error.
+  const commitPendingThought = useCallback(
+    (userMessageTimestamp: number) => {
+      if (pendingThoughtItemRef.current) {
+        const item = { ...pendingThoughtItemRef.current };
+        if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
+          item.durationMs = Date.now() - thoughtStartTimeRef.current;
+        }
+        addItem(item, userMessageTimestamp);
+      }
+      setPendingThoughtItem(null);
+      thoughtStartTimeRef.current = null;
+    },
+    [addItem, pendingThoughtItemRef, setPendingThoughtItem],
   );
 
   const handleUserCancelledEvent = useCallback(
@@ -1157,6 +1137,8 @@ export const useGeminiStream = (
       }
 
       lastPromptErroredRef.current = false;
+      // Persist any streamed reasoning (collapsed) above the cancelled answer.
+      commitPendingThought(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         if (pendingHistoryItemRef.current.type === 'tool_group') {
           const updatedTools = pendingHistoryItemRef.current.tools.map(
@@ -1187,6 +1169,7 @@ export const useGeminiStream = (
     },
     [
       addItem,
+      commitPendingThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
       setThought,
@@ -1197,6 +1180,8 @@ export const useGeminiStream = (
   const handleErrorEvent = useCallback(
     (eventValue: GeminiErrorEventValue, userMessageTimestamp: number) => {
       lastPromptErroredRef.current = true;
+      // Persist any streamed reasoning (collapsed) above the error.
+      commitPendingThought(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -1239,6 +1224,7 @@ export const useGeminiStream = (
     },
     [
       addItem,
+      commitPendingThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
       setPendingRetryErrorItem,
@@ -1560,11 +1546,7 @@ export const useGeminiStream = (
             };
           }
 
-          thoughtBuffer = handleThoughtEvent(
-            mergedThought,
-            thoughtBuffer,
-            userMessageTimestamp,
-          );
+          thoughtBuffer = handleThoughtEvent(mergedThought, thoughtBuffer);
         }
       };
 
@@ -1599,11 +1581,31 @@ export const useGeminiStream = (
               }
               break;
             case ServerGeminiEventType.Content:
+              // Thinking is done once the answer starts streaming; reset the
+              // title status. On the thinking→answer transition, flush any
+              // buffered reasoning so the full thought is captured, then commit
+              // it to history (collapsed) above the answer. After that the
+              // condition is false, so normal content batching resumes.
+              if (
+                pendingThoughtItemRef.current ||
+                bufferedEvents.some((e) => e.kind === 'thought')
+              ) {
+                flushBufferedStreamEvents();
+                commitPendingThought(userMessageTimestamp);
+                thoughtBuffer = '';
+              }
+              setThought((prev) => (prev ? null : prev));
               bufferedEvents.push({ kind: 'content', value: event.value });
               scheduleBufferedStreamFlush();
               break;
             case ServerGeminiEventType.ToolCallRequest:
+              // Thinking is done once a tool call is issued; flush buffered
+              // reasoning then commit it to history (collapsed) above the tool
+              // output.
               flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought((prev) => (prev ? null : prev));
               toolCallRequests.push(event.value);
               // Count tool call args JSON toward token estimation.
               try {
@@ -1640,6 +1642,9 @@ export const useGeminiStream = (
               break;
             case ServerGeminiEventType.Finished:
               flushBufferedStreamEvents();
+              // A thinking-only turn (no content/tool) still commits its
+              // reasoning so it persists collapsed in history.
+              commitPendingThought(userMessageTimestamp);
               handleFinishedEvent(
                 event as ServerGeminiFinishedEvent,
                 userMessageTimestamp,
@@ -1658,6 +1663,7 @@ export const useGeminiStream = (
               }
               geminiMessageBuffer = '';
               thoughtBuffer = '';
+              setThought(null);
               break;
             case ServerGeminiEventType.Citation:
               flushBufferedStreamEvents();
@@ -1682,8 +1688,10 @@ export const useGeminiStream = (
                 if (pendingHistoryItemRef.current) {
                   setPendingHistoryItem(null);
                 }
-                geminiMessageBuffer = '';
+                commitPendingThought(userMessageTimestamp);
                 thoughtBuffer = '';
+                setThought(null);
+                geminiMessageBuffer = '';
               } else {
                 flushBufferedStreamEvents();
               }
@@ -1740,6 +1748,7 @@ export const useGeminiStream = (
         }
       } finally {
         flushBufferedStreamEvents();
+        commitPendingThought(userMessageTimestamp);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
@@ -1763,7 +1772,9 @@ export const useGeminiStream = (
       startRetryCountdown,
       clearRetryCountdown,
       setThought,
+      commitPendingThought,
       pendingHistoryItemRef,
+      pendingThoughtItemRef,
       setPendingHistoryItem,
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
@@ -1932,6 +1943,7 @@ export const useGeminiStream = (
 
           // Reset thought when starting a new prompt
           setThought(null);
+          setPendingThoughtItem(null);
         }
 
         if (submitType === SendMessageType.Retry) {
@@ -2083,6 +2095,7 @@ export const useGeminiStream = (
       pendingRetryCountdownItemRef,
       pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
+      setPendingThoughtItem,
       dualOutput,
     ],
   );
@@ -2524,12 +2537,15 @@ export const useGeminiStream = (
   const pendingHistoryItems = useMemo(
     () =>
       [
+        // Reasoning renders above the streaming answer.
+        pendingThoughtItem,
         pendingHistoryItem,
         pendingRetryErrorItem,
         pendingRetryCountdownItem,
         pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
     [
+      pendingThoughtItem,
       pendingHistoryItem,
       pendingRetryErrorItem,
       pendingRetryCountdownItem,

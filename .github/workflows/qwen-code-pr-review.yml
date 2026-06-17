@@ -46,32 +46,27 @@ concurrency:
 jobs:
   ack-review-request:
     # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
+    # Authorization is delegated to the `authorize` job (write+ permission);
+    # this `if` only matches the /review command shape.
+    needs: ['authorize']
     if: |-
-      (github.event_name == 'issue_comment' &&
+      needs.authorize.outputs.should_review == 'true' &&
+      ((github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
-        (github.event.comment.author_association == 'OWNER' ||
-         github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
-        (github.event.comment.author_association == 'OWNER' ||
-         github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
-         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
-        (github.event.review.author_association == 'OWNER' ||
-         github.event.review.author_association == 'MEMBER' ||
-         github.event.review.author_association == 'COLLABORATOR'))
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n')))))
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
@@ -128,15 +123,14 @@ jobs:
           echo "bot_login=qwen-code-ci-bot" >> "$GITHUB_OUTPUT"
 
   delay-automatic-review:
+    needs: ['authorize']
     if: |-
       github.event_name == 'pull_request_target' &&
       (github.event.action == 'opened' ||
        github.event.action == 'synchronize') &&
       github.event.pull_request.state == 'open' &&
       !github.event.pull_request.draft &&
-      (github.event.pull_request.author_association == 'OWNER' ||
-       github.event.pull_request.author_association == 'MEMBER' ||
-       github.event.pull_request.author_association == 'COLLABORATOR')
+      needs.authorize.outputs.should_review == 'true'
     runs-on: 'ubuntu-latest'
     # Configured in repo settings with a 30-minute wait timer.
     environment:
@@ -170,50 +164,104 @@ jobs:
           fi
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
-  authorize-review-request:
-    needs: ['review-config']
+  authorize:
+    # Single source of truth for "may this trigger spend review compute".
+    # The principal whose permission decides eligibility is the PR author
+    # (automatic PR events), the commenter (comment/review command events), or
+    # the requester (review_requested). They must have write+ permission.
+    # This replaces the per-path author_association checks, which are
+    # unreliable for fork PRs (a write user pushing from a fork is reported as
+    # CONTRIBUTOR, not MEMBER), so fork PRs by trusted authors now qualify.
+    # Only run for PR-target events and /review command comments — not every
+    # unrelated comment — to avoid spawning a job per comment. The downstream
+    # `if`s still do the exact /review body match; this prefix is just a filter.
     if: |-
-      github.event_name == 'pull_request_target' &&
-      github.event.action == 'review_requested' &&
-      github.event.requested_reviewer.login == needs.review-config.outputs.bot_login &&
-      github.event.pull_request.state == 'open' &&
-      !github.event.pull_request.draft
+      github.repository == 'QwenLM/qwen-code' &&
+      (github.event_name == 'pull_request_target' ||
+       ((github.event_name == 'issue_comment' ||
+         github.event_name == 'pull_request_review_comment') &&
+        startsWith(github.event.comment.body, '@qwen-code /review')) ||
+       (github.event_name == 'pull_request_review' &&
+        startsWith(github.event.review.body, '@qwen-code /review')))
     runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
     permissions:
       contents: 'read'
     outputs:
-      should_review: '${{ steps.sender_permission.outputs.should_review }}'
+      should_review: '${{ steps.principal_permission.outputs.should_review }}'
     steps:
-      - name: 'Check requester permission'
-        id: 'sender_permission'
+      - name: 'Check principal write permission'
+        id: 'principal_permission'
         env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          REQUESTER: '${{ github.event.sender.login }}'
+          # CI_BOT_PAT (not GITHUB_TOKEN): reading a user's collaborator
+          # permission requires write/maintain/admin access, which the
+          # GITHUB_TOKEN with contents:read does not have. Safe here — this job
+          # runs no agent, checks out nothing, and processes no untrusted PR
+          # content; it only reads event metadata and calls one read API.
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          PR_ACTION: '${{ github.event.action }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          COMMENT_USER: '${{ github.event.comment.user.login }}'
+          REVIEW_USER: '${{ github.event.review.user.login }}'
+          SENDER: '${{ github.event.sender.login }}'
         run: |-
           set -euo pipefail
-          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${REQUESTER}/permission" --jq '.permission')"; then
-            echo "Failed to check permission for ${REQUESTER}." >&2
-            echo "Failed to check permission for ${REQUESTER}." >> "$GITHUB_STEP_SUMMARY"
+          # Select the principal whose permission gates this trigger.
+          case "$EVENT_NAME" in
+            pull_request_target)
+              if [ "$PR_ACTION" = "review_requested" ]; then
+                principal="$SENDER"
+              else
+                principal="$PR_AUTHOR"
+              fi
+              ;;
+            issue_comment|pull_request_review_comment)
+              principal="$COMMENT_USER"
+              ;;
+            pull_request_review)
+              principal="$REVIEW_USER"
+              ;;
+            *)
+              principal=""
+              ;;
+          esac
+          if [ -z "$principal" ]; then
+            echo "No principal resolved for ${EVENT_NAME}; denying." >> "$GITHUB_STEP_SUMMARY"
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Fail closed: any API error or non-write permission denies the run.
+          api_error_file="$(mktemp)"
+          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+            api_error="$(cat "$api_error_file")"
+            rm -f "$api_error_file"
+            api_error="${api_error:-unknown error}"
+            api_error="${api_error//$'\r'/ }"
+            api_error="${api_error//$'\n'/ }"
+            echo "::error::Permission API call failed for ${principal}: ${api_error}"
+            echo "Failed to check permission for ${principal} (API error: ${api_error}); denying." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rm -f "$api_error_file"
           case "$permission" in
             admin|maintain|write)
               echo "should_review=true" >> "$GITHUB_OUTPUT"
               ;;
             *)
-              echo "Skipping requested review: ${REQUESTER} lacks write permission or permission check failed." >> "$GITHUB_STEP_SUMMARY"
+              echo "Denying review: ${principal} permission is '${permission}' (needs write)." >> "$GITHUB_STEP_SUMMARY"
               echo "should_review=false" >> "$GITHUB_OUTPUT"
               ;;
           esac
 
   review-pr:
-    needs:
-      ['review-config', 'delay-automatic-review', 'authorize-review-request']
-    # pull_request_target routing:
-    # - review_requested uses authorize-review-request and skips delay
+    needs: ['review-config', 'delay-automatic-review', 'authorize']
+    # pull_request_target routing (every path additionally gated by the
+    # `authorize` job = the principal has write+ permission):
+    # - review_requested checks the requester and skips delay
     # - opened/synchronize uses delay-automatic-review
-    # - reopened/ready_for_review runs immediately for trusted PR authors
+    # - reopened/ready_for_review runs immediately
     # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
     if: |-
       always() &&
@@ -221,41 +269,32 @@ jobs:
       (github.event_name == 'pull_request_target' &&
        github.event.pull_request.state == 'open' &&
        !github.event.pull_request.draft &&
+       needs.authorize.outputs.should_review == 'true' &&
        ((github.event.action == 'review_requested' &&
-         github.event.requested_reviewer.login == needs.review-config.outputs.bot_login &&
-         needs.authorize-review-request.outputs.should_review == 'true') ||
+         github.event.requested_reviewer.login == needs.review-config.outputs.bot_login) ||
         (github.event.action != 'review_requested' &&
          ((github.event.action != 'opened' &&
            github.event.action != 'synchronize') ||
-          needs.delay-automatic-review.outputs.should_review == 'true') &&
-         (github.event.pull_request.author_association == 'OWNER' ||
-          github.event.pull_request.author_association == 'MEMBER' ||
-          github.event.pull_request.author_association == 'COLLABORATOR')))) ||
+          needs.delay-automatic-review.outputs.should_review == 'true')))) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
          startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
-        (github.event.comment.author_association == 'OWNER' ||
-         github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
+        needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
          startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
-        (github.event.comment.author_association == 'OWNER' ||
-         github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
+        needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
-        (github.event.review.author_association == 'OWNER' ||
-         github.event.review.author_association == 'MEMBER' ||
-         github.event.review.author_association == 'COLLABORATOR')))
+        needs.authorize.outputs.should_review == 'true'))
     timeout-minutes: 90
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     permissions:

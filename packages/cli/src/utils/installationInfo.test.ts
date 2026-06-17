@@ -597,4 +597,31 @@ describe('getInstallationInfo', () => {
     const infoDisabled = getInstallationInfo(projectRoot, false);
     expect(infoDisabled.updateMessage).toContain('Please run npm install');
   });
+
+  it('should ask for sudo and NOT migrate to standalone when the npm global prefix is not writable', () => {
+    const globalPath = `/usr/lib/node_modules/@qwen-code/qwen-code/cli-entry.js`;
+    process.argv[1] = globalPath;
+    mockedRealPathSync.mockReturnValue(globalPath);
+    mockedExecSync.mockImplementation(() => {
+      throw new Error('Command failed');
+    });
+    // npm global package dir is not writable -> `npm install -g` would need sudo.
+    vi.mocked(fs.accessSync).mockImplementation(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.NPM);
+    expect(info.isGlobal).toBe(true);
+    // Must NOT silently migrate to the standalone installer (bundled Node can be
+    // incompatible with the host, e.g. an older glibc).
+    expect(info.isStandalone).toBeUndefined();
+    expect(info.standaloneDir).toBeUndefined();
+    // No updateCommand -> the auto-updater won't attempt an unattended sudo.
+    expect(info.updateCommand).toBeUndefined();
+    expect(info.updateMessage).toContain('sudo');
+  });
 });

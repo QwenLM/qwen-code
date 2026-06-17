@@ -34,7 +34,6 @@
 .chevron {
   flex-shrink: 0;
   width: 12px;
-  font-size: 10px;
   color: var(--text-dimmed);
 }
 

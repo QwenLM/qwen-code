@@ -34,6 +34,7 @@ import type {
   DaemonNoticeOperation,
   DaemonPromptStatus,
   DaemonSessionActions,
+  SettledPrompt,
   PendingSessionLoad,
 } from './types.js';
 
@@ -45,6 +46,7 @@ export interface CreateDaemonSessionActionsArgs {
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
   activePromptsRef: RefBox<Map<string, ActivePrompt>>;
+  settledPromptsRef: RefBox<Map<string, SettledPrompt>>;
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
   pendingSessionLoadIdRef: RefBox<number>;
   heartbeatSupportedRef: RefBox<boolean>;
@@ -62,6 +64,7 @@ export function createDaemonSessionActions({
   store,
   sessionRef,
   activePromptsRef,
+  settledPromptsRef,
   pendingSessionLoadRef,
   pendingSessionLoadIdRef,
   heartbeatSupportedRef,
@@ -113,6 +116,7 @@ export function createDaemonSessionActions({
       };
     });
     setPromptStatus('idle');
+    settledPromptsRef.current.clear();
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
     store.reset();
     setRestoreMode(mode);
@@ -167,6 +171,7 @@ export function createDaemonSessionActions({
         if (isNonBlockingAccepted(result)) {
           return await waitForAcceptedPromptCompletion(
             activePromptsRef.current,
+            settledPromptsRef.current,
             sessionId,
             ctrl,
             result.promptId,
@@ -203,7 +208,10 @@ export function createDaemonSessionActions({
         if (active?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
         }
-        if (sessionRef.current?.sessionId === sessionId) {
+        if (
+          sessionRef.current?.sessionId === sessionId &&
+          !activePromptsRef.current.has(sessionId)
+        ) {
           setPromptStatus('idle');
         }
       }
@@ -242,7 +250,10 @@ export function createDaemonSessionActions({
         ) {
           activePromptsRef.current.delete(session.sessionId);
         }
-        if (sessionRef.current?.sessionId === session.sessionId) {
+        if (
+          sessionRef.current?.sessionId === session.sessionId &&
+          !activePromptsRef.current.has(session.sessionId)
+        ) {
           setPromptStatus('idle');
         }
       }
@@ -393,6 +404,7 @@ export function createDaemonSessionActions({
         active.controller.abort();
       }
       activePromptsRef.current.clear();
+      settledPromptsRef.current.clear();
       setPromptStatus('idle');
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       if (pendingSessionLoadRef.current) {
@@ -771,11 +783,27 @@ export function createDaemonSessionActions({
 
 function waitForAcceptedPromptCompletion(
   activePrompts: Map<string, ActivePrompt>,
+  settledPrompts: Map<string, SettledPrompt>,
   sessionId: string,
   controller: AbortController,
   promptId: string,
 ): Promise<PromptResult> {
   return new Promise<PromptResult>((resolve, reject) => {
+    // IMPORTANT: Check settledPrompts BEFORE activePrompts. The turn event
+    // may have already freed the active slot (allowing a new prompt to start).
+    // If we checked activePrompts first, we'd find the NEXT prompt's controller
+    // and incorrectly reject this one as aborted.
+    const settledKey = getPromptSettledKey(sessionId, promptId);
+    const settled = settledPrompts.get(settledKey);
+    if (settled) {
+      settledPrompts.delete(settledKey);
+      if (settled.status === 'resolved') {
+        resolve(settled.result);
+      } else {
+        reject(settled.error);
+      }
+      return;
+    }
     const active = activePrompts.get(sessionId);
     if (active?.controller !== controller) {
       reject(new DOMException('Aborted', 'AbortError'));
@@ -783,16 +811,6 @@ function waitForAcceptedPromptCompletion(
     }
     if (active.promptId !== undefined && active.promptId !== promptId) {
       reject(new Error(`Prompt accepted with unexpected id ${promptId}`));
-      return;
-    }
-    if (active.pendingResult !== undefined) {
-      activePrompts.delete(sessionId);
-      resolve(active.pendingResult);
-      return;
-    }
-    if (active.pendingError !== undefined) {
-      activePrompts.delete(sessionId);
-      reject(active.pendingError);
       return;
     }
     if (controller.signal.aborted) {
@@ -829,6 +847,13 @@ function waitForAcceptedPromptCompletion(
     });
     controller.signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+export function getPromptSettledKey(
+  sessionId: string,
+  promptId: string,
+): string {
+  return JSON.stringify([sessionId, promptId]);
 }
 
 function getModeFromSessionContext(
