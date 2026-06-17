@@ -2860,7 +2860,7 @@ export class Session implements SessionContext {
       }
     }
 
-    const recordSkippedToolCall = (fc: FunctionCall): Part => {
+    const recordSkippedToolCall = async (fc: FunctionCall): Promise<Part> => {
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
       const toolName = fc.name ?? 'unknown_tool';
       const part: Part = {
@@ -2878,13 +2878,14 @@ export class Session implements SessionContext {
         error,
         errorType: undefined,
       });
+      await this.toolCallEmitter.emitError(callId, toolName, error);
       return part;
     };
 
-    const appendSkippedAfter = (parts: Part[], fc: FunctionCall) => {
+    const appendSkippedAfter = async (parts: Part[], fc: FunctionCall) => {
       const startIndex = dedupedFunctionCalls.indexOf(fc) + 1;
       for (const remainingCall of dedupedFunctionCalls.slice(startIndex)) {
-        parts.push(recordSkippedToolCall(remainingCall));
+        parts.push(await recordSkippedToolCall(remainingCall));
       }
     };
 
@@ -2910,7 +2911,7 @@ export class Session implements SessionContext {
         const idx = i;
         if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
           results[idx] = {
-            parts: [recordSkippedToolCall(calls[idx])],
+            parts: [await recordSkippedToolCall(calls[idx])],
             stopAfterUserQuestionCancel: false,
           };
           continue;
@@ -2972,7 +2973,7 @@ export class Session implements SessionContext {
           shouldStop ||= r.stopAfterUserQuestionCancel;
         }
         if (shouldStop) {
-          appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
+          await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
           return { parts, stopAfterUserQuestionCancel: true };
         }
       } else {
@@ -2980,7 +2981,7 @@ export class Session implements SessionContext {
           const r = await this.runTool(abortSignal, promptId, fc);
           parts.push(...r.parts);
           if (r.stopAfterUserQuestionCancel) {
-            appendSkippedAfter(parts, fc);
+            await appendSkippedAfter(parts, fc);
             return { parts, stopAfterUserQuestionCancel: true };
           }
         }

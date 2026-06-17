@@ -5393,6 +5393,17 @@ describe('Session', () => {
           status: 'error',
         }),
       );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'shell_call',
+          status: 'failed',
+          _meta: expect.objectContaining({
+            toolName: core.ToolNames.SHELL,
+          }),
+        }),
+      });
     });
 
     it('does not stop the turn for non-question permission cancellation', async () => {
