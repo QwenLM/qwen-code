@@ -3560,6 +3560,10 @@ export class QwenAgent extends BaseAgent {
         textParts.push(
           `[Attached text: ${attachment.name}]\n${attachment.text}`,
         );
+      } else {
+        this.debug(
+          `Skipping attachment ${attachment.name} while building prompt blocks: no readable content`,
+        );
       }
     }
 

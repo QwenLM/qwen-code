@@ -2530,10 +2530,7 @@ export const useGeminiStream = (
                 onDebugMessage(
                   `Failed to resolve mid-turn @ command: ${errorMessage}`,
                 );
-                if (
-                  !midTurnAbort.signal.aborted ||
-                  atCommandTimeout.signal.aborted
-                ) {
+                if (!midTurnAbort.signal.aborted) {
                   addItem(
                     {
                       type: MessageType.WARNING,

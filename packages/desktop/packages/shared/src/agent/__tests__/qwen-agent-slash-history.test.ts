@@ -58,6 +58,10 @@ type QwenPromptInternals = {
   ) => QwenPromptBlock[];
 };
 
+type QwenDebugInternals = {
+  onDebug?: (message: string) => void;
+};
+
 type QwenAvailableCommandsInternals = {
   acpLease?: {
     isActive: () => boolean;
@@ -218,6 +222,36 @@ describe('QwenAgent slash command history', () => {
     expect(blocks).toEqual([{ type: 'text', text: 'hello' }]);
   });
 
+  it('logs attachments skipped while building prompt blocks', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const debugMessages: string[] = [];
+    (agent as unknown as QwenDebugInternals).onDebug = (message) => {
+      debugMessages.push(message);
+    };
+
+    const attachment: FileAttachment = {
+      type: 'unknown',
+      path: '',
+      name: 'empty.bin',
+      mimeType: 'application/octet-stream',
+      size: 0,
+    };
+    const blocks = (agent as unknown as QwenPromptInternals).buildPromptBlocks(
+      'hello',
+      [attachment],
+    );
+
+    expect(blocks).toEqual([{ type: 'text', text: 'hello' }]);
+    expect(debugMessages).toContain(
+      '[QwenAgent] Skipping attachment empty.bin while building prompt blocks: no readable content',
+    );
+
+    agent.destroy();
+  });
+
   it('drains queued mid-turn messages through the ACP extension handler', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);
@@ -346,6 +380,20 @@ describe('QwenAgent slash command history', () => {
       ],
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['', '']);
+
+    agent.destroy();
+  });
+
+  it('rejects empty mid-turn messages without attachments', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals._isProcessing = true;
+
+    expect(agent.enqueueMidTurnMessage('')).toBe(false);
+    expect(agent.enqueueMidTurnMessage('   ')).toBe(false);
 
     agent.destroy();
   });
