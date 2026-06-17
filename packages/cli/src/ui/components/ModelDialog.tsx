@@ -95,9 +95,14 @@ function maskApiKey(apiKey: string | undefined): string {
 function persistModelSelection(
   settings: ReturnType<typeof useSettings>,
   modelId: string,
+  baseUrl?: string,
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'model.name', modelId);
+  // Persist the provider baseUrl alongside the name so resolveCliGenerationConfig
+  // can pick the exact provider when several share this model id (#5173). Always
+  // write it — passing undefined clears a baseUrl left by a previous selection.
+  settings.setValue(scope, 'model.baseUrl', baseUrl);
 }
 
 function persistAuthTypeSelection(
@@ -143,7 +148,7 @@ function handleModelSwitchSuccess({
   effectiveModelId,
   isRuntime,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(settings, effectiveModelId);
+  persistModelSelection(settings, effectiveModelId, after?.baseUrl);
   if (effectiveAuthType) {
     persistAuthTypeSelection(settings, effectiveAuthType);
   }

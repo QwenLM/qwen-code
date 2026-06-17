@@ -1121,6 +1121,16 @@ const SETTINGS_SCHEMA = {
         description: 'The model to use for conversations.',
         showInDialog: false,
       },
+      baseUrl: {
+        type: 'string',
+        label: 'Model Base URL',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Base URL of the selected model provider. Persisted alongside the model name so providers that share a model id but differ by endpoint resolve to the one that was selected.',
+        showInDialog: false,
+      },
       maxSessionTurns: {
         type: 'number',
         label: 'Max Session Turns',

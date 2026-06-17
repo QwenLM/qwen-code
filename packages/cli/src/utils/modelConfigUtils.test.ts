@@ -404,6 +404,76 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('resolves the provider matching the persisted baseUrl when several share a model id', () => {
+      const tokenPlan: ProviderModelConfig = {
+        id: 'qwen3.7-max',
+        name: 'qwen3.7-max',
+        baseUrl: 'https://tokenplan.example.com',
+      };
+      const ideaLab: ProviderModelConfig = {
+        id: 'qwen3.7-max',
+        name: 'qwen3.7-max',
+        baseUrl: 'https://idealab.example.com',
+      };
+      const settings = makeMockSettings({
+        model: { name: 'qwen3.7-max', baseUrl: 'https://idealab.example.com' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+        },
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'qwen3.7-max', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({ modelProvider: ideaLab }),
+      );
+    });
+
+    it('falls back to the first id match when no baseUrl was persisted', () => {
+      const tokenPlan: ProviderModelConfig = {
+        id: 'qwen3.7-max',
+        name: 'qwen3.7-max',
+        baseUrl: 'https://tokenplan.example.com',
+      };
+      const ideaLab: ProviderModelConfig = {
+        id: 'qwen3.7-max',
+        name: 'qwen3.7-max',
+        baseUrl: 'https://idealab.example.com',
+      };
+      const settings = makeMockSettings({
+        model: { name: 'qwen3.7-max' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+        },
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'qwen3.7-max', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({ modelProvider: tokenPlan }),
+      );
+    });
+
     it('should find modelProvider from settings.model.name when argv.model is not provided', () => {
       const argv = {};
       const modelProvider: ProviderModelConfig = {

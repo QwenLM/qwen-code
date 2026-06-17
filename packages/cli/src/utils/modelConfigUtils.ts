@@ -181,7 +181,19 @@ export function resolveCliGenerationConfig(
   if (resolvedModel && authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
-      modelProvider = providers.find((p) => p.id === resolvedModel);
+      // Providers can share a model id but differ by baseUrl (e.g. the same
+      // model served through several endpoints). When the selection persisted
+      // a baseUrl, match on the composite (id + baseUrl) key so we resolve the
+      // exact provider the user picked rather than the first id match.
+      const persistedBaseUrl = settings.model?.baseUrl;
+      if (persistedBaseUrl) {
+        modelProvider = providers.find(
+          (p) => p.id === resolvedModel && p.baseUrl === persistedBaseUrl,
+        );
+      }
+      // Fall back to id-only for selections saved before baseUrl was persisted
+      // and for configs where a single provider matches the id.
+      modelProvider ??= providers.find((p) => p.id === resolvedModel);
     }
   }
 
