@@ -21,7 +21,7 @@ import { TodoEventSummary, TodoFullList } from './TodoView';
 import {
   formatDurationMs,
   formatElapsed,
-  formatToolDisplayName,
+  localizeToolDisplayName,
   StatusIcon,
   truncateText,
 } from './tools/toolDisplay';
@@ -522,7 +522,7 @@ function CompactToolGroup({
 }) {
   const { t } = useI18n();
   const activeTool = getActiveTool(tools);
-  const displayName = formatToolDisplayName(activeTool.toolName);
+  const displayName = localizeToolDisplayName(activeTool.toolName, t);
   const overallStatus = getCompactDisplayStatus(activeTool);
   const description = getToolDescription(activeTool, workspaceCwd);
   const elapsed =
@@ -758,7 +758,7 @@ export const ToolLine = memo(function ToolLine({
 
   const description = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
-  const displayName = formatToolDisplayName(tool.toolName);
+  const displayName = localizeToolDisplayName(tool.toolName, t);
   const elapsed =
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''

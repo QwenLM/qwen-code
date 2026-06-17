@@ -930,3 +930,44 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('- Step 2');
   });
 });
+
+describe('<ToolMessage /> localized badge', () => {
+  const localizedProps: ToolMessageProps = {
+    callId: 'tool-i18n',
+    name: 'ReadFile',
+    description: '',
+    resultDisplay: '',
+    status: ToolCallStatus.Success,
+    contentWidth: 80,
+    confirmationDetails: undefined,
+    emphasis: 'medium',
+    config: {} as Config,
+  };
+
+  afterEach(async () => {
+    const { setLanguageAsync } = await import('../../../i18n/index.js');
+    await setLanguageAsync('en');
+  });
+
+  it('shows the localized display name under the zh locale', async () => {
+    const { setLanguageAsync } = await import('../../../i18n/index.js');
+    await setLanguageAsync('zh');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...localizedProps} />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('读取文件');
+    expect(output).not.toContain('ReadFile');
+  });
+
+  it('keeps the English display name under the en locale', async () => {
+    const { setLanguageAsync } = await import('../../../i18n/index.js');
+    await setLanguageAsync('en');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...localizedProps} />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame() ?? '').toContain('ReadFile');
+  });
+});

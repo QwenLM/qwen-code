@@ -153,3 +153,35 @@ describe('supported language resolution', () => {
     expect(resolveSupportedLanguage('zh-HK')).toBe('zh');
   });
 });
+
+describe('localizeToolDisplayName', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('translates tool badges without colliding with generic UI strings', async () => {
+    const { setLanguageAsync, localizeToolDisplayName, t } = await import(
+      './index.js'
+    );
+    await setLanguageAsync('zh');
+
+    // The namespaced `toolDisplayName.*` key translates the badge...
+    expect(localizeToolDisplayName('Shell')).toBe('终端');
+    expect(localizeToolDisplayName('TodoWrite')).toBe('任务清单');
+    expect(localizeToolDisplayName('Lsp')).toBe('语言服务');
+    // ...while a same-spelled standalone UI string keeps its own value.
+    expect(t('Shell')).toBe('Shell');
+  });
+
+  it('falls back to the English display name for untranslated tools', async () => {
+    const { setLanguageAsync, localizeToolDisplayName } = await import(
+      './index.js'
+    );
+    await setLanguageAsync('en');
+
+    expect(localizeToolDisplayName('TodoWrite')).toBe('TodoWrite');
+    expect(localizeToolDisplayName('Shell')).toBe('Shell');
+    // An unknown tool name passes through unchanged.
+    expect(localizeToolDisplayName('MysteryTool')).toBe('MysteryTool');
+  });
+});

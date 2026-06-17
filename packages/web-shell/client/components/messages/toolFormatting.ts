@@ -39,6 +39,21 @@ export function formatToolDisplayName(toolName: string): string {
   return TOOL_DISPLAY_NAMES[toolName] ?? toolName;
 }
 
+/**
+ * Locale-aware tool display name for chat-stream badges. Looks up the
+ * `toolName.<wire_name>` i18n key; when the active language has no entry the
+ * translator returns the key verbatim, in which case we fall back to the
+ * English {@link formatToolDisplayName}. Pass the `t` from `useI18n()`.
+ */
+export function localizeToolDisplayName(
+  toolName: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  const key = `toolName.${toolName}`;
+  const translated = t(key);
+  return translated === key ? formatToolDisplayName(toolName) : translated;
+}
+
 export function isAskUserQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === 'ask_user_question' || normalized === 'askuserquestion';

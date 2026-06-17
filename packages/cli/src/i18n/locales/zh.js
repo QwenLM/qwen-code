@@ -8,6 +8,50 @@
 
 export default {
   // ============================================================================
+  // Tool display names (chat-stream badge labels)
+  // ----------------------------------------------------------------------------
+  // Keyed by `toolDisplayName.<English display name>` (from core
+  // `ToolDisplayNames`). The namespace prevents collisions with same-spelled
+  // generic UI strings (e.g. a standalone "Shell"). A missing key falls back to
+  // the English display name via `localizeToolDisplayName`. A product name is
+  // kept verbatim inside an otherwise-translated label (e.g. `Notebook`).
+  // ============================================================================
+  'toolDisplayName.Edit': '编辑',
+  'toolDisplayName.WriteFile': '写入文件',
+  'toolDisplayName.ReadFile': '读取文件',
+  'toolDisplayName.Grep': '搜索',
+  'toolDisplayName.Glob': '匹配文件',
+  'toolDisplayName.Shell': '终端',
+  'toolDisplayName.Shell Command': '终端命令',
+  'toolDisplayName.TodoWrite': '任务清单',
+  'toolDisplayName.SaveMemory': '保存记忆',
+  'toolDisplayName.Agent': '智能体',
+  'toolDisplayName.Skill': '技能',
+  'toolDisplayName.EnterPlanMode': '进入计划模式',
+  'toolDisplayName.ExitPlanMode': '退出计划模式',
+  'toolDisplayName.WebFetch': '网络抓取',
+  'toolDisplayName.WebSearch': '网络搜索',
+  'toolDisplayName.ListFiles': '列出文件',
+  'toolDisplayName.Lsp': '语言服务',
+  'toolDisplayName.AskUserQuestion': '询问用户',
+  'toolDisplayName.CronCreate': '创建定时任务',
+  'toolDisplayName.CronList': '定时任务列表',
+  'toolDisplayName.CronDelete': '删除定时任务',
+  'toolDisplayName.TaskCreate': '创建任务',
+  'toolDisplayName.TaskUpdate': '更新任务',
+  'toolDisplayName.TaskList': '任务列表',
+  'toolDisplayName.TaskStop': '停止任务',
+  'toolDisplayName.TeamCreate': '创建团队',
+  'toolDisplayName.TeamDelete': '删除团队',
+  'toolDisplayName.SendMessage': '发送消息',
+  'toolDisplayName.StructuredOutput': '结构化输出',
+  'toolDisplayName.Monitor': '监控',
+  'toolDisplayName.NotebookEdit': '编辑 Notebook',
+  'toolDisplayName.ToolSearch': '工具搜索',
+  'toolDisplayName.EnterWorktree': '进入工作树',
+  'toolDisplayName.ExitWorktree': '退出工作树',
+  'toolDisplayName.Workflow': '工作流',
+  // ============================================================================
   // Help / UI Components
   // ============================================================================
   // Attachment hints

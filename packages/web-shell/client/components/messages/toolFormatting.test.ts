@@ -4,7 +4,9 @@ import {
   formatToolDisplayName,
   getToolDescription,
   getToolResultSummary,
+  localizeToolDisplayName,
 } from './toolFormatting';
+import { getTranslator } from '../../i18n';
 
 function tool(overrides: Partial<ACPToolCall>): ACPToolCall {
   return {
@@ -189,5 +191,26 @@ describe('toolFormatting', () => {
     );
     expect(result.length).toBeLessThan(5000);
     expect(result.endsWith('...')).toBe(true);
+  });
+
+  describe('localizeToolDisplayName', () => {
+    it('translates known tool names in Chinese', () => {
+      const t = getTranslator('zh-CN');
+      expect(localizeToolDisplayName('todo_write', t)).toBe('任务清单');
+      expect(localizeToolDisplayName('grep_search', t)).toBe('搜索');
+      expect(localizeToolDisplayName('lsp', t)).toBe('语言服务');
+    });
+
+    it('falls back to the English display name when the locale has no entry', () => {
+      const t = getTranslator('en');
+      expect(localizeToolDisplayName('todo_write', t)).toBe('TodoWrite');
+      expect(localizeToolDisplayName('grep_search', t)).toBe('Grep');
+    });
+
+    it('falls back to the raw wire name for unknown tools', () => {
+      expect(
+        localizeToolDisplayName('mystery_tool', getTranslator('zh-CN')),
+      ).toBe('mystery_tool');
+    });
   });
 });
