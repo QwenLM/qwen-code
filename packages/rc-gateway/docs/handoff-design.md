@@ -152,8 +152,13 @@ terminal can come and go without reaping the session.
   Mobile/web clients then see that daemon's sessions. (Making the _terminal TUI_
   drive that same daemon session is Phase 2.)
 
-- **Phase 2 — `useDaemonStream` daemon-client TUI mode** (the core feature). Build
-  behind an opt-in flag; keep `useGeminiStream` as the default path untouched.
+- **Phase 2 — `useDaemonStream` daemon-client TUI mode** (the core feature).
+  **Specced** in [phase2-daemon-tui.md](./phase2-daemon-tui.md) — the parallel hook
+  that renders a daemon-hosted session in the rich TUI, the three inversions
+  (streaming source / tool-call projection / permission round-trip), the opt-in
+  `--attach-daemon` wiring, and the "grows" slicing. Built behind an opt-in flag;
+  `useGeminiStream` stays the default path untouched. **Built + verified on a real
+  machine** (real TTY + working `qwen serve`), not in the dev sandbox.
 - **Phase 3 — `qwen --remote-control` launcher + handoff polish** (small glue once
   1 & 2 exist).
 
@@ -168,6 +173,7 @@ terminal can come and go without reaping the session.
 - **Spawn-owner reap subtlety.** The launcher must spawn the daemon and let the
   _gateway_ be a persistent attacher, so a terminal detach can't trip the
   zero-attaches reap.
-- **Decisions needed:** (a) Phase-2 scope — full parity vs. a focused first subset?
-  (b) Opt-in `qwen --remote-control` (recommended) vs. changing default `qwen`?
-  (c) Pursue upstream-first for the TUI hook, or fork-first and upstream later?
+- **Decisions (locked by the user):** (a) Phase-2 scope — **grows**: a focused first
+  subset (text + tool approval + model switch), expanding toward parity. (b)
+  **Opt-in** — default `qwen` untouched; the daemon-client path is flag-gated. (c)
+  **Fork-first**, with the hook shaped to be upstream-proposable later.
