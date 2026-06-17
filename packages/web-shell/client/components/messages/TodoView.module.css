@@ -1,0 +1,139 @@
+.list,
+.summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.num {
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--text-dimmed);
+  font-variant-numeric: tabular-nums;
+}
+
+.icon {
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--text-dimmed);
+}
+
+.text {
+  color: var(--text-secondary);
+}
+
+/* The collapsed summary keeps each row to one line so a long task title never
+   wraps; the expanded list stays free to wrap and show the full text. */
+.summary .text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inProgress .icon,
+.inProgress .text {
+  color: var(--accent-color);
+}
+
+.completed .icon {
+  color: var(--success-color);
+}
+
+/* Strike-through belongs to the persistent expanded list, where a completed
+   item lingers as crossed-off. A summary row is an event ("just completed")
+   that reads as an accomplishment, so it stays in normal text. */
+.list .completed .text {
+  color: var(--text-dimmed);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-dimmed);
+}
+
+/* Each expanded-list entry stacks its row above an optional detail panel. */
+.item {
+  display: flex;
+  flex-direction: column;
+}
+
+/* A row that reveals task detail on click — reset the button chrome so it
+   reads exactly like the static rows around it. */
+.rowButton {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.detailChevron {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--text-dimmed);
+}
+
+/* Indented under its row and aligned past the status icon. */
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 3px 0 6px 20px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border-color);
+  font-size: 12px;
+}
+
+.detailSection {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detailSectionTitle {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+/* Label and value share two grid columns so every row in the section aligns:
+   labels in a tight first column, values left-aligned right after them rather
+   than stretched to the far edge. */
+.detailRows {
+  display: grid;
+  grid-template-columns: max-content auto;
+  column-gap: 12px;
+  row-gap: 1px;
+  padding-left: 10px;
+}
+
+.detailLabel {
+  color: var(--text-dimmed);
+}
+
+.detailValue {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The elapsed duration trails the end time as a dimmed parenthetical. */
+.detailDuration {
+  color: var(--text-dimmed);
+}
+
+.detailHint {
+  color: var(--text-dimmed);
+  font-style: italic;
+}

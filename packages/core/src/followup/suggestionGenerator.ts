@@ -168,6 +168,7 @@ async function generateViaForkedQuery(
   // Report usage to session stats
   if (result.usage) {
     reportSuggestionUsage(
+      config,
       model,
       {
         promptTokenCount: result.usage.inputTokens,
@@ -226,7 +227,7 @@ async function generateViaBaseLlm(
 
   // Report usage to session stats so /stats tracks suggestion model tokens
   if (result.usage) {
-    reportSuggestionUsage(model, result.usage, durationMs);
+    reportSuggestionUsage(config, model, result.usage, durationMs);
   }
 
   const text = result.text;
@@ -351,6 +352,7 @@ export function shouldFilterSuggestion(suggestion: string): boolean {
  * Report suggestion API usage to the UI telemetry service so it appears in /stats.
  */
 function reportSuggestionUsage(
+  config: Config,
   model: string,
   usage: {
     promptTokenCount?: number;
@@ -375,9 +377,8 @@ function reportSuggestionUsage(
       thoughtsTokenCount: usage.thoughtsTokenCount ?? 0,
     },
   );
-  // Override event.name to match UiEvent type (UiTelemetryService switch)
   const uiEvent = Object.assign(event, {
     'event.name': EVENT_API_RESPONSE as typeof EVENT_API_RESPONSE,
   });
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
 }

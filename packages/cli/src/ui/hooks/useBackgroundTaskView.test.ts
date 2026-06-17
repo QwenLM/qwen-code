@@ -11,17 +11,25 @@ import { useBackgroundTaskView, entryId } from './useBackgroundTaskView.js';
 
 interface FakeRegistry {
   setStatusChangeCallback: ReturnType<typeof vi.fn>;
-  /** Test helper — invokes the currently-set callback. */
+  setApprovalChangeCallback: ReturnType<typeof vi.fn>;
+  /** Test helper — invokes the currently-set status callback. */
   fire: () => void;
+  /** Test helper — invokes the currently-set approval callback. */
+  fireApproval: () => void;
 }
 
 function makeFakeRegistry(): FakeRegistry {
   let cb: (() => void) | undefined;
+  let approvalCb: (() => void) | undefined;
   return {
     setStatusChangeCallback: vi.fn((next: (() => void) | undefined) => {
       cb = next;
     }),
+    setApprovalChangeCallback: vi.fn((next: (() => void) | undefined) => {
+      approvalCb = next;
+    }),
     fire: () => cb?.(),
+    fireApproval: () => approvalCb?.(),
   };
 }
 
@@ -65,6 +73,7 @@ function makeConfig(opts: {
   shells: () => unknown[];
   monitors: () => unknown[];
   dreams?: () => unknown[];
+  workflows?: () => unknown[];
 }) {
   const agentReg = makeFakeRegistry();
   const shellReg = makeFakeRegistry();
@@ -84,6 +93,10 @@ function makeConfig(opts: {
     getMonitorRegistry: () => ({
       ...monitorReg,
       getAll: opts.monitors,
+    }),
+    getWorkflowRunRegistry: () => ({
+      list: () => opts.workflows?.() ?? [],
+      setStatusChangeCallback: () => {},
     }),
     getMemoryManager: () => ({
       subscribe: memoryMgr.subscribe,
@@ -335,6 +348,9 @@ describe('useBackgroundTaskView', () => {
     expect(monitorReg.setStatusChangeCallback).toHaveBeenCalledWith(
       expect.any(Function),
     );
+    expect(agentReg.setApprovalChangeCallback).toHaveBeenCalledWith(
+      expect.any(Function),
+    );
   });
 
   it('refreshes entries when any registry fires statusChange', () => {
@@ -360,6 +376,40 @@ describe('useBackgroundTaskView', () => {
     expect(result.current.entries.map(entryId)).toEqual(['a1', 'm1']);
   });
 
+  it('refreshes agent entries when approval state changes without a status change', () => {
+    const agents = [agent('a1', 100)];
+    const { config, agentReg } = makeConfig({
+      agents: () => agents,
+      shells: () => [],
+      monitors: () => [],
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    expect(result.current.entries).toHaveLength(1);
+    expect(result.current.entries[0]).not.toHaveProperty('pendingApprovals');
+
+    agents[0] = {
+      ...agents[0],
+      pendingApprovals: [
+        {
+          callId: 'c1',
+          name: 'Shell',
+          description: 'run',
+          args: {},
+          confirmationDetails: { type: 'exec' },
+          respond: vi.fn(),
+          timestamp: Date.now(),
+        },
+      ],
+    } as (typeof agents)[number];
+
+    act(() => agentReg.fireApproval());
+
+    expect(result.current.entries[0]).toMatchObject({
+      kind: 'agent',
+      pendingApprovals: [expect.objectContaining({ callId: 'c1' })],
+    });
+  });
+
   it('clears all three subscriptions on unmount', () => {
     const { config, agentReg, shellReg, monitorReg, memoryMgr } = makeConfig({
       agents: () => [],
@@ -374,6 +424,10 @@ describe('useBackgroundTaskView', () => {
     // into an unmounted component (warning + state-update on unmounted
     // tree, sometimes crashes the next render).
     expect(agentReg.setStatusChangeCallback.mock.calls).toEqual([
+      [expect.any(Function)],
+      [undefined],
+    ]);
+    expect(agentReg.setApprovalChangeCallback.mock.calls).toEqual([
       [expect.any(Function)],
       [undefined],
     ]);

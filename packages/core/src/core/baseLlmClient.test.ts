@@ -137,6 +137,10 @@ describe('BaseLlmClient', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      model: 'test-model',
+      authType: AuthType.USE_GEMINI,
+    });
     // Reset the mocked implementation for getErrorMessage for accurate error message assertions
     vi.mocked(getErrorMessage).mockImplementation((e) =>
       e instanceof Error ? e.message : String(e),
@@ -322,6 +326,31 @@ describe('BaseLlmClient', () => {
         expect.any(Function),
         expect.objectContaining({
           maxAttempts: 7,
+        }),
+      );
+    });
+
+    it('should pass configured retry error codes to retryWithBackoff', async () => {
+      const retryErrorCodes = [4999];
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+        retryErrorCodes,
+      });
+      const mockResponse = createMockResponseWithFunctionCall({
+        color: 'green',
+      });
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { color: 'green' } },
+      ]);
+
+      await client.generateJson(defaultOptions);
+
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({
+          extraRetryErrorCodes: retryErrorCodes,
         }),
       );
     });
@@ -729,9 +758,13 @@ describe('BaseLlmClient', () => {
     });
 
     it('generateJson routes through the per-model generator and forwards retry authType', async () => {
+      const retryErrorCodes = [4999];
       getResolvedModel.mockReturnValue({
         authType: AuthType.USE_ANTHROPIC,
         envKey: 'ANTHROPIC_API_KEY',
+        generationConfig: {
+          retryErrorCodes,
+        },
       });
       fastGenerateContent.mockResolvedValue(
         createMockResponseWithFunctionCall({ ok: true }),
@@ -754,7 +787,10 @@ describe('BaseLlmClient', () => {
       expect(mockGenerateContent).not.toHaveBeenCalled();
       expect(retryWithBackoff).toHaveBeenCalledWith(
         expect.any(Function),
-        expect.objectContaining({ authType: AuthType.USE_ANTHROPIC }),
+        expect.objectContaining({
+          authType: AuthType.USE_ANTHROPIC,
+          extraRetryErrorCodes: retryErrorCodes,
+        }),
       );
     });
 

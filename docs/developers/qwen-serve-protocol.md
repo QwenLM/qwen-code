@@ -18,6 +18,32 @@ Without a configured token (loopback dev default) the header is optional. Token 
 
 When the flag is on, the global `bearerAuth` middleware gates **every** route — including `/capabilities`. An **unauthenticated** client therefore cannot pre-flight `caps.features` to discover that auth is required: the discovery surface for that case is the **401 response body** itself (uniform across all routes per the [Authentication](#authentication) section). The `require_auth` capability tag is a **post-authentication confirmation** — once a client successfully authenticates and reads `/capabilities`, the tag's presence confirms the daemon was started with `--require-auth` (useful for audit / compliance UIs and for SDK clients to surface "this deployment is hardened" in a settings panel). Mutation routes that opt into per-route strict mode (Wave 4 follow-ups) refuse with `401 { code: "token_required", error: "…" }` when reached on a no-token loopback default — but with `--require-auth` enabled the global bearer middleware short-circuits the request before the per-route gate, so the legacy `Unauthorized` body is what unauthenticated callers actually see.
 
+**`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser webuis hitting the daemon cross-origin are blocked by default — any request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
+
+- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token is set (any source: `--token`, `QWEN_SERVER_TOKEN`, or `--require-auth` which mandates a token at boot). The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` and `/demo` are also gated by the bearer — they're registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach `/health` without a token), and a `*` allowlist makes them reachable from any cross-origin browser. On non-loopback binds the bearer is already mandatory at boot, so the `*` exposure surface is just `/health` (status JSON) and `/demo` (a static page whose JS still calls token-gated routes) — the actual API surface is gated regardless.
+- A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input.
+
+Matched origins receive the standard CORS response headers on every request:
+
+```
+Access-Control-Allow-Origin: <echoed origin>
+Vary: Origin
+Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID
+Access-Control-Max-Age: 86400
+Access-Control-Expose-Headers: Retry-After
+```
+
+`Access-Control-Allow-Origin` echoes the request's origin verbatim (lowercase / uppercase as the browser sent it) rather than the literal `*`, even under the `*` pattern — browser caches key responses on it paired with `Vary: Origin`, and echoing leaves room to add `Access-Control-Allow-Credentials` in a later release without a schema change. `Access-Control-Expose-Headers: Retry-After` lets browser webuis honor daemon retry hints from `429` / `503` responses. `Access-Control-Allow-Credentials` is **NOT** sent today: the daemon authenticates via bearer-in-`Authorization`, which works cross-origin without `credentials: 'include'`.
+
+OPTIONS preflight requests (OPTIONS with `Access-Control-Request-Method` or `Access-Control-Request-Headers`) short-circuit with `204 No Content` plus the headers above. This is the conventional CORS pattern and is safe — the preflight only confirms which methods/headers the daemon will accept; the actual subsequent request still runs the full chain (host allowlist → bearer auth → routes), so anti-DNS-rebinding and bearer enforcement still fire before any state is read or mutated. Plain OPTIONS requests from matched origins keep flowing downstream with CORS headers attached.
+
+Origins that don't match the allowlist still get `403 {"error":"Request denied by CORS policy"}` — same envelope as the default wall, so clients that already parsed the wall's response don't have to special-case allowlist-deployed daemons. The reject path **does not** emit any `Access-Control-*` headers (the browser would ignore them, and emitting would indirectly advertise the allowlist size through header presence).
+
+The configured pattern list is intentionally NOT echoed in `/capabilities` — browser webui already knows its own origin (it called the daemon, after all), and surfacing the list would let an unauthenticated reader of `/capabilities` enumerate every trusted origin (useful recon for a misconfigured deployment). SDK clients gate on the `caps.features.allow_origin` tag for "this daemon honors cross-origin browser hits" without needing to know which specific origins.
+
+Loopback self-origin requests (e.g. the `/demo` page calling the daemon at the same `127.0.0.1:port`) are handled by a **separate** Origin-strip shim that runs BEFORE the CORS middleware and removes the `Origin` header for `127.0.0.1:port` / `localhost:port` / `[::1]:port` / `host.docker.internal:port`. So they pass through regardless of `--allow-origin` configuration — operators don't need to list the daemon's own port to make the demo page work.
+
 ## Common error shape
 
 5xx responses carry the original error's `code` and `data` when present (JSON-RPC style — the ACP SDK forwards `{code, message, data}` from the agent):
@@ -93,23 +119,36 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 ```
 ['health', 'capabilities', 'session_create', 'session_scope_override',
- 'session_load', 'unstable_session_resume',
+ 'session_load', 'session_resume',
+ 'unstable_session_resume',
  'session_list', 'session_prompt', 'session_cancel', 'session_events',
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
- 'workspace_providers', 'workspace_env', 'workspace_preflight',
- 'session_context', 'session_supported_commands',
+ 'workspace_providers', 'auth_provider_install', 'workspace_memory',
+ 'workspace_agents', 'workspace_agent_generate', 'workspace_env',
+ 'workspace_preflight', 'session_context', 'session_context_usage',
+ 'session_supported_commands', 'session_tasks', 'session_stats',
  'session_close', 'session_metadata', 'mcp_guardrails',
- 'mcp_guardrail_events',
+ 'workspace_mcp_manage', 'mcp_guardrail_events',
+ 'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
  'session_approval_mode_control', 'workspace_tool_toggle',
- 'workspace_init', 'workspace_mcp_restart']
+ 'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
+ 'session_recap', 'session_btw', 'session_shell_command',
+ 'mcp_workspace_pool', 'mcp_pool_restart',
+ 'require_auth', 'allow_origin', 'auth_device_flow',
+ 'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
+ 'non_blocking_prompt', 'session_language', 'session_rewind',
+ 'workspace_hooks', 'session_hooks', 'workspace_extensions',
+ 'session_branch', 'rate_limit', 'workspace_reload']
 ```
+
+> Conditional tags appear only when their matching deployment toggle is on (see the table below). F3's `permission_mediation` tag is always-on and carries `modes: ['first-responder', 'designated', 'consensus', 'local-only']` so SDK clients can introspect the build-supported set; the runtime-active strategy is at `body.policy.permission`.
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
 
-`session_load` and `unstable_session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. The `unstable_` prefix on `unstable_session_resume` mirrors the underlying ACP method (`connection.unstable_resumeSession`) — the daemon's wire shape is committed for v1, but the ACP method name itself may change before ACP marks resume stable.
+`session_load` and `session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. `unstable_session_resume` is still advertised as a deprecated alias for compatibility with SDKs that shipped while the underlying ACP method was named `connection.unstable_resumeSession`; new clients should gate on `session_resume`.
 
 `slow_client_warning` covers two co-released SSE backpressure knobs introduced in #4175 Wave 2.5 PR 10: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's queue crosses 75% full, once per overflow episode (rearmed after the queue drains below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber backlog for cold reconnects against a large replay ring. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack both — pre-flight this tag before opting in.
 
@@ -134,11 +173,23 @@ The write tag means the route contract exists; it does not mean the current
 deployment is open for anonymous mutation. Write/edit are strict mutation
 routes and require a configured bearer token even on loopback.
 
+`daemon_status` advertises `GET /daemon/status`, the consolidated read-only
+operator diagnostic snapshot documented below.
+
 **Conditional tags.** A small number of feature tags are advertised only when the matching deployment toggle is on. Tag presence = behavior is on; absence = either an older daemon predating the tag, OR a current daemon where the operator did not opt in. Currently:
 
-| Tag            | Advertised when …                                                                                                                                                            |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `require_auth` | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds. |
+| Tag                        | Advertised when …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `require_auth`             | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds.                                                                                                                                                                                                                                                                                                                                    |
+| `mcp_workspace_pool`       | the shared MCP transport pool is active. Omitted when `QWEN_SERVE_NO_MCP_POOL=1` disables the pool.                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `mcp_pool_restart`         | the shared MCP transport pool is active; restart responses may include pool-aware multi-entry shapes.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `allow_origin`             | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). The daemon was started with at least one `--allow-origin <pattern>` (or `allowOrigins: [...]` via the embedded API). Cross-origin requests from matched origins receive proper CORS response headers; unmatched origins still get the default 403. The configured pattern list is intentionally NOT echoed in `/capabilities` to avoid leaking the trusted-origin set to unauthenticated readers — browser webui already knows its own origin. |
+| `prompt_absolute_deadline` | `--prompt-deadline-ms` / `QWEN_SERVE_PROMPT_DEADLINE_MS` / `ServeOptions.promptDeadlineMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                                        |
+| `writer_idle_timeout`      | `--writer-idle-timeout-ms` / `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` / `ServeOptions.writerIdleTimeoutMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                             |
+| `workspace_settings`       | the daemon was created with settings persistence available.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `session_shell_command`    | session shell execution is explicitly enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `rate_limit`               | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1` / `ServeOptions.rateLimit` is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `workspace_reload`         | workspace reload support is available in the embedded route configuration.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 `mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
 
@@ -165,6 +216,89 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
 
 **Auth:** required **only on non-loopback binds**. On loopback (`127.0.0.1`, `::1`, `[::1]`) `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the loopback exemption.
 
+### `GET /daemon/status`
+
+Read-only operator diagnostics. Unlike `/health`, this is a normal daemon API:
+it is registered after bearer auth and rate limiting, including on loopback
+binds. Query parameter:
+
+- `detail=summary` (default) reads only in-memory daemon state.
+- `detail=full` also includes live session diagnostics, ACP connection
+  diagnostics, auth device-flow counts, and workspace status sections.
+- any other `detail` returns `400 { "code": "invalid_detail" }`.
+
+`summary` intentionally does not query workspace status methods, start an ACP
+child, or spawn a session. `full` queries each workspace section independently;
+a timeout or exception marks only that section as `unavailable` and adds a
+`workspace_status_unavailable` issue.
+
+Response shape:
+
+```json
+{
+  "v": 1,
+  "detail": "summary",
+  "generatedAt": "2026-06-16T00:00:00.000Z",
+  "status": "ok",
+  "issues": [],
+  "daemon": {
+    "pid": 12345,
+    "uptimeMs": 3600000,
+    "mode": "http-bridge",
+    "workspaceCwd": "/repo",
+    "qwenCodeVersion": "0.18.1",
+    "daemonId": "serve-..."
+  },
+  "security": {
+    "tokenConfigured": true,
+    "requireAuth": false,
+    "loopbackBind": true,
+    "allowOriginConfigured": false,
+    "allowOriginMode": "none",
+    "sessionShellCommandEnabled": false
+  },
+  "limits": {
+    "maxSessions": 20,
+    "maxPendingPromptsPerSession": 5,
+    "listenerMaxConnections": 256,
+    "eventRingSize": 8000,
+    "promptDeadlineMs": null,
+    "writerIdleTimeoutMs": null,
+    "channelIdleTimeoutMs": 0,
+    "sessionIdleTimeoutMs": 1800000,
+    "acpConnectionCap": 64
+  },
+  "runtime": {
+    "sessions": { "active": 0 },
+    "permissions": { "pending": 0, "policy": "first-responder" },
+    "channel": { "live": false },
+    "transport": {
+      "restSseActive": 0,
+      "acp": {
+        "enabled": true,
+        "connections": 0,
+        "connectionStreams": 0,
+        "sessionStreams": 0,
+        "sseStreams": 0,
+        "wsStreams": 0,
+        "pendingClientRequests": 0
+      }
+    }
+  }
+}
+```
+
+`status` is `error` if any issue has error severity, `warning` if any issue has
+warning severity, otherwise `ok`. Issue codes are stable and include
+`session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
+`acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
+`mcp_budget_exhausted`, `rate_limit_hits`, and
+`workspace_status_unavailable`.
+
+Security: the response never includes bearer tokens, client ids, full ACP
+connection ids, device-flow user codes, or verification URLs. `summary` omits
+the daemon log path; `full` may include it for authenticated operators.
+
 ### `GET /capabilities`
 
 ```json
@@ -175,7 +309,7 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
     "supported": ["v1"]
   },
   "mode": "http-bridge",
-  "features": ["health", "capabilities", "..."],
+  "features": ["health", "daemon_status", "capabilities", "..."],
   "modelServices": [],
   "workspaceCwd": "/canonical/path/to/workspace"
 }
@@ -208,6 +342,7 @@ Capability tags:
 - `workspace_preflight` → `GET /workspace/preflight`
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
+- `session_tasks` → `GET /session/:id/tasks`
 
 Common status cell:
 
@@ -838,6 +973,36 @@ caller named the path. Success responses and audit events include
 `available_commands_update` SSE notification. `availableSkills` lists skill
 names only; clients must not expect skill bodies or paths over this route.
 
+### `GET /session/:id/tasks`
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "now": 1700000000000,
+  "tasks": [
+    {
+      "kind": "agent",
+      "id": "agent-1",
+      "label": "reviewer: check failure",
+      "description": "check failure",
+      "status": "running",
+      "startTime": 1699999999000,
+      "runtimeMs": 1000,
+      "outputFile": "/tmp/agent-1.jsonl",
+      "isBackgrounded": true,
+      "subagentType": "reviewer"
+    }
+  ]
+}
+```
+
+This route is a read-only out-of-band snapshot. It is intentionally not a
+prompt and can be queried while the session is streaming. The response only
+contains whitelisted metadata from the agent, shell, and monitor task
+registries; controllers, timers, offsets, pending messages, and raw registry
+objects are never exposed.
+
 ### `POST /session`
 
 Spawn a new agent or attach to an existing one (under `sessionScope: 'single'`, the default).
@@ -931,13 +1096,13 @@ Response:
 
 ### `POST /session/:id/resume`
 
-Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.unstable_session_resume`.
+Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.session_resume`; `unstable_session_resume` remains a deprecated compatibility alias for older clients.
 
 Same request shape as `/load`. Same response shape — `state` mirrors ACP's `ResumeSessionResponse`. Same error envelope, including `409 restore_in_progress` (which fires when a `session/load` is in flight; `session/resume` racing behind another `session/resume` coalesces).
 
 Use `/load` when the client has no history rendered (cold reconnect, picker → open). Use `/resume` when the client already has the turns on screen and only needs the daemon-side handle back.
 
-> ⚠️ **Why `unstable_` on the capability tag?** The route is wire-stable for the daemon's v1, but it's backed by ACP's `connection.unstable_resumeSession` which is still subject to ACP-side breaking changes. The daemon insulates the wire shape from those changes; the prefix is a courtesy signal so SDK consumers know the underlying agent contract is not yet locked.
+> ⚠️ **Why is `unstable_session_resume` still advertised?** The daemon's HTTP route and `session_resume` capability are stable for v1, but the bridge still calls ACP's `connection.unstable_resumeSession`. The old tag remains only so SDKs that shipped before `session_resume` can keep working.
 
 ### `GET /workspace/:id/sessions`
 
@@ -1099,6 +1264,36 @@ Response:
 
 On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler.
 
+### `POST /session/:id/recap`
+
+Capability tag: `session_recap`. Bridge → ACP extMethod `qwen/control/session/recap`.
+
+Generate a one-sentence "where did I leave off" summary of the session. Wraps core's `generateSessionRecap` (`packages/core/src/services/sessionRecap.ts`), which runs a side-query against the fast model with tools disabled, `maxOutputTokens: 300`, and a strict `<recap>...</recap>` output format. The side-query reads the session's existing GeminiClient chat history and does **not** add to it.
+
+Request body is ignored (send `{}` or empty). Non-strict mutation gate — posture mirrors `/session/:id/prompt` (the call costs tokens but mutates no state). No SSE event is published.
+
+Response (200):
+
+```json
+{
+  "sessionId": "sess:42",
+  "recap": "Debugging the auth retry race. Next: add deterministic timing to the integration test."
+}
+```
+
+`recap` is `null` (a normal 200, not an error) when:
+
+- the session has fewer than two dialog turns yet,
+- the side-query returned no extractable `<recap>...</recap>` payload,
+- or any underlying model error occurred (the core helper is best-effort and never throws).
+
+Errors:
+
+- `400 {code: 'invalid_client_id'}` — malformed `X-Qwen-Client-Id` header.
+- `404` — session unknown.
+
+Cancellation: **none in v1**. The route does not listen for HTTP client disconnect, no `AbortSignal` is plumbed into the bridge, and the ACP child runs the side-query to completion regardless of whether the caller has disconnected. The only ceilings are the bridge's 60s backstop timeout (`SESSION_RECAP_TIMEOUT_MS`) and the transport-closed race against ACP channel death. This is acceptable because recap is short (single-attempt, `maxOutputTokens: 300`, ~1–5s typical); a request-id-based cancel ext-method can plumb full end-to-end cancellation in a future release if the bandwidth cost ever justifies it.
+
 ### Mutation: approval, tools, init, MCP restart
 
 Issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) Wave 4 PR 17 adds four mutation control routes that let remote clients change runtime posture without touching the daemon host's CLI. All four:
@@ -1149,7 +1344,7 @@ Capability tag: `workspace_tool_toggle`. Pure file IO — no ACP roundtrip.
 
 Toggle a tool name in the workspace's `tools.disabled` settings list. Tools listed there are **not registered** at all (distinct from `permissions.deny`, which keeps the tool registered and rejects invocation). Both built-in tools and MCP-discovered tools flow through `ToolRegistry.registerTool`, which consults the disabled set.
 
-> ⚠️ **Names must match the registry's exposed identifier exactly.** No alias resolution happens — the route stores whatever string is in the path parameter into `tools.disabled`, and the next ACP child compares against `tool.name` at register time. Built-ins use their canonical registry name (snake_case verb form): `run_shell_command`, `read_file`, `write_file`, `list_directory`, `glob`, `search_file_content`, `ripgrep`, `web_fetch`, etc. — NOT the display labels (`Shell`, `Read`, `Write`) that the CLI surfaces. MCP-discovered tools use the qualified `mcp__<server>__<name>` form (which is also the form `tool_toggled` events broadcast and what `GET /workspace/mcp` lists). Disabling `Bash` will NOT prevent `run_shell_command` from registering on the next session.
+> ⚠️ **Names must match the registry's exposed identifier exactly.** No alias resolution happens — the route stores whatever string is in the path parameter into `tools.disabled`, and the next ACP child compares against `tool.name` at register time. Built-ins use their canonical registry name (snake_case verb form): `run_shell_command`, `read_file`, `write_file`, `list_directory`, `glob`, `grep_search`, `web_fetch`, etc. — NOT the display labels (`Shell`, `Read`, `Write`) that the CLI surfaces. MCP-discovered tools use the qualified `mcp__<server>__<name>` form (which is also the form `tool_toggled` events broadcast and what `GET /workspace/mcp` lists). Disabling `Bash` will NOT prevent `run_shell_command` from registering on the next session.
 
 Live ACP children retain already-registered tools — the toggle takes effect on the **next** ACP child spawn. Combine with `POST /workspace/mcp/:server/restart` (for MCP-sourced tools) or new-session creation to make the change effective in the current daemon.
 
@@ -1278,17 +1473,19 @@ data: {"v":1,"type":"client_evicted","data":{"reason":"queue_overflow","droppedA
 
 The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` for EventSource compatibility. Raw-`fetch` consumers (the SDK's `parseSseStream`) read everything off the JSON envelope and ignore the SSE preamble lines.
 
-| Event type            | Trigger                                                                                                                                                                                                                                                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session_update`      | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage)                                                                                                                                                                                                                                                     |
-| `permission_request`  | Agent asked for tool approval                                                                                                                                                                                                                                                                                            |
-| `permission_resolved` | Some client voted on a permission via `POST /permission/:requestId`                                                                                                                                                                                                                                                      |
-| `model_switched`      | `POST /session/:id/model` succeeded                                                                                                                                                                                                                                                                                      |
-| `model_switch_failed` | `POST /session/:id/model` rejected                                                                                                                                                                                                                                                                                       |
-| `session_died`        | Agent child crashed unexpectedly. **Terminal: SSE stream closes after this frame; the session is gone from `byId`.** Subscribers should reconnect via `POST /session` to spawn a fresh one.                                                                                                                              |
-| `slow_client_warning` | Subscriber-local: queue ≥ 75% full. **Non-terminal** — the stream continues; the warning is a heads-up before eviction. Carries `{queueSize, maxQueued, lastEventId}`. Fires ONCE per overflow episode; re-arms after the queue drains below 37.5%. No `id` (synthetic). Pre-flight `caps.features.slow_client_warning`. |
-| `client_evicted`      | Subscriber-local: queue overflow. **Terminal: SSE stream closes after this frame** (no `id` — synthetic). Other subscribers on the same session continue.                                                                                                                                                                |
-| `stream_error`        | Daemon-side error during fan-out. **Terminal: SSE stream closes after this frame** (no `id` — synthetic).                                                                                                                                                                                                                |
+| Event type                | Trigger                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session_update`          | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage)                                                                                                                                                                                                                                                     |
+| `permission_request`      | Agent asked for tool approval                                                                                                                                                                                                                                                                                            |
+| `permission_resolved`     | Some client voted on a permission via `POST /permission/:requestId`                                                                                                                                                                                                                                                      |
+| `permission_partial_vote` | (consensus only) A vote was recorded but quorum not yet reached. Carries `{requestId, sessionId, votesReceived, votesNeeded, quorum, optionTallies}`. Pre-flight `caps.features.permission_mediation`.                                                                                                                   |
+| `permission_forbidden`    | A vote was rejected by the active policy (`designated` mismatch, `local-only` non-loopback, or `consensus` voter not in snapshot). Carries `{requestId, sessionId, clientId?, reason}`. Pre-flight `caps.features.permission_mediation`.                                                                                 |
+| `model_switched`          | `POST /session/:id/model` succeeded                                                                                                                                                                                                                                                                                      |
+| `model_switch_failed`     | `POST /session/:id/model` rejected                                                                                                                                                                                                                                                                                       |
+| `session_died`            | Agent child crashed unexpectedly. **Terminal: SSE stream closes after this frame; the session is gone from `byId`.** Subscribers should reconnect via `POST /session` to spawn a fresh one.                                                                                                                              |
+| `slow_client_warning`     | Subscriber-local: queue ≥ 75% full. **Non-terminal** — the stream continues; the warning is a heads-up before eviction. Carries `{queueSize, maxQueued, lastEventId}`. Fires ONCE per overflow episode; re-arms after the queue drains below 37.5%. No `id` (synthetic). Pre-flight `caps.features.slow_client_warning`. |
+| `client_evicted`          | Subscriber-local: queue overflow. **Terminal: SSE stream closes after this frame** (no `id` — synthetic). Other subscribers on the same session continue.                                                                                                                                                                |
+| `stream_error`            | Daemon-side error during fan-out. **Terminal: SSE stream closes after this frame** (no `id` — synthetic).                                                                                                                                                                                                                |
 
 Reconnect semantics:
 
@@ -1305,20 +1502,32 @@ Backpressure:
 
 ### `POST /permission/:requestId`
 
-Cast a vote on a pending `permission_request`. **First responder wins** — once one client answers, every other client trying to answer the same id gets `404`.
+Cast a vote on a pending `permission_request`. The active **mediation policy** decides who wins:
 
-> **Stage 1 limitation — no permission timeout.** A `permission_request`
+| Policy                      | Behavior                                                                                                                                                                                              |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `first-responder` (default) | Any validated voter wins; later voters get `404`. Pre-F3 baseline.                                                                                                                                    |
+| `designated`                | Only the prompt originator (`originatorClientId`) decides; non-originators get `403 permission_forbidden / designated_mismatch`. Falls back to first-responder for anonymous prompts.                 |
+| `consensus`                 | N-of-M voters must agree (default `N = floor(M/2) + 1`, override via `policy.consensusQuorum`). First option to reach `N` wins. Non-resolving votes get `200` + `permission_partial_vote` SSE frames. |
+| `local-only`                | Only loopback voters decide; remote callers get `403 permission_forbidden / remote_not_allowed`.                                                                                                      |
+
+The active policy is configured in `settings.json` under `policy.permissionStrategy` and surfaced on `/capabilities` at `body.policy.permission`. Pre-flight `caps.features.permission_mediation` (with `modes: [...]`) for the build-supported set.
+
+> **F3 (#4175): multi-client permission coordination.** F3 added the four policies above. Pre-F3 daemons hardcoded first-responder; the wire shape stays bit-for-bit unchanged when the configured policy is `first-responder`. New events (`permission_partial_vote`, `permission_forbidden`) are additive — old SDKs see them as `unrecognized_known_event` and gracefully ignore.
+
+> **Permission timeout (default 5 minutes).** A `permission_request`
 > stays pending until: (a) some client votes here, (b) `POST /session/:id/cancel`
-> fires, (c) the HTTP client driving the prompt
-> disconnects (mid-prompt cancel resolves outstanding permissions as
-> `cancelled`), (d) the session is killed, or (e) the daemon shuts
-> down. **In a fully-headless deployment with no SSE subscriber,
-> `requestPermission` blocks the agent indefinitely** — there's nothing
-> to time out the wait. Stage 2 will add a configurable
-> `permissionTimeoutMs`. Until then, headless callers should keep an
-> SSE subscription open or wrap their prompt loop in their own timeout
->
-> - `POST /session/:id/cancel` on expiry.
+> fires, (c) the HTTP client driving the prompt disconnects
+> (mid-prompt cancel resolves outstanding permissions as `cancelled`),
+> (d) the session is killed, (e) the daemon shuts down, **or
+> (f) the per-session permission timeout fires** (`DEFAULT_PERMISSION_TIMEOUT_MS`,
+> 5 minutes). On timeout fire the agent's `requestPermission` resolves
+> as `{outcome: 'cancelled'}`, the audit ring records a
+> `permission.timeout` entry, daemon stderr emits a one-line
+> breadcrumb, and the SSE bus fans out the standard
+> `permission_resolved` cancelled frame so subscribers clean up. The
+> timeout is configurable via `BridgeOptions.permissionResponseTimeoutMs`;
+> headless callers running long-form prompts may want to extend it.
 
 Request:
 
@@ -1338,10 +1547,13 @@ Outcomes:
 
 Response:
 
-- `200 {}` — your vote was accepted
+- `200 {}` — your vote was accepted (resolved OR recorded under consensus quorum)
+- `403 { "code": "permission_forbidden", "reason": "designated_mismatch" | "remote_not_allowed", "requestId", "sessionId" }` — F3: the active policy rejected your vote
 - `404 { "error": "..." }` — the requestId is unknown (already resolved, never existed, or session torn down)
+- `500 { "code": "cancel_sentinel_collision", ... }` — F3: the agent's `allowedOptionIds` contains the reserved sentinel `'__cancelled__'`; agent / daemon contract violation
+- `501 { "code": "permission_policy_not_implemented", "policy": "<name>" }` — F3 forward-compat: a policy literal landed in the schema but its mediator branch isn't built yet (currently unreachable; reserved for future policies)
 
-After a successful vote, every connected client sees `permission_resolved` with the same `requestId` and the chosen `outcome`.
+After a successful vote, every connected client sees `permission_resolved` with the same `requestId` and the chosen `outcome`. Under `consensus`, intermediate votes additionally fan out `permission_partial_vote` until quorum.
 
 ### Auth device-flow routes (issue #4175 PR 21)
 

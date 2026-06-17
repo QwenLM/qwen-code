@@ -330,8 +330,8 @@ describe('GlobTool', () => {
     it('should return error if path is provided but is not a string', () => {
       const params = {
         pattern: '*.ts',
-        path: 123,
-      } as unknown as GlobToolParams; // Force incorrect type
+        path: {},
+      } as unknown as GlobToolParams; // Force incorrect type (object, not coercible)
       expect(globTool.validateToolParams(params)).toBe(
         'params/path must be string',
       );

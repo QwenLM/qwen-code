@@ -31,7 +31,7 @@ on:
       timeout_minutes:
         description: 'Review timeout in minutes'
         required: false
-        default: '60'
+        default: '90'
         type: 'number'
 
 concurrency:
@@ -44,6 +44,70 @@ concurrency:
   cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
 
 jobs:
+  ack-review-request:
+    # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
+    # Authorization is delegated to the `authorize` job (write+ permission);
+    # this `if` only matches the /review command shape.
+    needs: ['authorize']
+    if: |-
+      needs.authorize.outputs.should_review == 'true' &&
+      ((github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.issue.state == 'open' &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
+      (github.event_name == 'pull_request_review_comment' &&
+        github.event.pull_request.state == 'open' &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
+      (github.event_name == 'pull_request_review' &&
+        github.event.pull_request.state == 'open' &&
+        (github.event.review.body == '@qwen-code /review' ||
+         startsWith(github.event.review.body, '@qwen-code /review ') ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n')))))
+    concurrency:
+      group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
+      cancel-in-progress: false
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: 'write'
+      issues: 'write'
+    steps:
+      - name: 'Post queued acknowledgement'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ github.event.issue.number || github.event.pull_request.number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')"
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          ACK_BODY="<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
+          EXISTING_ACK_ID="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+          )" || EXISTING_ACK_ID=""
+          if [ -n "$EXISTING_ACK_ID" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ACK_ID}" \
+              -f body="$ACK_BODY" > /dev/null
+            echo "Queued acknowledgement updated on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$ACK_BODY"
+            echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   review-config:
     if: |-
       github.event_name == 'pull_request_target' &&
@@ -59,17 +123,16 @@ jobs:
           echo "bot_login=qwen-code-ci-bot" >> "$GITHUB_OUTPUT"
 
   delay-automatic-review:
+    needs: ['authorize']
     if: |-
       github.event_name == 'pull_request_target' &&
       (github.event.action == 'opened' ||
        github.event.action == 'synchronize') &&
       github.event.pull_request.state == 'open' &&
       !github.event.pull_request.draft &&
-      (github.event.pull_request.author_association == 'OWNER' ||
-       github.event.pull_request.author_association == 'MEMBER' ||
-       github.event.pull_request.author_association == 'COLLABORATOR')
+      needs.authorize.outputs.should_review == 'true'
     runs-on: 'ubuntu-latest'
-    # Configured in repo settings with a 10-minute wait timer.
+    # Configured in repo settings with a 30-minute wait timer.
     environment:
       name: 'qwen-pr-review-delay'
       deployment: false
@@ -101,98 +164,167 @@ jobs:
           fi
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
-  authorize-review-request:
-    needs: ['review-config']
+  authorize:
+    # Single source of truth for "may this trigger spend review compute".
+    # The principal whose permission decides eligibility is the PR author
+    # (automatic PR events), the commenter (comment/review command events), or
+    # the requester (review_requested). They must have write+ permission.
+    # This replaces the per-path author_association checks, which are
+    # unreliable for fork PRs (a write user pushing from a fork is reported as
+    # CONTRIBUTOR, not MEMBER), so fork PRs by trusted authors now qualify.
+    # Only run for PR-target events and /review command comments — not every
+    # unrelated comment — to avoid spawning a job per comment. The downstream
+    # `if`s still do the exact /review body match; this prefix is just a filter.
     if: |-
-      github.event_name == 'pull_request_target' &&
-      github.event.action == 'review_requested' &&
-      github.event.requested_reviewer.login == needs.review-config.outputs.bot_login &&
-      github.event.pull_request.state == 'open' &&
-      !github.event.pull_request.draft
+      github.repository == 'QwenLM/qwen-code' &&
+      (github.event_name == 'pull_request_target' ||
+       ((github.event_name == 'issue_comment' ||
+         github.event_name == 'pull_request_review_comment') &&
+        startsWith(github.event.comment.body, '@qwen-code /review')) ||
+       (github.event_name == 'pull_request_review' &&
+        startsWith(github.event.review.body, '@qwen-code /review')))
     runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
     permissions:
       contents: 'read'
     outputs:
-      should_review: '${{ steps.sender_permission.outputs.should_review }}'
+      should_review: '${{ steps.principal_permission.outputs.should_review }}'
     steps:
-      - name: 'Check requester permission'
-        id: 'sender_permission'
+      - name: 'Check principal write permission'
+        id: 'principal_permission'
         env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          REQUESTER: '${{ github.event.sender.login }}'
+          # CI_BOT_PAT (not GITHUB_TOKEN): reading a user's collaborator
+          # permission requires write/maintain/admin access, which the
+          # GITHUB_TOKEN with contents:read does not have. Safe here — this job
+          # runs no agent, checks out nothing, and processes no untrusted PR
+          # content; it only reads event metadata and calls one read API.
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          PR_ACTION: '${{ github.event.action }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          COMMENT_USER: '${{ github.event.comment.user.login }}'
+          REVIEW_USER: '${{ github.event.review.user.login }}'
+          SENDER: '${{ github.event.sender.login }}'
         run: |-
           set -euo pipefail
-          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${REQUESTER}/permission" --jq '.permission')"; then
-            echo "Failed to check permission for ${REQUESTER}." >&2
-            echo "Failed to check permission for ${REQUESTER}." >> "$GITHUB_STEP_SUMMARY"
+          # Select the principal whose permission gates this trigger.
+          case "$EVENT_NAME" in
+            pull_request_target)
+              if [ "$PR_ACTION" = "review_requested" ]; then
+                principal="$SENDER"
+              else
+                principal="$PR_AUTHOR"
+              fi
+              ;;
+            issue_comment|pull_request_review_comment)
+              principal="$COMMENT_USER"
+              ;;
+            pull_request_review)
+              principal="$REVIEW_USER"
+              ;;
+            *)
+              principal=""
+              ;;
+          esac
+          if [ -z "$principal" ]; then
+            echo "No principal resolved for ${EVENT_NAME}; denying." >> "$GITHUB_STEP_SUMMARY"
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Fail closed: any API error or non-write permission denies the run.
+          api_error_file="$(mktemp)"
+          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+            api_error="$(cat "$api_error_file")"
+            rm -f "$api_error_file"
+            api_error="${api_error:-unknown error}"
+            api_error="${api_error//$'\r'/ }"
+            api_error="${api_error//$'\n'/ }"
+            echo "::error::Permission API call failed for ${principal}: ${api_error}"
+            echo "Failed to check permission for ${principal} (API error: ${api_error}); denying." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rm -f "$api_error_file"
           case "$permission" in
             admin|maintain|write)
               echo "should_review=true" >> "$GITHUB_OUTPUT"
               ;;
             *)
-              echo "Skipping requested review: ${REQUESTER} lacks write permission or permission check failed." >> "$GITHUB_STEP_SUMMARY"
+              echo "Denying review: ${principal} permission is '${permission}' (needs write)." >> "$GITHUB_STEP_SUMMARY"
               echo "should_review=false" >> "$GITHUB_OUTPUT"
               ;;
           esac
 
   review-pr:
-    needs:
-      ['review-config', 'delay-automatic-review', 'authorize-review-request']
-    # pull_request_target routing:
-    # - review_requested uses authorize-review-request and skips delay
+    needs: ['review-config', 'delay-automatic-review', 'authorize']
+    # pull_request_target routing (every path additionally gated by the
+    # `authorize` job = the principal has write+ permission):
+    # - review_requested checks the requester and skips delay
     # - opened/synchronize uses delay-automatic-review
-    # - reopened/ready_for_review runs immediately for trusted PR authors
+    # - reopened/ready_for_review runs immediately
+    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
     if: |-
       always() &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_target' &&
        github.event.pull_request.state == 'open' &&
        !github.event.pull_request.draft &&
+       needs.authorize.outputs.should_review == 'true' &&
        ((github.event.action == 'review_requested' &&
-         github.event.requested_reviewer.login == needs.review-config.outputs.bot_login &&
-         needs.authorize-review-request.outputs.should_review == 'true') ||
+         github.event.requested_reviewer.login == needs.review-config.outputs.bot_login) ||
         (github.event.action != 'review_requested' &&
          ((github.event.action != 'opened' &&
            github.event.action != 'synchronize') ||
-          needs.delay-automatic-review.outputs.should_review == 'true') &&
-         (github.event.pull_request.author_association == 'OWNER' ||
-          github.event.pull_request.author_association == 'MEMBER' ||
-          github.event.pull_request.author_association == 'COLLABORATOR')))) ||
+          needs.delay-automatic-review.outputs.should_review == 'true')))) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
          startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
-        (github.event.comment.author_association == 'OWNER' ||
-         github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
+        needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
          startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
-        (github.event.comment.author_association == 'OWNER' ||
-         github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
+        needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
-        (github.event.review.author_association == 'OWNER' ||
-         github.event.review.author_association == 'MEMBER' ||
-         github.event.review.author_association == 'COLLABORATOR')))
-    timeout-minutes: 60
+        needs.authorize.outputs.should_review == 'true'))
+    timeout-minutes: 90
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     permissions:
       contents: 'read'
       pull-requests: 'write'
       issues: 'write'
     steps:
+      # Self-hosted runners reuse the workspace, so an interrupted review can
+      # leave a stale `.qwen/tmp/review-pr-*` worktree or `qwen-review/*` branch
+      # that trips the checkout below. Prune defensively; never fail the job.
+      - name: 'Clean stale review worktrees'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in a
+          # worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to clean"
+            exit 0
+          fi
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          git worktree prune -v || true
+          git for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+            | while read -r stale_ref; do
+                if [ -n "$stale_ref" ]; then
+                  git branch -D "$stale_ref" || true
+                fi
+              done
+          git worktree prune -v || true
+          echo "stale review worktrees cleaned"
+
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
       - name: 'Checkout base branch'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -233,7 +365,7 @@ jobs:
             exit 1
           fi
 
-          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '60' }}"
+          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '90' }}"
 
           {
             echo "should_run=true"
@@ -281,7 +413,75 @@ jobs:
           if ! command -v qwen >/dev/null 2>&1; then
             fail "qwen CLI is required on the review runner."
           fi
-          qwen --version
+
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host proxy_bin
+            if ! command -v node >/dev/null 2>&1; then
+              fail "node is required to parse OPENAI_BASE_URL for the proxy bypass."
+            fi
+            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            if [ -z "$openai_host" ]; then
+              fail "Could not parse a hostname from OPENAI_BASE_URL."
+            fi
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+
+            # qwen currently reads HTTP(S)_PROXY directly and does not apply
+            # NO_PROXY when constructing its proxy agent. Clear proxy env for
+            # qwen itself, while restoring it for child gh/git commands.
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
+            mkdir -p "$proxy_bin"
+
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+
+            export PATH="$proxy_bin:$PATH"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+
+            echo "qwen_path=$(command -v qwen)"
+            qwen --version
+            echo "openai_host=${openai_host}"
+            echo "qwen_http_proxy=disabled"
+            if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
+              echo "child_git_github_proxy=restored"
+            else
+              echo "child_git_github_proxy=unset"
+            fi
+          }
+
+          configure_qwen_network
 
           case "$TIMEOUT_MINUTES" in
             ''|*[!0-9]*)
@@ -291,8 +491,8 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          if [ "$TIMEOUT_MINUTES" -gt 60 ]; then
-            fail "timeout_minutes must not exceed the 60 minute job timeout"
+          if [ "$TIMEOUT_MINUTES" -gt 90 ]; then
+            fail "timeout_minutes must not exceed the 90 minute job timeout"
           fi
 
           if ! PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')"; then
@@ -341,6 +541,29 @@ jobs:
           if [ ! -s "$LOG_PATH" ]; then
             fail "Qwen review completed but produced no output."
           fi
+
+          # qwen can exit 0 even when the run aborted mid-review (e.g. the model
+          # connection dropped before the review was posted). In that case the
+          # final stream-json `result` event still renders the error inline and
+          # carries subtype=success / is_error=false, so the checks above all
+          # pass and the job goes green without ever posting a comment. Inspect
+          # the terminal `result` event explicitly and treat an errored or
+          # aborted run as a failure so the fallback-comment step runs.
+          RESULT_LINE="$(grep '"type":"result"' "$LOG_PATH" | tail -n1 || true)"
+          if [ -z "$RESULT_LINE" ]; then
+            fail "Qwen review produced no result event (run aborted before completion)."
+          fi
+          RESULT_IS_ERROR="$(printf '%s' "$RESULT_LINE" | jq -r '.is_error // false')"
+          RESULT_SUBTYPE="$(printf '%s' "$RESULT_LINE" | jq -r '.subtype // ""')"
+          RESULT_TEXT="$(printf '%s' "$RESULT_LINE" | jq -r '.result // ""')"
+          if [ "$RESULT_IS_ERROR" = "true" ] || [ "$RESULT_SUBTYPE" != "success" ]; then
+            fail "Qwen review ended in an error result (subtype=${RESULT_SUBTYPE}, is_error=${RESULT_IS_ERROR})."
+          fi
+          case "$RESULT_TEXT" in
+            *"[API Error"*)
+              fail "Qwen review aborted with an API error before posting comments."
+              ;;
+          esac
 
       - name: 'Post fallback comment on failure'
         if: |-

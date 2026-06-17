@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Static } from 'ink';
+import { Box, Static, type DOMElement, useBoxMetrics } from 'ink';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
@@ -544,24 +544,32 @@ export const MainContent = () => {
     ],
   );
 
+  const vpHeaderRef = useRef<DOMElement>(null);
+  const { height: vpHeaderHeight } = useBoxMetrics(vpHeaderRef);
+
   if (useVirtualScroll) {
+    const scrollContainerHeight = Math.max(
+      0,
+      (uiState.availableTerminalHeight ?? 0) - vpHeaderHeight,
+    );
+
     return (
       <>
-        <Box flexDirection="column" flexShrink={0}>
+        <Box ref={vpHeaderRef} flexDirection="column" flexShrink={0}>
           <AppHeader version={version} />
           <DebugModeNotification />
           <Notifications />
         </Box>
         <OverflowProvider>
           <ScrollableList
-            hasFocus={!uiState.isInputActive && !uiState.isEditorDialogOpen}
+            hasFocus={!uiState.dialogsVisible}
             data={allVirtualItems}
             renderItem={renderVirtualItem}
             estimatedItemHeight={virtualEstimatedItemHeight}
             keyExtractor={virtualKeyExtractor}
             initialScrollIndex={SCROLL_TO_ITEM_END}
             isStaticItem={virtualIsStaticItem}
-            containerHeight={uiState.availableTerminalHeight}
+            containerHeight={scrollContainerHeight}
           />
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </OverflowProvider>

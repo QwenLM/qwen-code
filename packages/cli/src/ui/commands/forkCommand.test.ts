@@ -25,6 +25,7 @@ vi.mock('../../i18n/index.js', () => ({
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => ({ debug: () => undefined }),
   ToolNames: { AGENT: 'agent' },
+  FORK_SUBAGENT_TYPE: 'fork',
 }));
 
 describe('forkCommand', () => {
@@ -45,7 +46,6 @@ describe('forkCommand', () => {
       getHistoryShallow: () => historyWithTurn,
     }),
     getModel: () => 'test-model',
-    isForkSubagentEnabled: () => true,
     getToolRegistry: () => ({ getTool: mockGetTool }),
     ...overrides,
   });
@@ -153,23 +153,6 @@ describe('forkCommand', () => {
     expect(mockBuild).not.toHaveBeenCalled();
   });
 
-  it('refuses to fork when the fork feature gate is disabled', async () => {
-    const disabled = createMockCommandContext({
-      services: {
-        config: createConfig({
-          isForkSubagentEnabled: () => false,
-        }),
-      },
-    });
-    const result = await forkCommand.action!(disabled, 'do something');
-    expect(result).toMatchObject({
-      messageType: 'error',
-      content:
-        'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
-    });
-    expect(mockBuild).not.toHaveBeenCalled();
-  });
-
   it('errors when the agent tool is unavailable', async () => {
     mockGetTool.mockReturnValue(undefined);
     const result = await forkCommand.action!(mockContext, 'do something');
@@ -189,12 +172,13 @@ describe('forkCommand', () => {
     expect(mockGetTool).toHaveBeenCalledWith('agent');
 
     // Builds a background fork: full directive as prompt, run_in_background,
-    // no subagent_type (→ implicit FORK_AGENT).
+    // and an explicit subagent_type "fork" (→ FORK_AGENT; omitting it would
+    // select a general-purpose subagent instead).
     expect(mockBuild).toHaveBeenCalledTimes(1);
     const builtParams = mockBuild.mock.calls[0][0];
     expect(builtParams.prompt).toBe('review the current code');
     expect(builtParams.run_in_background).toBe(true);
-    expect(builtParams.subagent_type).toBeUndefined();
+    expect(builtParams.subagent_type).toBe('fork');
     expect(builtParams.description).toBeTruthy();
 
     expect(mockExecute).toHaveBeenCalledTimes(1);

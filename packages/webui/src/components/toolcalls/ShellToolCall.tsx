@@ -13,6 +13,7 @@ import {
   CopyButton,
   safeTitle,
   groupContent,
+  mapToolStatusToContainerStatus,
 } from './shared/index.js';
 import { usePlatform } from '../../context/PlatformContext.js';
 import type {
@@ -157,9 +158,7 @@ const ShellToolCallImpl: FC<BaseToolCallProps & { variant: ShellVariant }> = ({
     | 'default' =
     errors.length > 0 || (variant === 'execute' && toolCall.status === 'failed')
       ? 'error'
-      : toolCall.status === 'in_progress' || toolCall.status === 'pending'
-        ? 'loading'
-        : 'success';
+      : mapToolStatusToContainerStatus(toolCall.status);
 
   // Error case
   if (errors.length > 0) {

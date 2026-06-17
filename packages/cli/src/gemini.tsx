@@ -17,6 +17,8 @@ import {
   type Config,
   createDebugLogger,
   writeRuntimeStatus,
+  persistSessionUsage,
+  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
@@ -834,6 +836,29 @@ export async function main() {
       }
     }
 
+    // Persist session usage for cross-session reports (must run before
+    // config.shutdown() which clears telemetry state).
+    // sessionStartTime is read from uiTelemetryService so it stays correct
+    // after /clear resets the session (reset() updates the internal timestamp).
+    registerCleanup(() => {
+      try {
+        const metrics = uiTelemetryService.getMetrics();
+        const hasActivity = Object.values(metrics.models).some(
+          (m) => m.api.totalRequests > 0,
+        );
+        if (!hasActivity) return;
+        persistSessionUsage({
+          sessionId: config.getSessionId(),
+          startTime: uiTelemetryService.getSessionStartTime(),
+          endTime: new Date(),
+          project: config.getProjectRoot(),
+          metrics,
+        });
+      } catch {
+        // Best-effort — don't block shutdown
+      }
+    });
+
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
@@ -951,6 +976,7 @@ export async function main() {
           : []),
       ]),
     ];
+    const emittedStartupWarnings = new Set(startupWarnings);
 
     // Surface critical startup warnings (corrupted settings, recovery, etc.)
     // to stderr so they are visible regardless of UI mode. In interactive
@@ -1049,6 +1075,11 @@ export async function main() {
     if (inputFormat !== InputFormat.STREAM_JSON) {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
+      for (const warning of config.getWarnings()) {
+        if (emittedStartupWarnings.has(warning)) continue;
+        emittedStartupWarnings.add(warning);
+        writeStderrLine(warning);
+      }
       profileCheckpoint('config_initialize_end');
 
       // Non-interactive paths feed a prompt to the model immediately after

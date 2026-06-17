@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createDebugLogger, ToolNames } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  ToolNames,
+  FORK_SUBAGENT_TYPE,
+} from '@qwen-code/qwen-code-core';
 import type { AgentParams } from '@qwen-code/qwen-code-core';
 import type {
   CommandContext,
@@ -102,18 +106,9 @@ export const forkCommand: SlashCommand = {
       };
     }
 
-    if (!config.isForkSubagentEnabled?.()) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
-        ),
-      };
-    }
-
-    // Route through the Agent tool's background path (omitting subagent_type
-    // selects the implicit FORK_AGENT). This reuses the full background
+    // Route through the Agent tool's background path. `subagent_type: "fork"`
+    // explicitly selects the FORK_AGENT (omitting it would launch a
+    // general-purpose subagent instead). This reuses the full background
     // machinery: registration in the BackgroundTaskRegistry, live activity
     // streaming, a JSONL transcript, completion stats, and a terminal
     // task-notification — all surfaced by the existing background-tasks
@@ -131,6 +126,7 @@ export const forkCommand: SlashCommand = {
     const params: AgentParams = {
       description: deriveForkDescription(directive),
       prompt: directive,
+      subagent_type: FORK_SUBAGENT_TYPE,
       run_in_background: true,
     };
 
@@ -175,9 +171,12 @@ export const forkCommand: SlashCommand = {
         role: 'user',
         parts: [
           {
-            text: t('User launched a background fork via /fork: {{directive}}', {
-              directive,
-            }),
+            text: t(
+              'User launched a background fork via /fork: {{directive}}',
+              {
+                directive,
+              },
+            ),
           },
         ],
       });

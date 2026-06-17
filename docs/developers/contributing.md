@@ -203,7 +203,7 @@ This section describes how to develop and preview the documentation locally.
 
 ### Prerequisites
 
-1. Ensure you have Node.js (version 18+) installed
+1. Ensure you have Node.js (version 22+) installed
 2. Have npm or yarn available
 
 ### Setup Documentation Site Locally

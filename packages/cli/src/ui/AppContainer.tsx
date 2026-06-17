@@ -103,6 +103,7 @@ const MCP_BATCH_FLUSH_MS = 16;
 const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
+import { useResizeSettleRepaint } from './hooks/useResizeSettleRepaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -153,6 +154,7 @@ import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
+import { useMcpApproval } from './hooks/useMcpApproval.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
@@ -195,6 +197,7 @@ import { useSkillsManagerDialog } from './hooks/useSkillsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
+import { useStatsDialog } from './hooks/useStatsDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
@@ -277,6 +280,13 @@ export function dedupeNewestFirst(messages: readonly string[]): string[] {
     }
   }
   return result;
+}
+
+export function mergeStartupWarnings(
+  currentWarnings: readonly string[],
+  nextWarnings: readonly string[],
+): string[] {
+  return [...new Set([...currentWarnings, ...nextWarnings])];
 }
 
 interface AppContainerProps {
@@ -440,7 +450,11 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   // Additional hooks moved from App.tsx
-  const { stats: sessionStats, startNewSession } = useSessionStats();
+  const {
+    stats: sessionStats,
+    startNewSession,
+    seedPromptCount,
+  } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
@@ -477,6 +491,9 @@ export const AppContainer = (props: AppContainerProps) => {
     computeWindowTitle(basename(config.getTargetDir())),
   );
   const lastTitleRef = useRef<string | null>(null);
+  const [startupWarnings, setStartupWarnings] = useState(
+    () => props.startupWarnings || [],
+  );
   const staticExtraHeight = 3;
 
   // Prefetch the lowlight chunk on mount so the dynamic import is already
@@ -513,6 +530,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
+      setStartupWarnings((currentWarnings) =>
+        mergeStartupWarnings(currentWarnings, config.getWarnings()),
+      );
       profileCheckpoint('config_initialize_end');
       setConfigInitialized(true);
       profileCheckpoint('input_enabled');
@@ -547,6 +567,15 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        // Seed the prompt counter from the resumed conversation so new
+        // promptIds don't collide with restored file history snapshots.
+        const userTurnCount = resumedSessionData.conversation.messages.filter(
+          (m) => m.type === 'user' && m.subtype !== 'mid_turn_user_message',
+        ).length;
+        if (userTurnCount > 0) {
+          seedPromptCount(userTurnCount);
+        }
 
         // Re-arm any `/goal` that was active when the prior session ended.
         try {
@@ -866,26 +895,6 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
-  // Targeted repaint for resize events: move cursor to top-left and erase
-  // downward instead of a full clearTerminal, avoiding the full-screen
-  // flash. Ink's <Static> region is append-only, so when terminal width
-  // changes (tmux split, fullscreen toggle, font size change) we must
-  // explicitly re-emit the static history at the new width — otherwise
-  // header content stays at the old width and visibly tears.
-  // VP mode handles resize via ink's reflow + its own overflow clipping, so
-  // the physical write is unnecessary there too.
-  const repaintStaticViewport = useCallback(() => {
-    if (!useTerminalBuffer) {
-      stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
-    }
-    remountStaticHistory();
-  }, [useTerminalBuffer, remountStaticHistory, stdout]);
-
-  // Track previous terminal width across renders so we only repaint when
-  // the width actually changes. Initialized to the current width to avoid
-  // a spurious repaint on first mount.
-  const previousTerminalWidthRef = useRef(terminalWidth);
-
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
@@ -1093,6 +1102,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isMcpDialogOpen, openMcpDialog, closeMcpDialog } = useMcpDialog();
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
+  const { isStatsDialogOpen, openStatsDialog, closeStatsDialog } =
+    useStatsDialog();
 
   // Ref bridge: the guarded openRewindSelector callback is defined later
   // (after useDoublePress), but slashCommandActions needs it now. The ref
@@ -1140,6 +1151,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
+      openStatsDialog,
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
       openDiffDialog,
@@ -1169,6 +1181,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
+      openStatsDialog,
       openResumeDialog,
       handleResume,
       handleBranch,
@@ -2292,6 +2305,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
   const {
+    isMcpApprovalDialogOpen,
+    currentMcpApproval,
+    pendingMcpApprovals,
+    mcpApprovalRemaining,
+    handleMcpApprovalSelect,
+  } = useMcpApproval(config);
+  const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener();
@@ -2313,6 +2333,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shouldShowIdePrompt ||
     shouldShowCommandMigrationNudge ||
     isFolderTrustDialogOpen ||
+    isMcpApprovalDialogOpen ||
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
@@ -2337,6 +2358,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isSkillsManagerDialogOpen ||
     isMcpDialogOpen ||
     isHooksDialogOpen ||
+    isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
@@ -2419,18 +2441,8 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
-  // Repaint static header on terminal resize. Without this, tmux pane
-  // resizes and fullscreen toggles leave the static region rendered at the
-  // old width — header content visibly tears until the next refreshStatic
-  // (e.g. /model). Cheap repaint (cursor-to + erase-down) rather than a
-  // full clearTerminal to avoid the full-screen flash.
-  useEffect(() => {
-    if (previousTerminalWidthRef.current === terminalWidth) {
-      return;
-    }
-    previousTerminalWidthRef.current = terminalWidth;
-    repaintStaticViewport();
-  }, [terminalWidth, repaintStaticViewport]);
+  // Repaint static history on the trailing edge of a resize burst (#4891).
+  useResizeSettleRepaint(terminalWidth, refreshStatic);
 
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -2616,9 +2628,16 @@ export const AppContainer = (props: AppContainerProps) => {
             Date.now(),
           );
 
-          config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-            truncatedCount: originalLength - truncatedUi.length,
-          });
+          config.getChatRecordingService()?.rewindRecording(
+            targetTurnIndex,
+            { truncatedCount: originalLength - truncatedUi.length },
+            !hasRestoreFailure
+              ? config
+                  .getFileHistoryService()
+                  .getSnapshots()
+                  .slice(0, targetTurnIndex + 1)
+              : undefined,
+          );
         }
 
         // Show file restore result after conversation truncation so the
@@ -2820,6 +2839,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeBackgroundTasksDialog: closeBgTasksDialog,
     isDiffDialogOpen,
     closeDiffDialog,
+    isStatsDialogOpen,
+    closeStatsDialog,
     showWorktreeExitDialog,
     closeWorktreeExitDialog: () => setShowWorktreeExitDialog(false),
   });
@@ -3303,6 +3324,10 @@ export const AppContainer = (props: AppContainerProps) => {
       shouldShowCommandMigrationNudge,
       commandMigrationTomlFiles,
       isFolderTrustDialogOpen: isFolderTrustDialogOpen ?? false,
+      isMcpApprovalDialogOpen,
+      currentMcpApproval,
+      pendingMcpApprovals,
+      mcpApprovalRemaining,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -3360,6 +3385,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
+      isStatsDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3430,6 +3456,10 @@ export const AppContainer = (props: AppContainerProps) => {
       shouldShowCommandMigrationNudge,
       commandMigrationTomlFiles,
       isFolderTrustDialogOpen,
+      isMcpApprovalDialogOpen,
+      currentMcpApproval,
+      pendingMcpApprovals,
+      mcpApprovalRemaining,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -3488,6 +3518,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
+      isStatsDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3537,6 +3568,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
+      handleMcpApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
       onTabConsumerChange: setHasTabConsumer,
@@ -3566,6 +3598,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
+      closeStatsDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -3621,6 +3654,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
+      handleMcpApprovalSelect,
       setConstrainHeight,
       handleEscapePromptChange,
       refreshStatic,
@@ -3647,6 +3681,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
+      closeStatsDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -3693,7 +3728,7 @@ export const AppContainer = (props: AppContainerProps) => {
           <AppContext.Provider
             value={{
               version: props.version,
-              startupWarnings: props.startupWarnings || [],
+              startupWarnings,
             }}
           >
             <CompactModeProvider value={compactModeValue}>

@@ -804,8 +804,6 @@ export default {
     'Während eine Antwort oder ein Tool-Aufruf läuft, kann kein Hintergrund-Fork erstellt werden. Warten Sie, bis der Vorgang abgeschlossen ist, oder bearbeiten Sie den ausstehenden Tool-Aufruf.',
   'Cannot fork before the first conversation turn.':
     'Vor der ersten Gesprächsrunde kann kein Fork erstellt werden.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'Der Befehl /fork erfordert das Fork-Feature-Gate. Setzen Sie QWEN_CODE_ENABLE_FORK_SUBAGENT=1, um es zu aktivieren.',
   'The agent tool is unavailable; cannot fork.':
     'Das Agent-Tool ist nicht verfügbar; Fork kann nicht gestartet werden.',
   'Failed to launch fork: {{error}}':
@@ -1405,6 +1403,21 @@ export default {
     'In dieser Sitzung wurden keine Werkzeugaufrufe gemacht.',
   'Session start time is unavailable, cannot calculate stats.':
     'Sitzungsstartzeit nicht verfügbar, Statistiken können nicht berechnet werden.',
+  Activity: 'Aktivität',
+  Efficiency: 'Effizienz',
+  Today: 'Heute',
+  'Token Trend': 'Token-Trend',
+  'Cache Hit Rate': 'Cache-Trefferquote',
+  'Tool Success': 'Tool-Erfolgsrate',
+  'Tool Leaderboard': 'Tool-Rangliste',
+  Time: 'Zeit',
+  Success: 'Erfolg',
+  Cache: 'Cache',
+  Latency: 'Latenz',
+  'Code Impact': 'Code-Änderungen',
+  net: 'netto',
+  streak: 'Serie',
+  best: 'Rekord',
 
   // ============================================================================
   // Command Format Migration
@@ -1414,6 +1427,27 @@ export default {
   'Found {{count}} TOML command files:':
     '{{count}} TOML-Befehlsdateien gefunden:',
   'Current tasks': 'Aktuelle Aufgaben',
+  'Background tasks': 'Hintergrundaufgaben',
+  'No tasks currently running': 'Derzeit laufen keine Aufgaben',
+  'No entry to show.': 'Kein Eintrag zum Anzeigen.',
+  'needs approval': 'wartet auf Genehmigung',
+  'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
+  'Approve or deny the request above':
+    'Genehmigen oder lehnen Sie die obige Anfrage ab',
+  Running: 'Läuft',
+  Paused: 'Pausiert',
+  Completed: 'Abgeschlossen',
+  Failed: 'Fehlgeschlagen',
+  Stopped: 'Gestoppt',
+  Shell: 'Shell',
+  Monitor: 'Monitor',
+  Command: 'Befehl',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] Speicher-Konsolidierung',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] Speicher-Konsolidierung (prüft {{count}} Sitzung)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] Speicher-Konsolidierung (prüft {{count}} Sitzungen)',
   '... and {{count}} more': '... und {{count}} weitere',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Das TOML-Format ist veraltet. Möchten Sie sie ins Markdown-Format migrieren?',
@@ -1964,4 +1998,40 @@ export default {
   remote: 'entfernt',
   '中国 (China)': 'China',
   '中国 (China) - 阿里云百炼': 'China - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': 'Aktivitäts-Heatmap',
+  Less: 'Weniger',
+  More: 'Mehr',
+  Sessions: 'Sitzungen',
+  Duration: 'Dauer',
+  Projects: 'Projekte',
+  'Loading stats...': 'Statistiken werden geladen...',
+  '(no data)': '(keine Daten)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+  Input: 'Eingabe',
+  Models: 'Modelle',
+  'All time': 'Gesamtzeitraum',
+  'Last 7 days': 'Letzte 7 Tage',
+  'Last 30 days': 'Letzte 30 Tage',
+  'Show usage statistics dashboard.': 'Nutzungsstatistik-Dashboard anzeigen.',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API-Anfragen',
+  'Tool Calls': 'Tool-Aufrufe',
+  'Success rate': 'Erfolgsrate',
+  'Code Changes': 'Code-Änderungen',
+  Tool: 'Tool',
+  reqs: 'Anfr.',
+  in: 'ein',
+  out: 'aus',
+  'In/Out': 'Ein/Aus',
 };

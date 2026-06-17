@@ -121,6 +121,7 @@ export interface SlashCommandProcessorActions {
   openExtensionsManagerDialog: () => void;
   openMcpDialog: () => void;
   openHooksDialog: () => void;
+  openStatsDialog: () => void;
   openRewindSelector: () => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
@@ -402,8 +403,7 @@ export const useSlashCommandProcessor = (
     };
   }, [config, reloadCommands]);
 
-  // SkillManager already rebuilds its own cache and notifies SkillTool
-  // (which re-runs `setTools()` so `<available_skills>` is fresh). The
+  // SkillManager rebuilds its own cache when skills change on disk. The
   // slash-command list is a separate consumer: SkillCommandLoader reads
   // `listSkills()` once during CommandService.create(), so without this
   // bridge a newly added SKILL.md never produces a `/<skill-name>` entry
@@ -452,8 +452,9 @@ export const useSlashCommandProcessor = (
         if (controller.signal.aborted) {
           return;
         }
-        // Register model-invocable commands provider so SkillTool can include
-        // bundled skills, file commands, and MCP prompts in its description.
+        // Register model-invocable commands provider so the startup snapshot
+        // and per-turn drain include bundled skills, file commands, and MCP
+        // prompts in the <available_skills> listing.
         if (config) {
           config.setModelInvocableCommandsProvider(() =>
             commandService.getModelInvocableCommands().map((cmd) => ({
@@ -755,6 +756,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'hooks':
                       actions.openHooksDialog();
+                      return { type: 'handled' };
+                    case 'stats':
+                      actions.openStatsDialog();
                       return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
