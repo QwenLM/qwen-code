@@ -2815,16 +2815,12 @@ export class QwenAgent extends BaseAgent {
       this.debug(
         `Drained ${entries.length} mid-turn user message(s) to Qwen ACP`,
       );
-      const messageIds = entries
-        .map(
-          (entry) =>
-            (entry.messageId ?? entry.optimisticMessageId ?? entry.message) ||
-            `mid-turn-${randomUUID()}`,
-        )
-        .filter((messageId): messageId is string => !!messageId);
-      if (messageIds.length > 0) {
-        this.config.onMidTurnMessagesDrained?.(messageIds);
-      }
+      const messageIds = entries.map(
+        (entry) =>
+          (entry.messageId ?? entry.optimisticMessageId ?? entry.message) ||
+          `mid-turn-${randomUUID()}`,
+      );
+      this.config.onMidTurnMessagesDrained?.(messageIds);
     }
 
     const hasAttachments = entries.some(
