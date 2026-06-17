@@ -44,6 +44,7 @@ const mockSendMessageStream = vi
   .fn()
   .mockReturnValue((async function* () {})());
 const mockStartChat = vi.fn();
+const mockRunVisionBridge = vi.hoisted(() => vi.fn());
 
 const MockedGeminiClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
@@ -106,6 +107,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     activeGoalEquals: mockActiveGoalEquals,
     setActiveGoal: mockSetActiveGoal,
     clearActiveGoal: mockClearActiveGoal,
+    runVisionBridge: mockRunVisionBridge,
   };
 });
 
@@ -276,6 +278,7 @@ describe('useGeminiStream', () => {
       .mockClear()
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
+    mockRunVisionBridge.mockReset();
   });
 
   afterEach(() => {
@@ -408,6 +411,94 @@ describe('useGeminiStream', () => {
           notificationDisplayText: displayText,
         }),
       );
+    });
+  });
+
+  describe('vision bridge gate', () => {
+    const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
+    const enableBridge = (primaryAcceptsImages = false, enabled = true) => {
+      Object.assign(mockConfig, {
+        getVisionBridgeConfig: () => ({
+          enabled,
+          showTranscript: true,
+          maxImages: 4,
+          timeoutMs: 30000,
+        }),
+        getEffectiveInputModalities: () =>
+          primaryAcceptsImages ? { image: true } : {},
+      });
+      handleAtCommandSpy.mockResolvedValue({
+        processedQuery: [{ text: 'describe' }, imagePart],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+    };
+
+    it('runs the bridge and replaces image parts with text (enabled + text-only)', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        transcript: '[transcribed image]',
+        imageCount: 1,
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vm',
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+      expect(sent).toContain('[transcribed image]');
+      expect(sent).not.toContain('inlineData');
+    });
+
+    it('stops the turn (no model stream) when the bridge fails', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: false,
+        status: 'failed',
+        imageCount: 1,
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'vm',
+        error: 'timed out',
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('skips the bridge when the primary model already accepts images', async () => {
+      enableBridge(/* primaryAcceptsImages */ true);
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      // The image is sent straight to the (multimodal) primary model.
+      expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
+        'inlineData',
+      );
+    });
+
+    it('skips the bridge when disabled', async () => {
+      enableBridge(/* primaryAcceptsImages */ false, /* enabled */ false);
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
     });
   });
 
