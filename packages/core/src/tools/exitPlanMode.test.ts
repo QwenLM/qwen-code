@@ -42,6 +42,13 @@ describe('ExitPlanModeTool', () => {
       expect(tool.kind).toBe('think');
     });
 
+    // Regression for #5210: must stay declared so the model can call it
+    // directly in plan mode.
+    it('is always declared even though categorised as deferred (#5210)', () => {
+      expect(tool.shouldDefer).toBe(true);
+      expect(tool.alwaysLoad).toBe(true);
+    });
+
     it('should have correct schema', () => {
       expect(tool.schema).toEqual({
         name: 'exit_plan_mode',

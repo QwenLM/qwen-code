@@ -208,9 +208,10 @@ export class ExitPlanModeTool extends BaseDeclarativeTool<
       >,
       true, // isOutputMarkdown
       false, // canUpdateOutput
-      true, // shouldDefer — only used when leaving plan mode
-      false, // alwaysLoad
-      'plan mode exit approve',
+      true, // shouldDefer
+      // alwaysLoad: plan mode tells the model to call exit_plan_mode directly,
+      // so its schema must always be declared, not deferred (issue #5210).
+      true, // alwaysLoad
     );
   }
 
