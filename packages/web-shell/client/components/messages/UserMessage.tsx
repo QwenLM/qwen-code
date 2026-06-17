@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { PromptChevron } from '../PromptChevron';
 import { isSafeImageSrc } from './Markdown';
 import { useI18n } from '../../i18n';
-import type { CommandInfo, TurnCollapseHead } from '../../adapters/types';
+import type { TurnCollapseHead } from '../../adapters/types';
 import styles from './UserMessage.module.css';
 
 interface UserMessageImage {
@@ -13,7 +13,6 @@ interface UserMessageImage {
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
-  commands?: readonly CommandInfo[];
   /** When set, renders a toggle that folds/unfolds this turn's steps. */
   collapse?: TurnCollapseHead;
   onToggleCollapse?: (turnId: string) => void;
@@ -78,6 +77,14 @@ function metricsText(
   return parts.join(' · ');
 }
 
+function hasNonDurationMetrics(collapse: TurnCollapseHead): boolean {
+  return (
+    (collapse.inputTokens !== undefined &&
+      collapse.outputTokens !== undefined) ||
+    (collapse.toolCallCount !== undefined && collapse.toolCallCount > 0)
+  );
+}
+
 /**
  * Wall-clock that re-renders this row once a second while `active`, so a live
  * turn's elapsed advances smoothly instead of jumping per step. Idle (and for
@@ -94,35 +101,26 @@ function useNowTicker(active: boolean): number {
   return now;
 }
 
-function isKnownSlashCommandPrompt(
-  content: string,
-  commands: readonly CommandInfo[] | undefined,
-): boolean {
-  if (!commands?.length) return false;
-  const trimmed = content.trimStart();
-  if (!trimmed.startsWith('/')) return false;
-  const firstToken = trimmed.split(/\s+/, 1)[0]?.slice(1);
-  if (!firstToken) return false;
-  return commands.some((command) => command.name === firstToken);
-}
-
 export const UserMessage = memo(function UserMessage({
   content,
   images,
-  commands,
   collapse,
   onToggleCollapse,
 }: UserMessageProps) {
   const { t } = useI18n();
 
+  const hasToggle = !!collapse && collapse.hiddenCount > 0;
+  const showDurationMetric =
+    !!collapse && (hasToggle || hasNonDurationMetrics(collapse));
+
   // A live turn ticks `now - liveStartedAt`; a completed turn shows its frozen
   // elapsedMs. The ref clamps the shown value monotonically so it never steps
   // backward when a live turn settles onto its (timestamp-derived) final figure.
   const liveStartedAt = collapse?.liveStartedAt;
-  const now = useNowTicker(liveStartedAt !== undefined);
+  const now = useNowTicker(liveStartedAt !== undefined && showDurationMetric);
   const elapsedSeenRef = useRef(0);
   let displayElapsedMs: number | undefined;
-  if (liveStartedAt !== undefined) {
+  if (liveStartedAt !== undefined && showDurationMetric) {
     elapsedSeenRef.current = Math.max(
       elapsedSeenRef.current,
       Math.max(0, now - liveStartedAt),
@@ -140,9 +138,8 @@ export const UserMessage = memo(function UserMessage({
 
   // The chevron and step count toggle together (one comfortably-sized target);
   // the trailing metrics are inert. A step-less turn has no toggle, just metrics.
-  const hasToggle = !!collapse && collapse.hiddenCount > 0;
   const metrics = collapse ? metricsText(collapse, displayElapsedMs, t) : '';
-  const isSlashCommand = isKnownSlashCommandPrompt(content, commands);
+  const showMetrics = !!metrics && showDurationMetric;
 
   return (
     <div
@@ -175,39 +172,33 @@ export const UserMessage = memo(function UserMessage({
           </div>
         )}
         {content}
-        {!isSlashCommand &&
-          collapse &&
-          onToggleCollapse &&
-          (hasToggle || metrics) && (
-            <div className={styles.collapseRow}>
-              {hasToggle && (
-                <button
-                  type="button"
-                  className={styles.collapseToggle}
-                  onClick={() => onToggleCollapse(collapse.turnId)}
-                  aria-expanded={!collapse.collapsed}
-                  aria-label={
-                    collapse.collapsed ? t('turn.expand') : t('turn.collapse')
-                  }
-                  title={
-                    collapse.collapsed ? t('turn.expand') : t('turn.collapse')
-                  }
-                >
-                  {`${collapse.collapsed ? '▸' : '▾'} ${t(
-                    'turn.executionSteps',
-                    {
-                      count: collapse.hiddenCount,
-                    },
-                  )}`}
-                </button>
-              )}
-              {metrics && (
-                <span className={styles.collapseMeta}>
-                  {hasToggle ? ` · ${metrics}` : metrics}
-                </span>
-              )}
-            </div>
-          )}
+        {collapse && onToggleCollapse && (hasToggle || showMetrics) && (
+          <div className={styles.collapseRow}>
+            {hasToggle && (
+              <button
+                type="button"
+                className={styles.collapseToggle}
+                onClick={() => onToggleCollapse(collapse.turnId)}
+                aria-expanded={!collapse.collapsed}
+                aria-label={
+                  collapse.collapsed ? t('turn.expand') : t('turn.collapse')
+                }
+                title={
+                  collapse.collapsed ? t('turn.expand') : t('turn.collapse')
+                }
+              >
+                {`${collapse.collapsed ? '▸' : '▾'} ${t('turn.executionSteps', {
+                  count: collapse.hiddenCount,
+                })}`}
+              </button>
+            )}
+            {showMetrics && (
+              <span className={styles.collapseMeta}>
+                {hasToggle ? ` · ${metrics}` : metrics}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

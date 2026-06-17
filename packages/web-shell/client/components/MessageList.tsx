@@ -12,12 +12,7 @@ import {
   type MutableRefObject,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type {
-  CommandInfo,
-  Message,
-  ACPToolCall,
-  TurnCollapseHead,
-} from '../adapters/types';
+import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
   isBackgroundSubAgentToolCall,
@@ -55,7 +50,6 @@ interface MessageListProps {
   tailKey?: string;
   virtualScrollThreshold?: number;
   shellOutputMaxLines: number;
-  commands?: readonly CommandInfo[];
   /**
    * When true, scroll the tail content into view the moment it first appears
    * even if the user had scrolled up. Opt-in per caller so unrelated inline
@@ -683,7 +677,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
       shellOutputMaxLines,
-      commands,
       autoScrollTailIntoView = false,
       showRetryHint = false,
       onRetryClick,
@@ -1141,7 +1134,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
             showRetryHint={showRetryHint}
             onRetryClick={onRetryClick}
             shellOutputMaxLines={shellOutputMaxLines}
-            commands={commands}
             collapse={item.collapse}
             onToggleCollapse={handleToggleCollapse}
           />
@@ -1164,7 +1156,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         showRetryHint,
         onRetryClick,
         shellOutputMaxLines,
-        commands,
         handleToggleCollapse,
       ],
     );
