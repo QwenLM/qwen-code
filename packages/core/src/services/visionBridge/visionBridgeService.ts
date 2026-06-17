@@ -169,6 +169,8 @@ export interface VisionBridgeResult {
   omittedCount: number;
   /** Resolved bridge model id, when a call was attempted. */
   modelId?: string;
+  /** Host of the bridge model's endpoint, for cross-provider egress clarity. */
+  modelEndpoint?: string;
   /** Failure reason, when `status === 'failed'`. */
   error?: string;
 }
@@ -382,6 +384,7 @@ export async function runVisionBridge(params: {
       convertedCount: toConvert.length,
       omittedCount,
       modelId: model,
+      modelEndpoint: resolveEndpointHost(config, model),
     };
   } catch (error) {
     const reason =
@@ -392,6 +395,26 @@ export async function runVisionBridge(params: {
           : String(error);
     debugLogger.warn(`conversion failed via ${model}: ${reason}`);
     return failure(reason, imageParts.length, omittedCount, model);
+  }
+}
+
+/**
+ * Best-effort host of a model's configured endpoint, for egress disclosure.
+ * Cross-provider auto-select can route the image to a different endpoint than
+ * the primary model, so the UI notice surfaces where the data actually went.
+ */
+function resolveEndpointHost(
+  config: Config,
+  modelId: string,
+): string | undefined {
+  const baseUrl = config
+    .getAllConfiguredModels?.()
+    ?.find((m) => m.id === modelId)?.baseUrl;
+  if (!baseUrl) return undefined;
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl;
   }
 }
 

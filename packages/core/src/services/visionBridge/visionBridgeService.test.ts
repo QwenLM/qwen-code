@@ -91,6 +91,26 @@ describe('runVisionBridge', () => {
     expect(JSON.stringify(callOptions.contents)).toContain('PAYLOAD64');
   });
 
+  it('reports the bridge model endpoint host for cross-provider egress clarity', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    const configWithModels = {
+      getAllConfiguredModels: () => [
+        {
+          id: 'qwen3-vl-plus',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        },
+      ],
+    } as unknown as Config;
+    const result = await runVisionBridge({
+      config: configWithModels,
+      settings, // model: 'qwen3-vl-plus'
+      parts: ['look', image()],
+      signal: signal(),
+    });
+    expect(result.status).toBe('ok');
+    expect(result.modelEndpoint).toBe('dashscope.aliyuncs.com');
+  });
+
   it('strips an unterminated <think> block instead of leaking it', async () => {
     mockSideQuery.mockResolvedValue({
       text: 'A login form<think>now I will reason forever without closing',

@@ -119,7 +119,12 @@ function formatVisionBridgeNotice(
     result.omittedCount > 0 ? ` (${result.omittedCount} omitted)` : '';
   // The egress disclosure is always shown; the transcript body is optional so
   // that hiding the transcript never silently hides that data left the machine.
-  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${result.modelId}. Your image and prompt were sent to that model.`;
+  // Name the endpoint too — cross-provider auto-select can route to a different
+  // host than the primary model.
+  const target = result.modelEndpoint
+    ? `${result.modelId} (${result.modelEndpoint})`
+    : `${result.modelId}`;
+  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt were sent to that model.`;
   return showTranscript && result.transcript
     ? `${header}\n${result.transcript}`
     : header;
