@@ -36,9 +36,15 @@ environment). So the layers verify like this:
   `{type:'session_update', id, data:{sessionId, update:{sessionUpdate,
 content:{type,text}, _meta?}}}`. (Driven by the operator's configured
   OpenAI-compatible model endpoint, reachable from the daemon; qwen self-injects
-  the provider key from `settings.env`.) `tool_call`/`permission_request` frames
-  aren't triggered by a text prompt — built against the typed shapes for now,
-  capturable later with a tool-triggering prompt.
+  the provider key from `settings.env`.) A **tool turn** was also captured
+  (`CAPTURE_PROMPT=… npx tsx scripts/capture-daemon-frames.mts`, which
+  auto-DECLINES any approval so nothing executes): `session_update/tool_call`
+  (`{toolCallId, _meta.toolName, kind, title, rawInput, status:'in_progress'}`)
+  → `session_update/tool_call_update` (`{status:'completed', content:[…], rawOutput}`).
+  Notably **no `permission_request` fired** — this daemon config auto-approves
+  builtin reads (the tool executed directly). So the permission gate is built
+  against the SDK's typed `DaemonPermissionRequestData`/`…ResolvedData` shapes and
+  exercised with synthetic frames.
 - **Headless TUI render** — `ink-testing-library` renders the TUI to a string for
   assertions; no TTY needed, here.
 - **Interactive acceptance** (the rich TUI feel + the phone handoff) — this is the
@@ -193,16 +199,31 @@ default behavior.
 
 ## Phasing inside Phase 2 ("grows")
 
-1. **Slice 1 — text round-trip.** Attach → `prompt` → render `agent_message_chunk` +
-   `agent_thought_chunk` into history; `cancel`. No tools yet. _Verifies the seam._
-2. **Slice 2 — tool approval.** Project `tool_call`/`tool_call_update`; wire
-   `permission_request` → reuse `ToolConfirmationMessage` → `respondToSessionPermission`;
-   honor `permission_resolved` (first-responder-wins with the phone).
+The **pure projection** for slices 1+2 is built and unit-tested here
+(`packages/cli/src/ui/hooks/daemon/projectDaemonEvent.ts`, 16 tests) — it folds
+daemon frames into the UI's history/streaming/tool/permission shapes. What
+remains for each slice is the **React hook + AppContainer wiring**, which is the
+interactive/integration layer.
+
+1. **Slice 1 — text round-trip.** ✅ _Projection done_ (user echo origin-aware,
+   streamed thought + message, `turn_complete`, usage). Remaining: the
+   `useDaemonStream` hook (subscribe→reduce→contract) + `cancel`, and rendering it.
+2. **Slice 2 — tool approval.** ✅ _Projection done_ (`tool_call`/`tool_call_update`
+   → `tool_group` with grounded status mapping; `permission_request` → Confirming +
+   gate state; `permission_resolved` → first-responder-wins). Remaining: the hook
+   builds `confirmationDetails.onConfirm` → `respondToSessionPermission` and reuses
+   `ToolConfirmationMessage`.
 3. **Slice 3 — model switch + catch-up.** `setModel`; `Last-Event-ID`/`resume` on
    re-attach so a mid-conversation join (terminal _or_ phone) replays history.
 4. **Then** the Phase-3 launcher (`qwen --remote-control`) is small glue: spawn one
    daemon, start the gateway attached (Phase 1), run the TUI attached (this), print
    the `/ui` URL + pairing code.
+
+**Where the interactive boundary falls:** everything above the React layer (this
+projection) is verified here. The hook + the AppContainer component-boundary split
+
+- the actual TUI rendering/handoff feel need a real terminal — that's the handoff
+  to the user.
 
 ## Verification plan
 

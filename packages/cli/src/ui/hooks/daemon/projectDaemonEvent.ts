@@ -33,11 +33,13 @@
  *   cross-package dependency and is trivially unit-testable against captured
  *   frames.
  *
- * Scope: this first slice covers the PROVEN text turn (user echo, streamed
- * thought + message, turn completion, usage). Tool-call display and the
- * permission round-trip (`tool_call` / `tool_call_update` / `permission_request`)
- * are a following slice — built once a tool-triggering turn is captured so the
- * daemon status-string → ToolCallStatus mapping is grounded, not guessed.
+ * Scope: covers the text turn (user echo, streamed thought + message, completion,
+ * usage) AND tool-call display + the permission gate. The `tool_call` /
+ * `tool_call_update` shapes + status strings (`in_progress`/`completed`) are
+ * grounded in a captured tool turn; `permission_request` / `permission_resolved`
+ * are built against the SDK's typed shapes (this daemon config auto-approves
+ * builtin reads, so the gate is exercised with synthetic frames in tests). The
+ * reducer produces DISPLAY + gate state only — the hook owns the actual vote.
  *
  * Known slice-1 gaps to reconcile at integration:
  * - **Only `turn_complete` clears the streaming state.** An errored/canceled
@@ -51,7 +53,9 @@
  */
 import {
   StreamingState,
+  ToolCallStatus,
   type HistoryItemWithoutId,
+  type IndividualToolCallDisplay,
   type ThoughtSummary,
 } from '../../types.js';
 
@@ -78,6 +82,18 @@ export interface DaemonTurnUsage {
   durationMs?: number;
 }
 
+/**
+ * An in-flight tool-approval gate. The reducer records WHICH tool needs
+ * approval and the daemon-defined option set; the hook builds the actual
+ * vote (`respondToSessionPermission`) from this — the in-process
+ * `ToolConfirmationOutcome` is NOT 1:1 with these opaque `optionId`s.
+ */
+export interface PendingPermission {
+  requestId: string;
+  toolCallId?: string;
+  options: Array<{ optionId: string; [key: string]: unknown }>;
+}
+
 export interface DaemonProjectionState {
   streamingState: StreamingState;
   /** In-flight assistant text for the current turn (the pending `gemini` item). */
@@ -86,6 +102,10 @@ export interface DaemonProjectionState {
   pendingThought: string;
   /** Usage from the most recent terminal `agent_message_chunk`, if any. */
   lastUsage?: DaemonTurnUsage;
+  /** Tool calls seen this turn, in arrival order (live display + tool_group). */
+  tools: IndividualToolCallDisplay[];
+  /** The active approval gate, if a `permission_request` is outstanding. */
+  pendingPermission?: PendingPermission;
   /**
    * This client's daemon clientId. When set, `user_message_chunk` frames whose
    * `originatorClientId` matches are treated as self-echoes and NOT committed
@@ -107,6 +127,7 @@ export function initialDaemonProjectionState(
     streamingState: StreamingState.Idle,
     pendingText: '',
     pendingThought: '',
+    tools: [],
     ownClientId,
   };
 }
@@ -138,6 +159,99 @@ const readUsage = (
     durationMs: num(usage['durationMs'] ?? meta['durationMs']),
   };
 };
+
+/**
+ * Map the daemon's ACP tool status string → the UI's {@link ToolCallStatus}.
+ * Values grounded in a captured tool turn (`in_progress`, `completed`); the
+ * remaining ACP states (`pending`, `failed`) round out the set.
+ */
+function mapToolStatus(s: unknown): ToolCallStatus {
+  switch (s) {
+    case 'pending':
+      return ToolCallStatus.Pending;
+    case 'in_progress':
+      return ToolCallStatus.Executing;
+    case 'completed':
+      return ToolCallStatus.Success;
+    case 'failed':
+      return ToolCallStatus.Error;
+    case 'canceled':
+    case 'cancelled':
+      return ToolCallStatus.Canceled;
+    default:
+      return ToolCallStatus.Pending;
+  }
+}
+
+/** Join the text of ACP content blocks (`[{content:{text}}]`) into a string. */
+function resultTextOf(update: Record<string, unknown>): string | undefined {
+  const content = update['content'];
+  if (Array.isArray(content)) {
+    const text = content
+      .map((b) => {
+        const inner = asRecord(asRecord(b)['content']);
+        return typeof inner['text'] === 'string'
+          ? (inner['text'] as string)
+          : '';
+      })
+      .filter(Boolean)
+      .join('\n');
+    if (text) return text;
+  }
+  return typeof update['rawOutput'] === 'string'
+    ? (update['rawOutput'] as string)
+    : undefined;
+}
+
+/** Upsert a tool-call display from a `tool_call` / `tool_call_update` frame. */
+function upsertTool(
+  tools: IndividualToolCallDisplay[],
+  update: Record<string, unknown>,
+): IndividualToolCallDisplay[] {
+  const callId = String(update['toolCallId'] ?? '');
+  if (!callId) return tools;
+  const meta = asRecord(update['_meta']);
+  const title =
+    typeof update['title'] === 'string'
+      ? (update['title'] as string)
+      : undefined;
+  const name =
+    (typeof meta['toolName'] === 'string' && (meta['toolName'] as string)) ||
+    title ||
+    'tool';
+  const description =
+    title ??
+    (update['rawInput'] !== undefined
+      ? JSON.stringify(update['rawInput'])
+      : name);
+  const result = resultTextOf(update);
+
+  const prev = tools.find((t) => t.callId === callId);
+  const next: IndividualToolCallDisplay = {
+    callId,
+    name,
+    description: prev?.description ?? description,
+    status: mapToolStatus(update['status']),
+    // The reducer never builds the imperative onConfirm closure; the hook fills
+    // confirmationDetails when a permission_request targets this call.
+    confirmationDetails: prev?.confirmationDetails,
+    resultDisplay: result ?? prev?.resultDisplay,
+    renderOutputAsMarkdown: true,
+  };
+  return prev
+    ? tools.map((t) => (t.callId === callId ? next : t))
+    : [...tools, next];
+}
+
+/** Set a tool's status by id (used by the permission gate transitions). */
+function setToolStatus(
+  tools: IndividualToolCallDisplay[],
+  callId: string | undefined,
+  status: ToolCallStatus,
+): IndividualToolCallDisplay[] {
+  if (!callId) return tools;
+  return tools.map((t) => (t.callId === callId ? { ...t, status } : t));
+}
 
 function projectSessionUpdate(
   state: DaemonProjectionState,
@@ -186,11 +300,29 @@ function projectSessionUpdate(
       };
     }
 
+    case 'tool_call':
+    case 'tool_call_update':
+      return {
+        state: {
+          ...state,
+          streamingState: StreamingState.Responding,
+          tools: upsertTool(state.tools, update),
+        },
+        committed: [],
+      };
+
     // `available_commands_update` (and any other update kind) does not affect
     // the streamed turn in this slice.
     default:
       return { state, committed: [] };
   }
+}
+
+/** Extract a `toolCallId` from an opaque ACP `toolCall` object if present. */
+function toolCallIdOf(toolCall: unknown): string | undefined {
+  const tc = asRecord(toolCall);
+  const id = tc['toolCallId'] ?? tc['callId'] ?? tc['id'];
+  return typeof id === 'string' ? id : undefined;
 }
 
 /**
@@ -206,18 +338,80 @@ export function projectDaemonEvent(
     case 'session_update':
       return projectSessionUpdate(state, data, frame.originatorClientId);
 
+    case 'permission_request': {
+      // A tool wants approval. Mark the targeted call Confirming and record the
+      // gate so the hook can render options + post a vote. (Typed-shape based:
+      // this daemon config auto-approves builtin reads, so it's exercised with
+      // synthetic frames; the shape is the SDK's DaemonPermissionRequestData.)
+      const requestId = String(data['requestId'] ?? '');
+      if (!requestId) return { state, committed: [] };
+      const toolCallId = toolCallIdOf(data['toolCall']);
+      const options = Array.isArray(data['options'])
+        ? (data['options'] as PendingPermission['options'])
+        : [];
+      return {
+        state: {
+          ...state,
+          streamingState: StreamingState.WaitingForConfirmation,
+          tools: setToolStatus(
+            state.tools,
+            toolCallId,
+            ToolCallStatus.Confirming,
+          ),
+          pendingPermission: { requestId, toolCallId, options },
+        },
+        committed: [],
+      };
+    }
+
+    case 'permission_resolved':
+    case 'permission_already_resolved': {
+      const requestId = String(data['requestId'] ?? '');
+      if (
+        state.pendingPermission &&
+        requestId &&
+        state.pendingPermission.requestId !== requestId
+      ) {
+        // A different gate resolved — leave ours intact.
+        return { state, committed: [] };
+      }
+      const outcome = asRecord(data['outcome'])['outcome'] ?? data['outcome'];
+      const cancelled = outcome === 'cancelled';
+      const callId = state.pendingPermission?.toolCallId;
+      return {
+        state: {
+          ...state,
+          streamingState: StreamingState.Responding,
+          tools: setToolStatus(
+            state.tools,
+            callId,
+            cancelled ? ToolCallStatus.Canceled : ToolCallStatus.Executing,
+          ),
+          pendingPermission: undefined,
+        },
+        committed: [],
+      };
+    }
+
     case 'turn_complete': {
-      // Commit the assembled assistant message; reasoning stays ephemeral.
-      const committed: HistoryItemWithoutId[] =
-        state.pendingText.trim().length > 0
-          ? [{ type: 'gemini', text: state.pendingText }]
-          : [];
+      // Commit this turn's tool group (if any), then the assembled assistant
+      // message. Reasoning stays ephemeral. (Precise text/tool interleaving is
+      // an integration concern — see the in-process grouping logic.)
+      const committed: HistoryItemWithoutId[] = [];
+      if (state.tools.length > 0) {
+        committed.push({ type: 'tool_group', tools: state.tools });
+      }
+      if (state.pendingText.trim().length > 0) {
+        committed.push({ type: 'gemini', text: state.pendingText });
+      }
       return {
         state: {
           ...state,
           streamingState: StreamingState.Idle,
           pendingText: '',
           pendingThought: '',
+          tools: [],
+          pendingPermission: undefined,
         },
         committed,
       };
@@ -227,6 +421,20 @@ export function projectDaemonEvent(
     default:
       return { state, committed: [] };
   }
+}
+
+/** Live tool-call display for the current turn (the UI's `pendingToolCalls`). */
+export function pendingToolCallsOf(
+  state: DaemonProjectionState,
+): IndividualToolCallDisplay[] {
+  return state.tools;
+}
+
+/** The outstanding approval gate, if any (the hook turns this into a prompt). */
+export function activePermissionOf(
+  state: DaemonProjectionState,
+): PendingPermission | undefined {
+  return state.pendingPermission;
 }
 
 /**

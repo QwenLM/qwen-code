@@ -11,17 +11,29 @@
  * projection can be built against actual shapes/ordering, not guesses.
  *
  *   npx tsx scripts/capture-daemon-frames.mts
+ *   CAPTURE_PROMPT="List the files here using your tools" \
+ *     CAPTURE_OUT=/tmp/daemon-tool-frames.json npx tsx scripts/capture-daemon-frames.mts
  *
- * Writes the full frame log to /tmp/daemon-frames.json and prints a type
- * histogram. Safe: the prompt asks only for a word; if the model calls a tool,
- * we never vote, so nothing executes — we just capture the permission_request.
+ * Writes the full frame log to $CAPTURE_OUT (default /tmp/daemon-frames.json)
+ * and prints a type histogram. SAFE: any `permission_request` is immediately
+ * DECLINED (`outcome: cancelled`), so a tool the model proposes never executes —
+ * we only capture the request shape.
  */
 import { writeFileSync } from 'node:fs';
 import { startDaemon } from '../src/daemonSupervisor.js';
 import { DaemonSessionClient } from '@qwen-code/sdk';
 
-const PORT = 4195;
-const captured: Array<{ type: string; id?: number; data: unknown }> = [];
+const PORT = Number(process.env['CAPTURE_PORT'] ?? 4195);
+const OUT = process.env['CAPTURE_OUT'] ?? '/tmp/daemon-frames.json';
+const PROMPT_TEXT =
+  process.env['CAPTURE_PROMPT'] ??
+  'Reply with exactly the word PONG and nothing else.';
+const captured: Array<{
+  type: string;
+  id?: number;
+  originatorClientId?: string;
+  data: unknown;
+}> = [];
 
 function short(v: unknown, n = 240): string {
   try {
@@ -46,7 +58,13 @@ let lastFrameAt = Date.now();
 let sawAgentFrame = false;
 const consumer = (async () => {
   for await (const ev of sc.events({ signal: ac.signal })) {
-    captured.push({ type: ev.type, id: ev.id, data: ev.data });
+    const oc = (ev as { originatorClientId?: string }).originatorClientId;
+    captured.push({
+      type: ev.type,
+      id: ev.id,
+      originatorClientId: oc,
+      data: ev.data,
+    });
     lastFrameAt = Date.now();
     const kind = (ev.data as { update?: { sessionUpdate?: string } })?.update
       ?.sessionUpdate;
@@ -56,11 +74,22 @@ const consumer = (async () => {
     ) {
       sawAgentFrame = true;
     }
+    // SAFETY: decline any tool the model proposes so nothing ever executes —
+    // we only want to capture the request shape.
+    if (ev.type === 'permission_request') {
+      const reqId = (ev.data as { requestId?: string })?.requestId;
+      console.error(`[capture] DECLINING permission_request ${reqId}`);
+      if (reqId) {
+        await sc
+          .respondToSessionPermission(reqId, { outcome: 'cancelled' })
+          .catch((e) =>
+            console.error('[capture] decline failed:', (e as Error)?.message),
+          );
+      }
+      sawAgentFrame = true; // a tool turn counts as agent activity for idle-exit
+    }
     const upd = ev.type === 'session_update' ? ` sessionUpdate=${kind}` : '';
-    const oc = (ev as { originatorClientId?: string }).originatorClientId;
-    console.error(
-      `[frame] ${ev.type}${upd} oc=${oc ?? '∅'} ${short(ev.data)}`,
-    );
+    console.error(`[frame] ${ev.type}${upd} oc=${oc ?? '∅'} ${short(ev.data)}`);
   }
 })().catch((e) => console.error('[capture] events ended:', e?.message ?? e));
 
@@ -70,9 +99,7 @@ await new Promise((r) => setTimeout(r, 600));
 console.error('[capture] sending prompt…');
 try {
   const res = await sc.prompt({
-    prompt: [
-      { type: 'text', text: 'Reply with exactly the word PONG and nothing else.' },
-    ],
+    prompt: [{ type: 'text', text: PROMPT_TEXT }],
   });
   console.error('[capture] prompt() resolved:', short(res, 300));
 } catch (e) {
@@ -112,6 +139,6 @@ for (const f of captured) {
 }
 console.error('\n=== FRAME TYPE COUNTS ===', JSON.stringify(counts));
 console.error('=== session_update kinds ===', JSON.stringify(updKinds));
-writeFileSync('/tmp/daemon-frames.json', JSON.stringify(captured, null, 2));
-console.error(`=== wrote ${captured.length} frames to /tmp/daemon-frames.json ===`);
+writeFileSync(OUT, JSON.stringify(captured, null, 2));
+console.error(`=== wrote ${captured.length} frames to ${OUT} ===`);
 process.exit(0);

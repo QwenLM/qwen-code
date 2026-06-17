@@ -5,11 +5,17 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { StreamingState, type HistoryItemWithoutId } from '../../types.js';
+import {
+  StreamingState,
+  ToolCallStatus,
+  type HistoryItemWithoutId,
+} from '../../types.js';
 import {
   initialDaemonProjectionState,
   projectDaemonEvent,
   pendingHistoryItemsOf,
+  pendingToolCallsOf,
+  activePermissionOf,
   thoughtOf,
   type DaemonFrame,
   type DaemonProjectionState,
@@ -270,5 +276,171 @@ describe('projectDaemonEvent', () => {
     ];
     const { committed } = runAll(frames);
     expect(committed).toEqual([{ type: 'gemini', text: 'PONG[hook] note' }]);
+  });
+
+  // --- slice 2: tool-call display + permission gate ---
+
+  // Real captured shapes from a `list_directory` tool turn (status strings,
+  // toolCallId, _meta.toolName, title, content/rawOutput) — ground truth.
+  const TOOL_CALL = sessionUpdate({
+    sessionUpdate: 'tool_call',
+    _meta: { toolName: 'list_directory', provenance: 'builtin' },
+    kind: 'search',
+    rawInput: { path: '/work' },
+    status: 'in_progress',
+    title: 'ListFiles: .',
+    toolCallId: 'call_1',
+  });
+  const TOOL_UPDATE = sessionUpdate({
+    sessionUpdate: 'tool_call_update',
+    _meta: { toolName: 'list_directory', provenance: 'builtin' },
+    content: [
+      { content: { text: 'Listed 3 items', type: 'text' }, type: 'content' },
+    ],
+    rawOutput: 'Listed 3 items',
+    status: 'completed',
+    toolCallId: 'call_1',
+  });
+
+  it('projects a captured tool call into a tool_group with mapped status + result', () => {
+    let s = initialDaemonProjectionState(SELF);
+    s = projectDaemonEvent(s, TOOL_CALL).state;
+    // Live during the turn: one Executing tool.
+    expect(pendingToolCallsOf(s)).toEqual([
+      expect.objectContaining({
+        callId: 'call_1',
+        name: 'list_directory',
+        description: 'ListFiles: .',
+        status: ToolCallStatus.Executing,
+      }),
+    ]);
+
+    s = projectDaemonEvent(s, TOOL_UPDATE).state;
+    expect(pendingToolCallsOf(s)[0]).toMatchObject({
+      status: ToolCallStatus.Success,
+      resultDisplay: 'Listed 3 items',
+    });
+
+    // On turn end the tool group commits and live tools clear.
+    const r = projectDaemonEvent(s, { type: 'turn_complete', data: {} });
+    expect(r.committed).toEqual([
+      {
+        type: 'tool_group',
+        tools: [
+          expect.objectContaining({
+            callId: 'call_1',
+            status: ToolCallStatus.Success,
+          }),
+        ],
+      },
+    ]);
+    expect(pendingToolCallsOf(r.state)).toEqual([]);
+    expect(r.state.streamingState).toBe(StreamingState.Idle);
+  });
+
+  it('commits tool_group AND the assistant message together at turn end', () => {
+    const frames: DaemonFrame[] = [
+      TOOL_CALL,
+      TOOL_UPDATE,
+      sessionUpdate(
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'done' },
+        },
+        SELF,
+      ),
+      { type: 'turn_complete', data: {} },
+    ];
+    const { committed } = runAll(frames, SELF);
+    expect(committed).toEqual([
+      {
+        type: 'tool_group',
+        tools: [expect.objectContaining({ callId: 'call_1' })],
+      },
+      { type: 'gemini', text: 'done' },
+    ]);
+  });
+
+  it('opens an approval gate on permission_request (tool → Confirming)', () => {
+    let s = initialDaemonProjectionState(SELF);
+    s = projectDaemonEvent(s, TOOL_CALL).state;
+    s = projectDaemonEvent(s, {
+      type: 'permission_request',
+      data: {
+        requestId: 'req_1',
+        sessionId: 's1',
+        toolCall: { toolCallId: 'call_1' },
+        options: [
+          { optionId: 'proceed_once', name: 'Yes' },
+          { optionId: 'cancel', name: 'No' },
+        ],
+      },
+    }).state;
+    expect(s.streamingState).toBe(StreamingState.WaitingForConfirmation);
+    expect(pendingToolCallsOf(s)[0].status).toBe(ToolCallStatus.Confirming);
+    expect(activePermissionOf(s)).toEqual({
+      requestId: 'req_1',
+      toolCallId: 'call_1',
+      options: [
+        { optionId: 'proceed_once', name: 'Yes' },
+        { optionId: 'cancel', name: 'No' },
+      ],
+    });
+  });
+
+  it('clears the gate on permission_resolved — approved → Executing', () => {
+    let s = initialDaemonProjectionState(SELF);
+    s = projectDaemonEvent(s, TOOL_CALL).state;
+    s = projectDaemonEvent(s, {
+      type: 'permission_request',
+      data: {
+        requestId: 'req_1',
+        toolCall: { toolCallId: 'call_1' },
+        options: [],
+      },
+    }).state;
+    s = projectDaemonEvent(s, {
+      type: 'permission_resolved',
+      data: {
+        requestId: 'req_1',
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      },
+    }).state;
+    expect(activePermissionOf(s)).toBeUndefined();
+    expect(s.streamingState).toBe(StreamingState.Responding);
+    expect(pendingToolCallsOf(s)[0].status).toBe(ToolCallStatus.Executing);
+  });
+
+  it('clears the gate on permission_resolved — cancelled → Canceled', () => {
+    let s = initialDaemonProjectionState(SELF);
+    s = projectDaemonEvent(s, TOOL_CALL).state;
+    s = projectDaemonEvent(s, {
+      type: 'permission_request',
+      data: {
+        requestId: 'req_1',
+        toolCall: { toolCallId: 'call_1' },
+        options: [],
+      },
+    }).state;
+    s = projectDaemonEvent(s, {
+      type: 'permission_resolved',
+      data: { requestId: 'req_1', outcome: { outcome: 'cancelled' } },
+    }).state;
+    expect(activePermissionOf(s)).toBeUndefined();
+    expect(pendingToolCallsOf(s)[0].status).toBe(ToolCallStatus.Canceled);
+  });
+
+  it('leaves our gate intact when a DIFFERENT request resolves', () => {
+    let s = initialDaemonProjectionState(SELF);
+    s = projectDaemonEvent(s, {
+      type: 'permission_request',
+      data: { requestId: 'req_1', toolCall: {}, options: [] },
+    }).state;
+    s = projectDaemonEvent(s, {
+      type: 'permission_resolved',
+      data: { requestId: 'OTHER', outcome: { outcome: 'cancelled' } },
+    }).state;
+    expect(activePermissionOf(s)?.requestId).toBe('req_1');
+    expect(s.streamingState).toBe(StreamingState.WaitingForConfirmation);
   });
 });
