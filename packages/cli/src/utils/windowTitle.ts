@@ -55,12 +55,20 @@ export function writeTerminalTitle(
   title: string,
 ): void {
   const clean = sanitizeWindowTitle(title);
-  const padded = clean.substring(0, 80).padEnd(80, ' ');
   if (process.platform === 'win32') {
     process.title = clean;
   }
-  // Inside tmux/screen, OSC 0 causes padded titles to appear in the
-  // multiplexer window list. Only write OSC 2 in that case.
+  // Empty title → clear the terminal title so it reverts to the shell default.
+  if (clean.length === 0) {
+    const inMultiplexer = !!process.env['TMUX'] || !!process.env['STY'];
+    if (inMultiplexer) {
+      write('\x1b]2;\x07');
+    } else {
+      write('\x1b]0;\x07\x1b]2;\x07');
+    }
+    return;
+  }
+  const padded = clean.substring(0, 80).padEnd(80, ' ');
   const inMultiplexer = !!process.env['TMUX'] || !!process.env['STY'];
   if (inMultiplexer) {
     write(`\x1b]2;${padded}\x07`);

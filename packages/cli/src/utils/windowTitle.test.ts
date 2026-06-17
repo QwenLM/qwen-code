@@ -117,4 +117,21 @@ describe('writeTerminalTitle', () => {
       `\x1b]0;${expected}\x07\x1b]2;${expected}\x07`,
     );
   });
+
+  it('should write empty OSC sequences without padding for empty title', () => {
+    const write = vi.fn();
+
+    writeTerminalTitle(write, '');
+
+    expect(write).toHaveBeenCalledWith('\x1b]0;\x07\x1b]2;\x07');
+  });
+
+  it('should write empty OSC 2 sequence inside tmux for empty title', () => {
+    vi.stubEnv('TMUX', '/tmp/tmux-0/default');
+    const write = vi.fn();
+
+    writeTerminalTitle(write, '');
+
+    expect(write).toHaveBeenCalledWith('\x1b]2;\x07');
+  });
 });
