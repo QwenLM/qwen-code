@@ -5,11 +5,15 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { TodoItem } from '../../adapters/types';
 
-// PlanMessage imports App only for TodoTimelineContext; mock it so the unit
-// test doesn't pull the whole application graph.
+// PlanMessage's expanded list reads TodoTimelineContext and (via TodoFullList)
+// TodoDetailContext from App; mock both so the unit test doesn't pull the whole
+// application graph.
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
-  return { TodoTimelineContext: createContext(new Map()) };
+  return {
+    TodoTimelineContext: createContext(new Map()),
+    TodoDetailContext: createContext(new Map()),
+  };
 });
 
 const { PlanMessage } = await import('./PlanMessage');

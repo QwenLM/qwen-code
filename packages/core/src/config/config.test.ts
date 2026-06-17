@@ -1538,6 +1538,108 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
   });
 
+  it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
+    const config = new Config({
+      ...baseParams,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: 'short project rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(
+      '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+    );
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+  });
+
+  it('refreshHierarchicalMemory should warn when always-loaded context is large for the model window', async () => {
+    const config = new Config({
+      ...baseParams,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+      memoryContent: 'a'.repeat(800),
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("model's 1,000 token context window"),
+    );
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('more than 15%'),
+    );
+  });
+
+  it('getWarnings should include oversized context before initialize refresh runs', () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(800),
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+  });
+
+  it('getWarnings should use the model token limit when no contextWindowSize is configured', () => {
+    const config = new Config({
+      ...baseParams,
+      model: 'unknown-model-for-context-warning-test',
+      userMemory: 'a'.repeat(100_000),
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("model's 131,072 token context window"),
+    );
+  });
+
+  it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
+    const config = new Config({
+      ...baseParams,
+      enableManagedAutoMemory: false,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+      memoryContent: 'short project context',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(
+      config
+        .getWarnings()
+        .some((warning) =>
+          warning.includes('Loaded QWEN.md/context instructions'),
+        ),
+    ).toBe(false);
+  });
+
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = new Config(baseParams);
     const newDir = path.resolve('/path/to/other');
@@ -2860,6 +2962,76 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTruncateToolOutputThreshold()).toBe(
         Number.POSITIVE_INFINITY,
       );
+    });
+  });
+
+  describe('getClearContextOnIdle', () => {
+    it('should default the cumulative tool result threshold to 500000 chars', () => {
+      const config = new Config(baseParams);
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+    });
+
+    it('should use a custom cumulative tool result threshold if provided', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsTotalCharsThreshold: 123_456,
+        },
+      });
+
+      expect(
+        config.getClearContextOnIdle().toolResultsTotalCharsThreshold,
+      ).toBe(123_456);
+    });
+
+    it('should preserve an explicit disabled cumulative tool result threshold', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsTotalCharsThreshold: -1,
+        },
+      });
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: -1,
+      });
+    });
+
+    it('should keep legacy disabled idle cleanup disabled for the size trigger too', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsThresholdMinutes: -1,
+        },
+      });
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: -1,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: -1,
+      });
+    });
+
+    it('should treat any negative legacy idle threshold as disabling the size trigger too', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsThresholdMinutes: -2,
+        },
+      });
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: -2,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: -1,
+      });
     });
   });
 

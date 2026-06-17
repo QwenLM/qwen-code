@@ -1,11 +1,53 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+
+import * as React from 'react';
+import { act, createRef } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { describe, expect, it, afterEach } from 'vitest';
 import {
+  Editor,
+  type EditorHandle,
   createLargePastePlaceholder,
   expandLargePastePlaceholders,
   isLargePaste,
   normalizePastedText,
   prunePendingPastes,
 } from './Editor';
+
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
+
+let root: Root | null = null;
+let container: HTMLDivElement | null = null;
+
+afterEach(() => {
+  if (root) {
+    act(() => root?.unmount());
+    root = null;
+  }
+  container?.remove();
+  container = null;
+});
+
+function renderEditor(onSubmit: (text: string) => void) {
+  const ref = createRef<EditorHandle>();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root?.render(
+      React.createElement(Editor, {
+        ref,
+        onSubmit: (text: string) => onSubmit(text),
+        commands: [],
+        skills: [],
+      }),
+    );
+  });
+  if (!ref.current) throw new Error('Editor ref was not assigned');
+  return ref.current;
+}
 
 describe('Editor large paste helpers', () => {
   it('normalizes pasted newlines before threshold checks', () => {
@@ -69,5 +111,24 @@ describe('Editor large paste helpers', () => {
         'keep [Pasted Content 10 chars] as text',
       ),
     ).toBe('keep [Pasted Content 10 chars] as text');
+  });
+});
+
+describe('Editor composer API', () => {
+  it('includes existing inline tags when submitting override text', () => {
+    let submitted = '';
+    const editor = renderEditor((text) => {
+      submitted = text;
+    });
+
+    act(() => {
+      editor.addTags(
+        [{ id: 'ctx', label: 'context', value: 'from host app' }],
+        { placement: 'inline' },
+      );
+      editor.submit({ text: 'Summarize this.' });
+    });
+
+    expect(submitted).toBe('from host app\n\nSummarize this.');
   });
 });

@@ -134,6 +134,9 @@ export { useDaemonPromptStatus as usePromptStatus } from './daemon/session/index
 /** Server-pushed prompt follow-up suggestions for daemon-backed UIs. */
 export { useDaemonFollowupSuggestion } from './daemon/index.js';
 
+/** Notifies when the daemon drains browser-queued messages into the running turn. */
+export { useDaemonMidTurnInjected } from './daemon/index.js';
+
 // ── Constants ─────────────────────────────────────────────────────
 
 /** Ordered list of approval modes for cycling: `['auto', 'suggest', 'ask']`. */
