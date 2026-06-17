@@ -12,6 +12,18 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.18.3](https://github.com/QwenLM/qwen-code/releases/tag/v0.18.3) - 2026-06-17
+
+### Fixed
+
+- cli: Stop after cancelled ask_user_question ([#5218](https://github.com/QwenLM/qwen-code/pull/5218))
+- cli: render slash suggestion descriptions on a single truncated line ([#5236](https://github.com/QwenLM/qwen-code/pull/5236))
+- core: always declare exit_plan_mode so plan mode can call it (#5210) ([#5251](https://github.com/QwenLM/qwen-code/pull/5251))
+
+### Other
+
+- ci(release): report required Test checks on release PRs and auto-approve ([#5250](https://github.com/QwenLM/qwen-code/pull/5250))
+
 ## [0.18.2](https://github.com/QwenLM/qwen-code/releases/tag/v0.18.2) - 2026-06-17
 
 ### Added
