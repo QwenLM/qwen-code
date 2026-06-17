@@ -334,18 +334,38 @@ describe('WorkflowRunRegistry', () => {
     expect(e.tokenBudgetTotal).toBeNull();
   });
 
-  it('P5: onBudgetUpdated ignores backwards / zero deltas in perPhaseTokens', () => {
+  it('P5: onBudgetUpdated is a no-op on backwards / zero deltas (R1 #8: monotonic spent)', () => {
+    // R1 #8 contract: the orchestrator fires `budgetUpdated` after every
+    // dispatch, but `WorkflowBudgetImpl.recordSpent` only accumulates
+    // positive integer deltas — so `budget.spent()` is monotonically
+    // increasing in production. A backwards / zero call here can only
+    // come from a buggy caller, and we treat it as a defensive no-op
+    // (skip the emit + the field mutation) rather than overwriting the
+    // tracker with a stale value.
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_1'));
     r.onPhaseStarted('wf_1', 'A');
     r.onBudgetUpdated('wf_1', 100, 1000);
-    r.onBudgetUpdated('wf_1', 100, 1000); // same total → delta 0, skipped
-    r.onBudgetUpdated('wf_1', 50, 1000); // backwards — defensive skip
+    r.onBudgetUpdated('wf_1', 100, 1000); // same total → delta 0 → no-op
+    r.onBudgetUpdated('wf_1', 50, 1000); // backwards → no-op
     const e = r.get('wf_1')!;
-    // tokensSpent IS overwritten (cumulative tracker mirrors host),
-    // but per-phase attribution only takes positive deltas.
-    expect(e.tokensSpent).toBe(50);
+    expect(e.tokensSpent).toBe(100);
     expect(e.perPhaseTokens.get('A')).toBe(100);
+  });
+
+  it('P5 R1 #8: onBudgetUpdated does NOT emit statusChange on no-op deltas', () => {
+    const r = new WorkflowRunRegistry();
+    const cb = vi.fn();
+    r.setStatusChangeCallback(cb);
+    r.register(reg('wf_1'));
+    r.onBudgetUpdated('wf_1', 100, 1000); // first delta → emits
+    cb.mockClear();
+    r.onBudgetUpdated('wf_1', 100, 1000); // delta = 0, total unchanged → skip
+    r.onBudgetUpdated('wf_1', 100, 1000); // same again → still skip
+    expect(cb).not.toHaveBeenCalled();
+    // But a cap change (rare; defensive) still emits even at no spend delta.
+    r.onBudgetUpdated('wf_1', 100, 2000);
+    expect(cb).toHaveBeenCalledTimes(1);
   });
 
   it('P5: onBudgetUpdated fires the statusChange callback', () => {

@@ -26,7 +26,7 @@ import type { Config } from '../../config/config.js';
 // FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
-const { created, nextTerminateMode } = vi.hoisted(() => ({
+const { created, nextTerminateMode, nextOutputTokens } = vi.hoisted(() => ({
   created: [] as Array<{
     name: string;
     prompt: string;
@@ -39,6 +39,11 @@ const { created, nextTerminateMode } = vi.hoisted(() => ({
   // throws on non-GOAL. Tests set `nextTerminateMode.value` to simulate
   // CANCELLED / MAX_TURNS / TIMEOUT outcomes.
   nextTerminateMode: { value: 'GOAL' as string },
+  // R1 (#1 + #3): the production dispatch reads
+  // `subagent.getExecutionSummary().outputTokens` to feed budget. Tests
+  // set `nextOutputTokens.value` so the onTokens callback can be
+  // observed without standing up real telemetry.
+  nextOutputTokens: { value: 0 as number },
 }));
 
 // P3 R2 self-review (P3-T6 gap, batch): tests below for
@@ -132,6 +137,10 @@ vi.mock('./agent-headless.js', () => ({
       getFinalText: () =>
         `headless-said:${created[created.length - 1]!.prompt}`,
       getTerminateMode: () => nextTerminateMode.value,
+      // R1 (#1 + #3): expose `getExecutionSummary` so the production
+      // dispatch's `reportTokens` helper can read `outputTokens` after
+      // every `subagent.execute()` call, regardless of terminate mode.
+      getExecutionSummary: () => ({ outputTokens: nextOutputTokens.value }),
     }),
   },
   ContextState: class ContextState {
@@ -490,6 +499,55 @@ describe('WorkflowOrchestrator', () => {
     expect(dispatchCalls).toBe(2);
   });
 
+  it('P5 R1 #2: parallel-batch overshoot is bounded by the intra-limiter re-check', async () => {
+    // R1 Critical #2 — without the intra-limiter gate, a parallel() of N
+    // thunks queues them all in one microtask burst with spent=0, so the
+    // entry gate passes for every queued dispatch and the budget
+    // overshoots by up to `(N-1) × per_dispatch_tokens`.
+    //
+    // With the intra-limiter re-check, the gate observes budget mutations
+    // from already-completed in-flight dispatches at slot-acquire time, so
+    // queued thunks that arrive AFTER the budget is busted are refused
+    // (the parallel() batch collapses them to `null`).
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      budget.recordSpent(40); // 3 successful dispatches saturate the cap
+      return 'ok';
+    });
+    // 10 thunks — far more than the budget (100 / 40 ≈ 3 successful).
+    // The intra-limiter gate must reject the rest BEFORE this.dispatch
+    // runs, so `dispatchCalls` should be 3 (or 4 — see below), NOT 10.
+    const outcome = await orchestrator.run({
+      script: `const results = await parallel(Array.from({length: 10}, () => () => agent('q'))); return results;`,
+      args: undefined,
+      budget,
+    });
+    // parallel() treats budget rejections as errors-as-data → null per slot.
+    expect(Array.isArray(outcome.result)).toBe(true);
+    const results = outcome.result as unknown[];
+    expect(results).toHaveLength(10);
+    const successes = results.filter((r) => r === 'ok').length;
+    const nulls = results.filter((r) => r === null).length;
+    expect(successes + nulls).toBe(10);
+    // Bounded overshoot: at most `concurrency_window` dispatches can be
+    // already inside `limiter.run` when the budget tips over, so the
+    // upper bound on successful dispatches is
+    // `ceil(cap / per_dispatch) + concurrency_window`. The concurrency
+    // window on test machines is `min(16, cpus-2)` ≥ 1. With cap=100,
+    // per=40, the soft cap is reached at 3 dispatches (spent=120). We
+    // ASSERT it doesn't reach 10 (the without-fix overshoot value).
+    expect(dispatchCalls).toBeLessThan(10);
+    expect(successes).toBeLessThan(10);
+  });
+
+  // R1 #4 fix landed in production code (debugLogger.warn at both gate
+  // sites); no dedicated test — debugLogger has its own enable/disable
+  // gating and a spy here would be brittle. Manual verification path:
+  // run with DEBUG=WORKFLOW=1 and trigger a budget-exhausted dispatch.
+
   // ── P5 T4: budgetUpdated emitter event ─────────────────────────────────
 
   it('P5 T4: budgetUpdated fires after each successful completion with cumulative spent + total', async () => {
@@ -674,6 +732,55 @@ describe('createProductionDispatch', () => {
       );
     },
   );
+
+  // ── R1 (#1 + #3): token reporting across all terminate modes ──────────
+
+  beforeEach(() => {
+    nextOutputTokens.value = 0;
+  });
+
+  it('R1 #3: records tokens on GOAL success', async () => {
+    nextTerminateMode.value = 'GOAL';
+    nextOutputTokens.value = 1234;
+    const reports: Array<{ tokens: number; label?: string }> = [];
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      (tokens, opts) => reports.push({ tokens, label: opts.label }),
+    );
+    await dispatch('q1', { label: 'a' });
+    expect(reports).toEqual([{ tokens: 1234, label: 'a' }]);
+  });
+
+  it.each(['CANCELLED', 'MAX_TURNS', 'TIMEOUT', 'ERROR'])(
+    'R1 #3: records tokens on %s failure path (still throws)',
+    async (mode) => {
+      nextTerminateMode.value = mode;
+      nextOutputTokens.value = 777;
+      const reports: number[] = [];
+      const dispatch = createProductionDispatch(
+        fakeConfig(),
+        undefined,
+        (tokens) => reports.push(tokens),
+      );
+      await expect(dispatch('q1', { label: 'doomed' })).rejects.toThrow(
+        new RegExp(`terminate mode: ${mode}`),
+      );
+      // R1 contract: tokens recorded BEFORE the throw, not after.
+      // Otherwise CANCELLED/TIMEOUT/MAX_TURNS/ERROR dispatches would
+      // burn tokens without affecting the budget.
+      expect(reports).toEqual([777]);
+    },
+  );
+
+  it('R1 #1 + #3: onTokens is undefined ⇒ no crash', async () => {
+    nextTerminateMode.value = 'GOAL';
+    nextOutputTokens.value = 99;
+    const dispatch = createProductionDispatch(fakeConfig());
+    await expect(dispatch('q1', { label: 'x' })).resolves.toBe(
+      'headless-said:q1',
+    );
+  });
 });
 
 describe('WorkflowOrchestrator failure-context preservation', () => {
@@ -1258,6 +1365,16 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
               },
               getFinalText: () => finalText,
               getTerminateMode: () => terminateMode,
+              // R1 (#1): expose `getExecutionSummary` on the override-
+              // path subagent stub. Production dispatch reads it in
+              // `reportTokens` regardless of terminate mode, so the
+              // schema-mode early return (Critical #1) and the
+              // schema-mode failure paths (Critical #3) both need
+              // this surface. Defaults to 0; tests that observe
+              // budget-recording set `nextOutputTokens.value` first.
+              getExecutionSummary: () => ({
+                outputTokens: nextOutputTokens.value,
+              }),
             },
             dispose: async () => {
               disposed += 1;
@@ -1396,6 +1513,52 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
     });
     expect(result).toEqual({ ok: true, value: 42 });
+  });
+
+  it('R1 #1: schema-mode SUCCESS records tokens via onTokens (was missing before fix)', async () => {
+    nextOutputTokens.value = 555;
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED', // schema mode's success path triggers abort
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true, value: 42 },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+    const reports: number[] = [];
+    const dispatch = createProductionDispatch(
+      config,
+      undefined,
+      (tokens) => reports.push(tokens),
+    );
+    const result = await dispatch('extract', {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+    expect(result).toEqual({ ok: true, value: 42 });
+    // R1 #1 contract: tokens recorded BEFORE the schema/non-schema
+    // branching, so the schema success path now reports.
+    expect(reports).toEqual([555]);
   });
 
   it('schema-mode: 3 failed structured_output calls → upstream-aligned terminal error', async () => {

@@ -923,11 +923,13 @@ const WorkflowDetailBody: React.FC<{
   // P5: surface the per-run token usage when there's anything to report
   // (cap set OR tokens spent). Skipped when both are absent so legacy
   // / test runs don't show a noisy `0 tokens` chip.
+  // P5 R1 (#7): apply `formatTokenCount` for consistency with
+  // `statusLinePresets` and other token-bearing UI surfaces.
   if (entry.tokensSpent > 0 || entry.tokenBudgetTotal !== null) {
     dimSubtitleParts.push(
       entry.tokenBudgetTotal !== null
-        ? `${entry.tokensSpent}/${entry.tokenBudgetTotal} ${t('tokens')}`
-        : `${entry.tokensSpent} ${t('tokens')}`,
+        ? `${formatTokenCount(entry.tokensSpent)}/${formatTokenCount(entry.tokenBudgetTotal)} ${t('tokens')}`
+        : `${formatTokenCount(entry.tokensSpent)} ${t('tokens')}`,
     );
   }
 
@@ -1003,8 +1005,10 @@ const WorkflowDetailBody: React.FC<{
             // Skipped when no tokens attributed yet so empty phases
             // (early register, schema-mode-pending) don't render a
             // misleading `· 0` chip.
+            // P5 R1 (#7): apply `formatTokenCount` for consistency.
             const phaseTokens = entry.perPhaseTokens.get(phaseTitle) ?? 0;
-            const tokenChip = phaseTokens > 0 ? ` · ${phaseTokens}t` : '';
+            const tokenChip =
+              phaseTokens > 0 ? ` · ${formatTokenCount(phaseTokens)}t` : '';
             return (
               <Box key={`${phaseTitle}-${i}`}>
                 <Text color={isCurrent ? theme.status.success : undefined}>
@@ -1013,6 +1017,19 @@ const WorkflowDetailBody: React.FC<{
               </Box>
             );
           })}
+          {/* P5 R1 (#6): surface null-sentinel attribution — tokens
+              spent BEFORE the first `phase()` call accumulate under the
+              `null` key. Without this row the entire pre-phase spend is
+              hidden in the UI. */}
+          {(entry.perPhaseTokens.get(null) ?? 0) > 0 && (
+            <Box>
+              <Text dimColor>
+                {`  · ${t('(no phase)')} · ${formatTokenCount(
+                  entry.perPhaseTokens.get(null) ?? 0,
+                )}t`}
+              </Text>
+            </Box>
+          )}
         </Fragment>
       )}
 

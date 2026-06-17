@@ -263,9 +263,11 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         result: outcome.result,
         // P5: surface the per-run token total in the terminal display so
         // the user sees actual usage even without opening the dialog.
-        // Omitted when the run spent nothing (test dispatch / zero-token
-        // path) to keep the JSON minimal.
-        ...(budget.spent() > 0
+        // P5 R1 (#11): align with `buildLivePhaseTreeDisplay` — include
+        // tokens whenever ANY usage is reported OR a cap is set, not
+        // only when spend > 0. A capped-but-zero-spend run still wants
+        // the cap visible so the user sees the gate engaged.
+        ...(budget.spent() > 0 || budget.total !== null
           ? {
               tokens: {
                 spent: budget.spent(),
@@ -383,12 +385,16 @@ function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
 }
 
 /**
- * P5 T7: one-time usage-banner gate. Two filters: settings-level
- * suppression (`skipWorkflowUsageWarning`) AND the per-session registry
- * latch (`shouldShowUsageWarning`). Returns the banner string when both
- * gates pass, empty string otherwise. Called from BOTH the success and
- * failure paths so a workflow that crashes still teaches the user about
- * the env knob — the banner is informational, not tied to outcome.
+ * P5 T7: one-time usage-banner gate. Three filters: settings-level
+ * suppression (`skipWorkflowUsageWarning`), the per-session registry
+ * latch (`shouldShowUsageWarning`), and the presence of a registry.
+ * Returns the banner string when all three pass, empty string otherwise.
+ *
+ * Called from the SUCCESS path only — see the failure-path comment in
+ * `execute()` for why: `coreToolScheduler.createErrorResponse` hard-codes
+ * `resultDisplay = error.message` whenever `result.error` is set, so a
+ * failure-path banner would be invisible to TUI users AND would silently
+ * flip the registry latch, robbing the next successful run of its banner.
  *
  * The banner is prepended to `returnDisplay` only — `llmContent` stays
  * clean so the banner doesn't bias model behavior in agentic loops that

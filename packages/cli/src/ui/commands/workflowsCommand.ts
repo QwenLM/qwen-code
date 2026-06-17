@@ -8,7 +8,7 @@ import type { WorkflowTask } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { formatDuration } from '../utils/formatters.js';
+import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 
 /**
  * Format one workflow run as a one-line summary used by both the
@@ -33,11 +33,14 @@ function rowLine(entry: WorkflowTask, now: number): string {
   // Skipped on the listing row when nothing is spent AND no cap; the
   // detail view (`detailLines`) always renders both fields so an
   // operator inspecting one run sees the cap state regardless.
+  // P5 R1 (#7): use `formatTokenCount` so large counts render as
+  // `1.2k / 50k` instead of raw integers, matching the formatting used
+  // by `statusLinePresets` and other token-bearing UI surfaces.
   const budgetChip =
     entry.tokensSpent > 0 || entry.tokenBudgetTotal !== null
       ? entry.tokenBudgetTotal !== null
-        ? ` · ${entry.tokensSpent}/${entry.tokenBudgetTotal}t`
-        : ` · ${entry.tokensSpent}t`
+        ? ` · ${formatTokenCount(entry.tokensSpent)}/${formatTokenCount(entry.tokenBudgetTotal)}t`
+        : ` · ${formatTokenCount(entry.tokensSpent)}t`
       : '';
   const errorTail =
     entry.status === 'failed' && entry.error
@@ -74,9 +77,10 @@ function detailLines(entry: WorkflowTask, now: number): string[] {
   // P5: surface budget + token usage. `tokens` shows actual usage even
   // when no cap is set (operators care about uncapped runs too); `cap`
   // is the env override or `(no cap)` when null.
-  lines.push(`  tokens      : ${entry.tokensSpent}`);
+  // P5 R1 (#7): apply `formatTokenCount` for consistency with `statusLinePresets`.
+  lines.push(`  tokens      : ${formatTokenCount(entry.tokensSpent)}`);
   lines.push(
-    `  cap         : ${entry.tokenBudgetTotal !== null ? entry.tokenBudgetTotal : '(no cap)'}`,
+    `  cap         : ${entry.tokenBudgetTotal !== null ? formatTokenCount(entry.tokenBudgetTotal) : '(no cap)'}`,
   );
   if (entry.error) {
     lines.push(`  error       : ${entry.error}`);
@@ -86,8 +90,16 @@ function detailLines(entry: WorkflowTask, now: number): string[] {
     lines.push(`  Phases (${entry.phases.length})`);
     for (const phase of entry.phases) {
       const phaseTokens = entry.perPhaseTokens.get(phase) ?? 0;
-      const chip = phaseTokens > 0 ? ` · ${phaseTokens}t` : '';
+      const chip =
+        phaseTokens > 0 ? ` · ${formatTokenCount(phaseTokens)}t` : '';
       lines.push(`    · ${phase}${chip}`);
+    }
+    // P5 R1 (#6): surface null-sentinel attribution — tokens spent BEFORE
+    // the first `phase()` call accumulate under the `null` key. Without
+    // this branch the entire pre-phase spend was invisible in the dump.
+    const prePhaseTokens = entry.perPhaseTokens.get(null) ?? 0;
+    if (prePhaseTokens > 0) {
+      lines.push(`    · (no phase) · ${formatTokenCount(prePhaseTokens)}t`);
     }
   }
   if (entry.recentLogs.length > 0) {

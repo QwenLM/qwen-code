@@ -351,6 +351,12 @@ export function createProductionDispatch(
         { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
       );
       await subagent.execute(ctx, signal);
+      // P5 R1 (Critical #3): report tokens BEFORE the terminate-mode check.
+      // CANCELLED / TIMEOUT / MAX_TURNS / ERROR runs already burned tokens
+      // before failing; the original "only on GOAL" gate undercounted the
+      // budget by every failed dispatch's spend. Stats are valid as soon
+      // as `subagent.execute()` returns, regardless of mode.
+      reportTokens(subagent, opts, onTokens);
       // T10 (PR #4732 R1): runReasoningLoop does NOT throw on abort / turn /
       // time limit — it returns with terminateMode = CANCELLED|MAX_TURNS|
       // TIMEOUT|ERROR and getFinalText() = '' or partial. Without this check,
@@ -362,24 +368,38 @@ export function createProductionDispatch(
           `Workflow subagent did not complete (terminate mode: ${mode}).`,
         );
       }
-      // P5: report token usage out-of-band before returning. Reading
-      // stats AFTER GOAL ensures we count only the completed dispatch's
-      // tokens (CANCELLED/TIMEOUT/MAX_TURNS already threw above). The
-      // `try/catch` is defensive — a stats-read failure must not
-      // poison the dispatch result, only skip the budget update.
-      if (onTokens) {
-        try {
-          const summary = subagent.getExecutionSummary();
-          onTokens(summary.outputTokens, opts);
-        } catch (e) {
-          debugLogger.warn('onTokens callback threw:', e);
-        }
-      }
       return subagent.getFinalText();
     }
 
     return runOverridePath(config, ctx, opts, signal, onTokens);
   };
+}
+
+/**
+ * P5 R1 (Critical #1 + #3): single token-reporting site used by both the
+ * fast-path and override-path dispatch branches. Reads
+ * `subagent.getExecutionSummary().outputTokens` and forwards to the
+ * caller-supplied `onTokens` callback (no-op when `onTokens` is undefined).
+ * Defensive try/catch — a stats-read failure must NOT poison the dispatch
+ * result, only skip the budget update.
+ *
+ * Idempotency: callers must invoke this exactly once per `subagent.execute`
+ * call regardless of terminate mode. The same stats are valid for GOAL /
+ * CANCELLED / TIMEOUT / MAX_TURNS / ERROR — the field reflects whatever
+ * tokens the model actually emitted before the loop terminated.
+ */
+function reportTokens(
+  subagent: { getExecutionSummary(): { outputTokens: number } },
+  opts: WorkflowAgentOpts,
+  onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+): void {
+  if (!onTokens) return;
+  try {
+    const summary = subagent.getExecutionSummary();
+    onTokens(summary.outputTokens, opts);
+  } catch (e) {
+    debugLogger.warn('onTokens callback threw:', e);
+  }
 }
 
 /**
@@ -614,6 +634,14 @@ async function runOverridePath(
 
     try {
       await subagent.execute(ctx, dispatchSignal);
+      // P5 R1 (Critical #1 + #3): report tokens for EVERY execute outcome
+      // before branching on schema-mode / terminate-mode. Schema-mode
+      // success used to return early without ever recording its tokens
+      // (Critical #1); CANCELLED / TIMEOUT / MAX_TURNS / ERROR runs used
+      // to throw without ever recording theirs (Critical #3). One call
+      // here covers all five terminate modes × both schema and non-
+      // schema branches.
+      reportTokens(subagent, opts, onTokens);
 
       if (schemaState) {
         if (schemaState.result !== null) {
@@ -688,17 +716,9 @@ async function runOverridePath(
         );
       }
       let finalText: WorkflowAgentResult = subagent.getFinalText();
-      // P5: report token usage out-of-band before the worktree cleanup.
-      // Same defensive try/catch as the fast path so a stats-read
-      // failure does not poison the dispatch result.
-      if (onTokens) {
-        try {
-          const summary = subagent.getExecutionSummary();
-          onTokens(summary.outputTokens, opts);
-        } catch (e) {
-          debugLogger.warn('onTokens callback threw:', e);
-        }
-      }
+      // P5 R1: token reporting moved up to the single site after
+      // `subagent.execute()` returns — see the `reportTokens(...)` call
+      // above the schema/non-schema branching.
       // Cleanup worktree on the success path while we still have the
       // isolation handle. The preserved suffix (if any) is appended to
       // the final text so the script can see it. The outer finally below
@@ -1177,14 +1197,27 @@ export class WorkflowOrchestrator {
           ),
         );
       }
-      // P5: budget gate. When a per-run token cap is set
-      // (QWEN_CODE_MAX_TOKENS_PER_WORKFLOW), refuse to dispatch once the
-      // cap is reached. Token recording happens inside the production
-      // dispatch (createProductionDispatch reads subagent stats and
-      // reports back via the onTokens callback the WorkflowTool wires).
-      // No-op when `budget.total === null` (no cap), because
-      // `budget.remaining()` returns `Infinity` — the check never fires.
+      // P5: budget gate (entry check). When a per-run token cap is set
+      // (QWEN_CODE_MAX_TOKENS_PER_WORKFLOW), fail-fast at fire time if the
+      // cap is already busted. Token recording happens inside the production
+      // dispatch (createProductionDispatch reads subagent stats and reports
+      // back via the onTokens callback the WorkflowTool wires). No-op when
+      // `budget.total === null` (no cap), because `budget.remaining()`
+      // returns `Infinity` — the check never fires.
+      //
+      // P5 R1 (Critical #2): a SECOND gate fires inside `limiter.run` below.
+      // Without it, a `parallel([N thunks])` queues all N gate checks
+      // synchronously (spent=0 at check time) → every queued dispatch
+      // passes the entry gate → budget overshoots by up to
+      // `(N-1) × per_dispatch_tokens`, not the documented
+      // `(concurrency_window-1) × per_dispatch_tokens`. The intra-limiter
+      // re-check observes budget mutations from already-completed in-flight
+      // dispatches, restoring the documented overshoot bound.
       if (budget && budget.total !== null && budget.remaining() <= 0) {
+        debugLogger.warn(
+          `[Workflow] budget gate refused dispatch at entry: ` +
+            `runId=${runId} spent=${budget.spent()} total=${budget.total}`,
+        );
         return Promise.reject(
           new WorkflowBudgetExceededError(runId, budget.total, budget.spent()),
         );
@@ -1201,7 +1234,28 @@ export class WorkflowOrchestrator {
         debugLogger.warn('emitter.agentDispatched threw:', e);
       }
       return limiter
-        .run(() => this.dispatch(prompt, opts))
+        .run(() => {
+          // P5 R1 (Critical #2): re-check the gate at slot-acquire time so
+          // queued thunks see budget updates from already-completed in-
+          // flight dispatches. Without this, the entry gate above is
+          // bypassed by `parallel()` (all N thunks fire-check-queue in one
+          // microtask burst with spent=0). The throw here propagates through
+          // the same `.then(error)` arm as a dispatch-level rejection, so
+          // `agentCompleted` still fires with the error and the
+          // `parallel()` batch records this slot as `null`.
+          if (budget && budget.total !== null && budget.remaining() <= 0) {
+            debugLogger.warn(
+              `[Workflow] budget gate refused dispatch at slot-acquire: ` +
+                `runId=${runId} spent=${budget.spent()} total=${budget.total}`,
+            );
+            throw new WorkflowBudgetExceededError(
+              runId,
+              budget.total,
+              budget.spent(),
+            );
+          }
+          return this.dispatch(prompt, opts);
+        })
         .then(
           (result) => {
             try {

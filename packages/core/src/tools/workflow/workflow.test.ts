@@ -656,4 +656,28 @@ describe('WorkflowTool', () => {
     expect(registry.list()[0]!.status).toBe('failed');
     expect(registry.list()[1]!.status).toBe('completed');
   });
+
+  it('P5 R1 #10: capped banner shape (`total !== null`) — was untested', async () => {
+    const { config } = configWithRegistry();
+    const originalEnv = process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'];
+    process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'] = '50000';
+    try {
+      const tool = new WorkflowTool(config, { dispatch: async () => 'ok' });
+      const result = await tool
+        .build({ script: 'return 1' })
+        .execute(new AbortController().signal);
+      const display = result.returnDisplay as string;
+      // Capped banner has "Workflow token cap is <total>" copy.
+      expect(display).toMatch(/Workflow token cap is 50000/);
+      expect(display).toMatch(/skipWorkflowUsageWarning/);
+      // Capped banner must NOT carry the uncapped "have no per-run" copy.
+      expect(display).not.toMatch(/Workflows have no per-run token cap/);
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'];
+      } else {
+        process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'] = originalEnv;
+      }
+    }
+  });
 });

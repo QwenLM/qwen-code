@@ -281,6 +281,14 @@ export class WorkflowRunRegistry {
     const entry = this.entries.get(runId);
     if (!entry || entry.status !== 'running') return;
     const delta = spent - entry.tokensSpent;
+    const totalChanged = entry.tokenBudgetTotal !== total;
+    // P5 R1 (#8): skip the statusChange emit when nothing observable
+    // changed. The orchestrator fires `budgetUpdated` after EVERY
+    // successful dispatch — including dispatches whose subagent
+    // reported `outputTokens === 0` (early failures, fast no-op
+    // responses). Those produce a no-delta call here; firing the
+    // UI re-render anyway burns frames for no visible effect.
+    if (delta <= 0 && !totalChanged) return;
     if (delta > 0) {
       const key = entry.currentPhase;
       const prior = entry.perPhaseTokens.get(key) ?? 0;
