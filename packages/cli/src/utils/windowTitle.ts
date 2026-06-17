@@ -6,6 +6,8 @@
 
 export const DEFAULT_WINDOW_TITLE = 'qwen';
 
+const MULTIPLEXER_ENV_KEYS = ['TMUX', 'STY', 'ZELLIJ', 'DVTM'] as const;
+
 /**
  * Strip control characters that could break out of a terminal title payload.
  * Removes C0 controls (0x00-0x1F), DEL (0x7F), and C1 controls (0x80-0x9F)
@@ -60,7 +62,7 @@ export function writeTerminalTitle(
   }
   // Empty title → clear the terminal title so it reverts to the shell default.
   if (clean.length === 0) {
-    const inMultiplexer = !!process.env['TMUX'] || !!process.env['STY'];
+    const inMultiplexer = MULTIPLEXER_ENV_KEYS.some((k) => !!process.env[k]);
     if (inMultiplexer) {
       write('\x1b]2;\x07');
     } else {
@@ -69,7 +71,7 @@ export function writeTerminalTitle(
     return;
   }
   const padded = clean.substring(0, 80).padEnd(80, ' ');
-  const inMultiplexer = !!process.env['TMUX'] || !!process.env['STY'];
+  const inMultiplexer = MULTIPLEXER_ENV_KEYS.some((k) => !!process.env[k]);
   if (inMultiplexer) {
     write(`\x1b]2;${padded}\x07`);
   } else {

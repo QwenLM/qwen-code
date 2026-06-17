@@ -1210,7 +1210,12 @@ function setWindowTitle(settings: LoadedSettings, folderName?: string) {
     writeTerminalTitle((value) => process.stdout.write(value), windowTitle);
 
     process.on('exit', () => {
-      writeTerminalTitle((value) => process.stdout.write(value), '');
+      try {
+        writeTerminalTitle((value) => process.stdout.write(value), '');
+      } catch {
+        // Best-effort: clearing the title during exit must not produce
+        // a visible error (e.g. EPIPE if stdout is already closed).
+      }
     });
   }
 }
