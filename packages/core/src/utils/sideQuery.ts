@@ -13,6 +13,7 @@ import type {
 } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import type { AuthType } from '../core/contentGenerator.js';
 import { SchemaValidator } from './schemaValidator.js';
 
 export interface SideQueryJsonOptions<TResponse> {
@@ -28,6 +29,10 @@ export interface SideQueryJsonOptions<TResponse> {
    * summarization in web-fetch).
    */
   model?: string;
+  /** Optional provider hint for ambiguous model ids. */
+  modelAuthType?: AuthType;
+  /** Optional endpoint hint for ambiguous model ids within one auth type. */
+  modelBaseUrl?: string;
   systemInstruction?: string | Part | Part[] | Content;
   promptId?: string;
   purpose?: string;
@@ -71,6 +76,10 @@ export interface SideQueryTextOptions {
    * summarization in web-fetch).
    */
   model?: string;
+  /** Optional provider hint for ambiguous model ids. */
+  modelAuthType?: AuthType;
+  /** Optional endpoint hint for ambiguous model ids within one auth type. */
+  modelBaseUrl?: string;
   systemInstruction?: string | Part | Part[] | Content;
   promptId?: string;
   purpose?: string;
@@ -203,6 +212,8 @@ export async function runSideQuery<TResponse>(
       schema: options.schema,
       abortSignal: options.abortSignal,
       model,
+      modelAuthType: options.modelAuthType,
+      modelBaseUrl: options.modelBaseUrl,
       systemInstruction,
       promptId,
       config: requestConfig,
@@ -227,6 +238,8 @@ export async function runSideQuery<TResponse>(
   const result = await config.getBaseLlmClient().generateText({
     contents: options.contents,
     model,
+    modelAuthType: options.modelAuthType,
+    modelBaseUrl: options.modelBaseUrl,
     systemInstruction,
     abortSignal: options.abortSignal,
     promptId,

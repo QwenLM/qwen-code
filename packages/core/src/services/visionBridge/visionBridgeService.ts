@@ -6,7 +6,7 @@
 
 import type { Content, PartListUnion } from '@google/genai';
 import type { Config } from '../../config/config.js';
-import type { InputModalities } from '../../core/contentGenerator.js';
+import type { AuthType, InputModalities } from '../../core/contentGenerator.js';
 import { defaultModalities } from '../../core/modalityDefaults.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runSideQuery } from '../../utils/sideQuery.js';
@@ -26,6 +26,69 @@ export interface VisionModelCandidate {
   modalities?: InputModalities;
 }
 
+/** Exact model/provider selected for a vision bridge call. */
+export interface VisionBridgeModelSelection {
+  id: string;
+  authType?: string;
+  baseUrl?: string;
+}
+
+export interface VisionBridgeProviderHint {
+  authType?: string;
+  baseUrl?: string;
+}
+
+function toSelection(model: VisionModelCandidate): VisionBridgeModelSelection {
+  return {
+    id: model.id,
+    ...(model.authType && { authType: model.authType }),
+    ...(model.baseUrl && { baseUrl: model.baseUrl }),
+  };
+}
+
+function isSameProvider(
+  model: VisionModelCandidate,
+  provider: VisionBridgeProviderHint,
+): boolean {
+  if (provider.baseUrl && model.baseUrl !== provider.baseUrl) return false;
+  if (provider.authType && model.authType !== provider.authType) return false;
+  return true;
+}
+
+function isPrimaryModel(
+  model: VisionModelCandidate,
+  primaryModelId: string | undefined,
+  primaryProvider: VisionBridgeProviderHint,
+): boolean {
+  if (!primaryModelId || model.id !== primaryModelId) return false;
+  if (!primaryProvider.authType && !primaryProvider.baseUrl) return true;
+  return isSameProvider(model, primaryProvider);
+}
+
+function findPrimaryModel(
+  primaryModelId: string | undefined,
+  models: VisionModelCandidate[],
+  primaryProvider: VisionBridgeProviderHint,
+): VisionModelCandidate | undefined {
+  if (!primaryModelId) return undefined;
+  const idMatches = models.filter((m) => m.id === primaryModelId);
+  if (idMatches.length === 0) return undefined;
+
+  if (primaryProvider.baseUrl) {
+    const sameEndpoint = idMatches.find((m) =>
+      isSameProvider(m, primaryProvider),
+    );
+    if (sameEndpoint) return sameEndpoint;
+  }
+  if (primaryProvider.authType) {
+    const sameAuth = idMatches.find(
+      (m) => m.authType === primaryProvider.authType,
+    );
+    if (sameAuth) return sameAuth;
+  }
+  return idMatches[0];
+}
+
 /**
  * Pick an image-capable model to use as the vision bridge from the registered
  * models, preferring one on the SAME provider as the primary model so the
@@ -39,30 +102,36 @@ export interface VisionModelCandidate {
  *
  * @param primaryModelId The current primary model id, or undefined.
  * @param models The registered/available models to choose from.
- * @returns A chosen image-capable model id, or undefined when none qualifies.
+ * @param primaryProvider The current primary model's provider identity.
+ * @returns The chosen image-capable model selection, or undefined when none
+ * qualifies.
  */
 export function selectVisionBridgeModel(
   primaryModelId: string | undefined,
   models: VisionModelCandidate[],
-): string | undefined {
+  primaryProvider: VisionBridgeProviderHint = {},
+): VisionBridgeModelSelection | undefined {
   const isImageCapable = (m: VisionModelCandidate): boolean =>
     (m.modalities ?? defaultModalities(m.id)).image === true;
 
   const candidates = models.filter(
-    (m) => m.id !== primaryModelId && isImageCapable(m),
+    (m) =>
+      !isPrimaryModel(m, primaryModelId, primaryProvider) && isImageCapable(m),
   );
   if (candidates.length === 0) return undefined;
 
-  const primary = models.find((m) => m.id === primaryModelId);
-  if (primary?.baseUrl) {
-    const sameEndpoint = candidates.find((m) => m.baseUrl === primary.baseUrl);
-    if (sameEndpoint) return sameEndpoint.id;
+  const primary = findPrimaryModel(primaryModelId, models, primaryProvider);
+  const primaryBaseUrl = primaryProvider.baseUrl ?? primary?.baseUrl;
+  const primaryAuthType = primaryProvider.authType ?? primary?.authType;
+  if (primaryBaseUrl) {
+    const sameEndpoint = candidates.find((m) => m.baseUrl === primaryBaseUrl);
+    if (sameEndpoint) return toSelection(sameEndpoint);
   }
-  if (primary?.authType) {
-    const sameAuth = candidates.find((m) => m.authType === primary.authType);
-    if (sameAuth) return sameAuth.id;
+  if (primaryAuthType) {
+    const sameAuth = candidates.find((m) => m.authType === primaryAuthType);
+    if (sameAuth) return toSelection(sameAuth);
   }
-  return candidates[0].id;
+  return toSelection(candidates[0]);
 }
 
 /**
@@ -98,6 +167,14 @@ export const DEFAULT_VISION_BRIDGE_SETTINGS: VisionBridgeSettings = {
 const MAX_IMAGES_CEILING = 16;
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 120_000;
+
+type VisionBridgeModelReference = string | VisionBridgeModelSelection;
+
+function normalizeVisionBridgeModel(
+  model: VisionBridgeModelReference | undefined,
+): VisionBridgeModelSelection | undefined {
+  return typeof model === 'string' ? { id: model } : model;
+}
 
 /** Clamp a possibly-invalid number into [lo, hi], falling back when not finite. */
 function clampInt(
@@ -310,7 +387,10 @@ export async function runVisionBridge(params: {
   // Use the explicitly configured bridge model, or auto-pick an image-capable
   // model from the registered providers so the bridge works without hand
   // configuration when a multimodal provider is already available.
-  const model = settings.model || config.getDefaultVisionBridgeModel?.();
+  const modelSelection = normalizeVisionBridgeModel(
+    settings.model || config.getDefaultVisionBridgeModel?.(),
+  );
+  const model = modelSelection?.id;
   debugLogger.debug(
     `model=${model ?? '(none)'} (explicit=${!!settings.model}), images=${imageParts.length} convert=${toConvert.length} omitted=${omittedCount} invalid=${droppedAsInvalid}`,
   );
@@ -348,6 +428,10 @@ export async function runVisionBridge(params: {
       contents: requestContents,
       abortSignal: combinedSignal,
       model,
+      ...(modelSelection.authType && {
+        modelAuthType: modelSelection.authType as AuthType,
+      }),
+      ...(modelSelection.baseUrl && { modelBaseUrl: modelSelection.baseUrl }),
       systemInstruction: buildSystemInstruction(),
       purpose: 'vision-bridge',
       maxAttempts: 2,
@@ -379,7 +463,7 @@ export async function runVisionBridge(params: {
       convertedCount: toConvert.length,
       omittedCount,
       modelId: model,
-      modelEndpoint: resolveEndpointHost(config, model),
+      modelEndpoint: resolveEndpointHost(config, modelSelection),
     };
   } catch (error) {
     const reason =
@@ -400,11 +484,15 @@ export async function runVisionBridge(params: {
  */
 function resolveEndpointHost(
   config: Config,
-  modelId: string,
+  model: VisionBridgeModelSelection,
 ): string | undefined {
-  const baseUrl = config
-    .getAllConfiguredModels?.()
-    ?.find((m) => m.id === modelId)?.baseUrl;
+  const baseUrl =
+    model.baseUrl ??
+    config.getAllConfiguredModels?.()?.find((m) => {
+      if (m.id !== model.id) return false;
+      if (model.authType && m.authType !== model.authType) return false;
+      return true;
+    })?.baseUrl;
   if (!baseUrl) return undefined;
   try {
     return new URL(baseUrl).host;

@@ -61,6 +61,10 @@ export interface GenerateTextOptions {
   contents: Content[];
   /** The specific model to use for this task. */
   model: string;
+  /** Optional provider hint for ambiguous model ids. */
+  modelAuthType?: AuthType;
+  /** Optional endpoint hint for ambiguous model ids within one auth type. */
+  modelBaseUrl?: string;
   /**
    * Task-specific system instructions. Passed through to the underlying
    * content generator without the geminiClient main-prompt fallback or
@@ -133,6 +137,10 @@ export interface GenerateJsonOptions {
   schema: Record<string, unknown>;
   /** The specific model to use for this task. */
   model: string;
+  /** Optional provider hint for ambiguous model ids. */
+  modelAuthType?: AuthType;
+  /** Optional endpoint hint for ambiguous model ids within one auth type. */
+  modelBaseUrl?: string;
   /**
    * Task-specific system instructions.
    * If omitted, no system instruction is sent.
@@ -221,7 +229,10 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
-    } = await this.resolveForModel(model);
+    } = await this.resolveForModel(model, {
+      authType: options.modelAuthType,
+      baseUrl: options.modelBaseUrl,
+    });
 
     try {
       const apiCall = () =>
@@ -338,7 +349,10 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
-    } = await this.resolveForModel(model);
+    } = await this.resolveForModel(model, {
+      authType: options.modelAuthType,
+      baseUrl: options.modelBaseUrl,
+    });
 
     try {
       const apiCall = () =>
@@ -449,8 +463,17 @@ export class BaseLlmClient {
    * Falls back to the main generator when the target model is not registered
    * or generator creation fails (e.g. tests without full auth setup).
    */
-  async resolveForModel(model: string): Promise<ResolvedGeneratorForModel> {
-    const selector = this.resolveModelSelector(model);
+  async resolveForModel(
+    model: string,
+    hint: { authType?: AuthType; baseUrl?: string } = {},
+  ): Promise<ResolvedGeneratorForModel> {
+    const parsedSelector = this.resolveModelSelector(model);
+    const selector = hint.authType
+      ? {
+          authType: hint.authType,
+          modelId: parsedSelector?.modelId ?? model,
+        }
+      : parsedSelector;
     const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
     const mainModel = this.config.getModel() ?? model;
     const mainGeneratorConfig = this.config.getContentGeneratorConfig();
@@ -459,7 +482,8 @@ export class BaseLlmClient {
 
     if (
       requestModel === mainModel &&
-      (!selector?.authType || selector.authType === mainAuthType)
+      (!selector?.authType || selector.authType === mainAuthType) &&
+      (!hint.baseUrl || hint.baseUrl === mainGeneratorConfig?.baseUrl)
     ) {
       return {
         contentGenerator: this.getCurrentContentGenerator(),
@@ -472,8 +496,13 @@ export class BaseLlmClient {
     const contentGenerator = await this.createContentGeneratorForModel(
       model,
       selector,
+      hint.baseUrl,
     );
-    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+    const resolvedModel = this.resolveModelAcrossAuthTypes(
+      model,
+      selector,
+      hint.baseUrl,
+    );
     const retryAuthType =
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
     const retryErrorCodes =
@@ -503,14 +532,19 @@ export class BaseLlmClient {
   private resolveModelAcrossAuthTypes(
     model: string,
     selector: ResolvedModelId | undefined,
+    baseUrl?: string,
   ): ResolvedModelConfig | undefined {
     const modelsConfig = this.config.getModelsConfig?.();
     if (!modelsConfig) return undefined;
     if (!selector) return undefined;
     const modelId = selector.modelId;
+    const getResolvedModel = (authType: AuthType) =>
+      baseUrl
+        ? modelsConfig.getResolvedModel(authType, modelId, baseUrl)
+        : modelsConfig.getResolvedModel(authType, modelId);
 
     if (selector.authType) {
-      return modelsConfig.getResolvedModel(selector.authType, modelId);
+      return getResolvedModel(selector.authType);
     }
 
     const allAuthTypes: AuthType[] = [
@@ -523,13 +557,13 @@ export class BaseLlmClient {
 
     const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
     if (mainAuthType) {
-      const resolved = modelsConfig.getResolvedModel(mainAuthType, modelId);
+      const resolved = getResolvedModel(mainAuthType);
       if (resolved) return resolved;
     }
 
     for (const authType of allAuthTypes) {
       if (authType === mainAuthType) continue;
-      const resolved = modelsConfig.getResolvedModel(authType, modelId);
+      const resolved = getResolvedModel(authType);
       if (resolved) return resolved;
     }
 
@@ -539,14 +573,19 @@ export class BaseLlmClient {
   private async createContentGeneratorForModel(
     model: string,
     selector: ResolvedModelId | undefined,
+    baseUrl?: string,
   ): Promise<ContentGenerator> {
     const cacheKey = selector
-      ? `${selector.authType ?? ''}:${selector.modelId}`
+      ? `${selector.authType ?? ''}:${selector.modelId}:${baseUrl ?? ''}`
       : model;
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 
-    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+    const resolvedModel = this.resolveModelAcrossAuthTypes(
+      model,
+      selector,
+      baseUrl,
+    );
 
     if (!resolvedModel) {
       debugLogger.warn(

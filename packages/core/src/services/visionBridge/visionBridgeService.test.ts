@@ -111,6 +111,43 @@ describe('runVisionBridge', () => {
     expect(result.modelEndpoint).toBe('dashscope.aliyuncs.com');
   });
 
+  it('uses the exact auto-selected provider when model ids are duplicated', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    const configWithDuplicatedIds = {
+      getDefaultVisionBridgeModel: () => ({
+        id: 'shared-vision-model',
+        authType: 'anthropic',
+        baseUrl: 'https://vision.example.com/v1',
+      }),
+      getAllConfiguredModels: () => [
+        {
+          id: 'shared-vision-model',
+          authType: 'openai',
+          baseUrl: 'https://wrong.example.com/v1',
+        },
+        {
+          id: 'shared-vision-model',
+          authType: 'anthropic',
+          baseUrl: 'https://vision.example.com/v1',
+        },
+      ],
+    } as unknown as Config;
+    const result = await runVisionBridge({
+      config: configWithDuplicatedIds,
+      settings: { ...settings, model: undefined },
+      parts: ['look', image()],
+      signal: signal(),
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.modelEndpoint).toBe('vision.example.com');
+    expect(mockSideQuery.mock.calls[0][1]).toMatchObject({
+      model: 'shared-vision-model',
+      modelAuthType: 'anthropic',
+      modelBaseUrl: 'https://vision.example.com/v1',
+    });
+  });
+
   it('strips an unterminated <think> block instead of leaking it', async () => {
     mockSideQuery.mockResolvedValue({
       text: 'A login form<think>now I will reason forever without closing',
@@ -331,15 +368,94 @@ describe('selectVisionBridgeModel', () => {
 
   it('never selects the primary model itself', () => {
     const picked = selectVisionBridgeModel('qwen3.7-plus', models);
-    expect(picked).not.toBe('qwen3.7-plus');
+    expect(picked?.id).not.toBe('qwen3.7-plus');
   });
 
   it('prefers a same-endpoint image model over one on another provider', () => {
     // Primary is on dashscope; gpt-5.4 (idealab) appears first in the list, but
     // qwen3.7-plus shares the primary endpoint and must win.
-    expect(selectVisionBridgeModel('qwen-text-max', models)).toBe(
-      'qwen3.7-plus',
+    expect(selectVisionBridgeModel('qwen-text-max', models)).toEqual({
+      id: 'qwen3.7-plus',
+      authType: 'openai',
+      baseUrl: dashscope,
+    });
+  });
+
+  it('uses the primary provider identity when primary model ids are duplicated', () => {
+    const picked = selectVisionBridgeModel(
+      'shared-text',
+      [
+        {
+          id: 'shared-text',
+          authType: 'openai',
+          baseUrl: 'https://wrong.example.com/v1',
+          modalities: { image: false },
+        },
+        {
+          id: 'shared-text',
+          authType: 'anthropic',
+          baseUrl: 'https://primary.example.com/v1',
+          modalities: { image: false },
+        },
+        {
+          id: 'vision-openai',
+          authType: 'openai',
+          baseUrl: 'https://wrong.example.com/v1',
+          modalities: { image: true },
+        },
+        {
+          id: 'vision-anthropic',
+          authType: 'anthropic',
+          baseUrl: 'https://primary.example.com/v1',
+          modalities: { image: true },
+        },
+      ],
+      {
+        authType: 'anthropic',
+        baseUrl: 'https://primary.example.com/v1',
+      },
     );
+
+    expect(picked).toEqual({
+      id: 'vision-anthropic',
+      authType: 'anthropic',
+      baseUrl: 'https://primary.example.com/v1',
+    });
+  });
+
+  it('prefers the primary endpoint hint when the primary model entry lacks baseUrl', () => {
+    const picked = selectVisionBridgeModel(
+      'runtime-text',
+      [
+        {
+          id: 'runtime-text',
+          authType: 'openai',
+          modalities: { image: false },
+        },
+        {
+          id: 'vision-other',
+          authType: 'openai',
+          baseUrl: 'https://other.example.com/v1',
+          modalities: { image: true },
+        },
+        {
+          id: 'vision-same',
+          authType: 'openai',
+          baseUrl: 'https://primary.example.com/v1',
+          modalities: { image: true },
+        },
+      ],
+      {
+        authType: 'openai',
+        baseUrl: 'https://primary.example.com/v1',
+      },
+    );
+
+    expect(picked).toEqual({
+      id: 'vision-same',
+      authType: 'openai',
+      baseUrl: 'https://primary.example.com/v1',
+    });
   });
 
   it('falls back to same auth type when no endpoint matches', () => {
@@ -348,7 +464,11 @@ describe('selectVisionBridgeModel', () => {
       { id: 'claude-opus', authType: 'anthropic', baseUrl: 'urlB' }, // image-capable, same auth
       { id: 'gpt-5.4', authType: 'openai', baseUrl: 'urlC' },
     ]);
-    expect(picked).toBe('claude-opus');
+    expect(picked).toEqual({
+      id: 'claude-opus',
+      authType: 'anthropic',
+      baseUrl: 'urlB',
+    });
   });
 
   it('falls back to the first image-capable model when nothing matches', () => {
@@ -356,7 +476,11 @@ describe('selectVisionBridgeModel', () => {
       { id: 'qwen-text-max', authType: 'openai', baseUrl: 'urlA' },
       { id: 'gpt-5.4', authType: 'gemini', baseUrl: 'urlB' },
     ]);
-    expect(picked).toBe('gpt-5.4');
+    expect(picked).toEqual({
+      id: 'gpt-5.4',
+      authType: 'gemini',
+      baseUrl: 'urlB',
+    });
   });
 
   it('respects explicit modalities over name-based detection', () => {
@@ -365,7 +489,10 @@ describe('selectVisionBridgeModel', () => {
       // text-by-name but explicitly image-capable -> eligible
       { id: 'custom-text-name', baseUrl: 'urlA', modalities: { image: true } },
     ]);
-    expect(picked).toBe('custom-text-name');
+    expect(picked).toEqual({
+      id: 'custom-text-name',
+      baseUrl: 'urlA',
+    });
   });
 });
 

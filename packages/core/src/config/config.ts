@@ -24,7 +24,10 @@ import { defaultModalities } from '../core/modalityDefaults.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import type { VisionBridgeSettings } from '../services/visionBridge/visionBridgeService.js';
+import type {
+  VisionBridgeModelSelection,
+  VisionBridgeSettings,
+} from '../services/visionBridge/visionBridgeService.js';
 import {
   resolveVisionBridgeSettings,
   selectVisionBridgeModel,
@@ -2635,12 +2638,17 @@ export class Config {
    * auth type's, so a vision model registered under a different provider can
    * still be auto-selected; `runSideQuery` resolves its credentials.
    *
-   * @returns A registered image-capable model id, or `undefined`.
+   * @returns A registered image-capable model selection, or `undefined`.
    */
-  getDefaultVisionBridgeModel(): string | undefined {
+  getDefaultVisionBridgeModel(): VisionBridgeModelSelection | undefined {
+    const contentGeneratorConfig = this.getContentGeneratorConfig();
     return selectVisionBridgeModel(
       this.getModel(),
       this.getAllConfiguredModels(),
+      {
+        authType: contentGeneratorConfig?.authType,
+        baseUrl: contentGeneratorConfig?.baseUrl,
+      },
     );
   }
 

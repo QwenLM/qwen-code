@@ -909,5 +909,76 @@ describe('BaseLlmClient', () => {
         expect.objectContaining({ authType: AuthType.USE_ANTHROPIC }),
       );
     });
+
+    it('generateText uses provider hints to resolve duplicated model ids exactly', async () => {
+      const targetBaseUrl = 'https://vision.example.com/v1';
+      getResolvedModel.mockImplementation(
+        (authType: string, model: string, baseUrl?: string) => {
+          if (
+            authType === AuthType.USE_ANTHROPIC &&
+            model === 'shared-model' &&
+            baseUrl === targetBaseUrl
+          ) {
+            return {
+              id: 'shared-model',
+              authType: AuthType.USE_ANTHROPIC,
+              envKey: 'ANTHROPIC_API_KEY',
+              baseUrl: targetBaseUrl,
+            };
+          }
+          if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
+            return {
+              id: 'shared-model',
+              authType: AuthType.USE_OPENAI,
+              envKey: 'OPENAI_API_KEY',
+              baseUrl: 'https://wrong.example.com/v1',
+            };
+          }
+          return undefined;
+        },
+      );
+      fastGenerateContent.mockResolvedValue({
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text: 'described' }] },
+            index: 0,
+          },
+        ],
+      });
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const result = await c.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'describe image' }] }],
+        model: 'shared-model',
+        modelAuthType: AuthType.USE_ANTHROPIC,
+        modelBaseUrl: targetBaseUrl,
+        abortSignal: new AbortController().signal,
+        promptId: 'vision-bridge',
+      });
+
+      expect(result.text).toBe('described');
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        AuthType.USE_ANTHROPIC,
+        'shared-model',
+        targetBaseUrl,
+      );
+      expect(getResolvedModel).not.toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'shared-model',
+      );
+      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        crossProviderConfig,
+        'shared-model',
+        expect.objectContaining({
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: targetBaseUrl,
+        }),
+      );
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({ authType: AuthType.USE_ANTHROPIC }),
+      );
+    });
   });
 });

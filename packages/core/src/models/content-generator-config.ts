@@ -50,7 +50,16 @@ export function buildAgentContentGeneratorConfig(
   const sameProvider = authOverrides.authType === parentConfig.authType;
   const modelsConfig = base.getModelsConfig();
   const resolvedModel = modelId
-    ? modelsConfig.getResolvedModel(authOverrides.authType as AuthType, modelId)
+    ? authOverrides.baseUrl
+      ? modelsConfig.getResolvedModel(
+          authOverrides.authType as AuthType,
+          modelId,
+          authOverrides.baseUrl,
+        )
+      : modelsConfig.getResolvedModel(
+          authOverrides.authType as AuthType,
+          modelId,
+        )
     : undefined;
 
   const nextConfig: ContentGeneratorConfig = {

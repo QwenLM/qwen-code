@@ -522,6 +522,20 @@ describe('ModelRegistry', () => {
       expect(proxy?.name).toBe('GPT-4 Proxy');
     });
 
+    it('should retrieve a plain-id model by its resolved default baseUrl', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4 Default Endpoint' }],
+      });
+
+      const model = registry.getModel(
+        AuthType.USE_OPENAI,
+        'gpt-4',
+        'https://api.openai.com/v1',
+      );
+
+      expect(model?.name).toBe('GPT-4 Default Endpoint');
+    });
+
     it('should return first match when getModel is called without baseUrl', () => {
       const registry = new ModelRegistry({
         openai: [
