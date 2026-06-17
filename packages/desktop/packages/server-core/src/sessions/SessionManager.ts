@@ -8142,7 +8142,10 @@ export class SessionManager implements ISessionManager {
         textElements: options?.textElements,
         isQueued: true,
       }
+      const hasStoredAttachmentsWithoutLivePayload =
+        (storedAttachments?.length ?? 0) > 0 && !attachments?.length
       const canInjectMidTurn =
+        !hasStoredAttachmentsWithoutLivePayload &&
         canOfferMidTurnAttachments(attachments) &&
         (agent?.enqueueMidTurnMessage?.(message, attachments, {
           messageId: userMessage.id,

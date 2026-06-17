@@ -2616,6 +2616,11 @@ describe('Session', () => {
                   data: 'iVBORw0KGgo=',
                 },
                 {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgAAAA==',
+                },
+                {
                   type: 'image',
                   mimeType: 'text/html',
                   data: '<script>alert(1)</script>',
@@ -2669,6 +2674,12 @@ describe('Session', () => {
             inlineData: {
               mimeType: 'image/png',
               data: 'iVBORw0KGgo=',
+            },
+          },
+          {
+            inlineData: {
+              mimeType: 'audio/wav',
+              data: 'UklGRgAAAA==',
             },
           },
         ];
@@ -2776,8 +2787,8 @@ describe('Session', () => {
           const fallbackPart = {
             text: '\n[User message received during tool execution]: please inspect this image',
           };
-          const imageFailurePart = {
-            text: '[Image attachment could not be processed]',
+          const attachmentFailurePart = {
+            text: '[Attachment could not be processed]',
           };
           const followUpPart = {
             text: '\n[User message received during tool execution]: safe follow-up',
@@ -2787,14 +2798,14 @@ describe('Session', () => {
           expect(secondCall?.[1].message).toEqual(
             expect.arrayContaining([
               fallbackPart,
-              imageFailurePart,
+              attachmentFailurePart,
               followUpPart,
             ]),
           );
           expect(
             mockChatRecordingService.recordMidTurnUserMessage,
           ).toHaveBeenCalledWith(
-            [fallbackPart, imageFailurePart],
+            [fallbackPart, attachmentFailurePart],
             'please inspect this image',
           );
           expect(
@@ -2806,6 +2817,174 @@ describe('Session', () => {
         } finally {
           clampSpy.mockRestore();
         }
+      });
+
+      it('adds a fallback marker when audio resolution fails', async () => {
+        const clampSpy = vi
+          .spyOn(core, 'clampInlineMediaPart')
+          .mockImplementation(() => {
+            throw new Error('audio decode failed');
+          });
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgAAAA==',
+                },
+              ],
+              displayText: 'please listen to this audio',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          debugLoggerWarnSpy.mockClear();
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          const fallbackPart = {
+            text: '\n[User message received during tool execution]: please listen to this audio',
+          };
+          const attachmentFailurePart = {
+            text: '[Attachment could not be processed]',
+          };
+          const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1];
+
+          expect(secondCall?.[1].message).toEqual(
+            expect.arrayContaining([fallbackPart, attachmentFailurePart]),
+          );
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith(
+            [fallbackPart, attachmentFailurePart],
+            'please listen to this audio',
+          );
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'Failed to resolve mid-turn message: audio decode failed',
+          );
+        } finally {
+          clampSpy.mockRestore();
+        }
+      });
+
+      it('caps structured mid-turn drain items', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: Array.from({ length: 12 }, (_value, index) => ({
+            content: [{ type: 'text', text: `mid-turn ${index}` }],
+            displayText: `mid-turn ${index}`,
+          })),
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        debugLoggerWarnSpy.mockClear();
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[1].message).toEqual(
+          expect.arrayContaining([
+            {
+              text: '\n[User message received during tool execution]: mid-turn 0',
+            },
+            {
+              text: '\n[User message received during tool execution]: mid-turn 9',
+            },
+          ]),
+        );
+        expect(secondCall?.[1].message).not.toEqual(
+          expect.arrayContaining([
+            {
+              text: '\n[User message received during tool execution]: mid-turn 10',
+            },
+          ]),
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledTimes(10);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          'Mid-turn drain response had 12 item(s); processing first 10',
+        );
       });
 
       it('stops draining mid-turn messages when structured resolution is aborted', async () => {

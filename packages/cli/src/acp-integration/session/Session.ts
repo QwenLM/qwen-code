@@ -186,8 +186,9 @@ const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
 // await would wedge the prompt turn forever.
 const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
-const MID_TURN_IMAGE_PROCESSING_FAILURE_TEXT =
-  '[Image attachment could not be processed]';
+const MAX_MID_TURN_DRAIN_ITEMS = 10;
+const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
+  '[Attachment could not be processed]';
 const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // Latch the drain off only after this many consecutive timeouts: one slow
 // answer must not permanently disable mid-turn messages for a
@@ -272,8 +273,17 @@ function isEmbeddedResourceResource(
   return typeof value['blob'] === 'string';
 }
 
-function hasImageContentBlock(content: ContentBlock[]): boolean {
-  return content.some((part) => part.type === 'image');
+function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
+  return content.some((part) => part.type === 'image' || part.type === 'audio');
+}
+
+function capMidTurnDrainItems<T>(items: T[], fieldName: string): T[] {
+  if (items.length <= MAX_MID_TURN_DRAIN_ITEMS) return items;
+
+  debugLogger.warn(
+    `Mid-turn drain response had ${items.length} ${fieldName}; processing first ${MAX_MID_TURN_DRAIN_ITEMS}`,
+  );
+  return items.slice(0, MAX_MID_TURN_DRAIN_ITEMS);
 }
 
 function getMidTurnItemDisplayTextForLog(displayText: unknown): string {
@@ -333,26 +343,28 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
   if (!isRecord(response)) return [];
 
   if (Array.isArray(response['items'])) {
-    return response['items'].flatMap((item): DrainedMidTurnMessage[] => {
-      if (!isRecord(item)) {
-        return [];
-      }
-      const content = getValidMidTurnContentBlocks(
-        item['content'],
-        item['displayText'],
-      );
-      if (content.length === 0) return [];
-      return [
-        {
-          kind: 'structured',
-          content,
-          displayText: getStructuredMidTurnDisplayText(
+    return capMidTurnDrainItems(response['items'], 'item(s)').flatMap(
+      (item): DrainedMidTurnMessage[] => {
+        if (!isRecord(item)) {
+          return [];
+        }
+        const content = getValidMidTurnContentBlocks(
+          item['content'],
+          item['displayText'],
+        );
+        if (content.length === 0) return [];
+        return [
+          {
+            kind: 'structured',
             content,
-            item['displayText'],
-          ),
-        },
-      ];
-    });
+            displayText: getStructuredMidTurnDisplayText(
+              content,
+              item['displayText'],
+            ),
+          },
+        ];
+      },
+    );
   }
 
   if (!Array.isArray(response['messages'])) {
@@ -364,7 +376,7 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
     return [];
   }
 
-  return response['messages']
+  return capMidTurnDrainItems(response['messages'], 'message(s)')
     .filter(
       (message): message is string =>
         typeof message === 'string' && message.trim().length > 0,
@@ -2134,9 +2146,11 @@ export class Session implements SessionContext {
           ];
           if (
             message.kind === 'structured' &&
-            hasImageContentBlock(message.content)
+            hasInlineMediaContentBlock(message.content)
           ) {
-            rawParts.push({ text: MID_TURN_IMAGE_PROCESSING_FAILURE_TEXT });
+            rawParts.push({
+              text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT,
+            });
           }
         }
         const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
