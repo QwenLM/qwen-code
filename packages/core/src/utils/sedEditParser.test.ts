@@ -266,6 +266,13 @@ describe('sedEditParser', () => {
     expect(applySedSubstitution('aaa', lineSedInfo!)).toBe('X');
   });
 
+  it('applies trailing zero-width matches after prior zero-width matches', () => {
+    const sedInfo = parseSedEditCommand("sed -i 's/a*/foo/g' file.txt");
+
+    expect(sedInfo).not.toBeNull();
+    expect(applySedSubstitution('bbb', sedInfo!)).toBe('foobfoobfoobfoo');
+  });
+
   it('throws when direct sed simulation cannot compile the pattern', () => {
     expect(() =>
       applySedSubstitution('foo', {

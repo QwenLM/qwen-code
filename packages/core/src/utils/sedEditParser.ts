@@ -477,16 +477,23 @@ function replaceLine(
   },
 ): string {
   let seen = 0;
+  let lastMatchWasNonEmpty = false;
   globalRegex.lastIndex = 0;
 
   return line.replace(globalRegex, (...args: unknown[]) => {
     const match = String(args[0]);
     const offset = Number(args[args.length - 2]);
-    if (match.length === 0 && offset === line.length && seen > 0) {
+    if (
+      match.length === 0 &&
+      offset === line.length &&
+      seen > 0 &&
+      lastMatchWasNonEmpty
+    ) {
       return '';
     }
 
     seen++;
+    lastMatchWasNonEmpty = match.length > 0;
     const shouldReplace =
       options.occurrence === null
         ? options.replaceAll || seen === 1

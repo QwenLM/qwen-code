@@ -63,6 +63,7 @@ import {
 } from '../utils/shell-utils.js';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
   isShellCommandReadOnlyAST,
   extractCommandRules,
@@ -1497,7 +1498,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     ) {
       return null;
     }
-    return parseSedEditCommand(stripShellWrapper(this.params.command));
+    const strippedCommand = stripShellWrapper(this.params.command);
+    if (LEADING_ENV_ASSIGNMENT_RE.test(strippedCommand)) {
+      return null;
+    }
+    return parseSedEditCommand(strippedCommand);
   }
 
   private resolveSedFilePath(filePath: string): string {
@@ -1508,6 +1513,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return path.resolve(cwd, filePath);
   }
 
+  private async checkSedPriorRead(filePath: string): Promise<void> {
+    if (this.config.getFileReadCacheDisabled()) {
+      return;
+    }
+    const priorReadResult = await checkPriorRead(
+      this.config.getFileReadCache(),
+      filePath,
+      'editing',
+    );
+    if (!priorReadResult.ok) {
+      throw new StructuredToolError(
+        priorReadResult.rawMessage,
+        priorReadResult.type,
+      );
+    }
+  }
+
   private async prepareSedEdit(sedInfo: SedEditInfo): Promise<PreparedSedEdit> {
     const filePath = this.resolveSedFilePath(sedInfo.filePath);
     if (fs.lstatSync(filePath).isSymbolicLink()) {
@@ -1515,6 +1537,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `sed edit target '${filePath}' is a symlink; falling back to shell execution`,
       );
     }
+    await this.checkSedPriorRead(filePath);
     const { content, _meta } = await this.config
       .getFileSystemService()
       .readTextFile({ path: filePath });
@@ -1650,6 +1673,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
           message,
           ToolErrorType.EDIT_PREPARATION_FAILURE,
         );
+      }
+      if (err instanceof StructuredToolError) {
+        return this.sedEditError(err.message, err.errorType);
       }
       const message = `Error reading file for sed edit '${filePath}': ${getErrorMessage(err)}`;
       return this.sedEditError(
@@ -1880,6 +1906,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         };
         return confirmationDetails;
       } catch (err) {
+        if (err instanceof StructuredToolError) {
+          throw err;
+        }
         this.sedEditPreviewFailed = true;
         debugLogger.warn(
           `sed edit preview failed, falling back to exec confirmation: ${getErrorMessage(err)}`,
@@ -2022,6 +2051,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
           command: this.params.command,
         });
         return this.executeSedEdit(sedInfo, combinedSignal, effectiveTimeout);
+      }
+      try {
+        await this.checkSedPriorRead(this.resolveSedFilePath(sedInfo.filePath));
+      } catch (err) {
+        if (err instanceof StructuredToolError) {
+          return this.sedEditError(err.message, err.errorType);
+        }
+        throw err;
       }
       debugLogger.debug(
         'falling back to shell execution for sed edit without prepared preview',

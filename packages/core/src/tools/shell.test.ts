@@ -83,6 +83,7 @@ describe('ShellTool', () => {
     trackEdit: ReturnType<typeof vi.fn>;
   };
   let mockFileReadCache: {
+    check: ReturnType<typeof vi.fn>;
     recordWrite: ReturnType<typeof vi.fn>;
   };
 
@@ -97,6 +98,13 @@ describe('ShellTool', () => {
       trackEdit: vi.fn().mockResolvedValue(undefined),
     };
     mockFileReadCache = {
+      check: vi.fn().mockReturnValue({
+        state: 'fresh',
+        entry: {
+          lastReadAt: Date.now(),
+          lastReadCacheable: true,
+        },
+      }),
       recordWrite: vi.fn(),
     };
 
@@ -123,6 +131,7 @@ describe('ShellTool', () => {
       getFileSystemService: vi.fn().mockReturnValue(mockFileSystemService),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getFileReadCache: vi.fn().mockReturnValue(mockFileReadCache),
+      getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
       getGitCoAuthor: vi.fn().mockReturnValue({
         commit: true,
@@ -146,6 +155,20 @@ describe('ShellTool', () => {
     vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
     vi.mocked(fs.lstatSync).mockReturnValue({
       isSymbolicLink: () => false,
+    } as fs.Stats);
+    vi.mocked(fs.statSync).mockReturnValue({
+      dev: 1,
+      ino: 2,
+      isDirectory: () => false,
+      isFile: () => true,
+    } as fs.Stats);
+    vi.mocked(fs.promises.stat).mockResolvedValue({
+      dev: 1,
+      ino: 2,
+      isDirectory: () => false,
+      isFile: () => true,
+      mtimeMs: 1,
+      size: 4,
     } as fs.Stats);
     vi.mocked(fs.createWriteStream).mockReturnValue({
       write: vi.fn(),
@@ -458,7 +481,9 @@ describe('ShellTool', () => {
         expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
         expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
-        expect(mockShellExecutionService).toHaveBeenCalled();
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
 
         resolveShellExecution({ output: 'done' });
         const result = await resultPromise;
@@ -769,6 +794,31 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('sed edit applied');
       });
 
+      it('rejects simulated sed edits when the file was not read first', async () => {
+        mockFileReadCache.check.mockReturnValue({ state: 'unknown' });
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        await expect(
+          invocation.getConfirmationDetails(mockAbortSignal),
+        ).rejects.toMatchObject({
+          errorType: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      });
+
       it('reports timeout when a prepared sed edit times out before execution', async () => {
         mockFileSystemService.readTextFile.mockResolvedValue({
           content: 'foo\n',
@@ -929,6 +979,28 @@ describe('ShellTool', () => {
       it('falls back to shell execution for env-prefixed shell wrappers', async () => {
         const invocation = shellTool.build({
           command: 'LC_ALL=C bash -c "sed -i \'s/foo/bar/\' file.txt"',
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        const resultPromise = invocation.execute(mockAbortSignal);
+
+        expect(details.type).toBe('exec');
+        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+        expect(mockShellExecutionService).toHaveBeenCalled();
+
+        resolveShellExecution({ output: 'done' });
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('Output: done');
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      });
+
+      it('falls back to shell execution for env-prefixed unwrapped sed commands', async () => {
+        const invocation = shellTool.build({
+          command: `bash -c "LC_ALL=C sed -i 's/foo/bar/' file.txt"`,
           directory: '/test/dir',
           is_background: false,
         });
