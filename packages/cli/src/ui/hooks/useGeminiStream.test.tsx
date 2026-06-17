@@ -1031,7 +1031,7 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('warns when mid-turn @ resolution fails and falls back to text', async () => {
+  it('warns and skips mid-turn @ injection when resolution fails', async () => {
     const queuedPrompt = 'inspect @/tmp/unreadable.png';
     const recordMidTurnUserMessage = vi.fn();
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -1120,11 +1120,6 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    const expectedMidTurnParts: Part[] = [
-      {
-        text: `\n[User message received during tool execution]: ${queuedPrompt}`,
-      },
-    ];
     expect(mockAddItem).toHaveBeenCalledWith(
       {
         type: MessageType.WARNING,
@@ -1132,12 +1127,9 @@ describe('useGeminiStream', () => {
       },
       expect.any(Number),
     );
-    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
-      expectedMidTurnParts,
-      queuedPrompt,
-    );
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(mockSendMessageStream).toHaveBeenCalledWith(
-      [...toolCallResponseParts, ...expectedMidTurnParts],
+      toolCallResponseParts,
       expect.any(AbortSignal),
       'prompt-id-midturn-at-throw',
       { type: SendMessageType.ToolResult },

@@ -2536,6 +2536,7 @@ export const useGeminiStream = (
                     Date.now(),
                   );
                 }
+                continue;
               } finally {
                 clearTimeout(atCommandTimeoutId);
               }

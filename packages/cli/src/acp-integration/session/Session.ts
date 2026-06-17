@@ -215,6 +215,7 @@ function isContentBlock(value: unknown): value is ContentBlock {
     case 'resource':
       return isEmbeddedResourceResource(value['resource']);
     default:
+      debugLogger.warn(`Unknown ContentBlock type: ${value['type']}`);
       return false;
   }
 }
@@ -2053,10 +2054,11 @@ export class Session implements SessionContext {
       const drainedMessages = parseMidTurnDrainResponse(response);
       const drainedParts: Part[] = [];
       for (const message of drainedMessages) {
+        const displayText =
+          message.kind === 'text' ? message.message : message.displayText;
+        let rawParts: Part[];
         try {
-          const displayText =
-            message.kind === 'text' ? message.message : message.displayText;
-          const rawParts =
+          rawParts =
             message.kind === 'text'
               ? [{ text: message.message }]
               : await withTimeoutSignal(
@@ -2064,17 +2066,23 @@ export class Session implements SessionContext {
                   MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
                   (signal) => this.#resolvePrompt(message.content, signal),
                 );
-          const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
-          this.config
-            .getChatRecordingService()
-            ?.recordMidTurnUserMessage(parts, displayText);
-          drainedParts.push(...parts);
         } catch (messageError) {
           if (abortSignal.aborted) throw messageError;
+          const errorMessage = this.#formatError(messageError);
           debugLogger.warn(
-            `Failed to resolve mid-turn message: ${this.#formatError(messageError)}`,
+            `Failed to resolve mid-turn message: ${errorMessage}`,
           );
+          rawParts = [
+            {
+              text: `[Message could not be delivered: ${errorMessage}]`,
+            },
+          ];
         }
+        const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
+        this.config
+          .getChatRecordingService()
+          ?.recordMidTurnUserMessage(parts, displayText);
+        drainedParts.push(...parts);
       }
 
       return drainedParts;

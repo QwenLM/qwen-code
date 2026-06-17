@@ -343,6 +343,56 @@ describe('QwenAgent slash command history', () => {
     agent.destroy();
   });
 
+  it('acknowledges image-only mid-turn messages by optimistic id', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(
+      agent.enqueueMidTurnMessage('', [attachment], {
+        optimisticMessageId: 'optimistic-image',
+      }),
+    ).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            { type: 'text', text: '' },
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: '[User message with attachments]',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
+      'optimistic-image',
+    ]);
+
+    agent.destroy();
+  });
+
   it('adds slash command invocations when their result produced output', () => {
     const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));

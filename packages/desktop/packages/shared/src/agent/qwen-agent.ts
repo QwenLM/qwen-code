@@ -2815,7 +2815,10 @@ export class QwenAgent extends BaseAgent {
         `Drained ${entries.length} mid-turn user message(s) to Qwen ACP`,
       );
       const messageIds = entries
-        .map((entry) => entry.messageId ?? entry.message)
+        .map(
+          (entry) =>
+            entry.messageId ?? entry.optimisticMessageId ?? entry.message,
+        )
         .filter((messageId): messageId is string => !!messageId);
       if (messageIds.length > 0) {
         this.config.onMidTurnMessagesDrained?.(messageIds);

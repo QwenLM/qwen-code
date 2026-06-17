@@ -2591,6 +2591,11 @@ describe('Session', () => {
                   mimeType: 'text/plain',
                   data: 'not-audio',
                 },
+                {
+                  type: 'video',
+                  mimeType: 'video/mp4',
+                  data: 'not-supported',
+                },
               ],
               displayText: 'please inspect this image',
             },
@@ -2616,6 +2621,7 @@ describe('Session', () => {
           )
           .mockResolvedValueOnce(createEmptyStream());
 
+        debugLoggerWarnSpy.mockClear();
         await session.prompt({
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: 'read file' }],
@@ -2659,6 +2665,93 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(midTurnParts, 'please inspect this image');
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          'Unknown ContentBlock type: video',
+        );
+      });
+
+      it('injects a fallback notice when structured mid-turn resolution fails', async () => {
+        const clampSpy = vi
+          .spyOn(core, 'clampInlineMediaPart')
+          .mockImplementation(() => {
+            throw new Error('image decode failed');
+          });
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'iVBORw0KGgo=',
+                },
+              ],
+              displayText: 'please inspect this image',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          debugLoggerWarnSpy.mockClear();
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          const fallbackPart = {
+            text: '\n[User message received during tool execution]: [Message could not be delivered: image decode failed]',
+          };
+          const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1];
+          expect(secondCall?.[1].message).toEqual(
+            expect.arrayContaining([fallbackPart]),
+          );
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([fallbackPart], 'please inspect this image');
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'Failed to resolve mid-turn message: image decode failed',
+          );
+        } finally {
+          clampSpy.mockRestore();
+        }
       });
 
       it('rejects mid-turn resource links and keeps valid messages in the same batch', async () => {
