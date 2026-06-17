@@ -5,18 +5,32 @@ on:
     branches:
       - 'main'
       - 'feat/e2e/**'
+  pull_request:
+    branches:
+      - 'main'
   merge_group:
 
 concurrency:
+  # Key on the head ref so a `push` to a `feat/e2e/**` branch and a
+  # `pull_request` from that same branch share one group and cancel each
+  # other instead of running the matrix twice for the same change.
   group: |-
-    ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}
+    ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  # Cancel superseded PR / feature-branch runs, but let every `main`
+  # commit finish (complete per-commit e2e signal, matching ci.yml) and
+  # never cancel merge-queue runs.
   cancel-in-progress: |-
-    ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
 
 jobs:
   e2e-test-linux:
     name: 'E2E Test (Linux) - ${{ matrix.sandbox }}'
     runs-on: 'ubuntu-latest'
+    # Skip on fork PRs: forks have no access to repository secrets
+    # (OPENAI_*, DOCKERHUB_*), so the matrix would fail unconditionally
+    # and show misleading red status. Same-repo PRs run normally.
+    if: |-
+      ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     strategy:
       matrix:
         sandbox:
@@ -86,6 +100,9 @@ jobs:
   e2e-test-macos:
     name: 'E2E Test - macOS'
     runs-on: 'macos-latest'
+    # Skip on fork PRs (no secrets) — see e2e-test-linux above.
+    if: |-
+      ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2

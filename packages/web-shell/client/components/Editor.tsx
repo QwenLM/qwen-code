@@ -1934,18 +1934,18 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       {searchMode && (
         <div ref={searchUiRef}>
           <div className={styles.searchBar}>
-            <span className={styles.searchLabel}>reverse-i-search:</span>
+            <span className={styles.searchLabel}>
+              {t('editor.searchLabel')}
+            </span>
             <input
               ref={searchInputRef}
               className={styles.searchInput}
               value={searchQuery}
               onChange={handleSearchInput}
               onKeyDown={handleSearchKeyDown}
-              placeholder="type to search..."
+              placeholder={t('editor.searchPlaceholder')}
             />
-            <span className={styles.searchHint}>
-              ctrl+r next · tab accept · enter send · esc cancel
-            </span>
+            <span className={styles.searchHint}>{t('editor.searchHint')}</span>
           </div>
           {searchMatches.length > 0 && (
             <div className={styles.searchResults}>

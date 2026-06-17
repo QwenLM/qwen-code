@@ -8,6 +8,7 @@ import {
 } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { useWebShellCustomization } from '../../../customization';
+import { useI18n } from '../../../i18n';
 // Circular import with ToolGroup (agents render tool rows; agent tool
 // rows render SubAgentPanel). Safe only while both modules dereference
 // each other's exports at render time — never in top-level code.
@@ -159,6 +160,7 @@ type SubAgentTab = 'result' | 'tools';
  */
 function SubAgentStream({ text }: { text: string }) {
   const { compactThinking } = useWebShellCustomization();
+  const { t } = useI18n();
   const [streamExpanded, setStreamExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const streamRef = useRef<HTMLPreElement>(null);
@@ -199,7 +201,7 @@ function SubAgentStream({ text }: { text: string }) {
           className={styles.expandToggle}
           onClick={() => setStreamExpanded((v) => !v)}
           aria-expanded={streamExpanded}
-          aria-label="Toggle agent stream details"
+          aria-label={t('subagent.toggleStream')}
         >
           {streamExpanded ? '▲' : '▼'}
         </button>
