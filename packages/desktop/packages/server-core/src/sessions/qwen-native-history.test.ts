@@ -1487,6 +1487,94 @@ describe('Qwen native history loading', () => {
     ]);
   });
 
+  it('offers plain text follow-ups to Qwen mid-turn injection after visual messages', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-midturn-text-after-visual';
+    const timestamp = Date.now();
+    const storedAttachment: NonNullable<Message['attachments']>[number] = {
+      id: 'attachment-1',
+      type: 'image',
+      name: 'subscription.jpg',
+      mimeType: 'image/jpeg',
+      size: 1024,
+      storedPath: join(
+        workspaceRoot,
+        'sessions',
+        sessionId,
+        'attachments',
+        'subscription.jpg',
+      ),
+      thumbnailBase64: 'data:image/jpeg;base64,thumb',
+    };
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { isProcessing: true, messagesLoaded: true },
+    );
+    const enqueueCalls: Array<{
+      message: string;
+      attachments?: FileAttachment[];
+      metadata?: { messageId?: string; optimisticMessageId?: string };
+    }> = [];
+    managed.agent = {
+      enqueueMidTurnMessage: (
+        message: string,
+        attachments?: FileAttachment[],
+        metadata?: { messageId?: string; optimisticMessageId?: string },
+      ) => {
+        enqueueCalls.push({ message, attachments, metadata });
+        return true;
+      },
+      destroy: () => {},
+      dispose: () => {},
+    } as unknown as AgentBackend;
+    const manager = new SessionManager();
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    await manager.sendMessage(
+      sessionId,
+      'also summarize the visible text',
+      undefined,
+      [storedAttachment],
+      { optimisticMessageId: 'optimistic-text' },
+    );
+
+    expect(enqueueCalls).toHaveLength(1);
+    expect(enqueueCalls[0]).toEqual({
+      message: 'also summarize the visible text',
+      attachments: undefined,
+      metadata: {
+        messageId: expect.any(String),
+        optimisticMessageId: 'optimistic-text',
+      },
+    });
+    expect(managed.messageQueue[0]?.midTurnPending).toBe(true);
+    expect(managed.messageQueue[0]?.storedAttachments).toEqual([
+      storedAttachment,
+    ]);
+  });
+
   it('keeps image attachments queued when live base64 is unavailable', async () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),

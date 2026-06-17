@@ -2670,7 +2670,7 @@ describe('Session', () => {
         );
       });
 
-      it('injects a fallback notice when structured mid-turn resolution fails', async () => {
+      it('keeps later structured mid-turn messages when one resolution fails', async () => {
         const clampSpy = vi
           .spyOn(core, 'clampInlineMediaPart')
           .mockImplementation(() => {
@@ -2706,6 +2706,10 @@ describe('Session', () => {
               ],
               displayText: 'please inspect this image',
             },
+            {
+              content: [{ type: 'text', text: 'safe follow-up' }],
+              displayText: 'safe follow-up',
+            },
           ],
         });
         mockChat.sendMessageStream = vi
@@ -2736,22 +2740,81 @@ describe('Session', () => {
           });
 
           const fallbackPart = {
-            text: '\n[User message received during tool execution]: [Message could not be delivered: image decode failed]',
+            text: '\n[User message received during tool execution]: please inspect this image',
+          };
+          const followUpPart = {
+            text: '\n[User message received during tool execution]: safe follow-up',
           };
           const secondCall = vi.mocked(mockChat.sendMessageStream).mock
             .calls[1];
           expect(secondCall?.[1].message).toEqual(
-            expect.arrayContaining([fallbackPart]),
+            expect.arrayContaining([fallbackPart, followUpPart]),
           );
           expect(
             mockChatRecordingService.recordMidTurnUserMessage,
           ).toHaveBeenCalledWith([fallbackPart], 'please inspect this image');
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([followUpPart], 'safe follow-up');
           expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
             'Failed to resolve mid-turn message: image decode failed',
           );
         } finally {
           clampSpy.mockRestore();
         }
+      });
+
+      it('logs unrecognized mid-turn drain response fields', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          payload: ['safe follow-up'],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        debugLoggerWarnSpy.mockClear();
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          "Mid-turn drain response had no recognized 'items' or 'messages' field; keys: payload",
+        );
       });
 
       it('rejects mid-turn resource links and keeps valid messages in the same batch', async () => {

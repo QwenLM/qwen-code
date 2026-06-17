@@ -375,7 +375,6 @@ describe('QwenAgent slash command history', () => {
       items: [
         {
           content: [
-            { type: 'text', text: '' },
             {
               type: 'image',
               data: 'iVBORw0KGgo=',
@@ -388,6 +387,66 @@ describe('QwenAgent slash command history', () => {
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
       'optimistic-image',
+    ]);
+
+    agent.destroy();
+  });
+
+  it('drains mixed text and image mid-turn messages as ACP items', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(
+      agent.enqueueMidTurnMessage('first text only', undefined, {
+        messageId: 'queued-text',
+      }),
+    ).toBe(true);
+    expect(
+      agent.enqueueMidTurnMessage('then inspect image', [attachment], {
+        messageId: 'queued-image',
+      }),
+    ).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [{ type: 'text', text: 'first text only' }],
+          displayText: 'first text only',
+        },
+        {
+          content: [
+            { type: 'text', text: 'then inspect image' },
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: 'then inspect image',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
+      'queued-text',
+      'queued-image',
     ]);
 
     agent.destroy();

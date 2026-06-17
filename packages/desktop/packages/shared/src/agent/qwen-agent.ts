@@ -2816,8 +2816,9 @@ export class QwenAgent extends BaseAgent {
       );
       const messageIds = entries
         .map(
-          (entry) =>
-            entry.messageId ?? entry.optimisticMessageId ?? entry.message,
+          (entry, index) =>
+            (entry.messageId ?? entry.optimisticMessageId ?? entry.message) ||
+            `mid-turn-${Date.now()}-${index}`,
         )
         .filter((messageId): messageId is string => !!messageId);
       if (messageIds.length > 0) {
@@ -3522,12 +3523,13 @@ export class QwenAgent extends BaseAgent {
 
     textParts.push(message);
     const text = textParts.filter(Boolean).join('\n\n');
-    const blocks: ContentBlock[] = [
-      {
+    const blocks: ContentBlock[] = [];
+    if (text || context) {
+      blocks.push({
         type: 'text',
         text: context ? `${text}\n\n` : text,
-      },
-    ];
+      });
+    }
 
     if (context) {
       blocks.push({

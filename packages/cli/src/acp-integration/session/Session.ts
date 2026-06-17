@@ -315,7 +315,7 @@ function getStructuredMidTurnDisplayText(
 function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
   if (!isRecord(response)) return [];
 
-  if (Array.isArray(response['items']) && response['items'].length > 0) {
+  if (Array.isArray(response['items'])) {
     return response['items'].flatMap((item): DrainedMidTurnMessage[] => {
       if (!isRecord(item)) {
         return [];
@@ -338,7 +338,14 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
     });
   }
 
-  if (!Array.isArray(response['messages'])) return [];
+  if (!Array.isArray(response['messages'])) {
+    debugLogger.warn(
+      `Mid-turn drain response had no recognized 'items' or 'messages' field; keys: ${Object.keys(
+        response,
+      ).join(', ')}`,
+    );
+    return [];
+  }
 
   return response['messages']
     .filter(
@@ -2067,14 +2074,14 @@ export class Session implements SessionContext {
                   (signal) => this.#resolvePrompt(message.content, signal),
                 );
         } catch (messageError) {
-          if (abortSignal.aborted) throw messageError;
+          if (abortSignal.aborted) return drainedParts;
           const errorMessage = this.#formatError(messageError);
           debugLogger.warn(
             `Failed to resolve mid-turn message: ${errorMessage}`,
           );
           rawParts = [
             {
-              text: `[Message could not be delivered: ${errorMessage}]`,
+              text: displayText,
             },
           ];
         }

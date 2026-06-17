@@ -310,7 +310,7 @@ function canOfferMidTurnAttachments(
   storedAttachments?: StoredAttachment[],
 ): boolean {
   if (!attachments?.length) {
-    return !storedAttachments?.length
+    return true
   }
 
   return attachments.every((attachment) => {
@@ -5001,7 +5001,9 @@ export class SessionManager implements ISessionManager {
           const index = managed.messageQueue.findIndex(
             (entry) =>
               entry.midTurnPending &&
-              (entry.messageId === messageId || entry.message === messageId),
+              (entry.messageId === messageId ||
+                entry.optimisticMessageId === messageId ||
+                entry.message === messageId),
           )
           if (index >= 0) {
             const [entry] = managed.messageQueue.splice(index, 1)
