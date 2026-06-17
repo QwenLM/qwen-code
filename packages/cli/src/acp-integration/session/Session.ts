@@ -188,6 +188,7 @@ const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_IMAGE_PROCESSING_FAILURE_TEXT =
   '[Image attachment could not be processed]';
+const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // Latch the drain off only after this many consecutive timeouts: one slow
 // answer must not permanently disable mid-turn messages for a
 // conforming-but-busy client, while a client that never answers stops
@@ -265,7 +266,9 @@ function isEmbeddedResourceResource(
   value: unknown,
 ): value is EmbeddedResourceResource {
   if (!isRecord(value) || typeof value['uri'] !== 'string') return false;
-  if (typeof value['text'] === 'string') return true;
+  if (typeof value['text'] === 'string') {
+    return value['text'].length <= MAX_MID_TURN_RESOURCE_TEXT_LENGTH;
+  }
   return typeof value['blob'] === 'string';
 }
 

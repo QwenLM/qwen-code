@@ -103,6 +103,9 @@ type JsonRecord = Record<string, unknown>;
 
 const QWEN_RESPONSE_INTERRUPTED_MESSAGE = 'Response interrupted';
 const QWEN_TOOL_RESULT_MISSING_MESSAGE = 'Tool result was not recorded.';
+const MAX_MID_TURN_CONTENT_BUILD_FAILURES = 3;
+const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
+  '[Attachment could not be processed]';
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -1628,6 +1631,7 @@ function permissionTypeForKind(
 interface QueuedMidTurnMessage extends MidTurnMessageMetadata {
   message: string;
   attachments?: FileAttachment[];
+  buildFailureCount?: number;
 }
 
 export class QwenAgent extends BaseAgent {
@@ -2833,21 +2837,36 @@ export class QwenAgent extends BaseAgent {
     const messageIds: string[] = [];
     const failedEntries: QueuedMidTurnMessage[] = [];
     for (const entry of entries) {
+      const displayText = entry.message || '[User message with attachments]';
       try {
         items.push({
           content: this.buildPromptBlocks(entry.message, entry.attachments, {
             includeContext: false,
           }),
-          displayText: entry.message || '[User message with attachments]',
+          displayText,
         });
         messageIds.push(
           entry.messageId ?? entry.optimisticMessageId ?? entry.message,
         );
       } catch (error) {
-        failedEntries.push(entry);
+        const buildFailureCount = (entry.buildFailureCount ?? 0) + 1;
         this.debug(
-          `Failed to build mid-turn content blocks: ${getErrorMessage(error)}`,
+          `Failed to build mid-turn content blocks (${buildFailureCount}/${MAX_MID_TURN_CONTENT_BUILD_FAILURES}): ${getErrorMessage(error)}`,
         );
+        if (buildFailureCount >= MAX_MID_TURN_CONTENT_BUILD_FAILURES) {
+          items.push({
+            content: [
+              { type: 'text', text: displayText },
+              { type: 'text', text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT },
+            ],
+            displayText,
+          });
+          messageIds.push(
+            entry.messageId ?? entry.optimisticMessageId ?? entry.message,
+          );
+        } else {
+          failedEntries.push({ ...entry, buildFailureCount });
+        }
       }
     }
 

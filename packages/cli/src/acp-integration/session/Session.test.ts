@@ -3136,6 +3136,18 @@ describe('Session', () => {
               ],
               displayText: 'invalid resource',
             },
+            {
+              content: [
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'file:///huge.txt',
+                    text: 'x'.repeat(100_001),
+                  },
+                },
+              ],
+              displayText: 'huge resource',
+            },
           ],
         });
         mockChat.sendMessageStream = vi
@@ -3189,10 +3201,16 @@ describe('Session', () => {
             {
               text: '\n[User message received during tool execution]: invalid resource',
             },
+            {
+              text: '\n[User message received during tool execution]: huge resource',
+            },
           ]),
         );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           'Dropped 1 invalid mid-turn content block(s): "invalid resource"',
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          'Dropped 1 invalid mid-turn content block(s): "huge resource"',
         );
       });
 

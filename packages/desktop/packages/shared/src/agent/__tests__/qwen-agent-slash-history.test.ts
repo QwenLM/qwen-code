@@ -398,7 +398,7 @@ describe('QwenAgent slash command history', () => {
     agent.destroy();
   });
 
-  it('acknowledges only successfully built mid-turn attachment messages', async () => {
+  it('retries and falls back when mid-turn attachment messages fail to build', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);
 
@@ -463,6 +463,27 @@ describe('QwenAgent slash command history', () => {
       }),
     ).resolves.toEqual({ items: [] });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledTimes(1);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            { type: 'text', text: 'bad image' },
+            {
+              type: 'text',
+              text: '[Attachment could not be processed]',
+            },
+          ],
+          displayText: 'bad image',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenLastCalledWith(['bad-image']);
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledTimes(2);
 
     agent.destroy();
   });
