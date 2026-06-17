@@ -11,9 +11,11 @@ import { createWorkflowSandbox, debugLogger } from './workflow-sandbox.js';
 import type {
   WorkflowAgentOpts,
   WorkflowAgentResult,
+  WorkflowBudget,
   WorkflowMeta,
   WorkflowOrchestratorEmitter,
 } from './workflow-sandbox.js';
+import { WorkflowBudgetExceededError } from './workflow-budget.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
@@ -221,6 +223,22 @@ export interface WorkflowRunRequest {
    * generator so existing call sites work unchanged.
    */
   runId?: string;
+  /**
+   * P5: optional per-run token budget. When provided, `countedDispatch`
+   * checks `budget.remaining() > 0` BEFORE each `agent()` dispatch and
+   * throws `WorkflowBudgetExceededError` if the cap is hit. Also
+   * surfaced via `SandboxOptions.budget` so the script-side `budget`
+   * global reads the live state (`budget.spent()` / `budget.remaining()`
+   * for dynamic-loop patterns).
+   *
+   * Token recording happens inside the production dispatch
+   * (`createProductionDispatch` reads `subagent.core.stats.getSummary
+   * (...).outputTokens` after each successful execute and reports back
+   * via the `onTokens` callback the WorkflowTool wires through). Test
+   * dispatches that want to assert budget gating should call
+   * `budget.recordSpent(N)` directly.
+   */
+  budget?: WorkflowBudget;
 }
 
 export interface WorkflowRunOutcome {
@@ -290,6 +308,15 @@ function sanitizeForErrorMessage(value: string): string {
 export function createProductionDispatch(
   config: Config,
   signal?: AbortSignal,
+  /**
+   * P5: callback fired after each successful subagent.execute with the
+   * agent's output token count (read from `core.stats.getSummary`).
+   * `WorkflowTool` wires this to `budget.recordSpent` so the per-run
+   * budget tracks every dispatch's cost. Optional — when omitted
+   * (tests, legacy callers), the dispatch behaves exactly as before,
+   * just without budget recording.
+   */
+  onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): WorkflowAgentDispatch {
   return async (prompt, opts) => {
     const { AgentHeadless, ContextState } = await import('./agent-headless.js');
@@ -335,10 +362,23 @@ export function createProductionDispatch(
           `Workflow subagent did not complete (terminate mode: ${mode}).`,
         );
       }
+      // P5: report token usage out-of-band before returning. Reading
+      // stats AFTER GOAL ensures we count only the completed dispatch's
+      // tokens (CANCELLED/TIMEOUT/MAX_TURNS already threw above). The
+      // `try/catch` is defensive — a stats-read failure must not
+      // poison the dispatch result, only skip the budget update.
+      if (onTokens) {
+        try {
+          const summary = subagent.getExecutionSummary();
+          onTokens(summary.outputTokens, opts);
+        } catch (e) {
+          debugLogger.warn('onTokens callback threw:', e);
+        }
+      }
       return subagent.getFinalText();
     }
 
-    return runOverridePath(config, ctx, opts, signal);
+    return runOverridePath(config, ctx, opts, signal, onTokens);
   };
 }
 
@@ -382,6 +422,13 @@ async function runOverridePath(
   ctx: ContextState,
   opts: WorkflowAgentOpts,
   signal: AbortSignal | undefined,
+  /**
+   * P5: forwarded from createProductionDispatch. The override path
+   * builds its own AgentHeadless and runs subagent.execute(); the
+   * stats are on the same `core.stats` accessor as the fast path,
+   * so the token report site is identical.
+   */
+  onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): Promise<WorkflowAgentResult> {
   if (opts.isolation === 'remote') {
     // Error message verbatim from upstream Claude Code 2.1.168 strings.
@@ -641,6 +688,17 @@ async function runOverridePath(
         );
       }
       let finalText: WorkflowAgentResult = subagent.getFinalText();
+      // P5: report token usage out-of-band before the worktree cleanup.
+      // Same defensive try/catch as the fast path so a stats-read
+      // failure does not poison the dispatch result.
+      if (onTokens) {
+        try {
+          const summary = subagent.getExecutionSummary();
+          onTokens(summary.outputTokens, opts);
+        } catch (e) {
+          debugLogger.warn('onTokens callback threw:', e);
+        }
+      }
       // Cleanup worktree on the success path while we still have the
       // isolation handle. The preserved suffix (if any) is appended to
       // the final text so the script can see it. The outer finally below
@@ -1109,6 +1167,7 @@ export class WorkflowOrchestrator {
     // the (max+1)th throws), and limiter.run enforces the concurrency window.
     let agentCount = 0;
     const emitter = req.emitter;
+    const budget = req.budget;
     const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
       agentCount += 1;
       if (agentCount > maxAgents) {
@@ -1116,6 +1175,18 @@ export class WorkflowOrchestrator {
           new Error(
             `Workflow exceeded the maximum of ${maxAgents} agent() calls per run.`,
           ),
+        );
+      }
+      // P5: budget gate. When a per-run token cap is set
+      // (QWEN_CODE_MAX_TOKENS_PER_WORKFLOW), refuse to dispatch once the
+      // cap is reached. Token recording happens inside the production
+      // dispatch (createProductionDispatch reads subagent stats and
+      // reports back via the onTokens callback the WorkflowTool wires).
+      // No-op when `budget.total === null` (no cap), because
+      // `budget.remaining()` returns `Infinity` — the check never fires.
+      if (budget && budget.total !== null && budget.remaining() <= 0) {
+        return Promise.reject(
+          new WorkflowBudgetExceededError(runId, budget.total, budget.spent()),
         );
       }
       // P4b: emit dispatch-start outside the limiter so the registry
@@ -1137,6 +1208,18 @@ export class WorkflowOrchestrator {
               emitter?.agentCompleted?.(label);
             } catch (e) {
               debugLogger.warn('emitter.agentCompleted threw:', e);
+            }
+            // P5: re-snapshot the budget after successful completion so the
+            // registry sees the cumulative spent. The dispatch's onTokens
+            // callback (when wired) has already called budget.recordSpent
+            // before this point. Skipped when no budget — there is nothing
+            // for the registry to mirror.
+            if (budget) {
+              try {
+                emitter?.budgetUpdated?.(budget.spent(), budget.total);
+              } catch (e) {
+                debugLogger.warn('emitter.budgetUpdated threw:', e);
+              }
             }
             return result;
           },
@@ -1162,6 +1245,7 @@ export class WorkflowOrchestrator {
       pipeline: pipelineImpl,
       abortOnTimeout: req.abortOnTimeout,
       emitter,
+      budget,
     });
     try {
       const result = await sandbox.run(req.script);

@@ -920,6 +920,16 @@ const WorkflowDetailBody: React.FC<{
   dimSubtitleParts.push(
     `${entry.phases.length} ${entry.phases.length === 1 ? t('phase') : t('phases')}`,
   );
+  // P5: surface the per-run token usage when there's anything to report
+  // (cap set OR tokens spent). Skipped when both are absent so legacy
+  // / test runs don't show a noisy `0 tokens` chip.
+  if (entry.tokensSpent > 0 || entry.tokenBudgetTotal !== null) {
+    dimSubtitleParts.push(
+      entry.tokenBudgetTotal !== null
+        ? `${entry.tokensSpent}/${entry.tokenBudgetTotal} ${t('tokens')}`
+        : `${entry.tokensSpent} ${t('tokens')}`,
+    );
+  }
 
   // Phase tree: collapse the head when over the visible cap, keeping
   // the most recent N entries (the user almost always wants to see the
@@ -989,10 +999,16 @@ const WorkflowDetailBody: React.FC<{
               i === visiblePhases.length - 1 &&
               entry.currentPhase === phaseTitle;
             const marker = isCurrent ? '▸' : '·';
+            // P5: per-phase token tally appended to the phase row.
+            // Skipped when no tokens attributed yet so empty phases
+            // (early register, schema-mode-pending) don't render a
+            // misleading `· 0` chip.
+            const phaseTokens = entry.perPhaseTokens.get(phaseTitle) ?? 0;
+            const tokenChip = phaseTokens > 0 ? ` · ${phaseTokens}t` : '';
             return (
               <Box key={`${phaseTitle}-${i}`}>
                 <Text color={isCurrent ? theme.status.success : undefined}>
-                  {`  ${marker} ${phaseTitle}`}
+                  {`  ${marker} ${phaseTitle}${tokenChip}`}
                 </Text>
               </Box>
             );

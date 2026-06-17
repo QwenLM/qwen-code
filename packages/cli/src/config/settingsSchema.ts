@@ -1188,6 +1188,16 @@ const SETTINGS_SCHEMA = {
         description: 'Skip the next speaker check.',
         showInDialog: false,
       },
+      skipWorkflowUsageWarning: {
+        type: 'boolean',
+        label: 'Skip Workflow Usage Warning',
+        category: 'Model',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.',
+        showInDialog: false,
+      },
       skipLoopDetection: {
         type: 'boolean',
         label: 'Skip Loop Detection',

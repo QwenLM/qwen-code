@@ -507,6 +507,11 @@
           "type": "boolean",
           "default": true
         },
+        "skipWorkflowUsageWarning": {
+          "description": "Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.",
+          "type": "boolean",
+          "default": false
+        },
         "skipLoopDetection": {
           "description": "Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.",
           "type": "boolean",

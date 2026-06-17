@@ -29,11 +29,21 @@ function rowLine(entry: WorkflowTask, now: number): string {
     entry.phases.length > 0
       ? ` · ${entry.phases.length} ${entry.phases.length === 1 ? 'phase' : 'phases'}`
       : '';
+  // P5: budget chip — `tokens/cap` when capped, plain `tokens` otherwise.
+  // Skipped on the listing row when nothing is spent AND no cap; the
+  // detail view (`detailLines`) always renders both fields so an
+  // operator inspecting one run sees the cap state regardless.
+  const budgetChip =
+    entry.tokensSpent > 0 || entry.tokenBudgetTotal !== null
+      ? entry.tokenBudgetTotal !== null
+        ? ` · ${entry.tokensSpent}/${entry.tokenBudgetTotal}t`
+        : ` · ${entry.tokensSpent}t`
+      : '';
   const errorTail =
     entry.status === 'failed' && entry.error
       ? ` — ${entry.error.slice(0, 80)}`
       : '';
-  return `  ${entry.runId.padEnd(20)} ${entry.status.padEnd(10)} ${runtime.padStart(8)}  ${label}${phase}${counts}${phaseCount}${errorTail}`;
+  return `  ${entry.runId.padEnd(20)} ${entry.status.padEnd(10)} ${runtime.padStart(8)}  ${label}${phase}${counts}${phaseCount}${budgetChip}${errorTail}`;
 }
 
 function detailLines(entry: WorkflowTask, now: number): string[] {
@@ -61,6 +71,13 @@ function detailLines(entry: WorkflowTask, now: number): string[] {
   lines.push(
     `  agents      : ${entry.agentsCompleted}/${entry.agentsDispatched}`,
   );
+  // P5: surface budget + token usage. `tokens` shows actual usage even
+  // when no cap is set (operators care about uncapped runs too); `cap`
+  // is the env override or `(no cap)` when null.
+  lines.push(`  tokens      : ${entry.tokensSpent}`);
+  lines.push(
+    `  cap         : ${entry.tokenBudgetTotal !== null ? entry.tokenBudgetTotal : '(no cap)'}`,
+  );
   if (entry.error) {
     lines.push(`  error       : ${entry.error}`);
   }
@@ -68,7 +85,9 @@ function detailLines(entry: WorkflowTask, now: number): string[] {
     lines.push('');
     lines.push(`  Phases (${entry.phases.length})`);
     for (const phase of entry.phases) {
-      lines.push(`    · ${phase}`);
+      const phaseTokens = entry.perPhaseTokens.get(phase) ?? 0;
+      const chip = phaseTokens > 0 ? ` · ${phaseTokens}t` : '';
+      lines.push(`    · ${phase}${chip}`);
     }
   }
   if (entry.recentLogs.length > 0) {

@@ -444,6 +444,16 @@ export interface WorkflowOrchestratorEmitter {
   agentDispatched?(label?: string): void;
   /** `dispatch(...)` settled (success or thrown). `error` set on rejection. */
   agentCompleted?(label?: string, error?: string): void;
+  /**
+   * P5: cumulative `spent` re-snapshot after each successful agent
+   * completion. `total` is `null` when no per-run cap is set
+   * (`QWEN_CODE_MAX_TOKENS_PER_WORKFLOW` unset). Caller (the
+   * `WorkflowTool`) mirrors this into the `WorkflowRunRegistry` so the
+   * pill / dialog / detail body surface the live token usage. The
+   * orchestrator only fires this when a `budget` was passed to
+   * `WorkflowRunRequest.budget`.
+   */
+  budgetUpdated?(spent: number, total: number | null): void;
 }
 
 export interface SandboxOptions {

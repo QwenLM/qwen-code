@@ -272,4 +272,104 @@ describe('WorkflowRunRegistry', () => {
     r.complete('wf_1', null, 1_000);
     expect(r.hasRunningEntries()).toBe(false);
   });
+
+  // ── P5: budget + warning latch ─────────────────────────────────────
+
+  it('P5: register initializes tokensSpent=0, tokenBudgetTotal=null, perPhaseTokens=Map', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_1'));
+    expect(entry.tokensSpent).toBe(0);
+    expect(entry.tokenBudgetTotal).toBeNull();
+    expect(entry.perPhaseTokens).toBeInstanceOf(Map);
+    expect(entry.perPhaseTokens.size).toBe(0);
+  });
+
+  it('P5: register seeds tokenBudgetTotal from the caller-supplied cap', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_capped', { tokenBudgetTotal: 50_000 }));
+    expect(entry.tokenBudgetTotal).toBe(50_000);
+  });
+
+  it('P5: onBudgetUpdated mutates tokensSpent + tokenBudgetTotal', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_1'));
+    r.onBudgetUpdated('wf_1', 1500, 10_000);
+    const e = r.get('wf_1')!;
+    expect(e.tokensSpent).toBe(1500);
+    expect(e.tokenBudgetTotal).toBe(10_000);
+  });
+
+  it('P5: onBudgetUpdated attributes delta to the entry currentPhase', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_1'));
+    r.onPhaseStarted('wf_1', 'Find');
+    r.onBudgetUpdated('wf_1', 200, 1000); // +200 → Find
+    r.onBudgetUpdated('wf_1', 350, 1000); // +150 → Find
+    r.onPhaseStarted('wf_1', 'Verify');
+    r.onBudgetUpdated('wf_1', 500, 1000); // +150 → Verify
+    const e = r.get('wf_1')!;
+    expect(e.tokensSpent).toBe(500);
+    expect(e.perPhaseTokens.get('Find')).toBe(350);
+    expect(e.perPhaseTokens.get('Verify')).toBe(150);
+  });
+
+  it('P5: onBudgetUpdated attributes to the null sentinel before first phase()', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_1'));
+    r.onBudgetUpdated('wf_1', 100, null); // no phase yet
+    const e = r.get('wf_1')!;
+    expect(e.perPhaseTokens.get(null)).toBe(100);
+  });
+
+  it('P5: onBudgetUpdated is a no-op on missing / terminal entries', () => {
+    const r = new WorkflowRunRegistry();
+    // Missing entry — no throw.
+    r.onBudgetUpdated('wf_unknown', 100, 1000);
+
+    r.register(reg('wf_1'));
+    r.complete('wf_1', null, 1_000);
+    r.onBudgetUpdated('wf_1', 999, 1000); // terminal → ignored
+    const e = r.get('wf_1')!;
+    expect(e.tokensSpent).toBe(0);
+    expect(e.tokenBudgetTotal).toBeNull();
+  });
+
+  it('P5: onBudgetUpdated ignores backwards / zero deltas in perPhaseTokens', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_1'));
+    r.onPhaseStarted('wf_1', 'A');
+    r.onBudgetUpdated('wf_1', 100, 1000);
+    r.onBudgetUpdated('wf_1', 100, 1000); // same total → delta 0, skipped
+    r.onBudgetUpdated('wf_1', 50, 1000); // backwards — defensive skip
+    const e = r.get('wf_1')!;
+    // tokensSpent IS overwritten (cumulative tracker mirrors host),
+    // but per-phase attribution only takes positive deltas.
+    expect(e.tokensSpent).toBe(50);
+    expect(e.perPhaseTokens.get('A')).toBe(100);
+  });
+
+  it('P5: onBudgetUpdated fires the statusChange callback', () => {
+    const r = new WorkflowRunRegistry();
+    const cb = vi.fn();
+    r.setStatusChangeCallback(cb);
+    r.register(reg('wf_1'));
+    cb.mockClear();
+    r.onBudgetUpdated('wf_1', 100, 1000);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('P5: shouldShowUsageWarning fires once per registry instance', () => {
+    const r = new WorkflowRunRegistry();
+    expect(r.shouldShowUsageWarning()).toBe(true);
+    expect(r.shouldShowUsageWarning()).toBe(false);
+    expect(r.shouldShowUsageWarning()).toBe(false);
+  });
+
+  it('P5: shouldShowUsageWarning latch survives reset() (per-session, not per-clear)', () => {
+    const r = new WorkflowRunRegistry();
+    r.shouldShowUsageWarning(); // flips to true
+    r.register(reg('wf_1'));
+    r.reset();
+    expect(r.shouldShowUsageWarning()).toBe(false);
+  });
 });

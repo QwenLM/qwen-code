@@ -397,6 +397,192 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('mock:q1');
     expect(outcome.phases).toEqual(['Plan']);
   });
+
+  // ── P5: budget gate via WorkflowRunRequest.budget ─────────────────────
+
+  it('P5: budget gate refuses to dispatch once budget is exhausted', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(1000);
+    // Pre-burn the budget so the first agent() call lands over-cap.
+    budget.recordSpent(1000);
+
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      return 'never reached';
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('q1'); return 0;`,
+        args: undefined,
+        budget,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    // Cross-realm: the sandbox wraps the host error in a vm-realm Error
+    // (per T1/T8/T14 defense). The dispatch is never invoked because the
+    // gate short-circuits before limiter.run.
+    expect(String(caught)).toContain('exceeded the token budget');
+    expect(String(caught)).toContain('1000');
+    expect(dispatchCalls).toBe(0);
+  });
+
+  it('P5: budget gate stops further dispatches mid-run on overshoot', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    // Each dispatch burns 60 tokens; the budget should run out after 2.
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      budget.recordSpent(60);
+      return 'ok';
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('q1'); await agent('q2'); await agent('q3'); return 'done';`,
+        args: undefined,
+        budget,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    // q1 = 60/100, q2 = 120/100 (overshoot), q3 = gate refuses
+    expect(dispatchCalls).toBe(2);
+    expect(String(caught)).toContain('exceeded the token budget');
+    expect(budget.spent()).toBe(120);
+  });
+
+  it('P5: budget.total === null (no cap) — gate never fires', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(null);
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      budget.recordSpent(1_000_000); // each agent burns 1M tokens
+      return 'ok';
+    });
+    const outcome = await orchestrator.run({
+      script: `await agent('q1'); await agent('q2'); await agent('q3'); return 'done';`,
+      args: undefined,
+      budget,
+    });
+    expect(outcome.result).toBe('done');
+    expect(dispatchCalls).toBe(3);
+    expect(budget.spent()).toBe(3_000_000);
+    expect(budget.remaining()).toBe(Infinity);
+  });
+
+  it('P5: no budget passed (legacy callers) — gate never fires', async () => {
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      return 'ok';
+    });
+    const outcome = await orchestrator.run({
+      script: `await agent('q1'); await agent('q2'); return 'done';`,
+      args: undefined,
+    });
+    expect(outcome.result).toBe('done');
+    expect(dispatchCalls).toBe(2);
+  });
+
+  // ── P5 T4: budgetUpdated emitter event ─────────────────────────────────
+
+  it('P5 T4: budgetUpdated fires after each successful completion with cumulative spent + total', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(1000);
+    const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+      // Simulate the production-dispatch onTokens callback writing into
+      // the budget BEFORE the orchestrator's then() re-snapshots.
+      budget.recordSpent(prompt === 'q1' ? 150 : 250);
+      return 'ok';
+    });
+    const budgetUpdates: Array<{ spent: number; total: number | null }> = [];
+    const emitter = {
+      budgetUpdated: (spent: number, total: number | null) =>
+        budgetUpdates.push({ spent, total }),
+    };
+    await orchestrator.run({
+      script: `await agent('q1'); await agent('q2'); return 'done';`,
+      args: undefined,
+      budget,
+      emitter,
+    });
+    expect(budgetUpdates).toEqual([
+      { spent: 150, total: 1000 },
+      { spent: 400, total: 1000 },
+    ]);
+  });
+
+  it('P5 T4: budgetUpdated does NOT fire when no budget is passed', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    const budgetUpdates: number[] = [];
+    const emitter = {
+      budgetUpdated: (spent: number) => budgetUpdates.push(spent),
+    };
+    await orchestrator.run({
+      script: `await agent('q1'); return 'done';`,
+      args: undefined,
+      emitter,
+      // budget intentionally omitted
+    });
+    expect(budgetUpdates).toEqual([]);
+  });
+
+  it('P5 T4: budgetUpdated does NOT fire on dispatch rejection', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(1000);
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      throw new Error('dispatch-boom');
+    });
+    const budgetUpdates: number[] = [];
+    const completions: Array<{ label?: string; error?: string }> = [];
+    const emitter = {
+      budgetUpdated: (spent: number) => budgetUpdates.push(spent),
+      agentCompleted: (label?: string, error?: string) =>
+        completions.push({ label, error }),
+    };
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('q1'); return 'done';`,
+        args: undefined,
+        budget,
+        emitter,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(completions).toHaveLength(1);
+    expect(completions[0]?.error).toBe('dispatch-boom');
+    expect(budgetUpdates).toEqual([]);
+  });
+
+  it('P5 T4: budgetUpdated subscriber error does not break the run', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(1000);
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      budget.recordSpent(100);
+      return 'ok';
+    });
+    const emitter = {
+      budgetUpdated: () => {
+        throw new Error('budget-subscriber-boom');
+      },
+    };
+    const outcome = await orchestrator.run({
+      script: `await agent('q1'); return 'done';`,
+      args: undefined,
+      budget,
+      emitter,
+    });
+    expect(outcome.result).toBe('done');
+  });
 });
 
 describe('createProductionDispatch', () => {
