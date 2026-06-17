@@ -246,6 +246,9 @@ export class SubAgentTracker {
         );
         await event.respond(ToolConfirmationOutcome.Cancel);
         if (event.name === ToolNames.ASK_USER_QUESTION) {
+          // Fail closed: if the client cannot answer a nested user question,
+          // stop the parent turn instead of letting later tools run without the
+          // required user input.
           this.onAskUserQuestionCancel?.();
         }
       }

@@ -5174,6 +5174,17 @@ describe('Session', () => {
         await expect(promptPromise).resolves.toEqual({
           stopReason: 'end_turn',
         });
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'ask-user-question-call',
+                name: core.ToolNames.ASK_USER_QUESTION,
+              }),
+            }),
+          ],
+        });
       });
 
       it('waits for pending rewrites before cron stops after cancelled ask_user_question', async () => {
@@ -5240,6 +5251,134 @@ describe('Session', () => {
         releaseCronRewrite();
         await vi.waitFor(() => {
           expect(internals.cronCompletion).toBeNull();
+        });
+      });
+
+      it('ends Stop-hook continuation after cancelled ask_user_question', async () => {
+        const execute = vi.fn();
+        mockToolRegistry.getTool.mockReturnValue(
+          mockConfirmingTool(core.ToolNames.ASK_USER_QUESTION, execute),
+        );
+        vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+          outcome: { outcome: 'cancelled' },
+        });
+        const messageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            })
+            .mockResolvedValueOnce({
+              success: true,
+              output: {},
+            }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createAskUserQuestionResponseStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(execute).not.toHaveBeenCalled();
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(
+          messageBus.request.mock.calls.filter(([request]) => {
+            return (
+              typeof request === 'object' &&
+              request !== null &&
+              'eventName' in request &&
+              request.eventName === 'Stop'
+            );
+          }),
+        ).toHaveLength(1);
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'ask-user-question-call',
+                name: core.ToolNames.ASK_USER_QUESTION,
+              }),
+            }),
+          ],
+        });
+      });
+
+      it('ends background notification processing after cancelled ask_user_question', async () => {
+        const execute = vi.fn();
+        mockToolRegistry.getTool.mockReturnValue(
+          mockConfirmingTool(core.ToolNames.ASK_USER_QUESTION, execute),
+        );
+        vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+          outcome: { outcome: 'cancelled' },
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createAskUserQuestionResponseStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+
+        const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string; toolUseId?: string },
+        ) => void;
+
+        callback('done', '<task-notification />', {
+          agentId: 'agent-1',
+          status: 'completed',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            {
+              sessionId: 'test-session-id',
+              reason: 'end_turn',
+              source: 'background_notification',
+            },
+          );
+        });
+
+        expect(execute).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'ask-user-question-call',
+                name: core.ToolNames.ASK_USER_QUESTION,
+              }),
+            }),
+          ],
         });
       });
     });
@@ -5404,6 +5543,22 @@ describe('Session', () => {
           }),
         }),
       });
+      const shellUpdates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([params]) => params.update)
+        .filter(
+          (update) =>
+            'toolCallId' in update && update.toolCallId === 'shell_call',
+        );
+      expect(
+        shellUpdates.map((update) => ({
+          sessionUpdate: update.sessionUpdate,
+          status: 'status' in update ? update.status : undefined,
+        })),
+      ).toEqual([
+        { sessionUpdate: 'tool_call', status: 'pending' },
+        { sessionUpdate: 'tool_call_update', status: 'failed' },
+      ]);
     });
 
     it('does not stop the turn for non-question permission cancellation', async () => {
@@ -5629,6 +5784,196 @@ describe('Session', () => {
       expect(questionExecute).toHaveBeenCalledOnce();
       expect(siblingExecute).toHaveBeenCalledOnce();
       expect(siblingSignal?.aborted).toBe(true);
+    });
+
+    it('skips unstarted Agent calls after nested ask_user_question cancellation', async () => {
+      const previousMaxConcurrency =
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '1';
+      try {
+        const eventEmitter = new EventEmitter();
+        const respond = vi.fn().mockResolvedValue(undefined);
+        const questionExecute = vi
+          .fn()
+          .mockImplementation(async (signal: AbortSignal) => {
+            emitNestedAskUserQuestion(eventEmitter, respond);
+            await vi.waitFor(() => {
+              expect(signal.aborted).toBe(true);
+            });
+            return {
+              llmContent: 'agent stopped',
+              returnDisplay: 'agent stopped',
+            };
+          });
+        const secondExecute = vi.fn();
+        const thirdExecute = vi.fn();
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            const id = args['_test_id'];
+            return {
+              params: { subagent_type: 'explore', ...args },
+              eventEmitter,
+              execute:
+                id === 'question'
+                  ? questionExecute
+                  : id === 'second'
+                    ? secondExecute
+                    : thirdExecute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Agent'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            };
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+          outcome: { outcome: 'cancelled' },
+        });
+
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, 'prompt-agent-unstarted', [
+          {
+            id: 'agent_question',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'question', subagent_type: 'explore' },
+          },
+          {
+            id: 'agent_second',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'second', subagent_type: 'explore' },
+          },
+          {
+            id: 'agent_third',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'third', subagent_type: 'explore' },
+          },
+        ]);
+
+        expect(result.stopAfterUserQuestionCancel).toBe(true);
+        expect(questionExecute).toHaveBeenCalledOnce();
+        expect(secondExecute).not.toHaveBeenCalled();
+        expect(thirdExecute).not.toHaveBeenCalled();
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_question',
+          'agent_second',
+          'agent_third',
+        ]);
+        expect(result.parts[1]?.functionResponse?.response).toEqual({
+          error:
+            'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.',
+        });
+        expect(result.parts[2]?.functionResponse?.response).toEqual({
+          error:
+            'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.',
+        });
+      } finally {
+        if (previousMaxConcurrency === undefined) {
+          delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        } else {
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+            previousMaxConcurrency;
+        }
+      }
+    });
+
+    it('skips later sequential batches after nested ask_user_question cancellation', async () => {
+      const questionEventEmitter = new EventEmitter();
+      const siblingEventEmitter = new EventEmitter();
+      const respond = vi.fn().mockResolvedValue(undefined);
+      const questionExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          emitNestedAskUserQuestion(questionEventEmitter, respond);
+          await vi.waitFor(() => {
+            expect(signal.aborted).toBe(true);
+          });
+          return {
+            llmContent: 'agent stopped',
+            returnDisplay: 'agent stopped',
+          };
+        });
+      const siblingExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          await waitForAbortOrTick(signal);
+          return {
+            llmContent: 'sibling stopped',
+            returnDisplay: 'sibling stopped',
+          };
+        });
+      const shellExecute = vi.fn().mockResolvedValue({
+        llmContent: 'shell result',
+        returnDisplay: 'shell result',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) => {
+        if (name !== core.ToolNames.AGENT) {
+          return mockAllowedTool(name, shellExecute);
+        }
+        return {
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            const isQuestionAgent = args['_test_id'] === 'question';
+            return {
+              params: { subagent_type: 'explore', ...args },
+              eventEmitter: isQuestionAgent
+                ? questionEventEmitter
+                : siblingEventEmitter,
+              execute: isQuestionAgent ? questionExecute : siblingExecute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Agent'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            };
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        };
+      });
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-agent-then-shell', [
+        {
+          id: 'agent_question',
+          name: core.ToolNames.AGENT,
+          args: { _test_id: 'question', subagent_type: 'explore' },
+        },
+        {
+          id: 'agent_sibling',
+          name: core.ToolNames.AGENT,
+          args: { _test_id: 'sibling', subagent_type: 'explore' },
+        },
+        {
+          id: 'shell_after',
+          name: core.ToolNames.SHELL,
+          args: { command: 'echo should-not-run' },
+        },
+      ]);
+
+      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(questionExecute).toHaveBeenCalledOnce();
+      expect(siblingExecute).toHaveBeenCalledOnce();
+      expect(shellExecute).not.toHaveBeenCalled();
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'agent_question',
+        'agent_sibling',
+        'shell_after',
+      ]);
+      expect(result.parts[2]?.functionResponse?.response).toEqual({
+        error:
+          'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.',
+      });
     });
 
     it('does not fire success hooks for sibling Agents aborted by nested ask_user_question cancellation', async () => {

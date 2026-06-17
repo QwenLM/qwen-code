@@ -2878,6 +2878,12 @@ export class Session implements SessionContext {
         error,
         errorType: undefined,
       });
+      await this.toolCallEmitter.emitStart({
+        callId,
+        toolName,
+        args: (fc.args ?? {}) as Record<string, unknown>,
+        status: 'pending',
+      });
       await this.toolCallEmitter.emitError(callId, toolName, error);
       return part;
     };
@@ -3546,6 +3552,9 @@ export class Session implements SessionContext {
 
               switch (outcome) {
                 case ToolConfirmationOutcome.Cancel:
+                  if (toolName === ToolNames.ASK_USER_QUESTION) {
+                    onStopAfterUserQuestionCancel?.();
+                  }
                   // Route through earlyErrorResponse so spanError carries the
                   // cancellation reason (plain errorResponse leaves it unset,
                   // which makes endToolSpan fall back to the generic 'tool
@@ -3599,7 +3608,7 @@ export class Session implements SessionContext {
               args,
               toolUseId,
               permissionMode,
-              abortSignal,
+              activeToolAbortSignal,
             );
 
             if (!preHookResult.shouldProceed) {
@@ -3718,7 +3727,7 @@ export class Session implements SessionContext {
               toolResponse,
               toolUseId,
               permissionMode,
-              abortSignal,
+              activeToolAbortSignal,
             );
 
             // If hook indicates to stop, return an error response

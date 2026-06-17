@@ -587,6 +587,41 @@ describe('SubAgentTracker', () => {
       );
     });
 
+    it('does not notify when a non-question subagent tool is cancelled', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+      });
+      const onAskUserQuestionCancel = vi.fn();
+      tracker = new SubAgentTracker(
+        mockContext,
+        mockClient,
+        'parent-call-123',
+        'test-subagent',
+        onAskUserQuestionCancel,
+      );
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'shell',
+        callId: 'call-shell',
+        confirmationDetails: createInfoConfirmation(),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          {
+            answers: undefined,
+          },
+        );
+      });
+      expect(onAskUserQuestionCancel).not.toHaveBeenCalled();
+    });
+
     it('notifies when nested ask_user_question permission request fails', async () => {
       requestPermissionSpy.mockRejectedValue(new Error('Network error'));
       const onAskUserQuestionCancel = vi.fn();
