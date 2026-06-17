@@ -5,10 +5,14 @@
  * Extends ChannelBase for streaming, access control, and session routing.
  * Supports QR code login, credential persistence, C2C and group chat.
  *
+ * Cross-server context continuation: persists SessionRouter mappings and
+ * QQ-specific routing state (chatTypeMap, replyMsgId, msgSeqMap) to disk,
+ * restoring them on reconnect so conversations survive daemon restarts.
+ *
  * @see https://bot.q.qq.com/wiki/develop/api-v2/
  */
 
-import { ChannelBase } from '@qwen-code/channel-base';
+import { ChannelBase, SessionRouter } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
@@ -60,14 +64,35 @@ export class QQChannel extends ChannelBase {
   /** msg_seq counter per user messageId, for multi-block streaming. */
   private msgSeqMap: Map<string, number> = new Map();
 
+  /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
+  private readonly qqStatePath: string;
+  /**
+   * Path to the global sessions.json managed by start.ts.
+   * start.ts deletes it on shutdown, so we back it up.
+   */
+  private readonly globalSessionsPath: string;
+  /** Backup of sessions.json so conversations survive daemon restarts. */
+  private readonly sessionsBackupPath: string;
+
   constructor(
     name: string,
     config: ChannelConfig & Record<string, unknown>,
     bridge: AcpBridge,
     options?: ChannelBaseOptions,
   ) {
-    super(name, config, bridge, options);
+    const stateDir = join(homedir(), '.qwen', 'channels');
+    mkdirSync(stateDir, { recursive: true });
+    const sessionsPath = join(stateDir, `${name}-sessions.json`);
+
+    const router =
+      options?.router ??
+      new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
+
+    super(name, config, bridge, { ...options, router });
     this.qqConfig = config as unknown as QQChannelConfig;
+    this.qqStatePath = join(stateDir, `${name}-state.json`);
+    this.globalSessionsPath = join(stateDir, 'sessions.json');
+    this.sessionsBackupPath = join(stateDir, `${name}-sessions-backup.json`);
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
@@ -110,6 +135,7 @@ export class QQChannel extends ChannelBase {
         if (msgId) {
           const seq = (this.msgSeqMap.get(msgId) ?? 0) + 1;
           this.msgSeqMap.set(msgId, seq);
+          this.saveQQState();
           body['msg_id'] = msgId;
           body['msg_seq'] = seq;
         }
@@ -139,6 +165,8 @@ export class QQChannel extends ChannelBase {
   disconnect(): void {
     this.stopHeartbeat();
     this.stopTokenRefresh();
+    this.saveQQState();
+    this.backupGlobalSessions();
     if (this.ws) {
       this.ws.close(1000);
       this.ws = null;
@@ -150,6 +178,104 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
+  }
+
+  // ── State Persistence (cross-server context continuation) ──────
+
+  private saveQQState(): void {
+    try {
+      writeFileSync(
+        this.qqStatePath,
+        JSON.stringify({
+          chatTypeMap: Array.from(this.chatTypeMap.entries()),
+          replyMsgId: Array.from(this.replyMsgId.entries()),
+          msgSeqMap: Array.from(this.msgSeqMap.entries()),
+        }),
+      );
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  private restoreQQState(): boolean {
+    try {
+      if (!existsSync(this.qqStatePath)) return false;
+      const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
+      if (raw.chatTypeMap) this.chatTypeMap = new Map(raw.chatTypeMap);
+      if (raw.replyMsgId) this.replyMsgId = new Map(raw.replyMsgId);
+      if (raw.msgSeqMap) this.msgSeqMap = new Map(raw.msgSeqMap);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Backup the global sessions.json before start.ts deletes it on shutdown.
+   * Restored on next connect so conversations survive daemon restarts.
+   */
+  private backupGlobalSessions(): void {
+    try {
+      if (existsSync(this.globalSessionsPath)) {
+        const data = readFileSync(this.globalSessionsPath, 'utf-8');
+        if (data.trim()) writeFileSync(this.sessionsBackupPath, data);
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  private restoreGlobalSessions(): void {
+    try {
+      if (
+        !existsSync(this.globalSessionsPath) &&
+        existsSync(this.sessionsBackupPath)
+      ) {
+        writeFileSync(
+          this.globalSessionsPath,
+          readFileSync(this.sessionsBackupPath, 'utf-8'),
+        );
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
+   * ACP LoadSessionResponse has no sessionId field, so bridge.loadSession()
+   * returns undefined. SessionRouter.restoreSessions() stores undefined
+   * in its maps, which breaks session resolution. Fix by reading the
+   * correct sessionIds from the persisted sessions.json.
+   */
+  private fixRestoredSessions(): void {
+    try {
+      if (!existsSync(this.globalSessionsPath)) return;
+      const raw = JSON.parse(readFileSync(this.globalSessionsPath, 'utf-8'));
+      const r = this.router as unknown as Record<string, unknown>;
+      const tm = r['toSession'] as Map<string, string> | undefined;
+      const tt = r['toTarget'] as Map<string, unknown> | undefined;
+      const tc = r['toCwd'] as Map<string, string> | undefined;
+      if (!tm || !tt) return;
+
+      for (const [key, sid] of tm) {
+        if (sid) continue;
+        const entry = raw[key] as
+          | { sessionId?: string; target?: unknown; cwd?: string }
+          | undefined;
+        if (!entry?.sessionId) continue;
+        const correctId: string = entry.sessionId;
+        const target = tt.get(sid);
+        tm.set(key, correctId);
+        tt.delete(undefined as unknown as string);
+        tt.set(correctId, target ?? entry.target);
+        if (tc) {
+          tc.delete(undefined as unknown as string);
+          tc.set(correctId, entry.cwd || '');
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
   }
 
   // ── Token ──────────────────────────────────────────────────────
@@ -372,8 +498,30 @@ export class QQChannel extends ChannelBase {
           this.reconnectAttempts = 0;
           this.connectReject = null;
           this.startHeartbeat();
-          process.stderr.write(`[QQ:${this.name}] Ready\n`);
-          onReady();
+          this.restoreGlobalSessions();
+          this.restoreQQState();
+          this.router
+            .restoreSessions()
+            .then(() => {
+              this.fixRestoredSessions();
+              const all = (
+                this.router as unknown as {
+                  getAll?: () => Array<{
+                    target?: { chatId?: string };
+                    sessionId?: string;
+                  }>;
+                }
+              ).getAll?.();
+              const sessions =
+                all
+                  ?.map((e) => `${e.target?.chatId}:${e.sessionId}`)
+                  .join(', ') || 'none';
+              process.stderr.write(
+                `[QQ:${this.name}] Ready (sessions: ${sessions})\n`,
+              );
+              onReady();
+            })
+            .catch(() => onReady());
         } else if (t === 'C2C_MESSAGE_CREATE') {
           this.handleC2C(msg['d'] as unknown as QQMessageEvent);
         } else if (t === 'GROUP_AT_MESSAGE_CREATE') {
@@ -433,6 +581,7 @@ export class QQChannel extends ChannelBase {
     const chatId = event.author.user_openid || event.author.id;
     this.chatTypeMap.set(chatId, 'c2c');
     this.replyMsgId.set(chatId, event.id);
+    this.saveQQState();
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
@@ -452,6 +601,7 @@ export class QQChannel extends ChannelBase {
     const chatId = event.group_openid || event.author.id;
     this.chatTypeMap.set(chatId, 'group');
     this.replyMsgId.set(chatId, event.id);
+    this.saveQQState();
     // Strip bot @mention prefix from group messages
     const senderName = event.author.username || event.author.id || 'QQ User';
     const text = `[${senderName}]: ${(event.content || '').replace(/<@!\d+>/g, '').trim()}`;
