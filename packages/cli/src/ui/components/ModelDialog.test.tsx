@@ -380,6 +380,63 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('falls back to the picker entry baseUrl when switchModel does not propagate it', async () => {
+    // Regression guard for the `after?.baseUrl ?? selectedEntry?.model.baseUrl`
+    // fallback: if switchModel succeeds but getContentGeneratorConfig returns a
+    // config WITHOUT baseUrl, the disambiguator must still be persisted from the
+    // selected picker entry's baseUrl — otherwise an empty-string tombstone would
+    // be written and the wrong same-id provider would resolve on next launch.
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'qwen3.7-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'qwen3.7-max',
+          label: '[Token Plan] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          envKey: 'TOKEN_PLAN_KEY',
+        },
+        {
+          id: 'qwen3.7-max',
+          label: '[IdeaLab] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://idealab.example.com/v1',
+          envKey: 'IDEALAB_KEY',
+        },
+      ]),
+      // Resolved config has NO baseUrl, so `after?.baseUrl` is undefined and the
+      // `?? selectedEntry?.model.baseUrl` fallback must supply the disambiguator.
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    // Select the IdeaLab entry (second provider with the same id).
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-max\0https://idealab.example.com/v1`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      'qwen3.7-max',
+    );
+    // baseUrl comes from the picker entry, not the (baseUrl-less) resolved config.
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      'https://idealab.example.com/v1',
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('shows MiniMax-M3 image + video modality and 1M context details', () => {
     const { getByText } = renderComponent({}, {
       getModel: vi.fn(() => 'MiniMax-M3'),
