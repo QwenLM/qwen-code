@@ -186,6 +186,8 @@ const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
 // await would wedge the prompt turn forever.
 const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
+const MID_TURN_IMAGE_PROCESSING_FAILURE_TEXT =
+  '[Image attachment could not be processed]';
 // Latch the drain off only after this many consecutive timeouts: one slow
 // answer must not permanently disable mid-turn messages for a
 // conforming-but-busy client, while a client that never answers stops
@@ -265,6 +267,10 @@ function isEmbeddedResourceResource(
   if (!isRecord(value) || typeof value['uri'] !== 'string') return false;
   if (typeof value['text'] === 'string') return true;
   return typeof value['blob'] === 'string';
+}
+
+function hasImageContentBlock(content: ContentBlock[]): boolean {
+  return content.some((part) => part.type === 'image');
 }
 
 function getMidTurnItemDisplayTextForLog(displayText: unknown): string {
@@ -2123,6 +2129,12 @@ export class Session implements SessionContext {
               text: displayText,
             },
           ];
+          if (
+            message.kind === 'structured' &&
+            hasImageContentBlock(message.content)
+          ) {
+            rawParts.push({ text: MID_TURN_IMAGE_PROCESSING_FAILURE_TEXT });
+          }
         }
         const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
         this.config

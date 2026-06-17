@@ -54,6 +54,7 @@ type QwenPromptInternals = {
   buildPromptBlocks: (
     message: string,
     attachments?: FileAttachment[],
+    options?: { includeContext?: boolean },
   ) => QwenPromptBlock[];
 };
 
@@ -393,6 +394,75 @@ describe('QwenAgent slash command history', () => {
       ],
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['queued-image']);
+
+    agent.destroy();
+  });
+
+  it('acknowledges only successfully built mid-turn attachment messages', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    const promptInternals = agent as unknown as QwenPromptInternals;
+    const originalBuildPromptBlocks =
+      promptInternals.buildPromptBlocks.bind(agent);
+    promptInternals.buildPromptBlocks = (message, attachments, options) => {
+      if (message === 'bad image') {
+        throw new Error('image decode failed');
+      }
+      return originalBuildPromptBlocks(message, attachments, options);
+    };
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(
+      agent.enqueueMidTurnMessage('bad image', [attachment], {
+        messageId: 'bad-image',
+      }),
+    ).toBe(true);
+    expect(
+      agent.enqueueMidTurnMessage('good image', [attachment], {
+        messageId: 'good-image',
+      }),
+    ).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            { type: 'text', text: 'good image' },
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: 'good image',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['good-image']);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({ items: [] });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledTimes(1);
 
     agent.destroy();
   });

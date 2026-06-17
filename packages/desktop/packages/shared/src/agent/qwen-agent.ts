@@ -2810,30 +2810,59 @@ export class QwenAgent extends BaseAgent {
     }
 
     const entries = this.midTurnMessageQueue.splice(0);
-    if (entries.length > 0) {
-      this.debug(
-        `Drained ${entries.length} mid-turn user message(s) to Qwen ACP`,
-      );
-      const messageIds = entries.map(
-        (entry) => entry.messageId ?? entry.optimisticMessageId ?? entry.message,
-      );
-      this.config.onMidTurnMessagesDrained?.(messageIds);
-    }
 
     const hasAttachments = entries.some(
       (entry) => entry.attachments && entry.attachments.length > 0,
     );
     if (!hasAttachments) {
+      if (entries.length > 0) {
+        this.debug(
+          `Drained ${entries.length} mid-turn user message(s) to Qwen ACP`,
+        );
+        this.config.onMidTurnMessagesDrained?.(
+          entries.map(
+            (entry) =>
+              entry.messageId ?? entry.optimisticMessageId ?? entry.message,
+          ),
+        );
+      }
       return { messages: entries.map((entry) => entry.message) };
     }
 
+    const items: Array<{ content: ContentBlock[]; displayText: string }> = [];
+    const messageIds: string[] = [];
+    const failedEntries: QueuedMidTurnMessage[] = [];
+    for (const entry of entries) {
+      try {
+        items.push({
+          content: this.buildPromptBlocks(entry.message, entry.attachments, {
+            includeContext: false,
+          }),
+          displayText: entry.message || '[User message with attachments]',
+        });
+        messageIds.push(
+          entry.messageId ?? entry.optimisticMessageId ?? entry.message,
+        );
+      } catch (error) {
+        failedEntries.push(entry);
+        this.debug(
+          `Failed to build mid-turn content blocks: ${getErrorMessage(error)}`,
+        );
+      }
+    }
+
+    if (failedEntries.length > 0) {
+      this.midTurnMessageQueue.unshift(...failedEntries);
+    }
+    if (messageIds.length > 0) {
+      this.debug(
+        `Drained ${messageIds.length} mid-turn user message(s) to Qwen ACP`,
+      );
+      this.config.onMidTurnMessagesDrained?.(messageIds);
+    }
+
     return {
-      items: entries.map((entry) => ({
-        content: this.buildPromptBlocks(entry.message, entry.attachments, {
-          includeContext: false,
-        }),
-        displayText: entry.message || '[User message with attachments]',
-      })),
+      items,
     };
   }
 
