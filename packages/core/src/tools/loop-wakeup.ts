@@ -72,9 +72,10 @@ class LoopWakeupInvocation extends BaseToolInvocation<
 
     try {
       const scheduler = this.config.getCronScheduler();
-      if (!scheduler.running) {
+      if (scheduler.disabled) {
         const message =
-          'Loop wakeups cannot be scheduled because the scheduler is stopped.';
+          'Loop wakeups are disabled for the rest of this session ' +
+          '(token limit reached). Restart the session to re-enable.';
         return {
           llmContent: message,
           returnDisplay: message,

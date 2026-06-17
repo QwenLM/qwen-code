@@ -102,8 +102,8 @@ describe('LoopWakeupTool', () => {
     expect(scheduler.size).toBe(0);
   });
 
-  it('rejects scheduling when the scheduler is stopped', async () => {
-    scheduler.stop();
+  it('rejects scheduling when the scheduler is disabled', async () => {
+    scheduler.disable();
     const invocation = tool.build({
       delaySeconds: 300,
       prompt: 'continue loop',
@@ -112,9 +112,27 @@ describe('LoopWakeupTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.error?.message).toBe(
-      'Loop wakeups cannot be scheduled because the scheduler is stopped.',
+      'Loop wakeups are disabled for the rest of this session ' +
+        '(token limit reached). Restart the session to re-enable.',
     );
     expect(scheduler.sessionSize).toBe(0);
+  });
+
+  it('schedules even when the scheduler is stopped but not disabled', async () => {
+    // The first self-paced /loop in a session with no cron jobs arms a
+    // wakeup before the scheduler has started — the post-prompt hook starts
+    // the tick afterwards. A merely-stopped scheduler must not reject.
+    scheduler.stop();
+    const invocation = tool.build({
+      delaySeconds: 300,
+      prompt: 'continue loop',
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('Scheduled loop wakeup');
+    expect(scheduler.sessionSize).toBe(1);
   });
 
   it('tells the model to re-arm to keep the loop alive', async () => {
@@ -224,7 +242,7 @@ describe('LoopWakeupTool', () => {
   it('surfaces a scheduler failure as a structured tool error', async () => {
     const failingConfig = {
       getCronScheduler: () => ({
-        running: true,
+        disabled: false,
         scheduleWakeup: () => {
           throw new Error('scheduler boom', {
             cause: new Error('clock unavailable'),

@@ -194,6 +194,10 @@ export class CronScheduler {
   // an empty map would restart the clock every fire and let a continuous
   // loop escape the cap. Reset only by stop()/destroy() (a new session).
   private wakeupChainStartedAt: number | null = null;
+  // Set once disable() runs (the session's token-limit breaker). Permanent
+  // for this scheduler's lifetime — distinct from a stopped-but-restartable
+  // timer, so LoopWakeup can reject wakeups that would never fire.
+  private _disabled = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private onFire: ((job: CronJob) => void) | null = null;
 
@@ -948,6 +952,26 @@ export class CronScheduler {
    */
   get running(): boolean {
     return this.timer !== null;
+  }
+
+  /**
+   * True once disable() has run. Distinct from `!running`: a fresh scheduler
+   * is stopped but not disabled, and starts on first pending work. Used by
+   * LoopWakeup to reject wakeups that would never fire (vs. ones that will
+   * fire once the post-prompt hook starts the tick).
+   */
+  get disabled(): boolean {
+    return this._disabled;
+  }
+
+  /**
+   * Permanently disables the scheduler for this session: stops the tick and
+   * marks it disabled so LoopWakeup rejects new wakeups. Only the token-limit
+   * breaker calls this; cleared only by a new session (a fresh instance).
+   */
+  disable(): void {
+    this._disabled = true;
+    this.stop();
   }
 
   /**

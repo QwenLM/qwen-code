@@ -2184,7 +2184,9 @@ export class Session implements SessionContext {
               debugLogger.error('Error processing cron prompt:', error);
               const msg =
                 error instanceof Error ? error.message : String(error);
-              await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
+              await this.messageEmitter.emitAgentMessage(
+                `[${item.source} error] ${msg}`,
+              );
             } finally {
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
@@ -2212,7 +2214,10 @@ export class Session implements SessionContext {
     this.cronDisabledByTokenLimit = true;
     this.cronQueue = [];
     if (!this.config.isCronEnabled()) return;
-    this.config.getCronScheduler().stop();
+    // disable() (not stop()): the breaker is permanent for the session, so
+    // LoopWakeup must reject re-arms that would never fire, not just halt the
+    // tick (which a later pending wakeup would otherwise silently restart).
+    this.config.getCronScheduler().disable();
     void this.#emitAgentDiagnosticMessageSafely(
       'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
       'Failed to emit cron-disabled diagnostic',

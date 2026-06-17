@@ -483,6 +483,19 @@ describe('CronScheduler', () => {
       ).not.toThrow();
     });
 
+    it('disable() marks the scheduler disabled and stops the tick', () => {
+      scheduler.start(() => {});
+      expect(scheduler.disabled).toBe(false);
+      expect(scheduler.running).toBe(true);
+
+      scheduler.disable();
+
+      // Disabled is a distinct, permanent state — a plain stop() leaves it
+      // restartable, but disable() bars re-arming for the session.
+      expect(scheduler.disabled).toBe(true);
+      expect(scheduler.running).toBe(false);
+    });
+
     it('keeps second precision (does not round to the minute)', () => {
       // 90s would round up to 2 min under the old cron path; the timer is exact.
       const w = scheduler.scheduleWakeup(90, 'p');
