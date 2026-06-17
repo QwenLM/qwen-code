@@ -80,71 +80,100 @@ const external = [
 // in skill-manager / ripgrepUtils / i18n / extensions/new.
 const BUNDLE_CHUNK_DIR = 'chunks';
 
-esbuild
-  .build({
-    entryPoints: { cli: 'packages/cli/index.ts' },
-    bundle: true,
-    outdir: 'dist',
-    entryNames: '[name]',
-    chunkNames: `${BUNDLE_CHUNK_DIR}/[name]-[hash]`,
-    splitting: true,
-    platform: 'node',
-    format: 'esm',
-    target: 'node22',
-    external,
-    packages: 'bundle',
-    inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
-    banner: {
-      js: `// Force strict mode and setup for ESM
+const mainBuild = esbuild.build({
+  entryPoints: { cli: 'packages/cli/index.ts' },
+  bundle: true,
+  outdir: 'dist',
+  entryNames: '[name]',
+  chunkNames: `${BUNDLE_CHUNK_DIR}/[name]-[hash]`,
+  splitting: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  external,
+  packages: 'bundle',
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: {
+    js: `// Force strict mode and setup for ESM
 "use strict";`,
-    },
-    alias: {
-      'is-in-ci': path.resolve(
-        __dirname,
-        'packages/cli/src/patches/is-in-ci.ts',
-      ),
-      '@qwen-code/web-templates': path.resolve(
-        __dirname,
-        'packages/web-templates/src/index.ts',
-      ),
-      // Resolve to userland punycode instead of deprecated node:punycode built-in
-      punycode: require.resolve('punycode/'),
-    },
-    define: {
-      'process.env.CLI_VERSION': JSON.stringify(pkg.version),
-      // Make global available for compatibility
-      global: 'globalThis',
-      // Redirect free __dirname/__filename references to the shim so that
-      // vendored libraries that emit their own `var __dirname` locals don't
-      // collide with our injected bindings when code-splitting is enabled.
-      //
-      // CONTRIBUTOR WARNING: this rewrite applies to *all* source files, so
-      // any bare `__dirname` / `__filename` in our own code resolves to the
-      // shim chunk's on-disk location (i.e. `dist/chunks/`), NOT the source
-      // file's own directory. To get a per-file path, declare a local shadow
-      // at the top of the module:
-      //
-      //   import { fileURLToPath } from 'node:url';
-      //   const __filename = fileURLToPath(import.meta.url);
-      //   const __dirname  = path.dirname(__filename);
-      //
-      // esbuild leaves the local binding alone (it's a declared identifier,
-      // not a free reference). For sibling-asset lookups in modules that may
-      // be hoisted into a shared chunk, prefer
-      // `resolveBundleDir(import.meta.url)` from
-      // `packages/core/src/utils/bundlePaths.ts` — it both produces a
-      // per-file path and strips the chunk segment when the module ends up
-      // under `dist/chunks/`.
-      __dirname: '__qwen_dirname',
-      __filename: '__qwen_filename',
-    },
-    loader: { '.node': 'file' },
-    plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
-    metafile: true,
-    write: true,
-    keepNames: true,
-  })
-  .then(({ metafile }) => {
+  },
+  alias: {
+    'is-in-ci': path.resolve(__dirname, 'packages/cli/src/patches/is-in-ci.ts'),
+    '@qwen-code/web-templates': path.resolve(
+      __dirname,
+      'packages/web-templates/src/index.ts',
+    ),
+    // Resolve to userland punycode instead of deprecated node:punycode built-in
+    punycode: require.resolve('punycode/'),
+  },
+  define: {
+    'process.env.CLI_VERSION': JSON.stringify(pkg.version),
+    // react-reconciler ≥0.33 (ink 7) gates its dev build behind NODE_ENV
+    // and calls performance.measure() on every render, leaking
+    // PerformanceMeasure objects into the global measureEntryBuffer.
+    // Setting production here tree-shakes the entire dev build (~15k lines).
+    'process.env.NODE_ENV': JSON.stringify('production'),
+    // Make global available for compatibility
+    global: 'globalThis',
+    // Redirect free __dirname/__filename references to the shim so that
+    // vendored libraries that emit their own `var __dirname` locals don't
+    // collide with our injected bindings when code-splitting is enabled.
+    //
+    // CONTRIBUTOR WARNING: this rewrite applies to *all* source files, so
+    // any bare `__dirname` / `__filename` in our own code resolves to the
+    // shim chunk's on-disk location (i.e. `dist/chunks/`), NOT the source
+    // file's own directory. To get a per-file path, declare a local shadow
+    // at the top of the module:
+    //
+    //   import { fileURLToPath } from 'node:url';
+    //   const __filename = fileURLToPath(import.meta.url);
+    //   const __dirname  = path.dirname(__filename);
+    //
+    // esbuild leaves the local binding alone (it's a declared identifier,
+    // not a free reference). For sibling-asset lookups in modules that may
+    // be hoisted into a shared chunk, prefer
+    // `resolveBundleDir(import.meta.url)` from
+    // `packages/core/src/utils/bundlePaths.ts` — it both produces a
+    // per-file path and strips the chunk segment when the module ends up
+    // under `dist/chunks/`.
+    __dirname: '__qwen_dirname',
+    __filename: '__qwen_filename',
+  },
+  loader: { '.node': 'file' },
+  plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
+  metafile: true,
+  write: true,
+  keepNames: true,
+});
+
+// fzf index worker — runs in its own worker_threads worker that
+// `fzfWorkerHandle.ts` spawns via `new Worker(new URL('./fzfWorker.js', ...))`.
+// Must exist as a standalone file next to `dist/cli.js` so the URL resolves
+// at runtime; we bundle it self-contained (no chunk splitting) so fzf is
+// inlined and the worker doesn't need to walk back into node_modules from
+// the published tarball. `prepare-package.js` whitelists `fzfWorker.js` in
+// the dist `files` array.
+const workerBuild = esbuild.build({
+  entryPoints: ['packages/core/src/utils/filesearch/fzfWorker.ts'],
+  bundle: true,
+  outfile: 'dist/fzfWorker.js',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  external,
+  packages: 'bundle',
+  // fzf is CJS — needs the same require()-shim the main bundle uses for
+  // CJS interop in ESM output.
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: {
+    js: `"use strict";`,
+  },
+  write: true,
+  keepNames: true,
+});
+
+Promise.all([mainBuild, workerBuild])
+  .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));
     }

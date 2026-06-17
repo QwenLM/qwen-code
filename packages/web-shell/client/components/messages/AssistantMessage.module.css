@@ -1,0 +1,165 @@
+.message {
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prefix {
+  color: var(--assist-color);
+  flex-shrink: 0;
+  margin-right: 6px;
+  line-height: 1.2;
+}
+
+.thinking {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  margin-bottom: 4px;
+}
+
+.thinking .prefix {
+  color: var(--text-dimmed);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.thinkingBody {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--thinking-pre-color);
+  line-height: 1.5;
+}
+
+.thinkingBody p,
+.thinkingBody ul,
+.thinkingBody ol,
+.thinkingBody blockquote,
+.thinkingBody pre {
+  margin-top: 0;
+  margin-bottom: 4px;
+}
+
+.thinkingBody :last-child {
+  margin-bottom: 0;
+}
+
+.thinkingBody ul,
+.thinkingBody ol {
+  padding-left: 24px;
+}
+
+.thinkingBody pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thinkingPreviewWrap,
+.thinkingExpandedWrap {
+  position: relative;
+}
+
+.thinkingPreview {
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  padding-right: 18px;
+  line-height: inherit;
+}
+
+.thinkingPreviewTail {
+  display: block;
+  max-height: calc(5 * 1.5em);
+  overflow-y: hidden;
+}
+
+.thinkingPreview > [data-markdown-source='thinking'] {
+  font: inherit;
+  line-height: inherit;
+}
+
+.thinkingPreview > [data-markdown-source='thinking'] > :first-child {
+  margin-top: 0;
+}
+
+.expandToggle {
+  display: block;
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--text-dimmed) 72%, transparent);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 4px;
+  margin: 2px 0 0 auto;
+}
+
+.thinkingPreviewWrap .expandToggle,
+.thinkingExpandedWrap .expandToggle {
+  position: absolute;
+  right: 0;
+  bottom: 2px;
+  background: var(--bg-primary);
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.thinkingPreviewOverflow::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 16px;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--bg-primary) 70%, transparent)
+  );
+  opacity: 0.45;
+}
+
+.thinkingPreviewWrap:hover .expandToggle,
+.thinkingPreviewWrap .expandToggle:focus-visible,
+.thinkingExpandedWrap:hover .expandToggle,
+.thinkingExpandedWrap .expandToggle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .thinkingPreviewWrap .expandToggle,
+  .thinkingExpandedWrap .expandToggle {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.expandToggle:hover {
+  color: var(--text-dimmed);
+}
+
+.content {
+  display: flex;
+  align-items: baseline;
+}
+
+.contentBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.contentBody pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  margin: 0;
+}

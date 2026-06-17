@@ -6,11 +6,51 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  BACKGROUND_AGENT_CONCURRENCY_ENV,
   BackgroundTaskRegistry,
+  DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS,
+  MAX_CONCURRENT_BACKGROUND_AGENTS,
   MAX_RETAINED_TERMINAL_AGENTS,
+  resolveMaxConcurrentBackgroundAgents,
+  type AgentTaskRegistration,
+  type BackgroundApproval,
   type BackgroundTaskEntry,
 } from './background-tasks.js';
 import * as transcript from './agent-transcript.js';
+import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
+import { ToolConfirmationOutcome } from '../tools/tools.js';
+
+function makeApproval(
+  callId: string,
+  respond: BackgroundApproval['respond'] = vi.fn(async () => {}),
+): BackgroundApproval {
+  return {
+    callId,
+    name: 'Shell',
+    description: `run ${callId}`,
+    confirmationDetails: {
+      type: 'exec',
+    } as BackgroundApproval['confirmationDetails'],
+    respond,
+    at: Date.now(),
+  };
+}
+
+function makeRegistration(
+  agentId: string,
+  overrides: Partial<AgentTaskRegistration> = {},
+): AgentTaskRegistration {
+  return {
+    agentId,
+    description: agentId,
+    status: 'running',
+    startTime: Date.now(),
+    abortController: new AbortController(),
+    isBackgrounded: true,
+    outputFile: `/tmp/${agentId}.jsonl`,
+    ...overrides,
+  };
+}
 
 describe('BackgroundTaskRegistry', () => {
   let registry: BackgroundTaskRegistry;
@@ -302,6 +342,30 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
+  it('abandons a paused agent and rejects parked approvals', () => {
+    const respond = vi.fn(async () => {});
+
+    registry.register({
+      agentId: 'paused-approval',
+      description: 'paused agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+    registry.addPendingApproval(
+      'paused-approval',
+      makeApproval('c1', respond),
+    );
+    registry.get('paused-approval')!.status = 'paused';
+
+    registry.abandon('paused-approval');
+
+    expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    expect(registry.getPendingApprovals('paused-approval')).toEqual([]);
+  });
+
   it('does not treat paused entries as unfinalized work', () => {
     registry.register({
       agentId: 'paused-1',
@@ -341,6 +405,86 @@ describe('BackgroundTaskRegistry', () => {
     const running = registry.getAll().filter((e) => e.status === 'running');
     expect(running).toHaveLength(1);
     expect(running[0].agentId).toBe('b');
+  });
+
+  describe('background concurrency limit', () => {
+    it('resolves the default and env override for the background agent cap', () => {
+      expect(resolveMaxConcurrentBackgroundAgents({})).toBe(
+        DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS,
+      );
+      expect(
+        resolveMaxConcurrentBackgroundAgents({
+          [BACKGROUND_AGENT_CONCURRENCY_ENV]: '3',
+        }),
+      ).toBe(3);
+      expect(
+        resolveMaxConcurrentBackgroundAgents({
+          [BACKGROUND_AGENT_CONCURRENCY_ENV]: '0',
+        }),
+      ).toBe(DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS);
+      expect(MAX_CONCURRENT_BACKGROUND_AGENTS).toBeGreaterThanOrEqual(1);
+    });
+
+    it('rejects new running background agents once the cap is reached', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+
+      registry.register(makeRegistration('bg-1'));
+      registry.register(makeRegistration('bg-2'));
+
+      expect(() => registry.register(makeRegistration('bg-3'))).toThrow(
+        'Cannot start background agent: maximum concurrent background agents ' +
+          '(2) reached. Stop an existing agent first.',
+      );
+      expect(registry.get('bg-3')).toBeUndefined();
+    });
+
+    it('allows replacing the same running background agent at the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      registry.register(makeRegistration('bg-1'));
+
+      expect(() =>
+        registry.register(
+          makeRegistration('bg-1', {
+            prompt: 'resumed continuation',
+          }),
+        ),
+      ).not.toThrow();
+      expect(registry.get('bg-1')?.prompt).toBe('resumed continuation');
+    });
+
+    it('does not count foreground, paused, or terminal entries toward the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      registry.register(
+        makeRegistration('fg-1', {
+          isBackgrounded: false,
+        }),
+      );
+      registry.register(
+        makeRegistration('paused-1', {
+          status: 'paused',
+        }),
+      );
+
+      registry.register(makeRegistration('bg-1'));
+      expect(() => registry.register(makeRegistration('bg-2'))).toThrow(
+        'maximum concurrent background agents (1) reached',
+      );
+
+      registry.complete('bg-1', 'done');
+      registry.register(makeRegistration('bg-2'));
+
+      expect(registry.get('fg-1')).toBeDefined();
+      expect(registry.get('paused-1')).toBeDefined();
+      expect(registry.get('bg-2')?.status).toBe('running');
+    });
   });
 
   it('aborts all running agents and emits fallback notifications', () => {
@@ -1455,6 +1599,317 @@ describe('BackgroundTaskRegistry', () => {
       registry.complete('bg-notify-1', 'done');
 
       expect(callback).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('permission bubbling (pending approvals)', () => {
+    it('parks an approval and surfaces it on the entry', () => {
+      const onChange = vi.fn();
+      registry.setApprovalChangeCallback(onChange);
+      registry.register(makeRegistration('bg-appr-1'));
+
+      const ok = registry.addPendingApproval('bg-appr-1', makeApproval('c1'));
+
+      expect(ok).toBe(true);
+      expect(registry.getPendingApprovals('bg-appr-1')).toHaveLength(1);
+      expect(registry.get('bg-appr-1')?.pendingApprovals?.[0].callId).toBe(
+        'c1',
+      );
+      expect(onChange).toHaveBeenCalledOnce();
+    });
+
+    it('refuses to park for an unknown or terminal entry', () => {
+      registry.register(makeRegistration('bg-appr-2'));
+      registry.complete('bg-appr-2', 'done');
+
+      expect(registry.addPendingApproval('bg-appr-2', makeApproval('c1'))).toBe(
+        false,
+      );
+      expect(registry.addPendingApproval('missing', makeApproval('c1'))).toBe(
+        false,
+      );
+    });
+
+    it('ignores a duplicate callId', () => {
+      registry.register(makeRegistration('bg-appr-3'));
+      registry.addPendingApproval('bg-appr-3', makeApproval('c1'));
+
+      expect(registry.addPendingApproval('bg-appr-3', makeApproval('c1'))).toBe(
+        false,
+      );
+      expect(registry.getPendingApprovals('bg-appr-3')).toHaveLength(1);
+    });
+
+    it('resolves a parked approval via its respond callback and removes it', async () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-4'));
+      registry.addPendingApproval('bg-appr-4', makeApproval('c1', respond));
+
+      const resolved = await registry.resolvePendingApproval(
+        'bg-appr-4',
+        'c1',
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+
+      expect(resolved).toBe(true);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+      expect(registry.getPendingApprovals('bg-appr-4')).toHaveLength(0);
+    });
+
+    it.each([
+      ToolConfirmationOutcome.ProceedAlways,
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+      ToolConfirmationOutcome.ProceedAlwaysUser,
+      ToolConfirmationOutcome.ProceedAlwaysServer,
+      ToolConfirmationOutcome.ProceedAlwaysTool,
+    ])(
+      'downgrades persistent approval outcome %s to one-time approval',
+      async (outcome) => {
+        const respond = vi.fn(async () => {});
+        registry.register(makeRegistration(`bg-appr-${outcome}`));
+        registry.addPendingApproval(
+          `bg-appr-${outcome}`,
+          makeApproval('c1', respond),
+        );
+
+        const resolved = await registry.resolvePendingApproval(
+          `bg-appr-${outcome}`,
+          'c1',
+          outcome,
+        );
+
+        expect(resolved).toBe(true);
+        expect(respond).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+          undefined,
+        );
+      },
+    );
+
+    it('returns false when resolving a non-parked call', async () => {
+      registry.register(makeRegistration('bg-appr-5'));
+      expect(
+        await registry.resolvePendingApproval(
+          'bg-appr-5',
+          'nope',
+          ToolConfirmationOutcome.Cancel,
+        ),
+      ).toBe(false);
+    });
+
+    it('clears a parked approval without responding', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-6'));
+      registry.addPendingApproval('bg-appr-6', makeApproval('c1', respond));
+
+      registry.clearPendingApproval('bg-appr-6', 'c1');
+
+      expect(registry.getPendingApprovals('bg-appr-6')).toHaveLength(0);
+      expect(respond).not.toHaveBeenCalled();
+    });
+
+    it('auto-rejects parked approvals when the agent terminates', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-7'));
+      registry.addPendingApproval('bg-appr-7', makeApproval('c1', respond));
+
+      registry.complete('bg-appr-7', 'done');
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-7')).toHaveLength(0);
+    });
+
+    it('auto-rejects parked approvals when the agent fails', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-fail'));
+      registry.addPendingApproval('bg-appr-fail', makeApproval('c1', respond));
+
+      registry.fail('bg-appr-fail', 'boom');
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-fail')).toHaveLength(0);
+    });
+
+    it('auto-rejects parked approvals on finalizeCancelled', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-fc'));
+      registry.addPendingApproval('bg-appr-fc', makeApproval('c1', respond));
+
+      registry.finalizeCancelled('bg-appr-fc', 'partial');
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-fc')).toHaveLength(0);
+    });
+
+    it('rejects parked approvals on reset so a session switch never strands a respond()', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-reset'));
+      registry.addPendingApproval('bg-appr-reset', makeApproval('c1', respond));
+
+      registry.reset();
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.get('bg-appr-reset')).toBeUndefined();
+    });
+
+    it('fails the agent before aborting when a parked approval respond() rejects', async () => {
+      const respond = vi.fn(async () => {
+        throw new Error('frames torn down');
+      });
+      const onChange = vi.fn();
+      const onStatus = vi.fn();
+      const onNotify = vi.fn();
+      const abortController = new AbortController();
+      const order: string[] = [];
+      abortController.signal.addEventListener('abort', () => {
+        order.push('abort');
+      });
+      registry.register(makeRegistration('bg-appr-retry', { abortController }));
+      registry.addPendingApproval('bg-appr-retry', makeApproval('c1', respond));
+      registry.setApprovalChangeCallback(onChange);
+      registry.setStatusChangeCallback((entry) => {
+        if (entry?.agentId === 'bg-appr-retry') {
+          order.push(`status:${entry.status}`);
+        }
+        onStatus(entry);
+      });
+      registry.setNotificationCallback(onNotify);
+
+      const ok = await registry.resolvePendingApproval(
+        'bg-appr-retry',
+        'c1',
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+
+      expect(ok).toBe(false);
+      expect(registry.getPendingApprovals('bg-appr-retry')).toHaveLength(0);
+      expect(registry.get('bg-appr-retry')?.status).toBe('failed');
+      expect(registry.get('bg-appr-retry')?.error).toBe(
+        'Failed to resolve background approval: c1',
+      );
+      expect(abortController.signal.aborted).toBe(true);
+      expect(order).toEqual(['status:failed', 'abort']);
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onStatus).toHaveBeenCalledOnce();
+      expect(onNotify).toHaveBeenCalledOnce();
+    });
+
+    it('auto-rejects parked approvals on cancel', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-8'));
+      registry.addPendingApproval('bg-appr-8', makeApproval('c1', respond));
+
+      registry.cancel('bg-appr-8', { notify: false });
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-8')).toHaveLength(0);
+    });
+
+    it('cancel() rejects parked approvals before the abort-driven clear (production ordering)', () => {
+      // In production, abort() synchronously unwinds the agent's awaiting
+      // tool batch, which emits a synthetic TOOL_RESULT for the parked call;
+      // the bridge's onResult then clears the queue. cancel() must therefore
+      // reject BEFORE aborting, or respond(Cancel) never fires. This test
+      // wires the bridge AND simulates that abort→TOOL_RESULT chain so the
+      // ordering is exercised the way it happens live.
+      const emitter = new AgentEventEmitter();
+      const abortController = new AbortController();
+      registry.register(
+        makeRegistration('bg-appr-cancel', { abortController }),
+      );
+      registry.bridgeApprovalEvents('bg-appr-cancel', emitter);
+
+      const respond = vi.fn(async () => {});
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'bg-appr-cancel',
+        round: 1,
+        callId: 'c1',
+        name: 'Shell',
+        description: 'run c1',
+        args: {},
+        confirmationDetails: {
+          type: 'exec',
+        } as BackgroundApproval['confirmationDetails'],
+        respond,
+        timestamp: Date.now(),
+      });
+      abortController.signal.addEventListener('abort', () => {
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'bg-appr-cancel',
+          round: 1,
+          callId: 'c1',
+          success: false,
+        } as never);
+      });
+
+      registry.cancel('bg-appr-cancel', { notify: false });
+
+      expect(respond).toHaveBeenCalledTimes(1);
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-cancel')).toHaveLength(0);
+    });
+
+    it('bridges emitter approval events into the parked queue and clears on result', () => {
+      const emitter = new AgentEventEmitter();
+      registry.register(makeRegistration('bg-appr-9'));
+      const cleanup = registry.bridgeApprovalEvents('bg-appr-9', emitter);
+
+      const respond = vi.fn(async () => {});
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'bg-appr-9',
+        round: 1,
+        callId: 'c1',
+        name: 'Shell',
+        description: 'run c1',
+        args: {},
+        confirmationDetails: {
+          type: 'exec',
+        } as BackgroundApproval['confirmationDetails'],
+        respond,
+        timestamp: Date.now(),
+      });
+      expect(registry.getPendingApprovals('bg-appr-9')).toHaveLength(1);
+
+      // A tool result for the same call clears the stale prompt without
+      // double-answering.
+      emitter.emit(AgentEventType.TOOL_RESULT, {
+        subagentId: 'bg-appr-9',
+        round: 1,
+        callId: 'c1',
+        success: true,
+      } as never);
+      expect(registry.getPendingApprovals('bg-appr-9')).toHaveLength(0);
+      expect(respond).not.toHaveBeenCalled();
+
+      cleanup();
+    });
+
+    it('auto-rejects a bridged approval that arrives after termination', () => {
+      const emitter = new AgentEventEmitter();
+      registry.register(makeRegistration('bg-appr-10'));
+      registry.bridgeApprovalEvents('bg-appr-10', emitter);
+      registry.complete('bg-appr-10', 'done');
+
+      const respond = vi.fn(async () => {});
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'bg-appr-10',
+        round: 1,
+        callId: 'late',
+        name: 'Shell',
+        description: 'run late',
+        args: {},
+        confirmationDetails: {
+          type: 'exec',
+        } as BackgroundApproval['confirmationDetails'],
+        respond,
+        timestamp: Date.now(),
+      });
+
+      // Couldn't park (entry terminal) → rejected so the agent loop unblocks.
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
     });
   });
 });

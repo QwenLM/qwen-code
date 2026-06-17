@@ -33,7 +33,7 @@ export interface MCPServerDisplayInfo {
   /** 连接状态 */
   status: MCPServerStatus;
   /** 来源类型 */
-  source: 'user' | 'project' | 'extension';
+  source: 'user' | 'project' | 'workspace' | 'system' | 'extension';
   /** 配置文件路径 */
   configPath?: string;
   /** 服务器配置 */

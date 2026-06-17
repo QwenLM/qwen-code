@@ -9,6 +9,7 @@ import { type Key } from '../hooks/useKeypress.js';
 import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from '../CommandFormatMigrationNudge.js';
 import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
+import { type McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
 import { type EditorType, type ApprovalMode } from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import type { AuthController } from '../auth/useAuth.js';
@@ -44,8 +45,6 @@ export interface UIActions {
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
-  openManageModelsDialog: () => void;
-  closeManageModelsDialog: () => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
@@ -57,6 +56,7 @@ export interface UIActions {
   handleIdePromptComplete: (result: IdeIntegrationNudgeResult) => void;
   handleCommandMigrationComplete: (result: CommandMigrationNudgeResult) => void;
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
+  handleMcpApprovalSelect: (choice: McpApprovalChoice) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;
@@ -75,6 +75,19 @@ export interface UIActions {
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
+  // Skills manager dialog (`/skills`)
+  openSkillsManagerDialog: () => void;
+  closeSkillsManagerDialog: () => void;
+  // Trigger a CommandService rebuild — dialogs that mutate settings
+  // affecting the slash-command surface (e.g. SkillsManagerDialog)
+  // call this after `setValue` so `/<skill-name>` and the skills
+  // listing reflect the new state without restarting the CLI.
+  reloadCommands: () => void | Promise<void>;
+  // Replace the chat input buffer's text without submitting. Used by
+  // dialogs that want to "pick" something into the prompt and let the
+  // user review/edit before sending — e.g. SkillsManagerDialog Enter
+  // closes the dialog and drops `/<skill-name>` into the input.
+  setInputBuffer: (text: string) => void;
   // Extensions manager dialog
   closeExtensionsManagerDialog: () => void;
   // MCP dialog
@@ -83,6 +96,7 @@ export interface UIActions {
   openHooksDialog: () => void;
   // Hooks dialog
   closeHooksDialog: () => void;
+  closeStatsDialog: () => void;
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
@@ -107,6 +121,9 @@ export interface UIActions {
   openRewindSelector: () => void;
   closeRewindSelector: () => void;
   handleRewindConfirm: (userItem: HistoryItem, option: RestoreOption) => void;
+  // Diff dialog
+  openDiffDialog: () => void;
+  closeDiffDialog: () => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

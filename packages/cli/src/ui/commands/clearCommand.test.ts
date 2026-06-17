@@ -17,10 +17,13 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
     ...actual,
     uiTelemetryService: {
       reset: vi.fn(),
+      getMetrics: vi.fn(() => ({ models: {} })),
+      getSessionStartTime: vi.fn(() => new Date()),
     },
     ideContextStore: {
       clear: vi.fn(),
     },
+    persistSessionUsage: vi.fn(),
   };
 });
 
@@ -92,10 +95,17 @@ describe('clearCommand', () => {
           getModel: () => 'test-model',
           getToolRegistry: () => undefined,
           getApprovalMode: () => 'default',
+          getSessionId: () => 'test-session-id',
+          getProjectRoot: () => '/test/project',
           getMonitorRegistry: () => ({
             getRunning: vi.fn().mockReturnValue([]),
             abortAll: mockAbortMonitors,
             reset: mockResetMonitors,
+          }),
+          getWorkflowRunRegistry: () => ({
+            hasRunningEntries: vi.fn().mockReturnValue(false),
+            reset: vi.fn(),
+            abortAll: vi.fn(),
           }),
         },
       },
@@ -176,6 +186,32 @@ describe('clearCommand', () => {
     expect(mockResetMonitors.mock.invocationCallOrder[0]).toBeLessThan(
       mockStartNewSession.mock.invocationCallOrder[0],
     );
+  });
+
+  it('should persist usage when session has activity before clearing', async () => {
+    const core = await import('@qwen-code/qwen-code-core');
+    (
+      core.uiTelemetryService.getMetrics as ReturnType<typeof vi.fn>
+    ).mockReturnValue({
+      models: { 'test-model': { api: { totalRequests: 5 } } },
+    });
+
+    await clearCommand.action!(mockContext, '');
+
+    expect(core.persistSessionUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not persist usage when session has no activity', async () => {
+    const core = await import('@qwen-code/qwen-code-core');
+    (
+      core.uiTelemetryService.getMetrics as ReturnType<typeof vi.fn>
+    ).mockReturnValue({
+      models: {},
+    });
+
+    await clearCommand.action!(mockContext, '');
+
+    expect(core.persistSessionUsage).not.toHaveBeenCalled();
   });
 
   it('should handle hook errors gracefully and continue execution', async () => {
@@ -553,6 +589,11 @@ describe('clearCommand', () => {
               abortAll: mockAbortMonitors,
               reset: mockResetMonitors,
             }),
+            getWorkflowRunRegistry: () => ({
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: vi.fn(),
+              abortAll: vi.fn(),
+            }),
           },
         },
         session: {
@@ -630,6 +671,11 @@ describe('clearCommand', () => {
             getMonitorRegistry: vi.fn().mockReturnValue({
               getRunning: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
+            }),
+            getWorkflowRunRegistry: vi.fn().mockReturnValue({
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: vi.fn(),
+              abortAll: vi.fn(),
             }),
             getHookSystem: mockGetHookSystem,
             startNewSession: mockStartNewSession,
@@ -742,6 +788,11 @@ describe('clearCommand', () => {
             getMonitorRegistry: vi.fn().mockReturnValue({
               getRunning: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
+            }),
+            getWorkflowRunRegistry: vi.fn().mockReturnValue({
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: vi.fn(),
+              abortAll: vi.fn(),
             }),
             getHookSystem: mockGetHookSystem,
             startNewSession: mockStartNewSession,

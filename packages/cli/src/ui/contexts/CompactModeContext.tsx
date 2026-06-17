@@ -8,11 +8,13 @@ import { createContext, useContext } from 'react';
 
 interface CompactModeContextType {
   compactMode: boolean;
+  compactInline: boolean;
   setCompactMode?: (value: boolean) => void;
 }
 
 const CompactModeContext = createContext<CompactModeContextType>({
   compactMode: false,
+  compactInline: false,
 });
 
 export const useCompactMode = (): CompactModeContextType =>

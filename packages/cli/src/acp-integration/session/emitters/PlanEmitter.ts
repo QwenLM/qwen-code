@@ -28,9 +28,20 @@ export class PlanEmitter extends BaseEmitter {
       status: todo.status,
     }));
 
+    // Snapshot the running cumulative usage as a per-snapshot baseline. The
+    // web-shell diffs consecutive snapshots to attribute tokens/API time to the
+    // task that ran between two todo updates. Copied so later accumulation
+    // doesn't mutate this snapshot.
+    //
+    // ORDERING INVARIANT: the turn's usage must have been folded into
+    // cumulativeUsage (MessageEmitter.emitUsageMetadata) before this snapshot —
+    // emitting a plan ahead of its turn's usage would record a stale baseline
+    // and zero out that task's stats.
+    const cumulative = this.ctx.cumulativeUsage;
     await this.sendUpdate({
       sessionUpdate: 'plan',
       entries,
+      ...(cumulative ? { _meta: { stats: { ...cumulative } } } : {}),
     });
   }
 

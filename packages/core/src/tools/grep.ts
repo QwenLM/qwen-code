@@ -27,6 +27,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
+import { recordGrepResultFileReads } from './grepReadTracking.js';
 
 const debugLogger = createDebugLogger('GREP');
 
@@ -268,16 +269,19 @@ class GrepToolInvocation extends BaseToolInvocation<
         displayMessage += ` (truncated)`;
       }
 
+      const resultFilePaths = Array.from(
+        new Set(
+          visibleMatches
+            .map((match) => match.absoluteFilePath)
+            .filter((filePath) => filePath !== ''),
+        ),
+      );
+      await recordGrepResultFileReads(this.config, resultFilePaths);
+
       return {
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
-        resultFilePaths: Array.from(
-          new Set(
-            visibleMatches
-              .map((match) => match.absoluteFilePath)
-              .filter((filePath) => filePath !== ''),
-          ),
-        ),
+        resultFilePaths,
       };
     } catch (error) {
       debugLogger.error(`Error during GrepLogic execution: ${error}`);
@@ -595,6 +599,10 @@ class GrepToolInvocation extends BaseToolInvocation<
  */
 export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
   static readonly Name = ToolNames.GREP;
+
+  override get maxOutputChars(): number {
+    return 20_000;
+  }
 
   constructor(private readonly config: Config) {
     super(

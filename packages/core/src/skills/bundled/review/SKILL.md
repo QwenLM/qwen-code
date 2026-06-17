@@ -18,8 +18,10 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 **Critical rules (most commonly violated — read these first):**
 
-1. **Match the language of the PR.** If the PR is in English, ALL your output (terminal + PR comments) MUST be in English. If in Chinese, use Chinese. Do NOT switch languages. For **local reviews** (no PR), if the system prompt includes an output language preference, use that language; otherwise follow the user's input language.
-2. **Step 9: use Create Review API** with `comments` array for inline comments. Do NOT use `gh api .../pulls/.../comments` to post individual comments. See Step 9 for the JSON format.
+1. **For same-repo PR reviews (PR number, or URL whose owner/repo matches a local remote), the worktree is MANDATORY.** After argument parsing and remote detection (early in Step 1), the first command that touches code state MUST be `qwen review fetch-pr`. Do NOT use `gh pr checkout`, `git checkout <branch>`, `git switch`, `git pull`, `git reset --hard`, or any other command that modifies the user's current HEAD or working tree. After `fetch-pr` returns, ALL subsequent reads, linters, builds, tests, and edits MUST happen inside the `worktreePath` it created. Violating this contaminates the user's local branch state. (Cross-repo PRs with no matching remote use lightweight mode and do NOT create a worktree — see Step 1.)
+2. **If `--comment` was specified, Step 8 (Autofix) is SKIPPED entirely.** `--comment` means the user wants inline PR comments posted, not code mutations. Do not ask "Apply auto-fixes? (y/n)" — go straight from Step 7 to Step 9.
+3. **Match the language of the PR.** If the PR is in English, ALL your output (terminal + PR comments) MUST be in English. If in Chinese, use Chinese. Do NOT switch languages. For **local reviews** (no PR), if the system prompt includes an output language preference, use that language; otherwise follow the user's input language.
+4. **Step 9: use Create Review API** with `comments` array for inline comments. Do NOT use `gh api .../pulls/.../comments` to post individual comments. See Step 9 for the JSON format.
 
 **Design philosophy: Silence is better than noise.** Every comment you make should be worth the reader's time. If you're unsure whether something is a problem, DO NOT MENTION IT. Low-quality feedback causes "cry wolf" fatigue — developers stop reading all AI comments and miss real issues.
 
@@ -44,6 +46,8 @@ Based on the remaining arguments:
   - If both diffs are empty, inform the user there are no changes to review and stop here — do not proceed to the review agents
 
 - **PR number or same-repo URL** (e.g., `123` or a URL whose owner/repo matches the current repo — cross-repo URLs are handled by the lightweight mode above):
+
+  > ⚠️ **MANDATORY worktree flow.** Do NOT use `gh pr checkout`, `git checkout <branch>`, `git switch`, `git pull`, `git reset --hard`, or any other command that changes the user's current HEAD or working tree contents. The ONLY entry point is `qwen review fetch-pr` (below) — it isolates the PR into an ephemeral worktree so the user's local state is never touched. After it returns, every subsequent command in Steps 2-8 MUST operate inside the returned `worktreePath` (e.g. `cd <worktreePath>` first, or pass the path as a `--cwd` / explicit argument).
   - **Run `qwen review fetch-pr`** to set up the working state in one pass — it cleans any stale worktree, fetches the PR HEAD into `qwen-review/pr-<n>`, queries `gh pr view` for metadata, and creates an ephemeral worktree at `.qwen/tmp/review-pr-<n>`:
 
     ```bash
@@ -155,7 +159,9 @@ Assign severity based on the tool's own categorization:
 
 ## Step 4: Parallel multi-dimensional review
 
-Launch review agents by invoking all `task` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **9 agents** for same-repo reviews (Agent 6 has three persona variants 6a/6b/6c that each count as a separate parallel agent), or **8 agents** (skip Agent 7: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each agent should focus exclusively on its dimension.
+Launch review agents by invoking all `agent` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **9 agents** for same-repo reviews (Agent 6 has three persona variants 6a/6b/6c that each count as a separate parallel agent), or **8 agents** (skip Agent 7: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each agent should focus exclusively on its dimension.
+
+**Every agent MUST be an awaitable subagent: set `subagent_type: "general-purpose"` on every `agent` call.** Do NOT fork them — do not omit `subagent_type`, and never set `subagent_type: "fork"`. A fork runs fire-and-forget and its findings never come back to you, so the review would stall in Step 5 with nothing to aggregate. You need every agent's findings returned to you inline.
 
 **IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste the full diff — give each agent:
 
@@ -442,7 +448,12 @@ If the user responds with "post comments" (or similar intent like "yes post them
 
 ## Step 8: Autofix
 
-If there are **Critical** or **Suggestion** findings with clear, unambiguous fixes, offer to auto-apply them.
+**Skip this entire step (do not even ask) if EITHER of the following is true:**
+
+- `--comment` was specified in the arguments — the user explicitly asked for inline PR comments, not code edits. Go straight to Step 9.
+- The review target is a cross-repo PR running in lightweight mode (no local files to edit).
+
+Otherwise, if there are **Critical** or **Suggestion** findings with clear, unambiguous fixes, offer to auto-apply them. (If there are no such findings, this step is also a no-op — fall through to Step 9.)
 
 1. Count the number of auto-fixable findings (those with concrete suggested fixes that can be expressed as file edits).
 2. If there are fixable findings, ask the user:
@@ -562,20 +573,24 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
   --input .qwen/tmp/qwen-review-{target}-review.json
 ```
 
-If there are **no confirmed findings**, submit a single-line review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body:
+If there are **no confirmed findings**, submit a short summary review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body. Separate the footer from the body with a blank line so it renders on its own line — `-f body` does not interpret `\n`, so use a real line break inside the quotes:
 
 ```bash
 # downgradeApprove=false (non-self PR, green CI):
 gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
   -f commit_id="{commit_sha}" \
   -f event="APPROVE" \
-  -f body="No issues found. LGTM! ✅ _— YOUR_MODEL_ID via Qwen Code /review_"
+  -f body="No issues found. LGTM! ✅
+
+_— YOUR_MODEL_ID via Qwen Code /review_"
 
 # downgradeApprove=true (self-PR, CI failing, or CI still running):
 gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
   -f commit_id="{commit_sha}" \
   -f event="COMMENT" \
-  -f body="No review findings. Downgraded from Approve to Comment: <downgradeReasons joined with '; '>. _— YOUR_MODEL_ID via Qwen Code /review_"
+  -f body="No review findings. Downgraded from Approve to Comment: <downgradeReasons joined with '; '>.
+
+_— YOUR_MODEL_ID via Qwen Code /review_"
 ```
 
 Clean up the JSON file in Step 11.

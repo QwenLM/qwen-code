@@ -12,11 +12,16 @@ import {
   SessionEndReason,
   ToolNames,
   ideContextStore,
+  persistSessionUsage,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import {
   hasBlockingBackgroundWork,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
+import process from 'node:process';
+
+const debugLogger = createDebugLogger('CLEAR_COMMAND');
 
 export const clearCommand: SlashCommand = {
   name: 'clear',
@@ -32,9 +37,7 @@ export const clearCommand: SlashCommand = {
     const suggestions = [
       {
         value: '--all',
-        description: t(
-          'Complete reset (also clears IDE/editor context store)',
-        ),
+        description: t('Complete reset (also clears IDE/editor context store)'),
       },
     ];
     const filtered = suggestions.filter((s) => s.value.startsWith(partialArg));
@@ -45,6 +48,15 @@ export const clearCommand: SlashCommand = {
     const isAll = tokens.includes('--all');
 
     const { config } = context.services;
+
+    const memBefore = process.memoryUsage();
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[CLEAR_START] Starting clear command, ` +
+          `heapUsed=${(memBefore.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+          `rss=${(memBefore.rss / 1024 / 1024).toFixed(1)}MB`,
+      );
+    }
 
     // Check for blocking background work BEFORE asking for confirmation so the
     // user is never prompted "are you sure?" for a clear that will then
@@ -110,6 +122,25 @@ export const clearCommand: SlashCommand = {
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
 
+      // Persist current session's usage before resetting metrics
+      const metrics = uiTelemetryService.getMetrics();
+      const hasActivity = Object.values(metrics.models).some(
+        (m) => m.api.totalRequests > 0,
+      );
+      if (hasActivity) {
+        try {
+          persistSessionUsage({
+            sessionId: config.getSessionId(),
+            startTime: context.session.stats.sessionStartTime ?? new Date(),
+            endTime: new Date(),
+            project: config.getProjectRoot(),
+            metrics,
+          });
+        } catch {
+          // Best-effort — don't block /clear
+        }
+      }
+
       const newSessionId = config.startNewSession();
 
       // Reset UI telemetry metrics for the new session
@@ -145,6 +176,19 @@ export const clearCommand: SlashCommand = {
     } else {
       context.ui.setDebugMessage(t('Starting a new session and clearing.'));
       context.ui.clear();
+    }
+
+    const memAfter = process.memoryUsage();
+    if (debugLogger.isEnabled()) {
+      const heapDiff = (memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024;
+      const rssDiff = (memAfter.rss - memBefore.rss) / 1024 / 1024;
+      debugLogger.debug(
+        `[CLEAR_END] Clear command completed, ` +
+          `heapUsed=${(memAfter.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+          `rss=${(memAfter.rss / 1024 / 1024).toFixed(1)}MB, ` +
+          `heapDiff=${heapDiff.toFixed(1)}MB, ` +
+          `rssDiff=${rssDiff.toFixed(1)}MB`,
+      );
     }
 
     if (context.executionMode !== 'interactive') {

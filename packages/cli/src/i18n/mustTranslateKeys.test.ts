@@ -23,6 +23,17 @@ import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 import type { SlashCommand } from '../ui/commands/types.js';
 
+const FORK_COMMAND_REQUIRED_KEYS = [
+  'Spawn a background agent that inherits the full conversation',
+  'Please provide a directive. Usage: /fork <directive>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
+  'Cannot fork before the first conversation turn.',
+  'The agent tool is unavailable; cannot fork.',
+  'Failed to launch fork: {{error}}',
+  'User launched a background fork via /fork: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.',
+] as const;
+
 const NON_ENGLISH_LANGUAGES = SUPPORTED_LANGUAGES.filter(
   (language) => language.code !== 'en',
 );
@@ -69,6 +80,12 @@ function flattenCommandDescriptions(
   return flattened;
 }
 
+// Switching locales and loading built-in commands triggers dynamic locale
+// imports plus full command-tree construction, which is slow on cold Windows
+// CI runners — the default 5s per-test budget intermittently times out there.
+// Sibling i18n suites (index.test.ts) already use this same generous timeout.
+const SLOW_LOCALE_TEST_TIMEOUT_MS = 20000;
+
 describe('must-translate locale coverage', () => {
   afterEach(async () => {
     await setLanguageAsync('en');
@@ -83,6 +100,12 @@ describe('must-translate locale coverage', () => {
     expect(missingKeys).toEqual([]);
   });
 
+  it('requires translation coverage for /fork user-facing strings', () => {
+    expect(MUST_TRANSLATE_KEYS).toEqual(
+      expect.arrayContaining([...FORK_COMMAND_REQUIRED_KEYS]),
+    );
+  });
+
   it.each(NON_ENGLISH_LANGUAGES)(
     'does not fall back to English for required keys in %s',
     async (language) => {
@@ -92,6 +115,7 @@ describe('must-translate locale coverage', () => {
 
       expect(untranslated).toEqual([]);
     },
+    SLOW_LOCALE_TEST_TIMEOUT_MS,
   );
 
   it.each(NON_ENGLISH_LANGUAGES)(
@@ -138,6 +162,7 @@ describe('must-translate locale coverage', () => {
         "Set up Qwen Code's status line UI",
       );
     },
+    SLOW_LOCALE_TEST_TIMEOUT_MS,
   );
 
   it.each(STRICT_PARITY_NON_ENGLISH_LANGUAGES)(
@@ -164,5 +189,6 @@ describe('must-translate locale coverage', () => {
 
       expect(fallbackDescriptions).toEqual([]);
     },
+    SLOW_LOCALE_TEST_TIMEOUT_MS,
   );
 });

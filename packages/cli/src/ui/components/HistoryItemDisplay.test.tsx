@@ -58,6 +58,37 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toContain('/theme');
   });
 
+  it('renders assistant replies with a leading spacer row', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini',
+      text: 'Hello',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output.startsWith('\n')).toBe(true);
+    expect(output).toContain('✦ Hello');
+  });
+
+  it('renders tool summaries without a leading spacer row', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'tool_use_summary',
+      summary: 'Read txt files',
+      precedingToolUseIds: ['c1'],
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output.startsWith('\n')).toBe(false);
+    expect(output).toContain('Read txt files');
+  });
+
   it('renders StatsDisplay for "stats" type', () => {
     const item: HistoryItem = {
       ...baseItem,

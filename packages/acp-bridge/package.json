@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/acp-bridge",
-  "version": "0.0.1",
-  "description": "Shared ACP bridge primitives (EventBus, AcpChannel, in-memory channel, PermissionMediator interface) used by qwen serve, channels, IDE, TUI, and remote-control adapters.",
+  "version": "0.18.3",
+  "description": "Shared ACP bridge core (createHttpAcpBridge factory, BridgeClient, defaultSpawnChannelFactory, BridgeFileSystem injection seam) + primitives (EventBus, AcpChannel, in-memory channel, PermissionMediator interface) used by qwen serve, channels, IDE, TUI, and remote-control adapters.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -51,6 +51,34 @@
       "types": "./dist/bridgeOptions.d.ts",
       "import": "./dist/bridgeOptions.js"
     },
+    "./spawnChannel": {
+      "types": "./dist/spawnChannel.d.ts",
+      "import": "./dist/spawnChannel.js"
+    },
+    "./bridgeClient": {
+      "types": "./dist/bridgeClient.d.ts",
+      "import": "./dist/bridgeClient.js"
+    },
+    "./bridge": {
+      "types": "./dist/bridge.d.ts",
+      "import": "./dist/bridge.js"
+    },
+    "./bridgeFileSystem": {
+      "types": "./dist/bridgeFileSystem.d.ts",
+      "import": "./dist/bridgeFileSystem.js"
+    },
+    "./mcpTimeouts": {
+      "types": "./dist/mcpTimeouts.d.ts",
+      "import": "./dist/mcpTimeouts.js"
+    },
+    "./internal/testUtils": {
+      "types": "./dist/internal/testUtils.d.ts",
+      "import": "./dist/internal/testUtils.js"
+    },
+    "./compactionEngine": {
+      "types": "./dist/compactionEngine.d.ts",
+      "import": "./dist/compactionEngine.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -62,7 +90,9 @@
     "typecheck": "tsc --noEmit"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/internal/testUtils.*",
+    "!dist/**/*.test.*"
   ],
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",

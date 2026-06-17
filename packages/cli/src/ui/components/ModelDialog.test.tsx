@@ -5,6 +5,7 @@
  */
 
 import { render, cleanup } from '@testing-library/react';
+import process from 'node:process';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -43,6 +44,7 @@ const mockedSelect = vi.mocked(DescriptiveRadioButtonSelect);
 const renderComponent = (
   props: Partial<React.ComponentProps<typeof ModelDialog>> = {},
   contextValue: Partial<Config> | undefined = undefined,
+  settingsValue: Partial<LoadedSettings> | undefined = undefined,
 ) => {
   const defaultProps = {
     onClose: vi.fn(),
@@ -54,6 +56,7 @@ const renderComponent = (
     user: { settings: {} },
     workspace: { settings: {} },
     setValue: vi.fn(),
+    ...(settingsValue ?? {}),
   } as unknown as LoadedSettings;
 
   const mockConfig = {
@@ -134,6 +137,31 @@ describe('<ModelDialog />', () => {
       `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
+  });
+
+  it('hides discontinued qwen-oauth models for other auth types', () => {
+    renderComponent(
+      {},
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: DEFAULT_QWEN_MODEL,
+            label: DEFAULT_QWEN_MODEL,
+            authType: AuthType.QWEN_OAUTH,
+          },
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+      },
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::gpt-4`);
   });
 
   it('initializes with the model from ConfigContext', () => {
@@ -288,6 +316,98 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('shows MiniMax-M3 image + video modality and 1M context details', () => {
+    const { getByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'MiniMax-M3'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'MiniMax-M3',
+          label: '[MiniMax] MiniMax-M3',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api.minimaxi.com/v1',
+          envKey: 'MINIMAX_API_KEY',
+          modalities: { image: true, video: true },
+          contextWindowSize: 1000000,
+        },
+      ]),
+      getModelsConfig: vi.fn(() => ({
+        getGenerationConfig: vi.fn(() => ({
+          baseUrl: 'https://api.minimaxi.com/v1',
+        })),
+      })),
+    } as unknown as Partial<Config>);
+
+    expect(getByText('Modality:')).toBeDefined();
+    expect(getByText('text · image · video')).toBeDefined();
+    expect(getByText('Context Window:')).toBeDefined();
+    expect(getByText('1,000,000 tokens')).toBeDefined();
+  });
+
+  it('hydrates provider API key env from settings.env before switching', async () => {
+    const previousMinimaxKey = process.env['MINIMAX_API_KEY'];
+    delete process.env['MINIMAX_API_KEY'];
+
+    try {
+      const switchModel = vi.fn().mockImplementation(async () => {
+        expect(process.env['MINIMAX_API_KEY']).toBe('sk-minimax-from-settings');
+      });
+
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'MiniMax-M2.7'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          switchModel,
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'MiniMax-M3',
+              label: '[MiniMax] MiniMax-M3',
+              description: '',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://api.minimaxi.com/v1',
+              envKey: 'MINIMAX_API_KEY',
+              modalities: { image: true, video: true },
+              contextWindowSize: 1000000,
+            },
+          ]),
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: vi.fn(() => ({
+              baseUrl: 'https://api.minimaxi.com/v1',
+            })),
+          })),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'MiniMax-M3',
+            apiKey: 'sk-minimax-from-settings',
+            baseUrl: 'https://api.minimaxi.com/v1',
+          })),
+        } as unknown as Partial<Config>,
+        {
+          merged: {
+            env: { MINIMAX_API_KEY: 'sk-minimax-from-settings' },
+          },
+        } as unknown as Partial<LoadedSettings>,
+      );
+
+      const selected = mockedSelect.mock.calls[0][0].items[0].value;
+      await mockedSelect.mock.calls[0][0].onSelect(selected);
+
+      expect(switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'MiniMax-M3',
+        { baseUrl: 'https://api.minimaxi.com/v1' },
+      );
+    } finally {
+      if (previousMinimaxKey === undefined) {
+        delete process.env['MINIMAX_API_KEY'];
+      } else {
+        process.env['MINIMAX_API_KEY'] = previousMinimaxKey;
+      }
+    }
+  });
+
   it('stores authType-qualified selectors in fast model mode', async () => {
     const setFastModel = vi.fn();
     const { props, mockSettings } = renderComponent({ isFastModelMode: true }, {
@@ -388,48 +508,6 @@ describe('<ModelDialog />', () => {
     );
     expect(deepseekIndex).toBeGreaterThanOrEqual(0);
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(deepseekIndex);
-  });
-
-  it('blocks switching to qwen-oauth from another authType (discontinued)', async () => {
-    const switchModel = vi.fn().mockResolvedValue(undefined);
-    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
-    const getAvailableModelsForAuthType = vi.fn((t: AuthType) => {
-      if (t === AuthType.USE_OPENAI) {
-        return [{ id: 'gpt-4', label: 'GPT-4', authType: t }];
-      }
-      if (t === AuthType.QWEN_OAUTH) {
-        return getFilteredQwenModels().map((m) => ({
-          id: m.id,
-          label: m.label,
-          authType: AuthType.QWEN_OAUTH,
-        }));
-      }
-      return [];
-    });
-
-    const mockConfigWithSwitchAuthType = {
-      getAuthType,
-      getModel: vi.fn(() => 'gpt-4'),
-      getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.USE_OPENAI,
-        model: 'gpt-4',
-      })),
-      switchModel,
-      getAvailableModelsForAuthType,
-    };
-
-    const { props } = renderComponent(
-      {},
-      mockConfigWithSwitchAuthType as unknown as Partial<Config>,
-    );
-
-    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
-
-    // qwen-oauth is discontinued — switchModel should NOT be called
-    expect(switchModel).not.toHaveBeenCalled();
-    // Dialog should NOT close
-    expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it('passes onHighlight to DescriptiveRadioButtonSelect', () => {

@@ -646,6 +646,69 @@ export class ContentRetryEvent implements BaseTelemetryEvent {
   }
 }
 
+/**
+ * Phase 4b — HTTP-status retry telemetry. Emitted by `retryWithBackoff` (via
+ * the `onRetry` callback opt-in) for HTTP 429 / 5xx retries at LLM call sites.
+ *
+ * Distinct from {@link ContentRetryEvent}, which is emitted by `geminiChat`'s
+ * for-loop for `InvalidStreamError` retries that go through a SEPARATE retry
+ * budget (`INVALID_CONTENT_RETRY_OPTIONS`, NOT `retryWithBackoff`). A single
+ * user prompt may fire BOTH event types; sum across event types to count total
+ * retries per prompt_id.
+ */
+export class ApiRetryEvent implements BaseTelemetryEvent {
+  'event.name': 'api_retry';
+  'event.timestamp': string; // ISO 8601
+  model: string;
+  prompt_id?: string;
+  attempt_number: number; // 1-based monotonic counter (matches ALS retryContext.attempt)
+  error_type?: string;
+  error_message: string;
+  status_code?: number | string;
+  retry_delay_ms: number;
+  /**
+   * Reports the backoff delay following this failed attempt (NOT the attempt's
+   * own duration — that lives on the corresponding `qwen-code.llm_request`
+   * span's `duration_ms` attribute). Set equal to `retry_delay_ms` so the
+   * LogToSpanProcessor bridge span visualises the sleep window between the
+   * failed and next attempt in the trace timeline.
+   */
+  duration_ms: number;
+  /**
+   * Name of the subagent that issued the retrying request, or undefined when
+   * the request originates from the main conversation. Read from
+   * `subagentNameContext.getStore()` at the caller site (subagentNameContext
+   * is still active inside `retry.ts`'s catch block where `onRetry` fires).
+   */
+  subagent_name?: string;
+
+  constructor(opts: {
+    model: string;
+    promptId?: string;
+    attemptNumber: number;
+    error: unknown;
+    statusCode?: number | string;
+    retryDelayMs: number;
+    subagentName?: string;
+  }) {
+    this['event.name'] = 'api_retry';
+    this['event.timestamp'] = new Date().toISOString();
+    this.model = opts.model;
+    this.prompt_id = opts.promptId;
+    this.attempt_number = opts.attemptNumber;
+    this.error_message =
+      opts.error instanceof Error
+        ? opts.error.message
+        : String(opts.error ?? 'unknown error');
+    this.error_type =
+      opts.error instanceof Error ? opts.error.constructor.name : undefined;
+    this.status_code = opts.statusCode;
+    this.retry_delay_ms = opts.retryDelayMs;
+    this.duration_ms = opts.retryDelayMs;
+    this.subagent_name = opts.subagentName;
+  }
+}
+
 export class ContentRetryFailureEvent implements BaseTelemetryEvent {
   'event.name': 'content_retry_failure';
   'event.timestamp': string;
@@ -720,6 +783,31 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
     this.truncated_content_length = details.truncatedContentLength;
     this.threshold = details.threshold;
     this.lines = details.lines;
+  }
+}
+
+export class ToolResultPersistedEvent implements BaseTelemetryEvent {
+  readonly eventName = 'tool_result_persisted';
+  readonly 'event.timestamp' = new Date().toISOString();
+  'event.name': string;
+  tool_name: string;
+  bytes_written: number;
+  output_file: string;
+  prompt_id: string;
+
+  constructor(
+    prompt_id: string,
+    details: {
+      toolName: string;
+      bytesWritten: number;
+      outputFile: string;
+    },
+  ) {
+    this['event.name'] = this.eventName;
+    this.prompt_id = prompt_id;
+    this.tool_name = details.toolName;
+    this.bytes_written = details.bytesWritten;
+    this.output_file = details.outputFile;
   }
 }
 
@@ -898,12 +986,14 @@ export class SkillLaunchEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   skill_name: string;
   success: boolean;
+  prompt_id: string;
 
-  constructor(skill_name: string, success: boolean) {
+  constructor(skill_name: string, success: boolean, prompt_id: string = '') {
     this['event.name'] = 'skill_launch';
     this['event.timestamp'] = new Date().toISOString();
     this.skill_name = skill_name;
     this.success = success;
+    this.prompt_id = prompt_id;
   }
 }
 
@@ -961,11 +1051,13 @@ export type TelemetryEvent =
   | InvalidChunkEvent
   | ContentRetryEvent
   | ContentRetryFailureEvent
+  | ApiRetryEvent
   | SubagentExecutionEvent
   | ExtensionEnableEvent
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
+  | ToolResultPersistedEvent
   | ModelSlashCommandEvent
   | AuthEvent
   | HookCallEvent

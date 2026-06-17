@@ -83,7 +83,6 @@ const READ_ONLY_ROOT_COMMANDS = new Set([
   'dirname',
   'du',
   'echo',
-  'env',
   'find',
   'git',
   'grep',
@@ -831,12 +830,20 @@ function evaluateAwkReadOnly(args: string[]): boolean {
  *
  * Handles: command, pipeline, list, redirected_statement, subshell,
  * variable_assignment, negated_command, and compound statements.
+ *
+ * Command substitution (`$(...)`, `` `...` ``) and process substitution
+ * (`<(...)`, `>(...)`) anywhere in the subtree mark the whole node as
+ * NOT read-only — checked once at the top so every case below inherits
+ * the guard. This matters for non-`command` node types like
+ * `variable_assignment` (`FOO=$(curl evil)`) and `redirected_statement`
+ * (`cat < $(curl evil)`) where the substitution sits outside any
+ * `command` child. See PR #4386 round 4.
  */
 function evaluateStatementReadOnly(node: SyntaxNode): boolean {
+  if (containsCommandSubstitutionAST(node)) return false;
+
   switch (node.type) {
     case 'command':
-      // Check for command substitution anywhere inside the command
-      if (containsCommandSubstitutionAST(node)) return false;
       return evaluateCommandReadOnly(node);
 
     case 'pipeline': {

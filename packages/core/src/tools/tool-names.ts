@@ -29,6 +29,7 @@ export const ToolNames = {
   AGENT: 'agent',
   SKILL: 'skill',
   EXIT_PLAN_MODE: 'exit_plan_mode',
+  ENTER_PLAN_MODE: 'enter_plan_mode',
   WEB_FETCH: 'web_fetch',
   LS: 'list_directory',
   LSP: 'lsp',
@@ -37,12 +38,25 @@ export const ToolNames = {
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
   TASK_STOP: 'task_stop',
+  TASK_CREATE: 'task_create',
+  TASK_UPDATE: 'task_update',
+  TASK_LIST: 'task_list',
+  TEAM_CREATE: 'team_create',
+  TEAM_DELETE: 'team_delete',
   SEND_MESSAGE: 'send_message',
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
+  NOTEBOOK_EDIT: 'notebook_edit',
   TOOL_SEARCH: 'tool_search',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
+  // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
+  // Their full 35-tool surface is generated into computer-use/schemas.ts and
+  // registered via computer-use/index.ts (cast to ToolName). Duplicating a
+  // subset here only goes stale on every cua-driver version bump — review
+  // round 1 removed the old ocu-era 9-name list, which still carried
+  // `get_app_state` / `perform_secondary_action` that no longer exist.
+  WORKFLOW: 'workflow',
 } as const;
 
 /**
@@ -62,6 +76,7 @@ export const ToolDisplayNames = {
   AGENT: 'Agent',
   SKILL: 'Skill',
   EXIT_PLAN_MODE: 'ExitPlanMode',
+  ENTER_PLAN_MODE: 'EnterPlanMode',
   WEB_FETCH: 'WebFetch',
   LS: 'ListFiles',
   LSP: 'Lsp',
@@ -70,12 +85,20 @@ export const ToolDisplayNames = {
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
   TASK_STOP: 'TaskStop',
+  TASK_CREATE: 'TaskCreate',
+  TASK_UPDATE: 'TaskUpdate',
+  TASK_LIST: 'TaskList',
+  TEAM_CREATE: 'TeamCreate',
+  TEAM_DELETE: 'TeamDelete',
   SEND_MESSAGE: 'SendMessage',
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
+  NOTEBOOK_EDIT: 'NotebookEdit',
   TOOL_SEARCH: 'ToolSearch',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
+  // computer_use__* display names are not enumerated here (see ToolNames).
+  WORKFLOW: 'Workflow',
 } as const;
 
 // Migration from old tool names to new tool names

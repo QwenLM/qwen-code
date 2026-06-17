@@ -102,11 +102,7 @@ export async function readWorktreeSession(
   return parsed;
 }
 
-/**
- * Atomically writes the sidecar. Uses `atomicWriteJSON` (write-to-temp +
- * rename) so a crash mid-write can never leave a half-written file that
- * subsequent reads would reject as malformed.
- */
+/** Writes the worktree session sidecar via `atomicWriteJSON`. */
 export async function writeWorktreeSession(
   filePath: string,
   session: WorktreeSession,

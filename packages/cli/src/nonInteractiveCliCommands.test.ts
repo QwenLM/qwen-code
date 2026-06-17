@@ -33,6 +33,7 @@ describe('handleSlashCommand', () => {
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
   let abortController: AbortController;
+  let mockFireUserPromptExpansionEvent: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -52,6 +53,7 @@ describe('handleSlashCommand', () => {
       getCommandsForMode: mockGetCommandsForMode,
       getModelInvocableCommands: mockGetModelInvocableCommands,
     });
+    mockFireUserPromptExpansionEvent = vi.fn().mockResolvedValue(undefined);
 
     mockConfig = {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -62,9 +64,11 @@ describe('handleSlashCommand', () => {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue({
         addFunctionHook: vi.fn().mockReturnValue('goal-hook-id'),
         removeFunctionHook: vi.fn().mockReturnValue(true),
+        fireUserPromptExpansionEvent: mockFireUserPromptExpansionEvent,
       }),
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
@@ -231,7 +235,117 @@ describe('handleSlashCommand', () => {
           text: expect.stringContaining('write a hello world script'),
         }),
       ]);
+      expect(result.outputHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'write a hello world script',
+          setAt: expect.any(Number),
+        }),
+      ]);
     }
+  });
+
+  it('should report no active goal for empty non-interactive /goal', async () => {
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    const result = await handleSlashCommand(
+      '/goal',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'No goal set. Usage: `/goal <condition>` (or `/goal clear`).',
+    });
+  });
+
+  it('should report active goal status after setting a non-interactive /goal', async () => {
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    await handleSlashCommand(
+      '/goal write a hello world script',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+    const result = await handleSlashCommand(
+      '/goal',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    if (result.type === 'message') {
+      expect(result.content).toContain(
+        'Goal active: write a hello world script',
+      );
+      expect(result.content).toContain('not yet evaluated');
+    }
+  });
+
+  it('should report cleared goal for non-interactive /goal clear', async () => {
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    await handleSlashCommand(
+      '/goal write a hello world script',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+    const result = await handleSlashCommand(
+      '/goal clear',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Goal cleared: write a hello world script',
+    });
+    if (result.type === 'message') {
+      expect(result.outputHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'goal_status',
+          kind: 'cleared',
+          condition: 'write a hello world script',
+          durationMs: expect.any(Number),
+        }),
+      ]);
+    }
+  });
+
+  it('should report cleared goal for ACP /goal clear', async () => {
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    await handleSlashCommand(
+      '/goal write a hello world script',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+    const result = await handleSlashCommand(
+      '/goal clear',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Goal cleared: write a hello world script',
+    });
   });
 
   it('should execute FILE commands in any mode without explicit supportedModes', async () => {
@@ -257,6 +371,220 @@ describe('handleSlashCommand', () => {
     if (result.type === 'submit_prompt') {
       expect(result.content).toEqual([{ text: 'Custom prompt' }]);
     }
+  });
+
+  it('should fire UserPromptExpansion hooks for submit_prompt commands', async () => {
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Expanded prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom with args',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    expect(mockFireUserPromptExpansionEvent).toHaveBeenCalledWith(
+      'custom',
+      'with args',
+      'Expanded prompt',
+      abortController.signal,
+    );
+  });
+
+  it('should append UserPromptExpansion additional context for submit_prompt commands', async () => {
+    mockFireUserPromptExpansionEvent.mockResolvedValue({
+      getBlockingError: () => ({ blocked: false }),
+      shouldStopExecution: () => false,
+      getAdditionalContext: () => 'Hook context',
+    });
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Expanded prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom with args',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.content).toEqual([
+        { text: 'Expanded prompt' },
+        { text: '\n\nHook context' },
+      ]);
+    }
+  });
+
+  it('should not fire UserPromptExpansion hooks when hooks are disabled', async () => {
+    vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(true);
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockFireUserPromptExpansionEvent).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'Expanded prompt',
+    });
+  });
+
+  it('should not fire UserPromptExpansion hooks when no hooks are configured', async () => {
+    vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockFireUserPromptExpansionEvent).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'Expanded prompt',
+    });
+  });
+
+  it('should not fire UserPromptExpansion hooks when hook system is unavailable', async () => {
+    vi.mocked(mockConfig.getHookSystem).mockReturnValue(undefined);
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockFireUserPromptExpansionEvent).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'Expanded prompt',
+    });
+  });
+
+  it('should block submit_prompt commands when UserPromptExpansion blocks', async () => {
+    mockFireUserPromptExpansionEvent.mockResolvedValue({
+      getBlockingError: () => ({
+        blocked: true,
+        reason: 'Blocked by policy',
+      }),
+      shouldStopExecution: () => false,
+    });
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'UserPromptExpansion blocked: Blocked by policy',
+    });
+  });
+
+  it('should return the block reason for blocked model-invocable command execution', async () => {
+    mockFireUserPromptExpansionEvent.mockResolvedValue({
+      getBlockingError: () => ({
+        blocked: true,
+        reason: 'Blocked by policy',
+      }),
+      shouldStopExecution: () => false,
+      getEffectiveReason: () => 'fallback reason',
+    });
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      modelInvocable: true,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    const executor = vi.mocked(mockConfig.setModelInvocableCommandsExecutor)
+      .mock.calls[0]?.[0];
+    expect(executor).toBeDefined();
+
+    const content = await executor?.('custom', 'with args');
+
+    expect(content).toEqual({
+      error: 'UserPromptExpansion blocked: Blocked by policy',
+    });
   });
 
   it('should return unsupported for other built-in commands like /quit', async () => {

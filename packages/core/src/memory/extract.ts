@@ -7,15 +7,22 @@
 import * as fs from 'node:fs/promises';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { partToString } from '../utils/partUtils.js';
 import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryMetadataPath,
 } from './paths.js';
-import { ensureAutoMemoryScaffold } from './store.js';
+import {
+  ensureAutoMemoryScaffold,
+  ensureUserAutoMemoryScaffold,
+} from './store.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
-import { rebuildManagedAutoMemoryIndex } from './indexer.js';
+import {
+  rebuildManagedAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
+} from './indexer.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
@@ -90,10 +97,10 @@ async function writeExtractCursor(
   projectRoot: string,
   cursor: AutoMemoryExtractCursor,
 ): Promise<void> {
-  await fs.writeFile(
+  await atomicWriteFile(
     getAutoMemoryExtractCursorPath(projectRoot),
     `${JSON.stringify(cursor, null, 2)}\n`,
-    'utf-8',
+    { encoding: 'utf-8' },
   );
 }
 
@@ -115,10 +122,10 @@ async function bumpMetadata(
     metadata.lastExtractionTouchedTopics = touchedTopics;
     metadata.lastExtractionStatus =
       touchedTopics.length > 0 ? 'updated' : 'noop';
-    await fs.writeFile(
+    await atomicWriteFile(
       getAutoMemoryMetadataPath(projectRoot),
       `${JSON.stringify(metadata, null, 2)}\n`,
-      'utf-8',
+      { encoding: 'utf-8' },
     );
   } catch {
     // Scaffold creation already writes metadata; ignore non-critical update errors.
@@ -133,7 +140,18 @@ export async function runAutoMemoryExtract(params: {
   config?: Config;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
+  // Per-project scaffold is required (extraction cursor + metadata live
+  // there). User-level scaffold is optional — a brand-new user without
+  // write access to `~/.qwen/memories/` should still be able to use
+  // project-level memory, so swallow the failure and continue.
   await ensureAutoMemoryScaffold(params.projectRoot, now);
+  try {
+    await ensureUserAutoMemoryScaffold();
+  } catch (error) {
+    debugLogger.warn(
+      `User-level auto-memory scaffold failed (non-critical, will skip user-level writes this run): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   const transcript = buildTranscriptMessages(params.history);
   const currentCursor = await readExtractCursor(params.projectRoot);
@@ -173,7 +191,32 @@ export async function runAutoMemoryExtract(params: {
       params.sessionId,
       agentResult.touchedTopics,
     );
-    await rebuildManagedAutoMemoryIndex(params.projectRoot);
+    // Asymmetric failure isolation:
+    //   * project-level rebuild MUST bubble its error up. The cursor advances
+    //     only after rebuilds complete; a project rebuild failure that gets
+    //     silently swallowed would leave the memory file written, the index
+    //     stale, AND the cursor advanced — the memory becomes un-recallable
+    //     until some later session happens to trigger another rebuild. The
+    //     pre-existing `Promise.all` contract (throw → cursor stays → retry
+    //     on next session) is the durability guarantee we must preserve.
+    //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
+    //     (EACCES) must not poison the project-level rebuild or block the
+    //     cursor. Catch + warn, same shape as the user-level scaffold above.
+    const projectRebuild =
+      agentResult.touchedProjectScope || !agentResult.touchedUserScope
+        ? // Either explicitly touched, or the defensive fallback when both
+          // scope flags were unset (e.g. older planner) — both paths must
+          // surface project-level rebuild failures.
+          rebuildManagedAutoMemoryIndex(params.projectRoot)
+        : Promise.resolve();
+    const userRebuild = agentResult.touchedUserScope
+      ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
+          debugLogger.warn(
+            `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        })
+      : Promise.resolve();
+    await Promise.all([projectRebuild, userRebuild]);
   }
 
   const cursor: AutoMemoryExtractCursor = {

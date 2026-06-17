@@ -37,6 +37,8 @@ vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
         return entry.shellId;
       case 'monitor':
         return entry.monitorId;
+      case 'workflow':
+        return entry.runId;
       case 'dream':
         return entry.dreamId;
       default: {
@@ -119,6 +121,11 @@ interface Harness {
   dreamCancelTask: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string; ctrl?: boolean }) => void;
+  pressKeyBroadcast: (key: {
+    name?: string;
+    sequence?: string;
+    ctrl?: boolean;
+  }) => void;
   call: (fn: () => void) => void;
   lastFrame: () => string | undefined;
   probe: { current: ProbeHandle | null };
@@ -143,6 +150,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
+      resolvePendingApproval: vi.fn(),
       setActivityChangeCallback: vi.fn(),
       get: (id: string) => {
         const match = currentEntries.find(
@@ -226,7 +234,15 @@ function setup(initial: readonly DialogEntry[]): Harness {
         if (latest) latest(key);
       });
     },
+    pressKeyBroadcast(key) {
+      act(() => {
+        for (const handler of [...handlers]) {
+          handler(key);
+        }
+      });
+    },
     call(fn) {
+      handlers.length = 0;
       act(() => fn());
     },
     lastFrame,
@@ -368,6 +384,42 @@ describe('BackgroundTasksDialog', () => {
     expect(h.cancel).not.toHaveBeenCalled();
   });
 
+  it('sanitizes ANSI/control sequences in an entry label (terminal-injection guard)', () => {
+    // A /fork directive is user-controlled and flows verbatim into the entry
+    // description; a raw escape sequence must not reach the terminal when the
+    // dialog renders the row.
+    const ESC = '';
+    const malicious = entry({
+      agentId: 'fork-evil',
+      subagentType: 'fork',
+      description: `r${ESC}[2Jx`,
+      prompt: `prompt ${ESC}[31mred`,
+      recentActivities: [
+        {
+          at: 1,
+          name: 'Shell',
+          description: `activity ${ESC}[?25lhide`,
+        },
+      ],
+    });
+    const h = setup([malicious]);
+    h.call(() => h.probe.current!.actions.openDialog());
+
+    const frame = h.lastFrame() ?? '';
+    // The raw clear-screen escape (ESC + "[2J") never reaches the frame...
+    expect(frame).not.toContain(`${ESC}[2J`);
+    // ...it survives only as inert, escaped text.
+    expect(frame).toContain('[2J');
+
+    h.call(() => h.probe.current!.actions.enterDetail());
+    const detailFrame = h.lastFrame() ?? '';
+    expect(detailFrame).not.toContain(`${ESC}[2J`);
+    expect(detailFrame).not.toContain(`${ESC}[31m`);
+    expect(detailFrame).not.toContain(`${ESC}[?25l`);
+    expect(detailFrame).toContain('[31m');
+    expect(detailFrame).toContain('[?25l');
+  });
+
   it('detail-mode left clears any armed foreground cancel before exiting', () => {
     // Detail-mode `x` arms the foreground confirm step on the focused
     // entry. If the user presses `left` to back out without confirming,
@@ -392,6 +444,59 @@ describe('BackgroundTasksDialog', () => {
     // a stale armed state inherited from detail mode.
     h.pressKey({ sequence: 'x' });
     expect(h.cancel).not.toHaveBeenCalled();
+  });
+
+  it('lets ask-user-question approvals own all keyboard input in detail mode', () => {
+    const questionApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'ask-1',
+      name: 'ask_user_question',
+      description: 'choose',
+      confirmationDetails: {
+        type: 'ask_user_question',
+        title: 'Need input',
+        questions: [
+          {
+            question: 'Pick one',
+            header: 'Choice',
+            options: [
+              {
+                label: 'Alpha',
+                description: 'Use alpha.',
+              },
+              {
+                label: 'Beta',
+                description: 'Use beta.',
+              },
+            ],
+          },
+        ],
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+    };
+    const bg = entry({
+      agentId: 'bg-question',
+      pendingApprovals: [questionApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.probe.current!.state.dialogOpen).toBe(true);
+
+    h.pressKeyBroadcast({ sequence: 'x' });
+    h.pressKeyBroadcast({ name: 'left' });
+    h.pressKeyBroadcast({ name: 'space' });
+
+    expect(h.cancel).not.toHaveBeenCalled();
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.probe.current!.state.dialogOpen).toBe(true);
   });
 
   it('Esc backs out of an armed foreground cancel without closing the dialog', () => {

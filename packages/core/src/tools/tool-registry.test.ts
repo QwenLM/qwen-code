@@ -11,6 +11,7 @@ import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
 import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
+import { ExitPlanModeTool } from './exitPlanMode.js';
 import type { FunctionDeclaration, CallableTool } from '@google/genai';
 import { mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
@@ -374,6 +375,20 @@ describe('ToolRegistry', () => {
       expect(names).toEqual(['always-visible']);
     });
 
+    // Regression for #5210: the real exit_plan_mode is deferred-category but
+    // must stay declared, otherwise the model cannot call it in plan mode.
+    it('keeps the real exit_plan_mode tool declared (#5210)', () => {
+      toolRegistry.registerTool(new ExitPlanModeTool(config));
+
+      const declared = toolRegistry
+        .getFunctionDeclarations()
+        .map((d) => d.name);
+      const deferred = toolRegistry.getDeferredToolSummary().map((t) => t.name);
+
+      expect(declared).toContain('exit_plan_mode');
+      expect(deferred).not.toContain('exit_plan_mode');
+    });
+
     it('includes revealed deferred tools in getFunctionDeclarations', () => {
       toolRegistry.registerTool(
         new MockTool({ name: 'hidden', shouldDefer: true }),
@@ -419,6 +434,27 @@ describe('ToolRegistry', () => {
       expect(summary).toEqual([
         { name: 'alpha', description: 'alpha desc' },
         { name: 'bravo', description: 'bravo desc' },
+      ]);
+    });
+
+    it('getDeferredToolSummary includes MCP server names', () => {
+      const mcpCallable = {} as CallableTool;
+      toolRegistry.registerTool(
+        new DiscoveredMCPTool(
+          mcpCallable,
+          'schedule-server',
+          'cron_list',
+          'list scheduled jobs',
+          {},
+        ),
+      );
+
+      expect(toolRegistry.getDeferredToolSummary()).toEqual([
+        {
+          name: 'mcp__schedule-server__cron_list',
+          description: 'list scheduled jobs',
+          serverName: 'schedule-server',
+        },
       ]);
     });
 

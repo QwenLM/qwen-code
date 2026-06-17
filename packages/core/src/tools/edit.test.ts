@@ -1043,7 +1043,7 @@ describe('EditTool', () => {
       );
     });
 
-    it('should return a snippet of old and new strings if they are different', () => {
+    it('should return the file path when old and new strings differ', () => {
       const testFileName = 'test.txt';
       const params: EditToolParams = {
         file_path: path.join(rootDir, testFileName),
@@ -1051,14 +1051,10 @@ describe('EditTool', () => {
         new_string: 'this is the new string value',
       };
       const invocation = tool.build(params);
-      // shortenPath will be called internally, resulting in just the file name
-      // The snippets are truncated at 30 chars + '...'
-      expect(invocation.getDescription()).toBe(
-        `${testFileName}: this is the old string value => this is the new string value`,
-      );
+      expect(invocation.getDescription()).toBe(testFileName);
     });
 
-    it('should handle very short strings correctly in the description', () => {
+    it('should return the file path for short strings', () => {
       const testFileName = 'short.txt';
       const params: EditToolParams = {
         file_path: path.join(rootDir, testFileName),
@@ -1066,22 +1062,7 @@ describe('EditTool', () => {
         new_string: 'new',
       };
       const invocation = tool.build(params);
-      expect(invocation.getDescription()).toBe(`${testFileName}: old => new`);
-    });
-
-    it('should truncate long strings in the description', () => {
-      const testFileName = 'long.txt';
-      const params: EditToolParams = {
-        file_path: path.join(rootDir, testFileName),
-        old_string:
-          'this is a very long old string that will definitely be truncated',
-        new_string:
-          'this is a very long new string that will also be truncated',
-      };
-      const invocation = tool.build(params);
-      expect(invocation.getDescription()).toBe(
-        `${testFileName}: this is a very long old string... => this is a very long new string...`,
-      );
+      expect(invocation.getDescription()).toBe(testFileName);
     });
   });
 
@@ -1216,6 +1197,7 @@ describe('EditTool', () => {
       expect(result.error?.message).toMatch(
         /binary \/ image \/ audio \/ video \/ PDF \/ notebook payload/,
       );
+      expect(result.error?.message).toContain('notebook_edit');
       expect(result.error?.message).not.toMatch(/Use the read_file tool first/);
       // EditTool's verb is "edit", not "overwrite" — using the
       // wrong one here would be confusing for in-place edits.

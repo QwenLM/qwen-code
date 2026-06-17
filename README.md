@@ -46,15 +46,13 @@ Qwen Code is an open-source AI agent for the terminal, optimized for Qwen series
 #### Linux / macOS
 
 ```bash
-bash -c "$(curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh)"
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash
 ```
 
-#### Windows (Run as Administrator)
+#### Windows
 
-Works in both Command Prompt and PowerShell:
-
-```cmd
-powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+```powershell
+irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex
 ```
 
 > **Note**: It's recommended to restart your terminal after installation to ensure environment variables take effect.
@@ -258,7 +256,7 @@ Use the `/model` command at any time to switch between all configured models.
 }
 ```
 
-> Subscribe to the Coding Plan and get your API key at [Alibaba Cloud ModelStudio(Beijing)](https://bailian.console.aliyun.com/cn-beijing?tab=coding-plan#/efm/coding-plan-index) or [Alibaba Cloud ModelStudio(intl)](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index).
+> Subscribe to the Coding Plan and get your API key at [Alibaba Cloud ModelStudio (Beijing)](https://bailian.console.aliyun.com/cn-beijing?tab=coding-plan#/efm/coding-plan-index) or [Alibaba Cloud ModelStudio (intl)](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index).
 
 </details>
 
@@ -563,6 +561,7 @@ The most commonly used top-level fields in `settings.json`:
 
 Looking for a graphical interface?
 
+- [**Qwen Code Desktop**](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) Official desktop app for macOS, Windows, and Linux
 - [**AionUi**](https://github.com/iOfficeAI/AionUi) A modern GUI for command-line AI tools including Qwen Code
 - [**Gemini CLI Desktop**](https://github.com/Piebald-AI/gemini-cli-desktop) A cross-platform desktop/web/mobile UI for Qwen Code
 

@@ -105,6 +105,35 @@ describe('readManyFiles', () => {
       expect(content).toContain('--- End of content ---');
     });
 
+    it('should include truncated notebooks that do not expose text line ranges', async () => {
+      const relativePath = 'large.ipynb';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const cells = Array.from({ length: 30 }, (_, index) => ({
+        cell_type: 'code',
+        id: `large-cell-${index}`,
+        source: [`value_${index} = "${'x'.repeat(4500)}"`],
+        metadata: {},
+        outputs: [],
+      }));
+      await fs.writeFile(
+        absolutePath,
+        JSON.stringify({ cells, metadata: {} }),
+        'utf-8',
+      );
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const content = contentToString(result.contentParts);
+      expect(content).toContain('Jupyter Notebook');
+      expect(content).toContain('remaining cells truncated');
+      expect(content).not.toContain(
+        'No files matching the criteria were found',
+      );
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.filePath).toBe(absolutePath);
+    });
+
     it('should return message when no files found', async () => {
       const mockConfig = createMockConfig(tempRootDir);
 

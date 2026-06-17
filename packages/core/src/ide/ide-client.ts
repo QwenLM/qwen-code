@@ -23,7 +23,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { EnvHttpProxyAgent } from 'undici';
+import { EnvHttpProxyAgent, fetch as undiciFetch } from 'undici';
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { IDE_REQUEST_TIMEOUT_MS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -79,8 +79,6 @@ function getRealPath(path: string): string {
   try {
     return fs.realpathSync(path);
   } catch (_e) {
-    // If realpathSync fails, it might be because the path doesn't exist.
-    // In that case, we can fall back to the original path.
     return path;
   }
 }
@@ -452,7 +450,6 @@ export class IdeClient {
         ListToolsResultSchema,
       );
 
-      // Map the array of tool objects to an array of tool names (strings)
       this.availableTools = response.tools.map((tool) => tool.name);
 
       if (this.availableTools.length > 0) {
@@ -465,8 +462,7 @@ export class IdeClient {
         );
       }
     } catch (error) {
-      // It's okay if this fails, the IDE might not support it.
-      // Don't log an error if the method is not found, which is a common case.
+      // "Method not found" is expected for IDEs that don't support tool discovery.
       if (
         error instanceof Error &&
         !error.message?.includes('Method not found')
@@ -806,15 +802,13 @@ export class IdeClient {
     const agent = new EnvHttpProxyAgent({
       noProxy: noProxyHosts.filter(Boolean).join(','),
     });
-    const undiciPromise = import('undici');
     return async (url: string | URL, init?: RequestInit): Promise<Response> => {
-      const { fetch: fetchFn } = await undiciPromise;
       const fetchOptions: RequestInit & { dispatcher?: unknown } = {
         ...init,
         dispatcher: agent,
       };
       const options = fetchOptions as unknown as import('undici').RequestInit;
-      const response = await fetchFn(url, options);
+      const response = await undiciFetch(url, options);
       // Convert undici Headers to standard Headers for compatibility
       const standardHeaders = new Headers();
       for (const [key, value] of response.headers.entries()) {

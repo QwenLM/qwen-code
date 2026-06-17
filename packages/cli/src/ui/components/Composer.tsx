@@ -13,7 +13,7 @@ import { QueuedMessageDisplay } from './QueuedMessageDisplay.js';
 import { KeyboardShortcuts } from './KeyboardShortcuts.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { useVimModeState } from '../contexts/VimModeContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
 import { StreamingState, type HistoryItemToolGroup } from '../types.js';
@@ -25,7 +25,7 @@ export const Composer = () => {
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
   const uiActions = useUIActions();
-  const { vimEnabled } = useVimMode();
+  const { vimEnabled } = useVimModeState();
 
   const {
     showAutoAcceptIndicator,
@@ -97,12 +97,6 @@ export const Composer = () => {
         <LoadingIndicator
           // Hide loading phrases when enableLoadingPhrases is explicitly false.
           // Using === false ensures phrases show by default when undefined.
-          thought={
-            uiState.streamingState === StreamingState.WaitingForConfirmation ||
-            config.getAccessibility()?.enableLoadingPhrases === false
-              ? undefined
-              : uiState.thought
-          }
           currentLoadingPhrase={
             config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined

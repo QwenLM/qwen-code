@@ -24,6 +24,7 @@ import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
 import { formatDuration } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
+// Keep in sync with GOAL_CLEAR_KEYWORDS in packages/web-shell/client/App.tsx
 const CLEAR_KEYWORDS = new Set([
   'clear',
   'stop',
@@ -100,7 +101,7 @@ export const goalCommand: SlashCommand = {
   },
   argumentHint: '[<condition> | clear]',
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive', 'non_interactive'] as const,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,
@@ -158,6 +159,9 @@ export const goalCommand: SlashCommand = {
         durationMs: Date.now() - cleared.setAt,
       };
       context.ui.addItem(clearedItem, Date.now());
+      if (context.executionMode !== 'interactive') {
+        return infoMessage(`Goal cleared: ${cleared.condition}`);
+      }
       return;
     }
 
@@ -204,6 +208,7 @@ export const goalCommand: SlashCommand = {
       type: MessageType.GOAL_STATUS,
       kind: 'set',
       condition: registered.condition,
+      setAt: registered.setAt,
     };
     context.ui.addItem(setItem, Date.now());
 

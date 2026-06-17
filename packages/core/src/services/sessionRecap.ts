@@ -47,15 +47,29 @@ export async function generateSessionRecap(
 ): Promise<string | null> {
   try {
     const geminiClient = config.getGeminiClient();
-    if (!geminiClient) return null;
+    if (!geminiClient) {
+      debugLogger.debug('recap skipped: no geminiClient available');
+      return null;
+    }
 
-    const fullHistory = geminiClient.getChat().getHistory();
-    if (fullHistory.length < 2) return null;
+    const fullHistory = geminiClient.getHistoryShallow();
+    if (fullHistory.length < 2) {
+      debugLogger.debug(
+        `recap skipped: history too short (${fullHistory.length} messages)`,
+      );
+      return null;
+    }
 
     const dialog = filterToDialog(fullHistory);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
-    if (recentHistory.length === 0) return null;
+    if (recentHistory.length === 0) {
+      debugLogger.debug('recap skipped: no dialog messages after filtering');
+      return null;
+    }
 
+    debugLogger.debug(
+      `recap: sending side-query with ${recentHistory.length} messages`,
+    );
     const result = await runSideQuery(config, {
       purpose: 'session-recap',
       contents: [
@@ -72,13 +86,23 @@ export async function generateSessionRecap(
       maxAttempts: 1,
     });
 
-    if (abortSignal.aborted) return null;
+    if (abortSignal.aborted) {
+      debugLogger.debug('recap aborted by signal');
+      return null;
+    }
 
-    if (!result.text) return null;
+    if (!result.text) {
+      debugLogger.debug('recap: model returned empty text');
+      return null;
+    }
 
     const text = extractRecap(result.text);
-    if (!text) return null;
+    if (!text) {
+      debugLogger.debug('recap: failed to extract <recap> tags from response');
+      return null;
+    }
 
+    debugLogger.debug(`recap generated: len=${text.length}`);
     return text;
   } catch (err) {
     debugLogger.warn(

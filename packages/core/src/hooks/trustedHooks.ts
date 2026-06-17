@@ -12,6 +12,7 @@ import {
   type HookDefinition,
   type HookEventName,
 } from './types.js';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -50,9 +51,16 @@ export class TrustedHooksManager {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      fs.writeFileSync(
+      // 0o600 + forceMode + noFollow: this file lists user-approved
+      // executable hook commands and is strictly more sensitive than
+      // trustedFolders.json / tipHistory.json. forceMode heals
+      // over-permissive perms restored from a backup; noFollow refuses
+      // to write through a pre-placed symlink (matches the credential
+      // write sites' security posture).
+      atomicWriteFileSync(
         this.configPath,
         JSON.stringify(this.trustedHooks, null, 2),
+        { mode: 0o600, forceMode: true, noFollow: true },
       );
     } catch (error) {
       debugLogger.warn('Failed to save trusted hooks config', error);

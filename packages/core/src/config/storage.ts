@@ -320,6 +320,10 @@ export class Storage {
     return targetDir;
   }
 
+  getToolResultsDir(): string {
+    return path.join(this.getProjectTempDir(), 'tool-results');
+  }
+
   ensureProjectTempDirExists(): void {
     fs.mkdirSync(this.getProjectTempDir(), { recursive: true });
   }
@@ -330,13 +334,6 @@ export class Storage {
 
   getProjectRoot(): string {
     return this.targetDir;
-  }
-
-  getHistoryDir(): string {
-    const hash = getProjectHash(this.getProjectRoot());
-    const historyDir = path.join(Storage.getRuntimeBaseDir(), 'history');
-    const targetDir = path.join(historyDir, hash);
-    return targetDir;
   }
 
   getWorkspaceSettingsPath(): string {

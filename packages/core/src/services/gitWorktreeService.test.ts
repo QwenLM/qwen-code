@@ -537,4 +537,74 @@ describe('GitWorktreeService', () => {
       expect(result.errors).toHaveLength(0);
     });
   });
+
+  describe('parsePRReference', () => {
+    it('recognises #N shorthand', () => {
+      expect(GitWorktreeService.parsePRReference('#123')).toBe(123);
+      expect(GitWorktreeService.parsePRReference('#1')).toBe(1);
+      expect(GitWorktreeService.parsePRReference('#99999')).toBe(99999);
+    });
+
+    it('trims surrounding whitespace before matching', () => {
+      expect(GitWorktreeService.parsePRReference('  #42  ')).toBe(42);
+    });
+
+    it('rejects leading zeros to keep round-trips unambiguous', () => {
+      expect(GitWorktreeService.parsePRReference('#0123')).toBeNull();
+      expect(GitWorktreeService.parsePRReference('#0')).toBeNull();
+    });
+
+    it('recognises full GitHub PR URLs (any host)', () => {
+      expect(
+        GitWorktreeService.parsePRReference(
+          'https://github.com/QwenLM/qwen-code/pull/4174',
+        ),
+      ).toBe(4174);
+      expect(
+        GitWorktreeService.parsePRReference(
+          'http://gh.enterprise.example.com/team/repo/pull/9',
+        ),
+      ).toBe(9);
+    });
+
+    it('tolerates trailing slash, query string, and fragment', () => {
+      expect(
+        GitWorktreeService.parsePRReference('https://github.com/o/r/pull/123/'),
+      ).toBe(123);
+      expect(
+        GitWorktreeService.parsePRReference(
+          'https://github.com/o/r/pull/123?foo=bar',
+        ),
+      ).toBe(123);
+      expect(
+        GitWorktreeService.parsePRReference(
+          'https://github.com/o/r/pull/123#discussion_r999',
+        ),
+      ).toBe(123);
+    });
+
+    it('returns null for plain slugs and malformed inputs', () => {
+      expect(GitWorktreeService.parsePRReference('my-feature')).toBeNull();
+      expect(GitWorktreeService.parsePRReference('#abc')).toBeNull();
+      expect(GitWorktreeService.parsePRReference('123')).toBeNull();
+      expect(
+        GitWorktreeService.parsePRReference('https://example.com/'),
+      ).toBeNull();
+      expect(
+        GitWorktreeService.parsePRReference(
+          'https://github.com/o/r/issues/123',
+        ),
+      ).toBeNull();
+      expect(GitWorktreeService.parsePRReference('')).toBeNull();
+    });
+
+    it('safely handles non-string input', () => {
+      expect(
+        GitWorktreeService.parsePRReference(undefined as unknown as string),
+      ).toBeNull();
+      expect(
+        GitWorktreeService.parsePRReference(null as unknown as string),
+      ).toBeNull();
+    });
+  });
 });

@@ -17,10 +17,12 @@ import {
   vi,
 } from 'vitest';
 import { getProjectHash } from '../utils/paths.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
   getResumePromptTokenCount,
+  getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
 import { CompressionStatus } from '../core/turn.js';
@@ -29,6 +31,7 @@ import * as jsonl from '../utils/jsonl-utils.js';
 
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
+vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
 
 describe('SessionService', () => {
@@ -68,6 +71,7 @@ describe('SessionService', () => {
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
+    vi.mocked(readRuntimeStatus).mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -335,6 +339,41 @@ describe('SessionService', () => {
       expect(result.items).toHaveLength(0);
     });
 
+    it('should list a migrated session when runtime status matches this project', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].sessionId).toBe(sessionIdA);
+    });
+
     it('should skip files that do not match session file pattern', async () => {
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`, // valid
@@ -375,6 +414,252 @@ describe('SessionService', () => {
       expect(loaded?.lastCompletedUuid).toBe('b2');
     });
 
+    it('keeps the latest file history snapshot for a prompt id', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+
+      const firstSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 's1',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'old-backup',
+                  version: 1,
+                  backupTime: '2026-06-13T00:00:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      const updatedSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 's2',
+        parentUuid: 's1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:01:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'updated-backup',
+                  version: 2,
+                  backupTime: '2026-06-13T00:01:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        firstSnapshotRecord,
+        updatedSnapshotRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'updated-backup',
+              version: 2,
+              backupTime: new Date('2026-06-13T00:01:01.000Z'),
+              failed: undefined,
+            },
+          },
+        },
+      ]);
+    });
+
+    it('ignores file history snapshots on a rewound inactive branch', async () => {
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+
+      const staleSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'stale-snapshot',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'stale-backup',
+                  version: 1,
+                  backupTime: '2026-06-13T00:00:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      const rewindRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'rewind',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'rewind',
+        message: undefined,
+        systemPayload: { truncatedCount: 1 },
+      };
+      const survivingSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'surviving-snapshot',
+        parentUuid: 'rewind',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:01:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'surviving-backup',
+                  version: 2,
+                  backupTime: '2026-06-13T00:01:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        staleSnapshotRecord,
+        rewindRecord,
+        survivingSnapshotRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'surviving-backup',
+              version: 2,
+              backupTime: new Date('2026-06-13T00:01:01.000Z'),
+              failed: undefined,
+            },
+          },
+        },
+      ]);
+    });
+
+    it('leaves file history snapshots undefined when none are recorded', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toBeUndefined();
+    });
+
+    it('skips malformed file history snapshot records and keeps later valid ones', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+
+      const malformedSnapshotRecord = {
+        ...recordB1,
+        uuid: 'bad-snapshot',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'bad',
+              timestamp: 'not-enough-fields',
+            },
+          ],
+        },
+      } as unknown as ChatRecord;
+      const validSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'good-snapshot',
+        parentUuid: 'bad-snapshot',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'backup-a',
+                  version: 1,
+                  backupTime: '2026-06-13T00:00:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        malformedSnapshotRecord,
+        validSnapshotRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'backup-a',
+              version: 1,
+              backupTime: new Date('2026-06-13T00:00:01.000Z'),
+              failed: undefined,
+            },
+          },
+        },
+      ]);
+    });
+
     it('should return undefined when session file is empty', async () => {
       vi.mocked(jsonl.read).mockResolvedValue([]);
 
@@ -404,6 +689,39 @@ describe('SessionService', () => {
       const loaded = await sessionService.loadSession(sessionIdA);
 
       expect(loaded).toBeUndefined();
+    });
+
+    it('should load a migrated session when runtime status matches this project', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const loaded = await sessionService.loadSession(sessionIdA);
+
+      expect(loaded?.conversation.sessionId).toBe(sessionIdA);
+      expect(loaded?.conversation.projectHash).toBe('test-project-hash');
     });
 
     it('should reconstruct tree-structured history correctly', async () => {
@@ -565,6 +883,33 @@ describe('SessionService', () => {
 
       expect(result).toBe(false);
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('should remove a migrated session when runtime status matches this project', async () => {
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalled();
     });
 
     it('should handle file not found error', async () => {
@@ -756,6 +1101,38 @@ describe('SessionService', () => {
       expect(createReadStreamSpy).not.toHaveBeenCalled();
     });
 
+    it('should count a migrated session when runtime status matches this project', async () => {
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd) =>
+        cwd === '/test/project/root' ? 'test-project-hash' : 'other-hash',
+      );
+      vi.mocked(jsonl.parseLineTolerant).mockImplementation((line) => [
+        JSON.parse(line),
+      ]);
+      const createReadStreamSpy = stubCreateReadStream([
+        JSON.stringify({ uuid: 'u1', type: 'user' }),
+        JSON.stringify({ uuid: 'a1', type: 'assistant' }),
+      ]);
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(2);
+      expect(createReadStreamSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('should return 0 when the session file has no records (empty file)', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([]);
       const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
@@ -844,6 +1221,32 @@ describe('SessionService', () => {
 
       expect(exists).toBe(false);
     });
+
+    it('should return true for a migrated session when runtime status matches this project', async () => {
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const exists = await sessionService.sessionExists(sessionIdA);
+
+      expect(exists).toBe(true);
+    });
   });
 
   describe('getResumePromptTokenCount', () => {
@@ -893,6 +1296,9 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(450);
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 450, outputTokenCount: 0 });
     });
 
     it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
@@ -908,6 +1314,26 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(200);
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 200, outputTokenCount: 250 });
+    });
+
+    it('should restore disjoint candidate and thought output tokens when total is unavailable', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: {
+          promptTokenCount: 200,
+          candidatesTokenCount: 40,
+          thoughtsTokenCount: 60,
+        },
+      };
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 200, outputTokenCount: 100 });
     });
 
     it('should fall back to compression when latest assistant has zero usage', () => {
@@ -923,6 +1349,9 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(300);
+      expect(
+        getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
+      ).toEqual({ promptTokenCount: 300, outputTokenCount: 0 });
     });
   });
 
@@ -945,6 +1374,57 @@ describe('SessionService', () => {
       const history = buildApiHistoryFromConversation(conversation);
 
       expect(history).toEqual([recordA1.message, assistantA1.message]);
+    });
+
+    it('does not deep-clone stored messages when rebuilding resume API history', () => {
+      const largePayload = {
+        output: 'x'.repeat(128 * 1024),
+        nested: { keep: true },
+      };
+      const toolResult: ChatRecord = {
+        uuid: 'large-tool-result',
+        parentUuid: recordA1.uuid,
+        sessionId: sessionIdA,
+        timestamp: '2024-01-01T00:02:00Z',
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: largePayload,
+              },
+            },
+          ],
+        },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:02:00Z',
+        messages: [recordA1, toolResult],
+      };
+      const structuredCloneSpy = vi
+        .spyOn(globalThis, 'structuredClone')
+        .mockImplementation(() => {
+          throw new Error('unexpected deep clone');
+        });
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(structuredCloneSpy).not.toHaveBeenCalled();
+      expect(history).toEqual([recordA1.message, toolResult.message]);
+      expect(history[1]).not.toBe(toolResult.message);
+      expect(history[1].parts).not.toBe(toolResult.message!.parts);
+      const response = history[1].parts![0] as {
+        functionResponse: { response: typeof largePayload };
+      };
+      expect(response.functionResponse.response).toBe(largePayload);
     });
 
     it('merges mid-turn user messages into the preceding tool result on resume', () => {
@@ -1386,7 +1866,7 @@ describe('SessionService', () => {
       }
     });
 
-    const seedSession = (sessionId: string) => {
+    const seedSession = (sessionId: string, sessionCwd = cwd) => {
       const chatsDir = realPath.join(
         service['storage'].getProjectDir(),
         'chats',
@@ -1400,7 +1880,7 @@ describe('SessionService', () => {
           sessionId,
           type: 'user',
           timestamp: '2026-04-22T00:00:00.000Z',
-          cwd,
+          cwd: sessionCwd,
           version: 'test',
           message: { role: 'user', parts: [{ text: 'hello' }] },
         },
@@ -1410,7 +1890,7 @@ describe('SessionService', () => {
           sessionId,
           type: 'assistant',
           timestamp: '2026-04-22T00:00:01.000Z',
-          cwd,
+          cwd: sessionCwd,
           version: 'test',
           message: { role: 'model', parts: [{ text: 'hi' }] },
         },
@@ -1511,6 +1991,33 @@ describe('SessionService', () => {
       await expect(service.forkSession(oldId, newId)).rejects.toThrow(
         /does not belong to current project/,
       );
+    });
+
+    it('forks a migrated session when runtime status matches this project', async () => {
+      const oldId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+      const newId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+      seedSession(oldId, realPath.join(realTmpDir, 'old-project'));
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: oldId,
+        workDir: cwd,
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+
+      const result = await service.forkSession(oldId, newId);
+
+      expect(result.copiedCount).toBe(2);
+      expect(fs.existsSync(result.filePath)).toBe(true);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(written.every((r) => r.cwd === cwd)).toBe(true);
+      await expect(service.loadSession(newId)).resolves.toBeDefined();
     });
 
     it('rejects invalid sessionId patterns before touching disk', async () => {

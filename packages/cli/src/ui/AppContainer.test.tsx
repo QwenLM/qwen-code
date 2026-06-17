@@ -14,11 +14,13 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
+import { useContext, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
   getNextRenderMode,
   isRenderModeToggleKey,
+  mergeStartupWarnings,
 } from './AppContainer.js';
 import ansiEscapes from 'ansi-escapes';
 import {
@@ -43,8 +45,9 @@ import {
   type HistoryItemWithoutId,
   ToolCallStatus,
 } from './types.js';
-import { useContext } from 'react';
+import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
+import type { Content } from '@google/genai';
 
 // Mock useStdout to capture terminal title writes
 let mockStdout: { write: ReturnType<typeof vi.fn> };
@@ -94,6 +97,8 @@ vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');
 vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
+vi.mock('./hooks/usePreferredEditor.js');
+vi.mock('./hooks/useWorktreeSession.js');
 vi.mock('./hooks/useProviderUpdates.js', () => ({
   useProviderUpdates: vi.fn(() => ({
     providerUpdateRequest: undefined,
@@ -108,7 +113,6 @@ vi.mock('./contexts/AgentViewContext.js', () => ({
     agents: new Map(),
   })),
   useAgentViewActions: vi.fn(() => ({
-    switchToMain: vi.fn(),
     switchToAgent: vi.fn(),
     switchToNext: vi.fn(),
     switchToPrevious: vi.fn(),
@@ -139,7 +143,11 @@ import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
-import { useVimMode } from './contexts/VimModeContext.js';
+import {
+  useVimMode,
+  useVimModeActions,
+  useVimModeState,
+} from './contexts/VimModeContext.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
@@ -169,6 +177,8 @@ describe('AppContainer State Management', () => {
   const mockedUseAutoAcceptIndicator = useAutoAcceptIndicator as Mock;
   const mockedUseGitBranchName = useGitBranchName as Mock;
   const mockedUseVimMode = useVimMode as Mock;
+  const mockedUseVimModeActions = useVimModeActions as Mock;
+  const mockedUseVimModeState = useVimModeState as Mock;
   const mockedUseSessionStats = useSessionStats as Mock;
   const mockedUseTextBuffer = useTextBuffer as Mock;
   const mockedUseLogger = useLogger as Mock;
@@ -236,21 +246,15 @@ describe('AppContainer State Management', () => {
           authMessage: null,
         },
       },
-      handleAuthSelect: vi.fn(),
-      handleSubscriptionPlanSubmit: vi.fn(),
-      handleCodingPlanSubmit: vi.fn(),
-      handleTokenPlanSubmit: vi.fn(),
-      handleApiKeyProviderSubmit: vi.fn(),
-      handleOpenRouterSubmit: vi.fn(),
-      handleCustomApiKeySubmit: vi.fn(),
+      closeAuthDialog: vi.fn(),
+      handleProviderSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
       actions: {
         setAuthState: vi.fn(),
         onAuthError: vi.fn(),
-        handleAuthSelect: vi.fn(),
+        closeAuthDialog: vi.fn(),
         handleProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
       },
@@ -312,6 +316,14 @@ describe('AppContainer State Management', () => {
     mockedUseVimMode.mockReturnValue({
       isVimEnabled: false,
       toggleVimEnabled: vi.fn(),
+    });
+    mockedUseVimModeActions.mockReturnValue({
+      toggleVimEnabled: vi.fn(),
+      setVimMode: vi.fn(),
+    });
+    mockedUseVimModeState.mockReturnValue({
+      vimEnabled: false,
+      vimMode: 'NORMAL',
     });
     mockedUseSessionStats.mockReturnValue({ stats: {} });
     mockedUseTextBuffer.mockReturnValue({
@@ -381,6 +393,140 @@ describe('AppContainer State Management', () => {
   afterEach(() => {
     cleanup();
   });
+
+  const rewindUserItem = (
+    id: number,
+    text: string,
+    promptId?: string,
+  ): HistoryItem => ({
+    id,
+    type: 'user',
+    text,
+    promptId,
+  });
+
+  const apiUser = (text: string): Content => ({
+    role: 'user',
+    parts: [{ text }],
+  });
+
+  const apiModel = (text: string): Content => ({
+    role: 'model',
+    parts: [{ text }],
+  });
+
+  type RewindHarnessOptions = {
+    apiHistory?: Content[];
+    fileRewindResult?: {
+      filesChanged: string[];
+      filesFailed: string[];
+    };
+    fileRewindError?: Error;
+    noGeminiClient?: boolean;
+  };
+
+  const renderRewindHarness = (options: RewindHarnessOptions = {}) => {
+    const history: HistoryItem[] = [
+      rewindUserItem(1, 'first prompt', 'prompt-1'),
+      { id: 2, type: 'gemini', text: 'first response' },
+      rewindUserItem(3, 'second prompt', 'prompt-2'),
+      { id: 4, type: 'gemini', text: 'second response' },
+    ];
+    const target = history[2]!;
+    const addItem = vi.fn();
+    const loadHistory = vi.fn();
+    const truncateToItem = vi.fn();
+    mockedUseHistory.mockReturnValue({
+      history,
+      addItem,
+      updateItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory,
+      truncateToItem,
+    });
+
+    const setText = vi.fn();
+    mockedUseTextBuffer.mockReturnValue({
+      text: '',
+      setText,
+    });
+
+    const apiHistory = options.apiHistory ?? [
+      apiUser('first prompt'),
+      apiModel('first response'),
+      apiUser('second prompt'),
+      apiModel('second response'),
+    ];
+    const getHistoryShallow = vi.fn(() => apiHistory);
+    const truncateHistory = vi.fn();
+    const geminiClient = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      setTools: vi.fn().mockResolvedValue(undefined),
+      isInitialized: vi.fn().mockReturnValue(false),
+      getHistoryShallow,
+      truncateHistory,
+    } as unknown as GeminiClient;
+    vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(
+      options.noGeminiClient ? (null as unknown as GeminiClient) : geminiClient,
+    );
+
+    const rewind = vi.fn();
+    if (options.fileRewindError) {
+      rewind.mockRejectedValue(options.fileRewindError);
+    } else {
+      rewind.mockResolvedValue(
+        options.fileRewindResult ?? {
+          filesChanged: ['src/foo.ts'],
+          filesFailed: [],
+        },
+      );
+    }
+    const snapshots = [
+      { promptId: 'prompt-1' },
+      { promptId: 'prompt-2' },
+      { promptId: 'prompt-3' },
+    ];
+    const getSnapshots = vi.fn(() => snapshots);
+    vi.spyOn(mockConfig, 'getFileHistoryService').mockReturnValue({
+      rewind,
+      getSnapshots,
+    } as unknown as ReturnType<Config['getFileHistoryService']>);
+
+    const rewindRecording = vi.fn();
+    vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
+      rewindRecording,
+    } as unknown as NonNullable<ReturnType<Config['getChatRecordingService']>>);
+
+    render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+
+    return {
+      target,
+      addItem,
+      loadHistory,
+      setText,
+      rewind,
+      getHistoryShallow,
+      truncateHistory,
+      rewindRecording,
+      snapshots,
+    };
+  };
+
+  const runRewind = async (userItem: HistoryItem, option: RestoreOption) => {
+    await act(async () => {
+      await (capturedUIActions.handleRewindConfirm(
+        userItem,
+        option,
+      ) as unknown as Promise<void>);
+    });
+  };
 
   describe('Basic Rendering', () => {
     it('renders without crashing with minimal props', () => {
@@ -464,6 +610,15 @@ describe('AppContainer State Management', () => {
       expect(() => unmount()).not.toThrow();
     });
 
+    it('dedupes startup warnings produced during config initialization', () => {
+      expect(
+        mergeStartupWarnings(
+          ['early warning', 'same warning'],
+          ['same warning', 'late memory warning'],
+        ),
+      ).toEqual(['early warning', 'same warning', 'late memory warning']);
+    });
+
     it('provides UIStateContext with state management', () => {
       expect(() => {
         render(
@@ -505,7 +660,47 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
 
-    it('does not clear the terminal just because width changed', () => {
+    it('refreshStatic skips the physical clear in VP mode (#4891)', () => {
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={vpSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      mockStdout.write.mockClear();
+
+      capturedUIActions.refreshStatic();
+
+      // VP mode owns the viewport via the React tree, so refreshStatic must not
+      // emit a physical clear — the resize-settle path (#4891) strands nothing.
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+    });
+
+    // #4891 changed the resize contract: width changes now trigger ONE full
+    // clearTerminal after RESIZE_REPAINT_SETTLE_MS (trailing-edge debounce),
+    // instead of never (#3967) or per-event (pre-#3967). This test pins the
+    // synchronous half: no immediate clear during the burst. The settle-time
+    // half is not observable here — ink-testing-library's rerender does not
+    // flush update-time passive effects — and is covered by
+    // useResizeSettleRepaint.test.ts.
+    it('does not clear the terminal synchronously on width change', () => {
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
       const { rerender } = render(
@@ -773,6 +968,71 @@ describe('AppContainer State Management', () => {
       }
       capturedOnCancelSubmit(info);
     };
+
+    it('does not fire outer cancel handler on Esc when vim is enabled in INSERT mode', async () => {
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      const cancelSpy = vi.fn();
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: cancelSpy,
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('handleExit'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      const escKey: Key = {
+        name: 'escape',
+        sequence: '\u001b',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+      };
+      handleKeypress!(escKey);
+
+      // In vim INSERT mode, Esc must NOT trigger the outer cancel handler.
+      expect(cancelSpy).not.toHaveBeenCalled();
+    });
 
     it('does not repopulate the buffer with the previous prompt on ESC cancel', async () => {
       const mockSetText = vi.fn();
@@ -2341,7 +2601,13 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
-    it('does not remeasure footer height for sticky todo status-only updates', () => {
+    it('does not remeasure footer height for sticky todo status-only updates', async () => {
+      // Scoped stub: makeFakeConfig().initialize() rejects on React's
+      // double-mount, which leaks async renders and destabilizes the
+      // footer-measurement timing this test depends on. Kept per-test so
+      // unrelated tests in this block still exercise the real init gate.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+
       const historyManager = {
         history: makeTodoHistory('pending'),
         addItem: vi.fn(),
@@ -2354,29 +2620,55 @@ describe('AppContainer State Management', () => {
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
       mockedMeasureElement.mockReturnValue({ width: 80, height: 4 });
 
-      const view = render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-      const callsAfterInitialRender = mockedMeasureElement.mock.calls.length;
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      // Let any pending state updates from useLayoutEffect settle.
+      await act(async () => {
+        view!.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      const heightAfterSettle = capturedUIState.availableTerminalHeight;
+
+      // Switch the mock to a different height so any re-measurement triggered
+      // by the status-only rerender below would change controlsHeight (and
+      // therefore availableTerminalHeight). Without this, the production
+      // same-value short-circuit on setControlsHeight makes the equality
+      // assertion pass even when the optimization regresses.
+      mockedMeasureElement.mockReturnValue({ width: 80, height: 10 });
 
       historyManager.history = makeTodoHistory('in_progress');
-      view.rerender(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+      await act(async () => {
+        view!.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
 
-      expect(mockedMeasureElement).toHaveBeenCalledTimes(
-        callsAfterInitialRender,
-      );
+      // The sticky todo status change (pending → in_progress) must not alter
+      // the computed terminal height. Combined with the mock-height swap
+      // above, this fails iff the footer was re-measured.
+      expect(capturedUIState.availableTerminalHeight).toBe(heightAfterSettle);
     });
   });
 
@@ -2408,21 +2700,15 @@ describe('AppContainer State Management', () => {
             authMessage: null,
           },
         },
-        handleAuthSelect: vi.fn(),
-        handleSubscriptionPlanSubmit: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleTokenPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit: vi.fn(),
+        closeAuthDialog: vi.fn(),
+        handleProviderSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
         actions: {
           setAuthState: vi.fn(),
           onAuthError: vi.fn(),
-          handleAuthSelect: vi.fn(),
+          closeAuthDialog: vi.fn(),
           handleProviderSubmit: vi.fn(),
-          handleOpenRouterSubmit: vi.fn(),
           openAuthDialog: vi.fn(),
           cancelAuthentication: vi.fn(),
         },
@@ -3075,6 +3361,215 @@ describe('AppContainer State Management', () => {
       await flushEffects();
 
       expect(trigger.activeCount()).toBe(0);
+    });
+  });
+
+  describe('handleRewindConfirm', () => {
+    it('skips conversation truncation when both-mode file restore fails', async () => {
+      const harness = renderRewindHarness({
+        fileRewindResult: {
+          filesChanged: [],
+          filesFailed: ['src/bad.ts'],
+        },
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).toHaveBeenCalledWith('prompt-2', true);
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Failed to restore 1 file(s): bad.ts',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('skips conversation truncation when both-mode file restore throws', async () => {
+      const harness = renderRewindHarness({
+        fileRewindError: new Error('snapshot missing'),
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).toHaveBeenCalledWith('prompt-2', true);
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Failed to restore files: snapshot missing',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('shows an error when restoring files without a prompt id', async () => {
+      const harness = renderRewindHarness();
+
+      await runRewind(rewindUserItem(3, 'second prompt'), 'code');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot restore files: this turn was created before file checkpointing was enabled.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('truncates conversation when both-mode file restore succeeds', async () => {
+      const harness = renderRewindHarness();
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).toHaveBeenCalledWith('prompt-2', true);
+      expect(harness.truncateHistory).toHaveBeenCalledWith(2);
+      expect(harness.loadHistory).toHaveBeenCalledWith([
+        rewindUserItem(1, 'first prompt', 'prompt-1'),
+        { id: 2, type: 'gemini', text: 'first response' },
+      ]);
+      expect(harness.setText).toHaveBeenCalledWith('second prompt');
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
+        }),
+        expect.any(Number),
+      );
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Restored 1 file(s).',
+        }),
+        expect.any(Number),
+      );
+      expect(harness.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 2 },
+        harness.snapshots.slice(0, 2),
+      );
+    });
+
+    it('restores code only without truncating conversation history', async () => {
+      const harness = renderRewindHarness();
+
+      await runRewind(harness.target, 'code');
+
+      expect(harness.rewind).toHaveBeenCalledWith('prompt-2', false);
+      expect(harness.getHistoryShallow).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Restored 1 file(s).',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('rewinds conversation only without restoring files', async () => {
+      const harness = renderRewindHarness();
+
+      await runRewind(harness.target, 'conversation');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).toHaveBeenCalledWith(2);
+      expect(harness.loadHistory).toHaveBeenCalledWith([
+        rewindUserItem(1, 'first prompt', 'prompt-1'),
+        { id: 2, type: 'gemini', text: 'first response' },
+      ]);
+      expect(harness.setText).toHaveBeenCalledWith('second prompt');
+      expect(harness.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 2 },
+        harness.snapshots.slice(0, 2),
+      );
+    });
+
+    it('shows an error and returns for conversation-only rewind with no client', async () => {
+      const harness = renderRewindHarness({ noGeminiClient: true });
+
+      await runRewind(harness.target, 'conversation');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot rewind conversation: no active model client.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('falls back to code restore for both-mode rewind with no client', async () => {
+      const harness = renderRewindHarness({ noGeminiClient: true });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).toHaveBeenCalledWith('prompt-2', false);
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Code restored, but conversation could not be rewound (no active client).',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('surfaces unexpected outer errors through history', async () => {
+      const harness = renderRewindHarness();
+      vi.spyOn(mockConfig, 'getGeminiClient').mockImplementation(() => {
+        throw new Error('client exploded');
+      });
+
+      await runRewind(harness.target, 'conversation');
+
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: client exploded',
+        }),
+        expect.any(Number),
+      );
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+    });
+
+    it('bails before file restore when the target turn is compressed', async () => {
+      const harness = renderRewindHarness({
+        apiHistory: [apiUser('first prompt'), apiModel('first response')],
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+        }),
+        expect.any(Number),
+      );
     });
   });
 

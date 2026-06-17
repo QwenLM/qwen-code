@@ -27,6 +27,9 @@ import {
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import { subagentNameContext } from '../utils/subagentNameContext.js';
+import { ApiRetryEvent } from '../telemetry/types.js';
+import { logApiRetry } from '../telemetry/loggers.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -46,6 +49,7 @@ const debugLogger = createDebugLogger('BASE_LLM_CLIENT');
 export interface ResolvedGeneratorForModel {
   contentGenerator: ContentGenerator;
   retryAuthType: string | undefined;
+  retryErrorCodes?: readonly number[];
   model: string;
 }
 
@@ -215,6 +219,7 @@ export class BaseLlmClient {
     const {
       contentGenerator,
       retryAuthType,
+      retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model);
 
@@ -235,11 +240,26 @@ export class BaseLlmClient {
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         authType: retryAuthType,
+        extraRetryErrorCodes: retryErrorCodes,
         persistentMode: isUnattendedMode(),
         signal: abortSignal,
         heartbeatFn: (info) => {
           process.stderr.write(
             `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: requestModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
           );
         },
       });
@@ -316,6 +336,7 @@ export class BaseLlmClient {
     const {
       contentGenerator,
       retryAuthType,
+      retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model);
 
@@ -333,11 +354,26 @@ export class BaseLlmClient {
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         authType: retryAuthType,
+        extraRetryErrorCodes: retryErrorCodes,
         persistentMode: isUnattendedMode(),
         signal: abortSignal,
         heartbeatFn: (info) => {
           process.stderr.write(
             `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: requestModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
           );
         },
       });
@@ -417,7 +453,9 @@ export class BaseLlmClient {
     const selector = this.resolveModelSelector(model);
     const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
     const mainModel = this.config.getModel() ?? model;
-    const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
+    const mainGeneratorConfig = this.config.getContentGeneratorConfig();
+    const mainAuthType = mainGeneratorConfig?.authType;
+    const mainRetryErrorCodes = mainGeneratorConfig?.retryErrorCodes;
 
     if (
       requestModel === mainModel &&
@@ -426,6 +464,7 @@ export class BaseLlmClient {
       return {
         contentGenerator: this.getCurrentContentGenerator(),
         retryAuthType: mainAuthType,
+        retryErrorCodes: mainRetryErrorCodes,
         model: requestModel,
       };
     }
@@ -437,10 +476,13 @@ export class BaseLlmClient {
     const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
     const retryAuthType =
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
+    const retryErrorCodes =
+      resolvedModel?.generationConfig?.retryErrorCodes ?? mainRetryErrorCodes;
 
     return {
       contentGenerator,
       retryAuthType,
+      retryErrorCodes,
       model: resolvedModel?.id ?? requestModel,
     };
   }
