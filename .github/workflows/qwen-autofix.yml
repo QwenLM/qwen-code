@@ -624,7 +624,7 @@ jobs:
           TARGETS='[]'
           for PR in ${CANDIDATES}; do
             BRANCH="$(gh pr view "${PR}" --repo "${REPO}" --json headRefName --jq '.headRefName')"
-            ISSUE="${BRANCH#${BRANCH_PREFIX}}"
+            ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
             HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')"
 
             # Push watermark: the PR's last push. Feedback older than this was in
