@@ -1268,6 +1268,118 @@ describe('useGeminiStream', () => {
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
   });
 
+  it('skips mid-turn @ fallback side effects when cancelled during resolution', async () => {
+    const queuedPrompt = 'inspect @/tmp/cancelled.png';
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    let resolveSignal: AbortSignal | undefined;
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      ({ signal }) => {
+        resolveSignal = signal;
+        return new Promise(() => {});
+      },
+    );
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-cancel',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        completedToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    let completePromise: Promise<void> | undefined;
+    act(() => {
+      if (capturedOnComplete) {
+        completePromise = capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(resolveSignal).toBeDefined();
+    });
+
+    await act(async () => {
+      result.current.cancelOngoingRequest();
+      await completePromise;
+    });
+
+    expect(resolveSignal?.aborted).toBe(true);
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('handles mid-turn drain when chat recording is not configured', async () => {
     const queuedPrompt = 'save the logs locally first';
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);

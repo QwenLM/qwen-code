@@ -2457,6 +2457,9 @@ export const useGeminiStream = (
         }
         try {
           for (let index = 0; index < drained.length; index += 1) {
+            if (midTurnAbort.signal.aborted) {
+              break;
+            }
             const msg = drained[index];
             let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
             if (isAtCommand(msg)) {
@@ -2522,6 +2525,9 @@ export const useGeminiStream = (
                 }
               } finally {
                 clearTimeout(atCommandTimeoutId);
+              }
+              if (midTurnAbort.signal.aborted) {
+                break;
               }
             }
 
