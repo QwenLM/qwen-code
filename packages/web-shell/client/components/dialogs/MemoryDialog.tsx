@@ -370,7 +370,7 @@ export function MemoryDialog({
         <button
           className={dp('resume-picker-close')}
           onClick={onClose}
-          title="Close"
+          title={t('common.close')}
         >
           ESC
         </button>

@@ -1,7 +1,6 @@
 import { memo, type ReactElement } from 'react';
 import type {
   ACPToolCall,
-  CommandInfo,
   Message,
   PermissionRequest,
   TodoItem,
@@ -33,7 +32,6 @@ interface MessageItemProps {
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   shellOutputMaxLines: number;
-  commands?: readonly CommandInfo[];
   /** Present on a collapsible turn's prompt row; renders the collapse toggle. */
   collapse?: TurnCollapseHead;
   onToggleCollapse?: (turnId: string) => void;
@@ -49,7 +47,6 @@ export const MessageItem = memo(function MessageItem({
   showRetryHint = false,
   onRetryClick,
   shellOutputMaxLines,
-  commands,
   collapse,
   onToggleCollapse,
 }: MessageItemProps) {
@@ -60,7 +57,6 @@ export const MessageItem = memo(function MessageItem({
           <UserMessage
             content={message.content}
             images={message.images}
-            commands={commands}
             collapse={collapse}
             onToggleCollapse={onToggleCollapse}
           />
@@ -152,7 +148,6 @@ function areMessageItemPropsEqual(
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
   if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
-  if (prev.commands !== next.commands) return false;
   if (prev.onToggleCollapse !== next.onToggleCollapse) return false;
   if (!turnCollapseEqual(prev.collapse, next.collapse)) return false;
   return areMessagesEqual(prev.message, next.message);
