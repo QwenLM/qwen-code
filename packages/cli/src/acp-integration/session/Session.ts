@@ -174,11 +174,11 @@ type AutoCompressionSendResult =
 
 type RunToolResult = {
   parts: Part[];
-  stopAfterUserQuestionCancel: boolean;
+  stopAfterPermissionCancel: boolean;
 };
 
-const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
-  'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.';
+const PERMISSION_CANCEL_SKIP_MESSAGE =
+  'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.';
 
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
@@ -1525,8 +1525,8 @@ export class Session implements SessionContext {
                     promptId,
                     functionCalls,
                   );
-                  if (toolRun.stopAfterUserQuestionCancel) {
-                    await this.#preserveCancelledAskUserQuestionToolRun(
+                  if (toolRun.stopAfterPermissionCancel) {
+                    await this.#preserveCancelledPermissionToolRun(
                       toolRun,
                       pendingSend.signal,
                     );
@@ -1799,8 +1799,8 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            if (toolRun.stopAfterUserQuestionCancel) {
-              await this.#preserveCancelledAskUserQuestionToolRun(
+            if (toolRun.stopAfterPermissionCancel) {
+              await this.#preserveCancelledPermissionToolRun(
                 toolRun,
                 pendingSend.signal,
               );
@@ -1973,7 +1973,7 @@ export class Session implements SessionContext {
     }
   }
 
-  async #preserveCancelledAskUserQuestionToolRun(
+  async #preserveCancelledPermissionToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
@@ -2418,8 +2418,8 @@ export class Session implements SessionContext {
                     promptId,
                     functionCalls,
                   );
-                  if (toolRun.stopAfterUserQuestionCancel) {
-                    await this.#preserveCancelledAskUserQuestionToolRun(
+                  if (toolRun.stopAfterPermissionCancel) {
+                    await this.#preserveCancelledPermissionToolRun(
                       toolRun,
                       ac.signal,
                     );
@@ -2731,8 +2731,8 @@ export class Session implements SessionContext {
                 promptId,
                 functionCalls,
               );
-              if (toolRun.stopAfterUserQuestionCancel) {
-                await this.#preserveCancelledAskUserQuestionToolRun(
+              if (toolRun.stopAfterPermissionCancel) {
+                await this.#preserveCancelledPermissionToolRun(
                   toolRun,
                   ac.signal,
                 );
@@ -3098,10 +3098,10 @@ export class Session implements SessionContext {
         functionResponse: {
           id: callId,
           name: toolName,
-          response: { error: ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE },
+          response: { error: PERMISSION_CANCEL_SKIP_MESSAGE },
         },
       };
-      const error = new Error(ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE);
+      const error = new Error(PERMISSION_CANCEL_SKIP_MESSAGE);
       try {
         this.config.getChatRecordingService()?.recordToolResult([part], {
           callId,
@@ -3137,7 +3137,7 @@ export class Session implements SessionContext {
     const runBounded = async (
       calls: FunctionCall[],
       runAbortSignal: AbortSignal,
-      onStopAfterUserQuestionCancel?: () => void,
+      onStopAfterPermissionCancel?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
       const parsed = parseInt(
@@ -3153,7 +3153,7 @@ export class Session implements SessionContext {
         if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
           results[idx] = {
             parts: [await recordSkippedToolCall(calls[idx])],
-            stopAfterUserQuestionCancel: false,
+            stopAfterPermissionCancel: false,
           };
           continue;
         }
@@ -3161,7 +3161,7 @@ export class Session implements SessionContext {
           runAbortSignal,
           promptId,
           calls[idx],
-          onStopAfterUserQuestionCancel,
+          onStopAfterPermissionCancel,
         )
           .then((r) => {
             results[idx] = r;
@@ -3182,7 +3182,7 @@ export class Session implements SessionContext {
     for (const batch of batches) {
       if (batch.concurrent && batch.calls.length > 1) {
         const batchAbortController = new AbortController();
-        let batchStopAfterUserQuestionCancel = false;
+        let batchStopAfterPermissionCancel = false;
         const propagateAbort = () => {
           batchAbortController.abort(abortSignal.reason);
         };
@@ -3193,8 +3193,8 @@ export class Session implements SessionContext {
             once: true,
           });
         }
-        const stopBatchAfterUserQuestionCancel = () => {
-          batchStopAfterUserQuestionCancel = true;
+        const stopBatchAfterPermissionCancel = () => {
+          batchStopAfterPermissionCancel = true;
           batchAbortController.abort(USER_CANCEL_ABORT_REASON);
         };
         let results: RunToolResult[];
@@ -3202,8 +3202,8 @@ export class Session implements SessionContext {
           results = await runBounded(
             batch.calls,
             batchAbortController.signal,
-            stopBatchAfterUserQuestionCancel,
-            () => batchStopAfterUserQuestionCancel,
+            stopBatchAfterPermissionCancel,
+            () => batchStopAfterPermissionCancel,
           );
         } finally {
           abortSignal.removeEventListener('abort', propagateAbort);
@@ -3211,24 +3211,24 @@ export class Session implements SessionContext {
         let shouldStop = false;
         for (const r of results) {
           parts.push(...r.parts);
-          shouldStop ||= r.stopAfterUserQuestionCancel;
+          shouldStop ||= r.stopAfterPermissionCancel;
         }
         if (shouldStop) {
           await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
-          return { parts, stopAfterUserQuestionCancel: true };
+          return { parts, stopAfterPermissionCancel: true };
         }
       } else {
         for (const fc of batch.calls) {
           const r = await this.runTool(abortSignal, promptId, fc);
           parts.push(...r.parts);
-          if (r.stopAfterUserQuestionCancel) {
+          if (r.stopAfterPermissionCancel) {
             await appendSkippedAfter(parts, fc);
-            return { parts, stopAfterUserQuestionCancel: true };
+            return { parts, stopAfterPermissionCancel: true };
           }
         }
       }
     }
-    return { parts, stopAfterUserQuestionCancel: false };
+    return { parts, stopAfterPermissionCancel: false };
   }
 
   /**
@@ -3270,7 +3270,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     promptId: string,
     fc: FunctionCall,
-    onStopAfterUserQuestionCancel?: () => void,
+    onStopAfterPermissionCancel?: () => void,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -3278,7 +3278,7 @@ export class Session implements SessionContext {
     const startTime = Date.now();
     let spanError: string | undefined;
     let activeToolAbortSignal = abortSignal;
-    let nestedAskUserQuestionCancelled = false;
+    let nestedPermissionCancelled = false;
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
 
@@ -3315,7 +3315,7 @@ export class Session implements SessionContext {
     const earlyErrorResponse = async (
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
-      opts?: { stopAfterUserQuestionCancel?: boolean },
+      opts?: { stopAfterPermissionCancel?: boolean },
     ) => {
       spanError = error.message;
       removeAgentToolAbortPropagation?.();
@@ -3333,7 +3333,7 @@ export class Session implements SessionContext {
       });
       return {
         parts: errorParts,
-        stopAfterUserQuestionCancel: opts?.stopAfterUserQuestionCancel ?? false,
+        stopAfterPermissionCancel: opts?.stopAfterPermissionCancel ?? false,
       };
     };
 
@@ -3431,9 +3431,9 @@ export class Session implements SessionContext {
               parentToolCallId,
               subagentType,
               () => {
-                nestedAskUserQuestionCancelled = true;
+                nestedPermissionCancelled = true;
                 agentToolAbortController?.abort(USER_CANCEL_ABORT_REASON);
-                onStopAfterUserQuestionCancel?.();
+                onStopAfterPermissionCancel?.();
               },
             );
 
@@ -3732,24 +3732,74 @@ export class Session implements SessionContext {
                   _meta: { toolName },
                 },
               };
+              const stopAfterPermissionCancel = () => {
+                onStopAfterPermissionCancel?.();
+                return earlyErrorResponse(
+                  new Error(`Tool "${toolName}" was canceled by the user.`),
+                  toolName,
+                  { stopAfterPermissionCancel: true },
+                );
+              };
 
-              const output = (await this.client.requestPermission(
-                params,
-              )) as RequestPermissionResponse & {
+              let output: RequestPermissionResponse & {
                 answers?: Record<string, string>;
               };
-              const outcome =
-                output.outcome.outcome === 'cancelled'
-                  ? ToolConfirmationOutcome.Cancel
-                  : z
-                      .nativeEnum(ToolConfirmationOutcome)
-                      .parse(output.outcome.optionId);
+              let outcome: ToolConfirmationOutcome;
+              try {
+                output = (await this.client.requestPermission(
+                  params,
+                )) as RequestPermissionResponse & {
+                  answers?: Record<string, string>;
+                };
+                outcome =
+                  output.outcome.outcome === 'cancelled'
+                    ? ToolConfirmationOutcome.Cancel
+                    : z
+                        .nativeEnum(ToolConfirmationOutcome)
+                        .parse(output.outcome.optionId);
+              } catch (error) {
+                debugLogger.error(
+                  `Permission request failed for tool ${toolName}:`,
+                  error,
+                );
+                try {
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.Cancel,
+                  );
+                } catch (confirmError) {
+                  debugLogger.error(
+                    `Failed to cancel tool ${toolName} after permission request failure:`,
+                    confirmError,
+                  );
+                }
+                onStopAfterPermissionCancel?.();
+                return earlyErrorResponse(
+                  new Error(
+                    `Permission request failed for "${toolName}": ${this.#formatError(
+                      error,
+                    )}`,
+                  ),
+                  toolName,
+                  { stopAfterPermissionCancel: true },
+                );
+              }
 
               recordAutoModeFallbackResolution(outcome);
 
-              await confirmationDetails.onConfirm(outcome, {
-                answers: output.answers,
-              });
+              try {
+                await confirmationDetails.onConfirm(outcome, {
+                  answers: output.answers,
+                });
+              } catch (error) {
+                if (outcome !== ToolConfirmationOutcome.Cancel) {
+                  throw error;
+                }
+                debugLogger.error(
+                  `Failed to confirm cancellation for tool ${toolName}:`,
+                  error,
+                );
+                return stopAfterPermissionCancel();
+              }
 
               // Persist permission rules when user explicitly chose "Always Allow".
               // This branch is only reached for tools that went through
@@ -3787,21 +3837,11 @@ export class Session implements SessionContext {
 
               switch (outcome) {
                 case ToolConfirmationOutcome.Cancel:
-                  if (toolName === ToolNames.ASK_USER_QUESTION) {
-                    onStopAfterUserQuestionCancel?.();
-                  }
                   // Route through earlyErrorResponse so spanError carries the
                   // cancellation reason (plain errorResponse leaves it unset,
                   // which makes endToolSpan fall back to the generic 'tool
                   // error' message) and the declined call is still recorded.
-                  return earlyErrorResponse(
-                    new Error(`Tool "${toolName}" was canceled by the user.`),
-                    toolName,
-                    {
-                      stopAfterUserQuestionCancel:
-                        toolName === ToolNames.ASK_USER_QUESTION,
-                    },
-                  );
+                  return stopAfterPermissionCancel();
                 case ToolConfirmationOutcome.ProceedOnce:
                 case ToolConfirmationOutcome.ProceedAlways:
                 case ToolConfirmationOutcome.ProceedAlwaysProject:
@@ -3948,7 +3988,7 @@ export class Session implements SessionContext {
             messageBusForTool &&
             !toolResult.error &&
             !aborted &&
-            !nestedAskUserQuestionCancelled
+            !nestedPermissionCancelled
           ) {
             // Use the same response shape as core (llmContent/returnDisplay)
             const toolResponse = {
@@ -4080,7 +4120,7 @@ export class Session implements SessionContext {
           }
           return {
             parts: responseParts,
-            stopAfterUserQuestionCancel: nestedAskUserQuestionCancelled,
+            stopAfterPermissionCancel: nestedPermissionCancelled,
           };
         } catch (e) {
           // Ensure cleanup on error
@@ -4140,7 +4180,7 @@ export class Session implements SessionContext {
 
           return {
             parts: errorResponse(error),
-            stopAfterUserQuestionCancel: nestedAskUserQuestionCancelled,
+            stopAfterPermissionCancel: nestedPermissionCancelled,
           };
         }
       }); // end runInToolSpanContext

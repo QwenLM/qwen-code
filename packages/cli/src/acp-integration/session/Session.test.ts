@@ -232,6 +232,7 @@ describe('Session', () => {
     name: string,
     execute: ReturnType<typeof vi.fn>,
     type: core.ToolCallConfirmationDetails['type'] = 'ask_user_question',
+    onConfirm: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(undefined),
   ) {
     return {
       name,
@@ -249,7 +250,7 @@ describe('Session', () => {
             type === 'ask_user_question'
               ? [{ header: 'Continue?', question: 'Continue?' }]
               : undefined,
-          onConfirm: vi.fn().mockResolvedValue(undefined),
+          onConfirm,
         }),
         getDescription: vi.fn().mockReturnValue(name),
         toolLocations: vi.fn().mockReturnValue([]),
@@ -6215,7 +6216,7 @@ describe('Session', () => {
         functionCalls: FunctionCall[],
       ) => Promise<{
         parts: Part[];
-        stopAfterUserQuestionCancel: boolean;
+        stopAfterPermissionCancel: boolean;
       }>;
     };
 
@@ -6234,6 +6235,27 @@ describe('Session', () => {
           type: 'ask_user_question',
           title: 'Question',
           questions: [{ header: 'Continue?', question: 'Continue?' }],
+        },
+        respond,
+        timestamp: Date.now(),
+      });
+    }
+
+    function emitNestedInfoPermission(
+      eventEmitter: EventEmitter,
+      respond: ReturnType<typeof vi.fn>,
+    ) {
+      eventEmitter.emit(core.AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'subagent-1',
+        round: 1,
+        callId: 'nested_shell',
+        name: core.ToolNames.SHELL,
+        description: 'Shell permission',
+        args: {},
+        confirmationDetails: {
+          type: 'info',
+          title: 'Shell permission',
+          prompt: 'Allow shell?',
         },
         respond,
         timestamp: Date.now(),
@@ -6298,7 +6320,7 @@ describe('Session', () => {
         },
       ]);
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       expect(result.parts).toHaveLength(1);
       expect(result.parts[0]?.functionResponse?.id).toBe('question_call');
       expect(result.parts[0]?.functionResponse?.response).toEqual({
@@ -6337,7 +6359,7 @@ describe('Session', () => {
         },
       ]);
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       expect(questionExecute).not.toHaveBeenCalled();
       expect(shellExecute).not.toHaveBeenCalled();
       expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
@@ -6346,7 +6368,7 @@ describe('Session', () => {
       ]);
       expect(result.parts[1]?.functionResponse?.response).toEqual({
         error:
-          'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.',
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
       });
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
         [result.parts[1]],
@@ -6431,7 +6453,7 @@ describe('Session', () => {
         ],
       );
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       expect(shellExecute).not.toHaveBeenCalled();
       expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
         'question_call',
@@ -6439,7 +6461,7 @@ describe('Session', () => {
       ]);
       expect(result.parts[1]?.functionResponse?.response).toEqual({
         error:
-          'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.',
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
       });
     });
 
@@ -6476,7 +6498,7 @@ describe('Session', () => {
         },
       ]);
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
         'question_call',
         `${core.ToolNames.SHELL}-skip-1`,
@@ -6484,10 +6506,16 @@ describe('Session', () => {
       ]);
     });
 
-    it('does not stop the turn for non-question permission cancellation', async () => {
-      const execute = vi.fn();
-      mockToolRegistry.getTool.mockReturnValue(
-        mockConfirmingTool(core.ToolNames.SHELL, execute, 'exec'),
+    it('skips later tools after non-question permission cancellation', async () => {
+      const cancelledExecute = vi.fn();
+      const laterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.SHELL
+          ? mockConfirmingTool(name, cancelledExecute, 'exec')
+          : mockAllowedTool(name, laterExecute),
       );
       vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
         outcome: { outcome: 'cancelled' },
@@ -6501,12 +6529,172 @@ describe('Session', () => {
           name: core.ToolNames.SHELL,
           args: { command: 'echo denied' },
         },
+        {
+          id: 'read_call',
+          name: core.ToolNames.READ_FILE,
+          args: { file_path: '/tmp/should-not-run' },
+        },
       ]);
 
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
-      expect(result.parts).toHaveLength(1);
-      expect(result.parts[0]?.functionResponse?.id).toBe('shell_call');
-      expect(execute).not.toHaveBeenCalled();
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'shell_call',
+        'read_call',
+      ]);
+      expect(result.parts[1]?.functionResponse?.response).toEqual({
+        error:
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+      });
+      expect(cancelledExecute).not.toHaveBeenCalled();
+      expect(laterExecute).not.toHaveBeenCalled();
+    });
+
+    it('skips later tools after selecting the reject permission option', async () => {
+      const rejectedExecute = vi.fn();
+      const laterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.SHELL
+          ? mockConfirmingTool(name, rejectedExecute, 'exec')
+          : mockAllowedTool(name, laterExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.Cancel,
+        },
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-shell-reject', [
+        {
+          id: 'shell_call',
+          name: core.ToolNames.SHELL,
+          args: { command: 'echo denied' },
+        },
+        {
+          id: 'read_call',
+          name: core.ToolNames.READ_FILE,
+          args: { file_path: '/tmp/should-not-run' },
+        },
+      ]);
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'shell_call',
+        'read_call',
+      ]);
+      expect(result.parts[1]?.functionResponse?.response).toEqual({
+        error:
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+      });
+      expect(rejectedExecute).not.toHaveBeenCalled();
+      expect(laterExecute).not.toHaveBeenCalled();
+    });
+
+    it('skips later tools when cancellation confirmation cleanup fails', async () => {
+      const rejectedExecute = vi.fn();
+      const laterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      const onConfirm = vi.fn().mockRejectedValue(new Error('cleanup failed'));
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.SHELL
+          ? mockConfirmingTool(name, rejectedExecute, 'exec', onConfirm)
+          : mockAllowedTool(name, laterExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-shell-cancel-cleanup-failed',
+        [
+          {
+            id: 'shell_call',
+            name: core.ToolNames.SHELL,
+            args: { command: 'echo denied' },
+          },
+          {
+            id: 'read_call',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/should-not-run' },
+          },
+        ],
+      );
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+        { answers: undefined },
+      );
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'shell_call',
+        'read_call',
+      ]);
+      expect(result.parts[1]?.functionResponse?.response).toEqual({
+        error:
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+      });
+      expect(rejectedExecute).not.toHaveBeenCalled();
+      expect(laterExecute).not.toHaveBeenCalled();
+    });
+
+    it('skips later tools after non-question permission request failure', async () => {
+      const failedPermissionExecute = vi.fn();
+      const laterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.SHELL
+          ? mockConfirmingTool(name, failedPermissionExecute, 'exec')
+          : mockAllowedTool(name, laterExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockRejectedValueOnce(
+        new Error('client disconnected'),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-shell-permission-failed',
+        [
+          {
+            id: 'shell_call',
+            name: core.ToolNames.SHELL,
+            args: { command: 'echo denied' },
+          },
+          {
+            id: 'read_call',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/should-not-run' },
+          },
+        ],
+      );
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'shell_call',
+        'read_call',
+      ]);
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        error: `Permission request failed for "${core.ToolNames.SHELL}": client disconnected`,
+      });
+      expect(result.parts[1]?.functionResponse?.response).toEqual({
+        error:
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+      });
+      expect(failedPermissionExecute).not.toHaveBeenCalled();
+      expect(laterExecute).not.toHaveBeenCalled();
     });
 
     it('stops and aborts Agent tool execution after nested ask_user_question cancellation', async () => {
@@ -6556,7 +6744,69 @@ describe('Session', () => {
         },
       ]);
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(executeSignal?.aborted).toBe(true);
+      expect(respond).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+        {
+          answers: undefined,
+        },
+      );
+      expect(result.parts[0]?.functionResponse?.id).toBe('agent_call');
+    });
+
+    it('stops and aborts Agent tool execution after nested non-question permission cancellation', async () => {
+      const eventEmitter = new EventEmitter();
+      let executeSignal: AbortSignal | undefined;
+      const respond = vi.fn().mockResolvedValue(undefined);
+      const execute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          executeSignal = signal;
+          emitNestedInfoPermission(eventEmitter, respond);
+          await vi.waitFor(() => {
+            expect(signal.aborted).toBe(true);
+          });
+          return {
+            llmContent: 'agent stopped',
+            returnDisplay: 'agent stopped',
+          };
+        });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build: vi.fn().mockReturnValue({
+          params: { subagent_type: 'explore' },
+          eventEmitter,
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Agent'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-agent-nested-shell-cancel',
+        [
+          {
+            id: 'agent_call',
+            name: core.ToolNames.AGENT,
+            args: { subagent_type: 'explore' },
+          },
+        ],
+      );
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
       expect(executeSignal?.aborted).toBe(true);
       expect(respond).toHaveBeenCalledWith(
         core.ToolConfirmationOutcome.Cancel,
@@ -6624,7 +6874,7 @@ describe('Session', () => {
 
       await Promise.resolve();
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       const subagentUpdates = vi
         .mocked(mockClient.sessionUpdate)
         .mock.calls.map(([params]) => params.update)
@@ -6703,7 +6953,7 @@ describe('Session', () => {
         },
       ]);
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       expect(questionExecute).toHaveBeenCalledOnce();
       expect(siblingExecute).toHaveBeenCalledOnce();
       expect(siblingSignal?.aborted).toBe(true);
@@ -6755,7 +7005,7 @@ describe('Session', () => {
         },
       ]);
 
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(result.stopAfterPermissionCancel).toBe(false);
       expect(execute).toHaveBeenCalledTimes(2);
       expect(receivedAbortStates).toEqual([true, true]);
     });
@@ -6829,7 +7079,7 @@ describe('Session', () => {
           },
         ]);
 
-        expect(result.stopAfterUserQuestionCancel).toBe(true);
+        expect(result.stopAfterPermissionCancel).toBe(true);
         expect(questionExecute).toHaveBeenCalledOnce();
         expect(secondExecute).not.toHaveBeenCalled();
         expect(thirdExecute).not.toHaveBeenCalled();
@@ -6840,11 +7090,11 @@ describe('Session', () => {
         ]);
         expect(result.parts[1]?.functionResponse?.response).toEqual({
           error:
-            'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.',
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
         });
         expect(result.parts[2]?.functionResponse?.response).toEqual({
           error:
-            'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.',
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
         });
       } finally {
         if (previousMaxConcurrency === undefined) {
@@ -6935,7 +7185,7 @@ describe('Session', () => {
         },
       ]);
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       expect(questionExecute).toHaveBeenCalledOnce();
       expect(siblingExecute).toHaveBeenCalledOnce();
       expect(shellExecute).not.toHaveBeenCalled();
@@ -6946,7 +7196,7 @@ describe('Session', () => {
       ]);
       expect(result.parts[2]?.functionResponse?.response).toEqual({
         error:
-          'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.',
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
       });
     });
 
@@ -7027,7 +7277,7 @@ describe('Session', () => {
         ],
       );
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       const hookRequests = messageBus.request.mock.calls.map(([request]) => {
         const eventName =
           typeof request === 'object' &&
@@ -7104,7 +7354,7 @@ describe('Session', () => {
         },
       ]);
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       expect(messageBus.request).toHaveBeenCalledWith(
         expect.objectContaining({
           eventName: 'PostToolUseFailure',
@@ -7177,7 +7427,7 @@ describe('Session', () => {
         ],
       );
 
-      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.stopAfterPermissionCancel).toBe(true);
       expect(messageBus.request).toHaveBeenCalledWith(
         expect.objectContaining({
           eventName: 'PostToolUseFailure',
@@ -7232,7 +7482,7 @@ describe('Session', () => {
       expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
         'dup_id_0001',
       ]);
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(result.stopAfterPermissionCancel).toBe(false);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledOnce();
     });
 
@@ -7274,7 +7524,7 @@ describe('Session', () => {
 
       expect(execute).toHaveBeenCalledTimes(2);
       expect(result.parts).toHaveLength(2);
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(result.stopAfterPermissionCancel).toBe(false);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         2,
       );
