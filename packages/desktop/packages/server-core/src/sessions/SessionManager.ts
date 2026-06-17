@@ -1511,7 +1511,6 @@ export class SessionManager implements ISessionManager {
   private externalSessionListSyncPromises: Map<string, Promise<void>> =
     new Map()
   private pendingExternalSessionDeletes: Set<string> = new Set()
-  private externalSessionAgents: Map<string, AgentBackend> = new Map()
   /**
    * Track which session the user is actively viewing (per workspace).
    * Map of workspaceId -> sessionId. Used to determine if a session should be
@@ -2437,65 +2436,71 @@ export class SessionManager implements ISessionManager {
     )
       return
 
-    const agent = this.getExternalSessionAgent(workspace, backendContext)
-    if (!agent.listSessions) return
+    await this.withExternalSessionAgentForWorkspace(
+      workspace,
+      backendContext,
+      async (agent) => {
+        if (!agent.listSessions) return
 
-    const listedSessions: BackendSessionInfo[] = []
-    let cursor: string | null | undefined
-    let reachedEnd = false
+        const listedSessions: BackendSessionInfo[] = []
+        let cursor: string | null | undefined
+        let reachedEnd = false
 
-    for (let page = 0; page < EXTERNAL_SESSION_LIST_MAX_PAGES; page++) {
-      const result = await agent.listSessions({
-        cwd: sessionListCwd,
-        cursor,
-        size: EXTERNAL_SESSION_LIST_PAGE_SIZE,
-      })
-      listedSessions.push(...result.sessions)
-      cursor = result.nextCursor
-      if (!cursor) {
-        reachedEnd = true
-        break
-      }
-    }
+        for (let page = 0; page < EXTERNAL_SESSION_LIST_MAX_PAGES; page++) {
+          const result = await agent.listSessions({
+            cwd: sessionListCwd,
+            cursor,
+            size: EXTERNAL_SESSION_LIST_PAGE_SIZE,
+          })
+          listedSessions.push(...result.sessions)
+          cursor = result.nextCursor
+          if (!cursor) {
+            reachedEnd = true
+            break
+          }
+        }
 
-    const seenSdkSessionIds = new Set<string>()
-    for (const info of listedSessions) {
-      const didUpsert = await this.upsertExternalListedSession({
-        workspace,
-        info,
-        connectionSlug: backendContext.connection.slug,
-        model: backendContext.resolvedModel || undefined,
-        defaultPermissionMode,
-        defaultThinkingLevel:
-          normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ??
-          getDefaultThinkingLevel(),
-        loadMessages: agent.loadSessionMessages
-          ? (sessionInfo) =>
-              agent.loadSessionMessages!(sessionInfo.sessionId, {
-                cwd: sessionInfo.cwd,
-              })
-          : undefined,
-      })
-      if (didUpsert) seenSdkSessionIds.add(info.sessionId)
-    }
+        const seenSdkSessionIds = new Set<string>()
+        for (const info of listedSessions) {
+          const didUpsert = await this.upsertExternalListedSession({
+            workspace,
+            info,
+            connectionSlug: backendContext.connection.slug,
+            model: backendContext.resolvedModel || undefined,
+            defaultPermissionMode,
+            defaultThinkingLevel:
+              normalizeThinkingLevel(
+                workspaceConfig?.defaults?.thinkingLevel,
+              ) ?? getDefaultThinkingLevel(),
+            loadMessages: agent.loadSessionMessages
+              ? (sessionInfo) =>
+                  agent.loadSessionMessages!(sessionInfo.sessionId, {
+                    cwd: sessionInfo.cwd,
+                  })
+              : undefined,
+          })
+          if (didUpsert) seenSdkSessionIds.add(info.sessionId)
+        }
 
-    const removedMissingSessions = reachedEnd
-      ? await this.removeMissingExternalListedSessions(
-          workspace,
-          backendContext.connection.slug,
-          seenSdkSessionIds,
-        )
-      : false
+        const removedMissingSessions = reachedEnd
+          ? await this.removeMissingExternalListedSessions(
+              workspace,
+              backendContext.connection.slug,
+              seenSdkSessionIds,
+            )
+          : false
 
-    if (listedSessions.length > 0) {
-      sessionLog.info(
-        `Synced ${seenSdkSessionIds.size} provider session(s) for workspace ${workspace.id}`,
-      )
-    }
+        if (listedSessions.length > 0) {
+          sessionLog.info(
+            `Synced ${seenSdkSessionIds.size} provider session(s) for workspace ${workspace.id}`,
+          )
+        }
 
-    if (seenSdkSessionIds.size > 0 || removedMissingSessions) {
-      this.emitSessionListChanged(workspace.id)
-    }
+        if (seenSdkSessionIds.size > 0 || removedMissingSessions) {
+          this.emitSessionListChanged(workspace.id)
+        }
+      },
+    )
   }
 
   private createExternalSessionListAgent(
@@ -2523,29 +2528,21 @@ export class SessionManager implements ISessionManager {
     })
   }
 
-  private externalSessionAgentCacheKey(
+  private async withExternalSessionAgentForWorkspace<T>(
     workspace: Workspace,
     backendContext: ReturnType<typeof resolveBackendContext>,
-  ): string {
-    const connectionSlug = backendContext.connection?.slug ?? 'unknown'
-    return `${workspace.id}:${connectionSlug}:${backendContext.resolvedModel}`
-  }
-
-  private getExternalSessionAgent(
-    workspace: Workspace,
-    backendContext: ReturnType<typeof resolveBackendContext>,
-  ): AgentBackend {
-    const key = this.externalSessionAgentCacheKey(workspace, backendContext)
-    const cached = this.externalSessionAgents.get(key)
-    if (cached) return cached
-
+    callback: (agent: AgentBackend) => Promise<T>,
+  ): Promise<T> {
     const agent = this.createExternalSessionListAgent(
       workspace,
       backendContext,
     )
     agent.onDebug = (msg: string) => sessionLog.debug(msg)
-    this.externalSessionAgents.set(key, agent)
-    return agent
+    try {
+      return await callback(agent)
+    } finally {
+      agent.dispose()
+    }
   }
 
   private async withExternalSessionAgent<T>(
@@ -2570,11 +2567,11 @@ export class SessionManager implements ISessionManager {
     )
       return undefined
 
-    const agent = this.getExternalSessionAgent(
+    return await this.withExternalSessionAgentForWorkspace(
       managed.workspace,
       backendContext,
+      callback,
     )
-    return await callback(agent)
   }
 
   private resolveExternalSessionConnectionSlug(
@@ -12244,19 +12241,6 @@ export class SessionManager implements ISessionManager {
     for (const sessionId of this.sessions.keys()) {
       unregisterSessionScopedToolCallbacks(sessionId)
     }
-
-    for (const [key, agent] of this.externalSessionAgents) {
-      try {
-        agent.dispose()
-        sessionLog.info(`Disposed external session agent ${key}`)
-      } catch (error) {
-        sessionLog.warn(
-          `Failed to dispose external session agent ${key}:`,
-          error,
-        )
-      }
-    }
-    this.externalSessionAgents.clear()
 
     sessionLog.info('Cleanup complete')
   }

@@ -19,6 +19,7 @@ import { existsSync } from 'fs';
  * @example
  * expandPath('~')                    // '/Users/alice'
  * expandPath('~/Documents')          // '/Users/alice/Documents'
+ * expandPath('~\\Documents')         // 'C:\\Users\\alice\\Documents'
  * expandPath('${HOME}/projects')     // '/Users/alice/projects'
  * expandPath('/absolute/path')       // '/absolute/path' (unchanged)
  */
@@ -33,14 +34,14 @@ export function expandPath(inputPath: string, basePath?: string): string {
     return home;
   }
 
-  // Handle ~/ prefix
-  if (expanded.startsWith('~/')) {
+  // Handle ~/ and Windows ~\ prefixes
+  if (expanded.startsWith('~/') || expanded.startsWith('~\\')) {
     expanded = join(home, expanded.slice(2));
   }
 
   // Handle ${HOME} and $HOME variables
   expanded = expanded.replace(/\$\{HOME\}/g, home);
-  expanded = expanded.replace(/\$HOME(?=\/|$)/g, home);
+  expanded = expanded.replace(/\$HOME(?=\/|\\|$)/g, home);
 
   // If still not absolute, resolve from base path
   if (!isAbsolute(expanded)) {
@@ -98,7 +99,8 @@ export function hasPathVariables(path: string): boolean {
   return (
     path.startsWith('~') ||
     path.includes('${HOME}') ||
-    path.includes('$HOME/')
+    path.includes('$HOME/') ||
+    path.includes('$HOME\\')
   );
 }
 
