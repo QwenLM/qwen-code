@@ -199,31 +199,51 @@ default behavior.
 
 ## Phasing inside Phase 2 ("grows")
 
-The **pure projection** for slices 1+2 is built and unit-tested here
-(`packages/cli/src/ui/hooks/daemon/projectDaemonEvent.ts`, 16 tests) — it folds
-daemon frames into the UI's history/streaming/tool/permission shapes. What
-remains for each slice is the **React hook + AppContainer wiring**, which is the
-interactive/integration layer.
+Built + unit-tested here (24 tests total):
 
-1. **Slice 1 — text round-trip.** ✅ _Projection done_ (user echo origin-aware,
-   streamed thought + message, `turn_complete`, usage). Remaining: the
-   `useDaemonStream` hook (subscribe→reduce→contract) + `cancel`, and rendering it.
-2. **Slice 2 — tool approval.** ✅ _Projection done_ (`tool_call`/`tool_call_update`
-   → `tool_group` with grounded status mapping; `permission_request` → Confirming +
-   gate state; `permission_resolved` → first-responder-wins). Remaining: the hook
-   builds `confirmationDetails.onConfirm` → `respondToSessionPermission` and reuses
-   `ToolConfirmationMessage`.
+- `projectDaemonEvent.ts` (16 tests) — the pure reducer folding daemon frames
+  into the UI's history/streaming/tool/permission shapes.
+- `useDaemonStream.ts` (8 tests) — the React hook: subscribes to
+  `driver.events()` (AbortController cleanup + retry on the daemon's
+  single-subscription race), folds frames through the reducer, and exposes the
+  `useGeminiStream` contract + a permission action. Decoupled via a structural
+  `DaemonSessionDriver` (no `@qwen-code/sdk` dep), so it's fakeable in tests.
+
+1. **Slice 1 — text round-trip.** ✅ _Projection + hook done_ (origin-aware user
+   echo, streamed thought + message, `turn_complete`, usage, `submitQuery` local
+   echo + `prompt`, `cancel`). Remaining: render it (AppContainer wiring).
+2. **Slice 2 — tool approval.** ✅ _Projection + hook gate done_
+   (`tool_call`/`tool_call_update` → `tool_group`; `permission_request` →
+   Confirming + `activePermission`; `respondToPermission` posts the vote;
+   `permission_resolved` first-responder-wins). Remaining (interactive): bind
+   `confirmationDetails.onConfirm` → `respondToPermission` so `ToolGroupMessage` /
+   `ToolConfirmationMessage` can render and answer the prompt. **Until that binding
+   lands the daemon-mode permission UI is non-functional** (a Confirming tool with
+   no `confirmationDetails` shows a prompt with no way to respond).
 3. **Slice 3 — model switch + catch-up.** `setModel`; `Last-Event-ID`/`resume` on
    re-attach so a mid-conversation join (terminal _or_ phone) replays history.
 4. **Then** the Phase-3 launcher (`qwen --remote-control`) is small glue: spawn one
    daemon, start the gateway attached (Phase 1), run the TUI attached (this), print
    the `/ui` URL + pairing code.
 
-**Where the interactive boundary falls:** everything above the React layer (this
-projection) is verified here. The hook + the AppContainer component-boundary split
+**Where the interactive boundary now falls:** the reducer is verified here; the
+hook's **logic is verified in isolation** (against a fake `DaemonSessionDriver`) —
+NOT yet in the TUI. The stub-vs-real risk stands: e.g. the real `submitQuery` is
+`(query, submitType?, prompt_id?, metadata?)` over `PartListUnion`, not
+`(query: string)`, and the component-boundary swap may not be the clean drop-in
+the seam doc assumes (tsc will surface the shape mismatches at wiring time). What's
+left is purely interactive — the **AppContainer component-boundary split**, the
+**opt-in flag wiring**, the **permission `confirmationDetails` binding**, and the
+actual **TUI rendering / handoff feel** — all of which need a real terminal. That's
+the handoff to the user.
 
-- the actual TUI rendering/handoff feel need a real terminal — that's the handoff
-  to the user.
+**Slice-3 note — idempotent commit on resume/replay.** The hook retries its
+subscription (StrictMode race) and slice 3 adds `Last-Event-ID`/`resume`. Because
+`stateRef` persists across a remount, a replay from the daemon's ring would re-run
+`turn_complete` and **re-`addItem` already-committed turns** → duplicate history.
+The fake driver doesn't replay, so the unit tests can't see this. Design the
+defense in when wiring resume: **dedup committed items by daemon event id**
+(idempotent commit), rather than discover the double-render at the terminal.
 
 ## Verification plan
 
