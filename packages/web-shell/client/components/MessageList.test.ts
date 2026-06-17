@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Message } from '../adapters/types';
 import {
   applyTurnCollapse,
@@ -499,6 +499,40 @@ describe('applyTurnCollapse', () => {
       collapseItems(items, { isResponding: true })[0],
     ).collapse;
     expect(head?.liveStartedAt).toBe(1_000);
+  });
+
+  it('marks a prompt-only active turn live with its prompt timestamp', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+    ]);
+    const head = messageRow(
+      collapseItems(items, { isResponding: true })[0],
+    ).collapse;
+    expect(head).toMatchObject({
+      collapsed: false,
+      hiddenCount: 0,
+      liveStartedAt: 1_000,
+    });
+  });
+
+  it('marks a prompt-only active turn live without a prompt timestamp', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const items = groupParallelAgents([
+        { id: 'u1', role: 'user', content: 'hi' },
+      ]);
+      const head = messageRow(
+        collapseItems(items, { isResponding: true })[0],
+      ).collapse;
+      expect(head).toMatchObject({
+        collapsed: false,
+        hiddenCount: 0,
+        liveStartedAt: 10_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not mark a completed turn live', () => {

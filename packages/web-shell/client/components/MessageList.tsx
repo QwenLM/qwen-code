@@ -12,12 +12,7 @@ import {
   type MutableRefObject,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type {
-  CommandInfo,
-  Message,
-  ACPToolCall,
-  TurnCollapseHead,
-} from '../adapters/types';
+import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
   isBackgroundSubAgentToolCall,
@@ -55,7 +50,6 @@ interface MessageListProps {
   tailKey?: string;
   virtualScrollThreshold?: number;
   shellOutputMaxLines: number;
-  commands?: readonly CommandInfo[];
   /**
    * When true, scroll the tail content into view the moment it first appears
    * even if the user had scrolled up. Opt-in per caller so unrelated inline
@@ -535,13 +529,15 @@ export function applyTurnCollapse(
     }
 
     const promptTs = head.message.timestamp;
+    const liveStartedAt = isActiveTurn ? (promptTs ?? Date.now()) : undefined;
     const elapsedMs =
       promptTs !== undefined &&
       lastStepTs !== undefined &&
       lastStepTs >= promptTs
         ? lastStepTs - promptTs
         : undefined;
-    const hasMetrics = hasUsage || elapsedMs !== undefined;
+    const hasMetrics =
+      hasUsage || elapsedMs !== undefined || liveStartedAt !== undefined;
 
     if (hasPendingApproval || (hiddenCount === 0 && !hasMetrics)) {
       // Nothing to add: the inline approve/reject UI must stay reachable, or the
@@ -574,9 +570,7 @@ export function applyTurnCollapse(
         ...(hasUsage ? { inputTokens, outputTokens } : {}),
         ...(cachedTokens > 0 ? { cachedTokens } : {}),
         ...(toolCallCount > 0 ? { toolCallCount } : {}),
-        ...(isActiveTurn && promptTs !== undefined
-          ? { liveStartedAt: promptTs }
-          : {}),
+        ...(liveStartedAt !== undefined ? { liveStartedAt } : {}),
       },
     });
 
@@ -683,7 +677,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
       shellOutputMaxLines,
-      commands,
       autoScrollTailIntoView = false,
       showRetryHint = false,
       onRetryClick,
@@ -1141,7 +1134,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
             showRetryHint={showRetryHint}
             onRetryClick={onRetryClick}
             shellOutputMaxLines={shellOutputMaxLines}
-            commands={commands}
             collapse={item.collapse}
             onToggleCollapse={handleToggleCollapse}
           />
@@ -1164,7 +1156,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         showRetryHint,
         onRetryClick,
         shellOutputMaxLines,
-        commands,
         handleToggleCollapse,
       ],
     );
