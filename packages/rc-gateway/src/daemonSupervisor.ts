@@ -12,6 +12,20 @@ export interface SpawnedDaemon {
   baseUrl: string;
   token: string | undefined;
   kill: () => void;
+  /**
+   * Optional: settles (resolves — never rejects, to avoid stray unhandled
+   * rejections) when the child terminates, carrying a human-readable reason.
+   * `startDaemon` races this against the health poll so a daemon that crashes
+   * at startup fails fast with the REAL cause (`spawn ENOENT`, `exited code 1:
+   * <stderr>`) instead of a generic "did not become healthy" timeout — the gap
+   * that made a supervisor crash look like a "WSL timeout".
+   */
+  whenExited?: Promise<DaemonExit>;
+}
+
+export interface DaemonExit {
+  /** Human-readable reason the daemon process ended (for diagnostics). */
+  reason: string;
 }
 
 export interface StartDaemonOptions {
@@ -65,17 +79,58 @@ function defaultSpawner(
   qwenBin: string,
   port: number,
 ): SpawnedDaemon {
+  // Ephemeral-port (0) read-back from the daemon's stdout is not implemented;
+  // polling http://127.0.0.1:0 would never connect. Fail loudly instead of
+  // silently hanging until the health timeout.
+  if (port === 0) {
+    throw new Error(
+      'startDaemon: a non-zero port is required when spawning the daemon ' +
+        '(ephemeral-port read-back is not implemented). Pass { port } or { spawner }.',
+    );
+  }
+  // Pipe (not inherit) stdout/stderr so we can BOTH preserve the daemon's
+  // console output AND capture a stderr tail to explain a startup crash. With
+  // `inherit` the child's failure reason is printed but unreachable in-process,
+  // so a crash is indistinguishable from a hang.
   const child = spawn(qwenBin, buildServeArgs(port), {
     env: { ...process.env, QWEN_SERVER_TOKEN: token },
-    stdio: 'inherit',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  // NOTE: with ephemeral port 0 the real daemon prints its chosen port;
-  // wiring that read-back is a follow-on. For now require an explicit
-  // non-zero port in production launches.
+
+  const TAIL_MAX = 4000;
+  let stderrTail = '';
+  child.stdout?.on('data', (chunk: Buffer) => process.stdout.write(chunk));
+  child.stderr?.on('data', (chunk: Buffer) => {
+    process.stderr.write(chunk);
+    stderrTail = (stderrTail + chunk.toString()).slice(-TAIL_MAX);
+  });
+
+  let settled = false;
+  const whenExited = new Promise<DaemonExit>((resolve) => {
+    child.on('error', (err: Error) => {
+      if (settled) return;
+      settled = true;
+      // e.g. ENOENT when `qwen` is not on PATH.
+      resolve({ reason: `failed to spawn "${qwenBin}": ${err.message}` });
+    });
+    child.on('exit', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      const how = signal ? `signal ${signal}` : `code ${code}`;
+      const tail = stderrTail.trim();
+      resolve({
+        reason:
+          `"${qwenBin} serve" exited with ${how}` +
+          (tail ? `: ${tail.slice(-500)}` : ''),
+      });
+    });
+  });
+
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     token,
     kill: () => child.kill('SIGTERM'),
+    whenExited,
   };
 }
 
@@ -88,6 +143,11 @@ export async function startDaemon(
   // SAME health-poll + DaemonClient handle below.
   let daemon: DaemonClient;
   let kill: () => void;
+  // Set once the spawned daemon process terminates before we deem it healthy;
+  // `exitSignal` resolves to 'exited' so we can RACE it against a (possibly
+  // slow) health attempt rather than wait for health to return first.
+  let exitReason: string | undefined;
+  let exitSignal: Promise<'exited'> | undefined;
   if (opts.attach) {
     daemon = new DaemonClient({
       baseUrl: opts.attach.url,
@@ -105,25 +165,45 @@ export async function startDaemon(
       token: spawned.token,
     });
     kill = spawned.kill;
+    // `whenExited` resolves (never rejects), so this can't leak an unhandled
+    // rejection even when the daemon exits long after startup.
+    exitSignal = spawned.whenExited?.then((e) => {
+      exitReason = e.reason;
+      return 'exited' as const;
+    });
   }
 
+  const failExited = () => {
+    kill();
+    return new Error(
+      `Daemon process ended before becoming healthy: ${exitReason}`,
+    );
+  };
+
   const deadline = Date.now() + (opts.readyTimeoutMs ?? 10000);
-  // Poll health until ready or timeout.
+  // Poll health until ready, the child dies, or the budget is exhausted.
   for (;;) {
-    try {
-      await daemon.health();
-      break;
-    } catch {
-      if (Date.now() > deadline) {
-        kill(); // no-op in attach mode
-        throw new Error(
-          attached
-            ? `Could not reach the daemon at ${opts.attach!.url} before timeout (URL/token/--require-auth?)`
-            : 'Daemon did not become healthy before timeout',
-        );
-      }
-      await new Promise((r) => setTimeout(r, 100));
+    // `.then(ok, fail)` makes the health attempt never reject, so a dangling
+    // attempt (when the exit signal wins the race) can't leak a rejection.
+    const healthAttempt = daemon.health().then(
+      () => 'healthy' as const,
+      () => 'unhealthy' as const,
+    );
+    const outcome = exitSignal
+      ? await Promise.race([healthAttempt, exitSignal])
+      : await healthAttempt;
+
+    if (outcome === 'healthy') break;
+    if (outcome === 'exited' || exitReason !== undefined) throw failExited();
+    if (Date.now() > deadline) {
+      kill(); // no-op in attach mode
+      throw new Error(
+        attached
+          ? `Could not reach the daemon at ${opts.attach!.url} before timeout (URL/token/--require-auth?)`
+          : 'Daemon did not become healthy before timeout',
+      );
     }
+    await new Promise((r) => setTimeout(r, 100));
   }
 
   return {

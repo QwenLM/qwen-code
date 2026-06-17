@@ -75,4 +75,32 @@ describe('daemonSupervisor', () => {
       }),
     ).rejects.toThrow(/Could not reach the daemon/);
   });
+
+  it('fails fast with the child exit reason instead of polling until timeout', async () => {
+    // A spawned daemon that dies at startup must surface WHY (its exit reason),
+    // not masquerade as a generic health timeout — the bug that made us
+    // misdiagnose a supervisor failure as a "WSL timeout".
+    const t0 = Date.now();
+    await expect(
+      startDaemon({
+        readyTimeoutMs: 10000,
+        spawner: () => ({
+          baseUrl: 'http://127.0.0.1:59999', // nothing listening here
+          token: undefined,
+          kill: () => {},
+          whenExited: Promise.resolve({
+            reason: '"qwen serve" exited with code 1: untrusted workspace',
+          }),
+        }),
+      }),
+    ).rejects.toThrow(/exited with code 1.*untrusted workspace/);
+    // It must NOT have burned the full 10s health budget waiting.
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it('rejects a zero/ephemeral port on the real-spawn path without spawning', async () => {
+    // With no injected spawner, port 0 would silently poll http://127.0.0.1:0
+    // forever; convert that latent gap into an immediate, clear error.
+    await expect(startDaemon({ port: 0 })).rejects.toThrow(/non-zero port/);
+  });
 });
