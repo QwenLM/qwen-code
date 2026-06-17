@@ -209,7 +209,12 @@ export function ModelDialog({
 
     // Separate runtime models from registry models
     const runtimeModels = allModels.filter((m) => m.isRuntimeModel);
-    const registryModels = allModels.filter((m) => !m.isRuntimeModel);
+    const registryModels = allModels.filter(
+      (m) =>
+        !m.isRuntimeModel &&
+        (m.authType !== AuthType.QWEN_OAUTH ||
+          authType === AuthType.QWEN_OAUTH),
+    );
 
     // Group registry models by authType
     const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
@@ -262,7 +267,7 @@ export function ModelDialog({
     }
 
     return result;
-  }, [config]);
+  }, [authType, config]);
 
   const MODEL_OPTIONS = useMemo(
     () =>

@@ -487,17 +487,8 @@ export function reduceDaemonEventToTuiUpdates(
         ];
       }
 
-      if (sessionUpdate === 'agent_thought_chunk' && text) {
-        return [
-          {
-            type: 'history',
-            item: {
-              type: 'gemini_thought_content',
-              text: sanitizeDisplayText(text),
-            },
-            daemonEventId: event.id,
-          },
-        ];
+      if (sessionUpdate === 'agent_thought_chunk') {
+        return [];
       }
 
       if (

@@ -122,7 +122,7 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('reduceDaemonEventToTuiUpdates', () => {
-  it('maps assistant, thought, tool, model, and disconnect daemon events', () => {
+  it('maps assistant, tool, model, and disconnect daemon events while suppressing thought history', () => {
     expect(
       reduceDaemonEventToTuiUpdates({
         id: 0,
@@ -172,13 +172,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
           },
         },
       }),
-    ).toEqual([
-      {
-        type: 'history',
-        item: { type: 'gemini_thought_content', text: 'thinking' },
-        daemonEventId: 2,
-      },
-    ]);
+    ).toEqual([]);
 
     expect(
       reduceDaemonEventToTuiUpdates({
