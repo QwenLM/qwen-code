@@ -382,4 +382,82 @@ describe('FileTokenStorage', () => {
       );
     });
   });
+
+  describe('secret storage', () => {
+    const secretFilePath = path.join(
+      '/home/test',
+      '.qwen',
+      'extension-secrets-v1.json',
+    );
+
+    beforeEach(() => {
+      mockFs.mkdir.mockResolvedValue(undefined);
+      vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
+    });
+
+    it('isAvailable() is always true for the file backend', async () => {
+      await expect(storage.isAvailable()).resolves.toBe(true);
+    });
+
+    it('returns null / empty when no secret file exists', async () => {
+      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+
+      await expect(storage.getSecret('API_KEY')).resolves.toBeNull();
+      await expect(storage.listSecrets()).resolves.toEqual([]);
+    });
+
+    it('persists a secret encrypted under the service name', async () => {
+      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+
+      await storage.setSecret('API_KEY', 'sk-123');
+
+      expect(atomicWriteFile).toHaveBeenCalledTimes(1);
+      const [writtenPath, writtenData, writeOptions] =
+        vi.mocked(atomicWriteFile).mock.calls[0];
+      expect(writtenPath).toBe(secretFilePath);
+      expect(writtenData).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
+      expect(writeOptions).toEqual({
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
+      expect(JSON.parse(storage['decrypt'](writtenData as string))).toEqual({
+        'test-storage': { API_KEY: 'sk-123' },
+      });
+    });
+
+    it('reads back a stored secret and ignores other keys and services', async () => {
+      const encrypted = storage['encrypt'](
+        JSON.stringify({
+          'test-storage': { API_KEY: 'sk-123' },
+          'other-service': { API_KEY: 'sk-other' },
+        }),
+      );
+      mockFs.readFile.mockResolvedValue(encrypted);
+
+      await expect(storage.getSecret('API_KEY')).resolves.toBe('sk-123');
+      await expect(storage.getSecret('MISSING')).resolves.toBeNull();
+      await expect(storage.listSecrets()).resolves.toEqual(['API_KEY']);
+    });
+
+    it('deletes a secret and drops the now-empty service bucket', async () => {
+      const encrypted = storage['encrypt'](
+        JSON.stringify({ 'test-storage': { API_KEY: 'sk-123' } }),
+      );
+      mockFs.readFile.mockResolvedValue(encrypted);
+
+      await storage.deleteSecret('API_KEY');
+
+      expect(atomicWriteFile).toHaveBeenCalledTimes(1);
+      const [, writtenData] = vi.mocked(atomicWriteFile).mock.calls[0];
+      expect(JSON.parse(storage['decrypt'](writtenData as string))).toEqual({});
+    });
+
+    it('deleting a missing secret is a no-op (no write, no throw)', async () => {
+      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+
+      await expect(storage.deleteSecret('API_KEY')).resolves.toBeUndefined();
+      expect(atomicWriteFile).not.toHaveBeenCalled();
+    });
+  });
 });
