@@ -450,6 +450,11 @@ export class Session implements SessionContext {
   private lastPromptTokenCountChat: GeminiChat | null = null;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
+  // Messages from a drain that the daemon answered but we timed out waiting for
+  // (the daemon already spliced + SSE-published them). Re-injected on the next
+  // batch so a transient stall can't silently lose them. See
+  // `#drainMidTurnUserMessages`.
+  private midTurnRecoveredMessages: string[] = [];
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -1893,7 +1898,16 @@ export class Session implements SessionContext {
   }
 
   async #drainMidTurnUserMessages(): Promise<Part[]> {
-    if (this.midTurnDrainUnavailable) return [];
+    // Flush anything recovered from a PRIOR timed-out drain first: the daemon
+    // splices + SSE-publishes synchronously, so on a timeout the browser has
+    // already deduped those messages — discarding the late response would lose
+    // them from both queues. We stash them (see the timeout branch) and
+    // re-inject them here on the next batch.
+    const recovered = this.#takeRecoveredMidTurnMessages();
+
+    if (this.midTurnDrainUnavailable) {
+      return this.#formatMidTurnParts(recovered);
+    }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
@@ -1914,28 +1928,10 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      // A client may legally resolve with `result: null` (passed through
-      // unwrapped by the ACP SDK); guard the object access so that doesn't
-      // throw a TypeError and get misclassified as a transient drain error.
-      const messages =
-        response &&
-        typeof response === 'object' &&
-        Array.isArray(response['messages'])
-          ? response['messages'].filter(
-              (message): message is string =>
-                typeof message === 'string' && message.trim().length > 0,
-            )
-          : [];
-
-      return messages.map((message) => {
-        const part = {
-          text: `\n[User message received during tool execution]: ${message}`,
-        };
-        this.config
-          .getChatRecordingService()
-          ?.recordMidTurnUserMessage([part], message);
-        return part;
-      });
+      return this.#formatMidTurnParts([
+        ...recovered,
+        ...this.#extractMidTurnMessages(response),
+      ]);
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so
@@ -1955,9 +1951,20 @@ export class Session implements SessionContext {
       const isTimeout = error instanceof MidTurnDrainTimeoutError;
       if (isTimeout) {
         this.midTurnDrainTimeoutStrikes += 1;
-        // The lost race leaves the request pending; if the client settles it
-        // later, a rejection must not surface as an unhandled rejection.
-        drainPromise?.catch(() => {});
+        // The lost race leaves the drain request pending. The daemon answers it
+        // by splicing the queue + publishing the SSE echo (so the browser has
+        // already deduped), then returns the messages — which we just timed out
+        // waiting for. Instead of discarding that late response (losing the
+        // messages from both queues = silent loss), recover it and inject it on
+        // the next batch. A late REJECTION is still swallowed (no unhandled
+        // rejection); only a resolved payload carries messages.
+        drainPromise
+          ?.then((late) => {
+            this.midTurnRecoveredMessages.push(
+              ...this.#extractMidTurnMessages(late),
+            );
+          })
+          .catch(() => {});
       }
       // Repeated timeouts are also permanent: a conforming client answers
       // (or rejects with -32601) immediately, so sustained silence means the
@@ -1978,8 +1985,52 @@ export class Session implements SessionContext {
       debugLogger.warn(
         `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
-      return [];
+      // Even on a failed/timed-out drain, still inject anything recovered from
+      // an EARLIER timeout so a transient stall never strands those messages.
+      return this.#formatMidTurnParts(recovered);
     }
+  }
+
+  /** Read and clear the buffer of messages recovered from a timed-out drain. */
+  #takeRecoveredMidTurnMessages(): string[] {
+    if (this.midTurnRecoveredMessages.length === 0) return [];
+    const out = this.midTurnRecoveredMessages;
+    this.midTurnRecoveredMessages = [];
+    return out;
+  }
+
+  /**
+   * Extract the trimmed, non-empty string messages from a drain response. A
+   * client may legally resolve with `result: null` (passed through unwrapped by
+   * the ACP SDK), so guard the object access — a TypeError here would otherwise
+   * be misclassified as a transient drain error.
+   */
+  #extractMidTurnMessages(response: unknown): string[] {
+    return response &&
+      typeof response === 'object' &&
+      Array.isArray((response as { messages?: unknown }).messages)
+      ? (response as { messages: unknown[] }).messages.filter(
+          (message): message is string =>
+            typeof message === 'string' && message.trim().length > 0,
+        )
+      : [];
+  }
+
+  /**
+   * Wrap each mid-turn message as an agent-visible `Part` and record it once to
+   * the chat transcript. Recording happens on injection (here), so a recovered
+   * message is recorded exactly once even though its drain timed out earlier.
+   */
+  #formatMidTurnParts(messages: string[]): Part[] {
+    return messages.map((message) => {
+      const part = {
+        text: `\n[User message received during tool execution]: ${message}`,
+      };
+      this.config
+        .getChatRecordingService()
+        ?.recordMidTurnUserMessage([part], message);
+      return part;
+    });
   }
 
   /**

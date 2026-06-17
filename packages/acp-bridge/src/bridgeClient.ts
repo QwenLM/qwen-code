@@ -19,6 +19,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
+import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
 import type { MidTurnQueueEntry } from './bridgeTypes.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
@@ -202,13 +203,15 @@ function sliceLineRange(
 // source of truth shared with the child-side caller in `Session.ts`).
 
 /**
- * SSE frame published when mid-turn messages are actually drained into the
- * running turn. The browser consumes it to move those messages out of its
- * pending queue so they aren't resent as the next turn (a transient dedupe
- * signal — it isn't rendered as a transcript item).
+ * `MID_TURN_MESSAGE_INJECTED_EVENT` (the SSE frame `type` published when mid-turn
+ * messages are drained into the running turn) is imported from
+ * `./daemonEventTypes.js` — the single source of truth the SDK re-exports, so the
+ * validator and the browser consumer share the same literal. The browser consumes
+ * the frame to
+ * move those messages out of its pending queue so they aren't resent as the next
+ * turn (a transient dedupe signal — it isn't rendered as a transcript item).
  * `data: { sessionId, messages: string[] }`.
  */
-const MID_TURN_MESSAGE_INJECTED_EVENT = 'mid_turn_message_injected';
 
 export interface BridgeClientSessionEntry {
   sessionId: string;
