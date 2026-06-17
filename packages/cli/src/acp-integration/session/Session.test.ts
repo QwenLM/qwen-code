@@ -3259,6 +3259,7 @@ describe('Session', () => {
             callback({ prompt: 'scheduled prompt' });
           }),
           stop: vi.fn(),
+          disable: vi.fn(),
           getExitSummary: vi.fn().mockReturnValue(undefined),
         };
         mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
@@ -3308,7 +3309,9 @@ describe('Session', () => {
             },
           },
         });
-        expect(scheduler.stop).toHaveBeenCalledTimes(1);
+        // Token limit disables the scheduler (permanent for the session, so
+        // a later LoopWakeup is rejected), not just stops it.
+        expect(scheduler.disable).toHaveBeenCalledTimes(1);
         await vi.waitFor(() => {
           expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
             sessionId: 'test-session-id',
