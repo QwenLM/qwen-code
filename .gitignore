@@ -42,8 +42,6 @@ package-lock.json
 .qwen/skills/auto-skill-*/
 !.qwen/agents/
 !.qwen/agents/**
-!.qwen/e2e-tests/
-!.qwen/e2e-tests/**
 
 # OS metadata
 .DS_Store
