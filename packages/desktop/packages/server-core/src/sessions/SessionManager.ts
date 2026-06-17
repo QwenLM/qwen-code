@@ -4772,6 +4772,11 @@ export class SessionManager implements ISessionManager {
           })
         }
       }
+      if (drainedEntries.length < messageIds.length) {
+        sessionLog.warn(
+          `Mid-turn drain acknowledgement matched ${drainedEntries.length}/${messageIds.length} entries for session ${managed.id}`,
+        )
+      }
       if (drainedEntries.length > 0) {
         sessionLog.info(
           `Acknowledged ${drainedEntries.length} mid-turn queued message(s) for session ${managed.id}`,

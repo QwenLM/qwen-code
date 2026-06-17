@@ -1633,6 +1633,67 @@ describe('Qwen native history loading', () => {
     expect(managed.messageQueue[0]?.messageId).toBe('message-with-id');
   });
 
+  it('warns when Qwen mid-turn drain acknowledgements do not match', () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-midturn-unmatched-ack';
+    const timestamp = Date.now();
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { isProcessing: true, messagesLoaded: true },
+    );
+    managed.messageQueue.push({
+      message: 'queued response',
+      messageId: 'message-with-id',
+      midTurnPending: true,
+    });
+
+    const warnings: unknown[][] = [];
+    const originalWarn = logger.warn;
+    logger.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      const manager = new SessionManager();
+      const onMidTurnMessagesDrained = (
+        manager as unknown as {
+          createMidTurnMessagesDrainedCallback: (
+            managedSession: unknown,
+          ) => (messageIds: string[]) => void;
+        }
+      ).createMidTurnMessagesDrainedCallback(managed);
+
+      onMidTurnMessagesDrained(['missing-message-id']);
+
+      expect(managed.messageQueue).toHaveLength(1);
+      expect(warnings).toContainEqual([
+        '[session]',
+        `Mid-turn drain acknowledgement matched 0/1 entries for session ${sessionId}`,
+      ]);
+    } finally {
+      logger.warn = originalWarn;
+    }
+  });
+
   it('offers plain text follow-ups to Qwen mid-turn injection after visual messages', async () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),

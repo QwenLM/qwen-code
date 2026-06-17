@@ -883,7 +883,7 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('falls back to text when mid-turn @ resolution should not proceed', async () => {
+  it('skips mid-turn @ injection when resolution should not proceed', async () => {
     const queuedPrompt = 'inspect @/tmp/missing.png';
     const recordMidTurnUserMessage = vi.fn();
     const recordAtCommand = vi.fn();
@@ -993,11 +993,6 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    const expectedMidTurnParts: Part[] = [
-      {
-        text: `\n[User message received during tool execution]: ${queuedPrompt}`,
-      },
-    ];
     expect(resolveAtCommandQuerySpy).toHaveBeenCalledWith(
       expect.objectContaining({
         query: queuedPrompt,
@@ -1019,12 +1014,9 @@ describe('useGeminiStream', () => {
       },
       expect.any(Number),
     );
-    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
-      expectedMidTurnParts,
-      queuedPrompt,
-    );
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(mockSendMessageStream).toHaveBeenCalledWith(
-      [...toolCallResponseParts, ...expectedMidTurnParts],
+      toolCallResponseParts,
       expect.any(AbortSignal),
       'prompt-id-midturn-at-error',
       { type: SendMessageType.ToolResult },

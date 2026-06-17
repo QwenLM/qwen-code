@@ -2498,6 +2498,9 @@ export const useGeminiStream = (
                       signal: atCommandSignal,
                     }),
                 );
+                const shouldSkipMidTurnMessage =
+                  !atCommandResult.shouldProceed &&
+                  (atCommandResult.toolDisplays?.length ?? 0) > 0;
                 if (
                   atCommandResult.shouldProceed &&
                   atCommandResult.processedQuery !== null
@@ -2518,6 +2521,9 @@ export const useGeminiStream = (
                       : {}),
                     userText: msg,
                   });
+                }
+                if (shouldSkipMidTurnMessage) {
+                  continue;
                 }
               } catch (error) {
                 const errorMessage = getErrorMessage(error);
