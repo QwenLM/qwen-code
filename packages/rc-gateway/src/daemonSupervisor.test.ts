@@ -76,6 +76,55 @@ describe('daemonSupervisor', () => {
     ).rejects.toThrow(/Could not reach the daemon/);
   });
 
+  it('stop() escalates SIGTERM → SIGKILL when the daemon ignores SIGTERM', async () => {
+    // A daemon mid-turn can ignore SIGTERM; stop() must force-kill after a grace
+    // period so the launcher never leaks a daemon (the Phase-3 reap path).
+    stub = await startStubDaemon();
+    const signals: string[] = [];
+    let resolveExit: (v: { reason: string }) => void = () => {};
+    const whenExited = new Promise<{ reason: string }>((r) => {
+      resolveExit = r;
+    });
+    const handle = await startDaemon({
+      stopGraceMs: 50,
+      spawner: () => ({
+        baseUrl: stub!.baseUrl,
+        token: undefined,
+        whenExited,
+        // Only a SIGKILL actually ends this (simulated) process.
+        kill: (sig?: string) => {
+          signals.push(sig ?? 'SIGTERM');
+          if (sig === 'SIGKILL') resolveExit({ reason: 'force-killed' });
+        },
+      }),
+    });
+    await handle.stop();
+    expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
+  it('stop() does not escalate when the daemon exits promptly on SIGTERM', async () => {
+    stub = await startStubDaemon();
+    const signals: string[] = [];
+    let resolveExit: (v: { reason: string }) => void = () => {};
+    const whenExited = new Promise<{ reason: string }>((r) => {
+      resolveExit = r;
+    });
+    const handle = await startDaemon({
+      stopGraceMs: 1000,
+      spawner: () => ({
+        baseUrl: stub!.baseUrl,
+        token: undefined,
+        whenExited,
+        kill: (sig?: string) => {
+          signals.push(sig ?? 'SIGTERM');
+          resolveExit({ reason: 'graceful' }); // exits on the first (SIGTERM) signal
+        },
+      }),
+    });
+    await handle.stop();
+    expect(signals).toEqual(['SIGTERM']);
+  });
+
   it('fails fast with the child exit reason instead of polling until timeout', async () => {
     // A spawned daemon that dies at startup must surface WHY (its exit reason),
     // not masquerade as a generic health timeout — the bug that made us

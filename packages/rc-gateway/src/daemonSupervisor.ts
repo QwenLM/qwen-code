@@ -11,7 +11,11 @@ import { DaemonClient } from '@qwen-code/sdk';
 export interface SpawnedDaemon {
   baseUrl: string;
   token: string | undefined;
-  kill: () => void;
+  /**
+   * Signal the daemon process. Defaults to `SIGTERM`; `stop()` escalates to
+   * `SIGKILL` if the process ignores `SIGTERM` (e.g. mid-turn).
+   */
+  kill: (signal?: NodeJS.Signals) => void;
   /**
    * Optional: settles (resolves — never rejects, to avoid stray unhandled
    * rejections) when the child terminates, carrying a human-readable reason.
@@ -37,6 +41,12 @@ export interface StartDaemonOptions {
   spawner?: (token: string) => SpawnedDaemon;
   /** Health-poll budget in ms (default 10000). */
   readyTimeoutMs?: number;
+  /**
+   * Grace period in ms between `SIGTERM` and the escalation `SIGKILL` in
+   * `stop()` (default 3000). A daemon running a turn may ignore `SIGTERM`;
+   * after this window `stop()` force-kills so no daemon is leaked.
+   */
+  stopGraceMs?: number;
   /**
    * Attach to an ALREADY-RUNNING daemon instead of spawning one (the handoff
    * Phase-1 path: a terminal session's `qwen serve` that the gateway shares, so
@@ -92,9 +102,17 @@ function defaultSpawner(
   // console output AND capture a stderr tail to explain a startup crash. With
   // `inherit` the child's failure reason is printed but unreachable in-process,
   // so a crash is indistinguishable from a hang.
+  //
+  // `detached: true` puts the child in its OWN process group so we can reap the
+  // whole subtree with `process.kill(-pid, …)`. This is essential because the
+  // `qwen` entry (`cli-entry.js`) `spawnSync`s the real `cli.js` — the daemon is
+  // a GRANDCHILD. Signalling only the tracked child (the shim) orphans the
+  // daemon, which reparents to init and survives. Group-kill reaches both. We do
+  // NOT `unref()` — we keep tracking the child.
   const child = spawn(qwenBin, buildServeArgs(port), {
     env: { ...process.env, QWEN_SERVER_TOKEN: token },
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
   });
 
   const TAIL_MAX = 4000;
@@ -105,31 +123,68 @@ function defaultSpawner(
     stderrTail = (stderrTail + chunk.toString()).slice(-TAIL_MAX);
   });
 
+  // Signal the daemon's whole process group; fall back to the bare child.
+  const killGroup = (signal: NodeJS.Signals = 'SIGTERM') => {
+    if (child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, signal);
+        return;
+      } catch {
+        /* group gone or unsupported — fall through */
+      }
+    }
+    try {
+      child.kill(signal);
+    } catch {
+      /* already gone */
+    }
+  };
+
+  // True only when EVERY process in the group is gone (signal 0 = liveness
+  // probe). The grandchild daemon can outlive the shim, so the shim's `exit`
+  // event alone does NOT mean the daemon died.
+  const groupGone = (): boolean => {
+    if (child.pid === undefined) return true;
+    try {
+      process.kill(-child.pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+
   let settled = false;
   const whenExited = new Promise<DaemonExit>((resolve) => {
-    child.on('error', (err: Error) => {
+    const finish = (reason: string) => {
       if (settled) return;
       settled = true;
+      resolve({ reason });
+    };
+    child.on('error', (err: Error) =>
       // e.g. ENOENT when `qwen` is not on PATH.
-      resolve({ reason: `failed to spawn "${qwenBin}": ${err.message}` });
-    });
+      finish(`failed to spawn "${qwenBin}": ${err.message}`),
+    );
     child.on('exit', (code, signal) => {
-      if (settled) return;
-      settled = true;
       const how = signal ? `signal ${signal}` : `code ${code}`;
       const tail = stderrTail.trim();
-      resolve({
-        reason:
-          `"${qwenBin} serve" exited with ${how}` +
-          (tail ? `: ${tail.slice(-500)}` : ''),
-      });
+      const reason =
+        `"${qwenBin} serve" exited with ${how}` +
+        (tail ? `: ${tail.slice(-500)}` : '');
+      // The shim exited; the daemon grandchild may linger. Resolve only once the
+      // whole group is gone so `stop()`'s escalation isn't fooled into skipping
+      // the SIGKILL.
+      const waitGroup = () => {
+        if (groupGone()) finish(reason);
+        else setTimeout(waitGroup, 50).unref?.();
+      };
+      waitGroup();
     });
   });
 
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     token,
-    kill: () => child.kill('SIGTERM'),
+    kill: killGroup,
     whenExited,
   };
 }
@@ -142,7 +197,7 @@ export async function startDaemon(
   // `qwen serve` with a fresh token and own its lifecycle. Both then share the
   // SAME health-poll + DaemonClient handle below.
   let daemon: DaemonClient;
-  let kill: () => void;
+  let kill: (signal?: NodeJS.Signals) => void;
   // Set once the spawned daemon process terminates before we deem it healthy;
   // `exitSignal` resolves to 'exited' so we can RACE it against a (possibly
   // slow) health attempt rather than wait for health to return first.
@@ -206,11 +261,34 @@ export async function startDaemon(
     await new Promise((r) => setTimeout(r, 100));
   }
 
+  const stopGraceMs = opts.stopGraceMs ?? 3000;
   return {
     daemon,
     stop: async () => {
-      kill();
+      kill('SIGTERM'); // no-op in attach mode
+      // Attach mode (or a spawner without exit tracking) has nothing to await
+      // or escalate.
+      if (attached || !exitSignal) return;
+      // A daemon mid-turn can ignore SIGTERM. If it hasn't exited within the
+      // grace window, escalate to SIGKILL so we never leak the process (the
+      // Phase-3 launcher reaps through this same path).
+      if (!(await settledWithin(exitSignal, stopGraceMs))) {
+        kill('SIGKILL');
+        await settledWithin(exitSignal, 1000);
+      }
     },
     attached,
   };
+}
+
+/** Resolve true if `p` settles within `ms`, false on timeout (timer unref'd). */
+function settledWithin(p: Promise<unknown>, ms: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+    void p.then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
 }
