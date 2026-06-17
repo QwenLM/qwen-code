@@ -154,7 +154,6 @@ export class QQChannel extends ChannelBase {
         if (msgId) {
           const seq = (this.msgSeqMap.get(msgId) ?? 0) + 1;
           this.msgSeqMap.set(msgId, seq);
-          this.saveQQState();
           body['msg_id'] = msgId;
           body['msg_seq'] = seq;
         }
@@ -179,6 +178,8 @@ export class QQChannel extends ChannelBase {
         process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
       }
     }
+    // Persist msgSeqMap once after all chunks are sent
+    if (msgId) this.saveQQState();
   }
 
   disconnect(): void {
@@ -283,10 +284,11 @@ export class QQChannel extends ChannelBase {
           | undefined;
         if (!entry?.sessionId) continue;
         const correctId: string = entry.sessionId;
-        const target = tt.get(sid);
+        // sid is undefined here — use entry.target directly instead of tt.get(undefined)
+        const target = entry.target;
         tm.set(key, correctId);
         tt.delete(undefined as unknown as string);
-        tt.set(correctId, target ?? entry.target);
+        tt.set(correctId, target);
         if (tc) {
           tc.delete(undefined as unknown as string);
           tc.set(correctId, entry.cwd || '');
@@ -375,11 +377,15 @@ export class QQChannel extends ChannelBase {
     const delay = Math.max(Math.min(ttl * 0.8, ttl - 60_000), 60_000);
     if (delay > 0) {
       this.tokenRefreshTimer = setTimeout(() => {
-        this.fetchToken().catch((e) =>
+        this.fetchToken().catch((e) => {
           process.stderr.write(
-            `[QQ:${this.name}] Token refresh failed: ${e}\n`,
-          ),
-        );
+            `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
+          );
+          this.tokenRefreshTimer = setTimeout(
+            () => this.scheduleTokenRefresh(),
+            60_000,
+          );
+        });
       }, delay);
     }
   }
@@ -677,7 +683,13 @@ export class QQChannel extends ChannelBase {
   }
 
   private handleGroup(event: QQGroupMessageEvent): void {
-    const chatId = event.group_openid || event.author.id;
+    if (!event.group_openid) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group message dropped: missing group_openid\n`,
+      );
+      return;
+    }
+    const chatId = event.group_openid;
     this.chatTypeMap.set(chatId, 'group');
     this.replyMsgId.set(chatId, event.id);
     this.saveQQState();
