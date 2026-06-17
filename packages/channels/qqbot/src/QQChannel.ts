@@ -12,7 +12,11 @@
  * @see https://bot.q.qq.com/wiki/develop/api-v2/
  */
 
-import { ChannelBase, SessionRouter } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  SessionRouter,
+  getGlobalQwenDir,
+} from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
@@ -20,14 +24,7 @@ import type {
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { qrConnect } from '@tencent-connect/qqbot-connector';
-import {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  mkdirSync,
-  chmodSync,
-} from 'node:fs';
-import { homedir } from 'node:os';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
 import type {
@@ -60,6 +57,16 @@ export class QQChannel extends ChannelBase {
   private serverRequestedReconnect: boolean = false;
   /** Pending connect promise reject — called when WebSocket closes before READY. */
   private connectReject: ((err: Error) => void) | null = null;
+  /** Set to true when channel is disconnected — prevents orphaned connections. */
+  private disposed: boolean = false;
+  /** Deduplicate inbound messages on reconnect replay (messageId → timestamp). */
+  private seenMessages: Map<string, number> = new Map();
+  /** Cleanup timer for seenMessages TTL eviction. */
+  private seenCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** Timestamp of last received HEARTBEAT_ACK, for zombie-connection detection. */
+  private lastHeartbeatAck: number = 0;
+  /** Debounce timer for saveQQState to avoid blocking event loop. */
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
@@ -84,9 +91,10 @@ export class QQChannel extends ChannelBase {
     bridge: AcpBridge,
     options?: ChannelBaseOptions,
   ) {
-    const stateDir = join(homedir(), '.qwen', 'channels');
+    const safeName = name.replace(/[^A-Za-z0-9_-]/g, '_');
+    const stateDir = join(getGlobalQwenDir(), 'channels');
     mkdirSync(stateDir, { recursive: true });
-    const sessionsPath = join(stateDir, `${name}-sessions.json`);
+    const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
 
     const router =
       options?.router ??
@@ -94,9 +102,12 @@ export class QQChannel extends ChannelBase {
 
     super(name, config, bridge, { ...options, router });
     this.qqConfig = config as unknown as QQChannelConfig;
-    this.qqStatePath = join(stateDir, `${name}-state.json`);
+    this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     this.globalSessionsPath = join(stateDir, 'sessions.json');
-    this.sessionsBackupPath = join(stateDir, `${name}-sessions-backup.json`);
+    this.sessionsBackupPath = join(
+      stateDir,
+      `${safeName}-sessions-backup.json`,
+    );
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
@@ -151,11 +162,11 @@ export class QQChannel extends ChannelBase {
           msg_type: 0,
         };
         // Multi-block streaming: set msg_id + incrementing msg_seq
+        // seq incremented before send so we can track the next value
+        const nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
         if (msgId) {
-          const seq = (this.msgSeqMap.get(msgId) ?? 0) + 1;
-          this.msgSeqMap.set(msgId, seq);
           body['msg_id'] = msgId;
-          body['msg_seq'] = seq;
+          body['msg_seq'] = nextSeq;
         }
 
         const resp = await fetch(`${base}${path}`, {
@@ -165,6 +176,7 @@ export class QQChannel extends ChannelBase {
             Authorization: `QQBot ${this.accessToken}`,
           },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(15_000),
         });
 
         if (!resp.ok) {
@@ -173,9 +185,13 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${errBody.slice(0, 200)}\n`,
           );
+          break; // stop sending on failure to avoid msg_seq gaps
         }
+        // Only persist seq on success
+        if (msgId) this.msgSeqMap.set(msgId, nextSeq);
       } catch (e) {
         process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
+        break;
       }
     }
     // Persist msgSeqMap once after all chunks are sent
@@ -183,9 +199,14 @@ export class QQChannel extends ChannelBase {
   }
 
   disconnect(): void {
+    this.disposed = true;
     this.stopHeartbeat();
     this.stopTokenRefresh();
-    this.saveQQState();
+    if (this.seenCleanupTimer) {
+      clearInterval(this.seenCleanupTimer);
+      this.seenCleanupTimer = null;
+    }
+    this.flushQQState();
     this.backupGlobalSessions();
     if (this.ws) {
       this.ws.close(1000);
@@ -202,7 +223,31 @@ export class QQChannel extends ChannelBase {
 
   // ── State Persistence (cross-server context continuation) ──────
 
+  /** Debounced state persistence to avoid blocking event loop. */
   private saveQQState(): void {
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => {
+      try {
+        writeFileSync(
+          this.qqStatePath,
+          JSON.stringify({
+            chatTypeMap: Array.from(this.chatTypeMap.entries()),
+            replyMsgId: Array.from(this.replyMsgId.entries()),
+            msgSeqMap: Array.from(this.msgSeqMap.entries()),
+          }),
+        );
+      } catch {
+        /* best-effort */
+      }
+    }, 500);
+  }
+
+  /** Flush pending state writes immediately (called on disconnect). */
+  private flushQQState(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
     try {
       writeFileSync(
         this.qqStatePath,
@@ -302,11 +347,11 @@ export class QQChannel extends ChannelBase {
   // ── Token ──────────────────────────────────────────────────────
 
   private async fetchToken(): Promise<void> {
+    const safeName = this.name.replace(/[^A-Za-z0-9_-]/g, '_');
     const credsFile = join(
-      homedir(),
-      '.qwen',
+      getGlobalQwenDir(),
       'channels',
-      `${this.name}-credentials.json`,
+      `${safeName}-credentials.json`,
     );
     let appID = this.qqConfig.appID;
     let appSecret = this.qqConfig.appSecret;
@@ -334,12 +379,13 @@ export class QQChannel extends ChannelBase {
       appSecret = creds.appSecret;
       this.qqConfig.appID = appID;
       this.qqConfig.appSecret = appSecret;
-      // Persist to disk with restrictive permissions
+      // Persist to disk with restrictive permissions (mode: 0o600 avoids TOCTOU)
       try {
-        const dir = join(homedir(), '.qwen', 'channels');
+        const dir = join(getGlobalQwenDir(), 'channels');
         mkdirSync(dir, { recursive: true });
-        writeFileSync(credsFile, JSON.stringify({ appId: appID, appSecret }));
-        chmodSync(credsFile, 0o600);
+        writeFileSync(credsFile, JSON.stringify({ appId: appID, appSecret }), {
+          mode: 0o600,
+        });
       } catch {
         /* non-fatal */
       }
@@ -349,6 +395,7 @@ export class QQChannel extends ChannelBase {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ appId: appID, clientSecret: appSecret }),
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (!resp.ok) {
@@ -400,12 +447,14 @@ export class QQChannel extends ChannelBase {
   // ── WebSocket Gateway ──────────────────────────────────────────
 
   private async connectGateway(): Promise<void> {
+    if (this.disposed) throw new Error('Channel disposed');
     const gw = this.qqConfig.sandbox
       ? 'https://sandbox.api.sgroup.qq.com/gateway'
       : 'https://api.sgroup.qq.com/gateway';
 
     const resp = await fetch(gw, {
       headers: { Authorization: `QQBot ${this.accessToken}` },
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (!resp.ok) {
@@ -465,7 +514,7 @@ export class QQChannel extends ChannelBase {
         setTimeout(() => this.reconnectWithRetry(), delay);
       } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
         process.stderr.write(
-          `[QQ:${this.name}] Max reconnect attempts (${this.maxReconnectAttempts}) reached, giving up\n`,
+          `[QQ:${this.name}] FATAL: reconnect exhausted after ${this.maxReconnectAttempts} attempts. Bot is offline until daemon restart.\n`,
         );
         // Reject pending connect promise if we're not reconnecting
         if (this.connectReject) {
@@ -556,7 +605,7 @@ export class QQChannel extends ChannelBase {
         break;
       }
       case OpCode.HEARTBEAT_ACK:
-        // Expected, nothing to do
+        this.lastHeartbeatAck = Date.now();
         break;
       case OpCode.RECONNECT:
         this.serverRequestedReconnect = true;
@@ -646,10 +695,19 @@ export class QQChannel extends ChannelBase {
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
+    this.lastHeartbeatAck = Date.now();
     this.heartbeatTimer = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ op: OpCode.HEARTBEAT, d: this.seq }));
+      if (this.ws?.readyState !== WebSocket.OPEN) return;
+      // Check if previous heartbeat was acknowledged
+      const elapsed = Date.now() - this.lastHeartbeatAck;
+      if (elapsed > this.heartbeatInterval * 2) {
+        process.stderr.write(
+          `[QQ:${this.name}] Heartbeat ACK timeout (${elapsed}ms), forcing reconnect\n`,
+        );
+        this.ws?.close(4001);
+        return;
       }
+      this.ws.send(JSON.stringify({ op: OpCode.HEARTBEAT, d: this.seq }));
     }, this.heartbeatInterval);
   }
 
@@ -662,7 +720,29 @@ export class QQChannel extends ChannelBase {
 
   // ── Message Handlers ───────────────────────────────────────────
 
+  /** Check if a message ID was already processed (reconnect replay dedup). */
+  private isDuplicate(eventId: string): boolean {
+    if (this.seenMessages.has(eventId)) return true;
+    const now = Date.now();
+    this.seenMessages.set(eventId, now);
+    // Evict entries older than 5 minutes
+    if (!this.seenCleanupTimer) {
+      this.seenCleanupTimer = setInterval(() => {
+        const cutoff = Date.now() - 300_000;
+        for (const [id, ts] of this.seenMessages) {
+          if (ts < cutoff) this.seenMessages.delete(id);
+        }
+        if (this.seenMessages.size === 0) {
+          clearInterval(this.seenCleanupTimer!);
+          this.seenCleanupTimer = null;
+        }
+      }, 60_000);
+    }
+    return false;
+  }
+
   private handleC2C(event: QQMessageEvent): void {
+    if (this.isDuplicate(event.id)) return;
     const chatId = event.author.user_openid || event.author.id;
     this.chatTypeMap.set(chatId, 'c2c');
     this.replyMsgId.set(chatId, event.id);
@@ -683,6 +763,7 @@ export class QQChannel extends ChannelBase {
   }
 
   private handleGroup(event: QQGroupMessageEvent): void {
+    if (this.isDuplicate(event.id)) return;
     if (!event.group_openid) {
       process.stderr.write(
         `[QQ:${this.name}] Group message dropped: missing group_openid\n`,
@@ -693,9 +774,17 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.set(chatId, 'group');
     this.replyMsgId.set(chatId, event.id);
     this.saveQQState();
-    // Strip bot @mention prefix from group messages
     const senderName = event.author.username || event.author.id || 'QQ User';
-    const text = `[${senderName}]: ${(event.content || '').replace(/<@!\d+>/g, '').trim()}`;
+    const cleanText = (event.content || '').replace(/<@!\d+>/g, '').trim();
+    const isSlash = cleanText.startsWith('/');
+    // Log slash commands with senderName for audit trail
+    if (isSlash) {
+      process.stderr.write(
+        `[QQ:${this.name}] Slash cmd from ${senderName} (${chatId}): ${cleanText}\n`,
+      );
+    }
+    // Don't prefix slash commands, keep [senderName] for normal messages
+    const text = isSlash ? cleanText : `[${senderName}]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId: event.author.user_openid || event.author.id,
