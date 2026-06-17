@@ -2509,7 +2509,6 @@ describe('Session', () => {
         mockToolRegistry.getTool.mockReturnValue(tool);
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockClient.extMethod = vi.fn().mockResolvedValue({
-          items: [],
           messages: ['  please also check tests  '],
         });
         mockChat.sendMessageStream = vi
@@ -2582,6 +2581,16 @@ describe('Session', () => {
                   mimeType: 'image/png',
                   data: 'iVBORw0KGgo=',
                 },
+                {
+                  type: 'image',
+                  mimeType: 'text/html',
+                  data: '<script>alert(1)</script>',
+                },
+                {
+                  type: 'audio',
+                  mimeType: 'text/plain',
+                  data: 'not-audio',
+                },
               ],
               displayText: 'please inspect this image',
             },
@@ -2626,6 +2635,26 @@ describe('Session', () => {
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         expect(secondCall?.[1].message).toEqual(
           expect.arrayContaining(midTurnParts),
+        );
+        expect(secondCall?.[1].message).not.toEqual(
+          expect.arrayContaining([
+            {
+              inlineData: {
+                mimeType: 'text/html',
+                data: '<script>alert(1)</script>',
+              },
+            },
+          ]),
+        );
+        expect(secondCall?.[1].message).not.toEqual(
+          expect.arrayContaining([
+            {
+              inlineData: {
+                mimeType: 'text/plain',
+                data: 'not-audio',
+              },
+            },
+          ]),
         );
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,

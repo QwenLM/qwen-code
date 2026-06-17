@@ -197,9 +197,15 @@ function isContentBlock(value: unknown): value is ContentBlock {
     case 'text':
       return typeof value['text'] === 'string';
     case 'image':
+      return (
+        typeof value['mimeType'] === 'string' &&
+        value['mimeType'].startsWith('image/') &&
+        typeof value['data'] === 'string'
+      );
     case 'audio':
       return (
         typeof value['mimeType'] === 'string' &&
+        value['mimeType'].startsWith('audio/') &&
         typeof value['data'] === 'string'
       );
     case 'resource_link':

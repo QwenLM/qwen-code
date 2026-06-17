@@ -35,7 +35,7 @@ import {
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
-import { MessageType, StreamingState } from '../types.js';
+import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 
@@ -891,11 +891,22 @@ describe('useGeminiStream', () => {
       recordAtCommand,
       recordMidTurnUserMessage,
     });
+    const toolDisplays = [
+      {
+        callId: 'client-read-midturn-at-error',
+        name: 'Read File(s)',
+        description: 'Error attempting to read files',
+        status: ToolCallStatus.Error,
+        resultDisplay: 'Error reading files (/tmp/missing.png): not found',
+        confirmationDetails: undefined,
+      },
+    ];
     const resolveAtCommandQuerySpy = vi
       .spyOn(atCommandProcessor, 'resolveAtCommandQuery')
       .mockResolvedValue({
         processedQuery: null,
         shouldProceed: false,
+        toolDisplays,
         recording: {
           filesRead: ['/tmp/missing.png'],
           status: 'error',
@@ -1001,6 +1012,13 @@ describe('useGeminiStream', () => {
       message: 'Error reading files (/tmp/missing.png): not found',
       userText: queuedPrompt,
     });
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'tool_group',
+        tools: toolDisplays,
+      },
+      expect.any(Number),
+    );
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
       expectedMidTurnParts,
       queuedPrompt,

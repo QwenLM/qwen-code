@@ -2487,6 +2487,11 @@ export const useGeminiStream = (
                   atCommandResult.processedQuery !== null
                 ) {
                   resolvedMidTurnQuery = atCommandResult.processedQuery;
+                } else if (atCommandResult.toolDisplays?.length) {
+                  addItem(
+                    { type: 'tool_group', tools: atCommandResult.toolDisplays },
+                    midTurnTimestamp + index,
+                  );
                 }
                 if (atCommandResult.recording) {
                   config.getChatRecordingService()?.recordAtCommand?.({
