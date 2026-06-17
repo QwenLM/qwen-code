@@ -258,11 +258,20 @@ jobs:
         run: |-
           set -euo pipefail
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-          # One API call for everything the job gates on (state + file list).
-          data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,mergeable,files)"
+          # One API call per attempt for everything the job gates on (state +
+          # file list). Right after a /tmux comment GitHub may not have computed
+          # mergeability yet (mergeable=UNKNOWN), and refs/pull/N/merge is only
+          # current once it has — so give it a few seconds to settle before
+          # deciding, rather than checking out a stale/missing ref.
+          for attempt in 1 2 3 4 5; do
+            data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,mergeable,files)"
+            mergeable="$(jq -r '.mergeable' <<< "$data")"
+            [ "$mergeable" != "UNKNOWN" ] && break
+            echo "::notice::Mergeability for PR #${PR_NUMBER} not computed yet; retry ${attempt}/5."
+            sleep 3
+          done
           state="$(jq -r '.state' <<< "$data")"
           is_draft="$(jq -r '.isDraft' <<< "$data")"
-          mergeable="$(jq -r '.mergeable' <<< "$data")"
           # decision drives every step below: skip (nothing to do, stay silent) |
           # na (no TUI surface to exercise) | run (drive the app).
           if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
