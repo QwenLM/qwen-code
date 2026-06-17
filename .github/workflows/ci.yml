@@ -293,3 +293,45 @@ jobs:
 
       - name: 'Perform CodeQL Analysis'
         uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
+
+  # Integration tests run only in the merge queue, not on every PR push.
+  # They are the suite that previously ran *only* in the nightly Release
+  # pipeline (`release.yml`), so regressions stayed hidden until release
+  # time. Gating them on `merge_group` catches the failure before the PR
+  # lands on `main`, while keeping the per-PR critical path fast. The
+  # `merge_group` event runs in the base-repo context, so the same model
+  # secrets used by the release jobs are available here.
+  #
+  # Until merge queue is enabled on `main` this job simply never triggers,
+  # so adding it is a no-op for existing PR/push runs. Reuses the exact
+  # `test:integration:cli:sandbox:none` script from `release.yml`.
+  integration_cli:
+    name: 'Integration Tests (CLI, No Sandbox)'
+    if: "${{ github.event_name == 'merge_group' }}"
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    env:
+      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Run CLI Integration Tests'
+        run: |-
+          npm run test:integration:cli:sandbox:none
