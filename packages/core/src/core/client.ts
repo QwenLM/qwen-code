@@ -2123,6 +2123,26 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
+        // Always-on safety checks (turn tool-call cap). These fire before
+        // the skipLoopDetection gate so they cannot be bypassed by
+        // configuration.
+        const alwaysOnLoop =
+          this.loopDetector.checkAlwaysOnSafeties(event);
+        if (alwaysOnLoop) {
+          yield {
+            type: GeminiEventType.LoopDetected,
+            value: { loopType: this.loopDetector.getLastLoopType()! },
+          };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
+          }
+          this.lastApiCompletionTimestamp = Date.now();
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', { errorMessage: 'loop detected' });
+          this.cancelPendingMemoryPrefetch();
+          return turn;
+        }
+
         // Loop detection is opt-in: `model.skipLoopDetection` defaults to true
         // (see settingsSchema) to avoid false-positive interruptions. Keep BOTH
         // the deterministic identical-tool-call check and the heuristic checks

@@ -6182,6 +6182,7 @@ Other open files:
 
       // Replace loop detector with spies
       const ldMock = {
+        checkAlwaysOnSafeties: vi.fn().mockReturnValue(false),
         addAndCheckDeterministicToolCallLoop: vi.fn().mockReturnValue(false),
         addAndCheckHeuristicLoops: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -6211,7 +6212,8 @@ Other open files:
         // consume stream
       }
 
-      // Assert - neither detector path runs when skipLoopDetection is true
+      // Assert - always-on safeties still run, but opt-in detectors don't
+      expect(ldMock.checkAlwaysOnSafeties).toHaveBeenCalled();
       expect(
         ldMock.addAndCheckDeterministicToolCallLoop,
       ).not.toHaveBeenCalled();

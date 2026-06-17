@@ -44,6 +44,20 @@ const FILE_READ_WINDOW = 15;
 // Action stagnation tracking
 const STAGNATION_THRESHOLD = 8;
 
+// Global tool call duplicate tracking: how many times the same (tool, args)
+// pair must appear across the entire turn (not necessarily consecutively)
+// before it is treated as a loop.
+const GLOBAL_DUPLICATE_THRESHOLD = 6;
+
+// Alternating pattern detection: number of complete AB cycles needed to
+// trip the detector (3 cycles = 6 calls: A B A B A B).
+const ALTERNATING_PATTERN_CYCLES = 3;
+
+// Hard per-turn tool call cap. Always-on circuit breaker — not gated by
+// skipLoopDetection. If a single turn exceeds this many tool calls the
+// turn is halted regardless of loop-detection configuration.
+const TURN_TOOL_CALL_CAP = 100;
+
 /**
  * Service for detecting and preventing infinite loops in AI responses.
  * Monitors tool call repetitions and content sentence repetitions.
@@ -84,6 +98,19 @@ export class LoopDetectionService {
   // non-read-like tool fires, a window full of reads is treated as legitimate
   // exploration rather than loop evidence. Resets per-prompt in reset().
   private hasSeenNonReadTool = false;
+
+  // Non-consecutive global duplicate tracking: counts every (tool, args)
+  // pair seen across the entire turn. When any pair reaches
+  // GLOBAL_DUPLICATE_THRESHOLD, the turn is halted.
+  private globalToolCallCounts = new Map<string, number>();
+
+  // Sliding window of recent tool-call keys for alternating-pattern
+  // detection (ABABAB…). Kept at 2 * ALTERNATING_PATTERN_CYCLES entries.
+  private recentToolCallKeys: string[] = [];
+
+  // Total tool calls emitted in the current turn. Always-on circuit breaker;
+  // exceeds TURN_TOOL_CALL_CAP → hard-stop.
+  private turnToolCallTotal = 0;
 
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
@@ -152,10 +179,17 @@ export class LoopDetectionService {
         this.thoughtHistory = [];
 
         this.trackToolCall(event.value);
+        const globalDup = this.checkGlobalDuplicate(
+          this.getToolCallKey(event.value),
+        );
+        const alternating = this.checkAlternatingPattern(
+          this.getToolCallKey(event.value),
+        );
         const readFileLoop = this.checkReadFileLoop();
         const actionStagnation = this.checkActionStagnation();
 
-        this.loopDetected = readFileLoop || actionStagnation;
+        this.loopDetected =
+          globalDup || alternating || readFileLoop || actionStagnation;
         break;
       }
       case GeminiEventType.Content: {
@@ -196,6 +230,28 @@ export class LoopDetectionService {
       this.loopDetected = true;
     }
     return this.loopDetected;
+  }
+
+  /**
+   * Always-on safety checks that fire regardless of skipLoopDetection.
+   * Currently enforces the per-turn tool call cap. Call this before the
+   * gated checks so the hard cap cannot be bypassed by configuration.
+   */
+  checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
+    if (this.loopDetected) {
+      return true;
+    }
+
+    if (event.type !== GeminiEventType.ToolCallRequest) {
+      return false;
+    }
+
+    const key = this.getToolCallKey(event.value);
+    if (this.checkTurnToolCallCap(key)) {
+      this.loopDetected = true;
+      return true;
+    }
+    return false;
   }
 
   private checkToolCallLoop(toolCall: { name: string; args: object }): boolean {
@@ -551,6 +607,92 @@ export class LoopDetectionService {
   }
 
   /**
+   * Always-on hard cap: if the turn exceeds TURN_TOOL_CALL_CAP tool calls
+   * the turn is halted. This is a safety net independent of
+   * skipLoopDetection and fires on the very next tool call that pushes the
+   * total past the cap, not retroactively.
+   */
+  private checkTurnToolCallCap(_toolCallKey: string): boolean {
+    this.turnToolCallTotal++;
+    if (this.turnToolCallTotal > TURN_TOOL_CALL_CAP) {
+      this.lastLoopType = LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(
+          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+          this.promptId,
+        ),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Non-consecutive global duplicate detection: the SAME (tool, args) pair
+   * need not appear consecutively — if it appears GLOBAL_DUPLICATE_THRESHOLD
+   * times anywhere in the turn, it is treated as a loop. This catches models
+   * that intersperse the stuck call among other actions.
+   */
+  private checkGlobalDuplicate(toolCallKey: string): boolean {
+    const count = (this.globalToolCallCounts.get(toolCallKey) ?? 0) + 1;
+    this.globalToolCallCounts.set(toolCallKey, count);
+
+    if (count >= GLOBAL_DUPLICATE_THRESHOLD) {
+      this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          this.promptId,
+        ),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Alternating-pattern detection: catches ABABAB… patterns where the model
+   * flips between two distinct tool calls. Tracked via a sliding window of
+   * tool-call keys; when the window fills with alternating A/B values the
+   * turn is halted.
+   */
+  private checkAlternatingPattern(toolCallKey: string): boolean {
+    const maxLen = 2 * ALTERNATING_PATTERN_CYCLES;
+    this.recentToolCallKeys.push(toolCallKey);
+    if (this.recentToolCallKeys.length > maxLen) {
+      this.recentToolCallKeys.shift();
+    }
+
+    if (this.recentToolCallKeys.length < maxLen) {
+      return false;
+    }
+
+    // Extract the two alternating keys. If there are more than two distinct
+    // keys in the window, there is no clean ABAB pattern.
+    const [a, b] = this.recentToolCallKeys;
+    if (a === b) return false; // not alternating, same tool
+
+    for (let i = 0; i < maxLen; i++) {
+      const expected = i % 2 === 0 ? a : b;
+      if (this.recentToolCallKeys[i] !== expected) {
+        return false;
+      }
+    }
+
+    this.lastLoopType = LoopType.ALTERNATING_TOOL_CALL_PATTERN;
+    logLoopDetected(
+      this.config,
+      new LoopDetectedEvent(
+        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
+        this.promptId,
+      ),
+    );
+    return true;
+  }
+
+  /**
    * Resets all loop detection state.
    */
   reset(promptId: string): void {
@@ -566,6 +708,9 @@ export class LoopDetectionService {
     this.lastSeenToolName = null;
     this.hasSeenNonReadTool = false;
     this.lastLoopType = null;
+    this.globalToolCallCounts.clear();
+    this.recentToolCallKeys = [];
+    this.turnToolCallTotal = 0;
   }
 
   private resetToolCallCount(): void {
