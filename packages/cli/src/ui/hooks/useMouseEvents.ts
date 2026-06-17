@@ -10,10 +10,12 @@
  */
 
 import { useEffect, useRef } from 'react';
+import { writeSync } from 'node:fs';
 import { useStdin, useStdout, useInput } from 'ink';
 import {
   enableMouseEvents,
   disableMouseEvents,
+  DISABLE_SGR_MOUSE,
   parseSGRMouseEvent,
   type MouseEvent,
 } from '../utils/mouse.js';
@@ -75,10 +77,16 @@ export function useMouseEvents(
     // never runs and the terminal stays in SGR mouse-tracking mode after
     // qwen exits — wheel events would be echoed as literal escape
     // sequences. Hook `exit` to write the disable seq one more time as
-    // a fallback. Node never throws from an `exit` listener, so even if
-    // stdout is broken (EPIPE) the process still terminates cleanly.
+    // a fallback. Use writeSync(fd=1) instead of stdout.write because
+    // during the `exit` event the event loop is stopped and async writes
+    // never reach the terminal — leaving the terminal stuck in SGR mouse
+    // mode (mouse unusable after qwen exits).
     const onExit = () => {
-      disableMouseEvents(stdout);
+      try {
+        writeSync(1, DISABLE_SGR_MOUSE);
+      } catch {
+        // fd 1 may already be closed (EPIPE, parent killed), ignore
+      }
     };
     process.on('exit', onExit);
 

@@ -190,7 +190,7 @@ export function isIncompleteMouseSequence(buffer: string): boolean {
 // `?1006h` = SGR extended coordinates (handles cols/rows beyond 223).
 // Sent together — most terminals ignore unknown modes silently.
 const ENABLE_SGR_MOUSE = '\x1b[?1002h\x1b[?1006h';
-const DISABLE_SGR_MOUSE = '\x1b[?1006l\x1b[?1002l';
+export const DISABLE_SGR_MOUSE = '\x1b[?1006l\x1b[?1002l';
 
 export function enableMouseEvents(stdout: NodeJS.WriteStream): void {
   stdout.write(ENABLE_SGR_MOUSE);
