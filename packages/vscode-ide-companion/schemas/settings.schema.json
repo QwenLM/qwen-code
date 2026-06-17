@@ -591,7 +591,7 @@
           "default": false
         },
         "clearContextOnIdle": {
-          "description": "Settings for clearing stale context after idle periods. Use -1 to disable a threshold.",
+          "description": "Settings for clearing stale or oversized tool result context. Use -1 to disable a threshold.",
           "type": "object",
           "properties": {
             "toolResultsThresholdMinutes": {
@@ -603,6 +603,11 @@
               "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
               "type": "number",
               "default": 5
+            },
+            "toolResultsTotalCharsThreshold": {
+              "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
+              "type": "number",
+              "default": 500000
             }
           }
         },

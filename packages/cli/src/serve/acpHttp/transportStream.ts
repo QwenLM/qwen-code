@@ -9,6 +9,7 @@
  * Both `SseStream` (HTTP SSE) and `WsStream` (WebSocket) implement this.
  */
 export interface TransportStream {
+  readonly kind: 'sse' | 'ws';
   send(message: unknown): Promise<void>;
   close(): void;
   readonly isClosed: boolean;

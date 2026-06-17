@@ -9,6 +9,10 @@ export interface FreeFormInputContextBadgeProps {
   icon: React.ReactNode
   /** Label text - shown in expanded state or collapsed with selection */
   label: string
+  /** Accessible label for the full badge when visible metadata is appended */
+  ariaLabel?: string
+  /** Optional trailing metadata shown after the label */
+  trailingContent?: React.ReactNode
   /** Whether to show expanded state (icon + label + chevron) vs collapsed */
   isExpanded?: boolean
   /** Whether there's an active selection (affects collapsed state styling and shows label) */
@@ -45,6 +49,8 @@ export const FreeFormInputContextBadge = React.forwardRef<HTMLButtonElement, Fre
     {
       icon,
       label,
+      ariaLabel,
+      trailingContent,
       isExpanded = false,
       hasSelection = false,
       showChevron = false,
@@ -68,7 +74,7 @@ export const FreeFormInputContextBadge = React.forwardRef<HTMLButtonElement, Fre
       <button
         ref={mergedRef as React.Ref<HTMLButtonElement>}
         type="button"
-        aria-label={label}
+        aria-label={ariaLabel ?? label}
         onClick={onClick}
         disabled={disabled}
         data-tutorial={dataTutorial}
@@ -106,6 +112,8 @@ export const FreeFormInputContextBadge = React.forwardRef<HTMLButtonElement, Fre
             </FadingText>
           )
         )}
+
+        {showLabel && trailingContent}
 
         {/* Optional chevron - only in expanded state */}
         {isExpanded && showChevron && (

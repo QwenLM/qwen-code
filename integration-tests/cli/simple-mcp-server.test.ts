@@ -169,6 +169,7 @@ rpc.send({
 
 describe('simple-mcp-server', () => {
   const rig = new TestRig();
+  let previousLegacyMcpBlocking: string | undefined;
   let previousMcpApprovalsPath: string | undefined;
 
   beforeAll(async () => {
@@ -177,6 +178,7 @@ describe('simple-mcp-server', () => {
     // request fires without the MCP `add` tool wired into the model's tool
     // surface, so the model answers `15` directly and `foundToolCall` stays
     // false. Remove once QwenLM/qwen-code#4163 is fixed.
+    previousLegacyMcpBlocking = process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
     process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
 
     // Setup test directory with MCP server configuration
@@ -238,6 +240,12 @@ describe('simple-mcp-server', () => {
   });
 
   afterAll(() => {
+    if (previousLegacyMcpBlocking === undefined) {
+      delete process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
+    } else {
+      process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = previousLegacyMcpBlocking;
+    }
+
     if (previousMcpApprovalsPath === undefined) {
       delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
     } else {
