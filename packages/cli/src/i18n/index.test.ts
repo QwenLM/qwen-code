@@ -184,4 +184,21 @@ describe('localizeToolDisplayName', () => {
     // An unknown tool name passes through unchanged.
     expect(localizeToolDisplayName('MysteryTool')).toBe('MysteryTool');
   });
+
+  it('has a zh translation for every core tool display name', async () => {
+    const { setLanguageAsync, localizeToolDisplayName } = await import(
+      './index.js'
+    );
+    const { ToolDisplayNames } = await import('@qwen-code/qwen-code-core');
+    await setLanguageAsync('zh');
+
+    // Guards against a new tool landing without a `toolDisplayName.*` entry:
+    // every English display name must resolve to a different (translated) zh
+    // string. check-i18n can't catch this because the keys are built
+    // dynamically, never as `t('toolDisplayName.X')` string literals.
+    const untranslated = Object.values(ToolDisplayNames).filter(
+      (name) => localizeToolDisplayName(name) === name,
+    );
+    expect(untranslated).toEqual([]);
+  });
 });
