@@ -307,7 +307,6 @@ export const AGENT_FLAGS = {
 
 function canOfferMidTurnAttachments(
   attachments?: FileAttachment[],
-  storedAttachments?: StoredAttachment[],
 ): boolean {
   if (!attachments?.length) {
     return true
@@ -8133,7 +8132,7 @@ export class SessionManager implements ISessionManager {
         isQueued: true,
       }
       const canInjectMidTurn =
-        canOfferMidTurnAttachments(attachments, storedAttachments) &&
+        canOfferMidTurnAttachments(attachments) &&
         (agent?.enqueueMidTurnMessage?.(message, attachments, {
           messageId: userMessage.id,
           optimisticMessageId: options?.optimisticMessageId,
