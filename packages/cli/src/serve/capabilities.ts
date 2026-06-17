@@ -31,13 +31,14 @@ export interface ServeCapabilityDescriptor {
 
 export const SERVE_CAPABILITY_REGISTRY = {
   health: { since: 'v1' },
+  daemon_status: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
-  // ACP backs this with `connection.unstable_resumeSession`. Surface
-  // the unstable prefix so clients don't pin against a `v1` shape that
-  // the underlying ACP method may still change.
+  session_resume: { since: 'v1' },
+  // Deprecated alias — kept until @agentclientprotocol/sdk graduates
+  // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
   session_prompt: { since: 'v1' },
@@ -160,6 +161,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Side question (/btw) against the session's conversation context.
   // Single-turn, tool-free LLM call via runForkedAgent (cache path).
   session_btw: { since: 'v1' },
+  // Direct daemon-side shell execution for an existing session.
+  // Advertised CONDITIONALLY: operators must explicitly enable it and
+  // configure bearer auth. Clients must still send a session-bound
+  // X-Qwen-Client-Id when calling the route.
+  session_shell_command: { since: 'v1' },
   // Daemon hosts a workspace-shared MCP transport
   // pool (`QwenAgent.mcpPool`); `GET /workspace/mcp` reflects pool-level
   // accounting (`entryCount`, `entrySummary` on each per-server cell).
@@ -240,6 +246,7 @@ export interface AdvertiseFeatureToggles {
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
   persistSettingAvailable?: boolean;
+  sessionShellCommandEnabled?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
 }
@@ -297,6 +304,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  [
+    'session_shell_command',
+    (toggles) => toggles.sessionShellCommandEnabled === true,
+  ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
 ]);

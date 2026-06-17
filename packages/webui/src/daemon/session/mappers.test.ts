@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
-import { getReplayTokenCount } from './mappers.js';
+import { getReplayTokenCount, getReplayTokenUsage } from './mappers.js';
 
 function usageEvent(
   id: number,
@@ -63,6 +63,34 @@ describe('getReplayTokenCount', () => {
         turnComplete,
       ]),
     ).toBe(23_000);
+  });
+
+  it('returns the latest structured usage fields', () => {
+    expect(
+      getReplayTokenUsage([
+        usageEvent(1, {
+          cachedReadTokens: 10,
+          inputTokens: 11_000,
+          outputTokens: 100,
+          thoughtTokens: 5,
+          totalTokens: 11_105,
+        }),
+        turnComplete,
+        usageEvent(3, {
+          cachedReadTokens: 0,
+          inputTokens: 23_279,
+          outputTokens: 182,
+          thoughtTokens: 0,
+          totalTokens: 23_461,
+        }),
+      ]),
+    ).toEqual({
+      cachedReadTokens: 0,
+      inputTokens: 23_279,
+      outputTokens: 182,
+      thoughtTokens: 0,
+      totalTokens: 23_461,
+    });
   });
 
   it('prefers inputTokens over totalTokens and falls back to totalTokens', () => {

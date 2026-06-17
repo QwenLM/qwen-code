@@ -976,6 +976,7 @@ export async function main() {
           : []),
       ]),
     ];
+    const emittedStartupWarnings = new Set(startupWarnings);
 
     // Surface critical startup warnings (corrupted settings, recovery, etc.)
     // to stderr so they are visible regardless of UI mode. In interactive
@@ -1074,6 +1075,11 @@ export async function main() {
     if (inputFormat !== InputFormat.STREAM_JSON) {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
+      for (const warning of config.getWarnings()) {
+        if (emittedStartupWarnings.has(warning)) continue;
+        emittedStartupWarnings.add(warning);
+        writeStderrLine(warning);
+      }
       profileCheckpoint('config_initialize_end');
 
       // Non-interactive paths feed a prompt to the model immediately after

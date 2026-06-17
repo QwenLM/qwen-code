@@ -10,15 +10,16 @@ import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { join } from 'path';
+import { pathToFileURL } from 'node:url';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import {
   createDebugLogger,
   encodeInsightErrorMessage,
   encodeInsightProgressMessage,
   encodeInsightReadyMessage,
+  openBrowserSecurely,
   Storage,
 } from '@qwen-code/qwen-code-core';
-import open from 'open';
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -221,33 +222,26 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
-      try {
-        await open(outputPath);
-
-        context.ui.addItem(
-          {
-            type: MessageType.INFO,
-            text: t('Opening insights in your browser: {{path}}', {
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t(
+            'Insights generated at: {{path}}. If the browser does not open automatically, open this file manually.',
+            {
               path: outputPath,
-            }),
-          },
-          Date.now(),
-        );
+            },
+          ),
+        },
+        Date.now(),
+      );
+
+      try {
+        await openBrowserSecurely(pathToFileURL(outputPath).href, {
+          allowFile: true,
+          allowedFilePaths: [outputPath],
+        });
       } catch (browserError) {
         logger.error('Failed to open browser automatically:', browserError);
-
-        context.ui.addItem(
-          {
-            type: MessageType.INFO,
-            text: t(
-              'Insights generated at: {{path}}. Please open this file in your browser.',
-              {
-                path: outputPath,
-              },
-            ),
-          },
-          Date.now(),
-        );
       }
 
       context.ui.setDebugMessage(t('Insights ready.'));

@@ -34,6 +34,7 @@ export type {
   DaemonSessionContextValue,
   DaemonSessionNotice,
   DaemonSessionProviderProps,
+  DaemonTokenUsage,
   DaemonTodoItem,
   DaemonTodoList,
   DaemonTodoPriority,

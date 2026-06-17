@@ -57,6 +57,7 @@ concurrency:
 env:
   BUN_VERSION: '1.3.9'
   CRAFT_BRAND: 'qwen-code'
+  DESKTOP_UPDATE_FEED_TAG: 'desktop-latest'
 
 jobs:
   release_metadata:
@@ -339,13 +340,13 @@ jobs:
         working-directory: 'packages/desktop'
         shell: 'bash'
         env:
-          EXPECTED_REPOSITORY: '${{ github.repository }}'
+          EXPECTED_UPDATE_URL: 'https://github.com/${{ github.repository }}/releases/download/${{ env.DESKTOP_UPDATE_FEED_TAG }}'
         run: |
           set -euo pipefail
 
           bun run electron:builder-config
 
-          actual_repository="$(node <<'NODE'
+          actual_update_url="$(node <<'NODE'
           const fs = require('node:fs');
           const yaml = require('js-yaml');
 
@@ -353,32 +354,36 @@ jobs:
             fs.readFileSync('apps/electron/electron-builder.generated.yml', 'utf8'),
           );
           const publish = config?.publish;
-          if (
-            !publish ||
-            publish.provider !== 'github' ||
-            !publish.owner ||
-            !publish.repo
-          ) {
+          if (!publish || typeof publish.provider !== 'string') {
             process.exit(1);
           }
 
-          console.log(`${publish.owner}/${publish.repo}`);
+          if (publish.provider === 'github') {
+            if (!publish.owner || !publish.repo) process.exit(1);
+            console.log(`https://github.com/${publish.owner}/${publish.repo}/releases`);
+          } else if (publish.provider === 'generic') {
+            if (!publish.url) process.exit(1);
+            console.log(publish.url);
+          } else {
+            process.exit(1);
+          }
           NODE
           )"
 
-          if [ "$actual_repository" != "$EXPECTED_REPOSITORY" ]; then
-            echo "::error::Desktop update feed points to $actual_repository, expected $EXPECTED_REPOSITORY."
+          if [ "$actual_update_url" != "$EXPECTED_UPDATE_URL" ]; then
+            echo "::error::Desktop update feed points to $actual_update_url, expected $EXPECTED_UPDATE_URL."
             exit 1
           fi
 
-          echo "Desktop update feed: https://github.com/${actual_repository}/releases"
+          echo "Desktop update feed: ${actual_update_url}"
 
       - name: 'Configure optional signing secrets'
         shell: 'bash'
         env:
           IS_DRY_RUN: '${{ inputs.dry_run }}'
-          APPLE_APP_SPECIFIC_PASSWORD_SECRET: '${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
-          APPLE_ID_SECRET: '${{ secrets.APPLE_ID }}'
+          APPLE_NOTARY_API_KEY_P8_BASE64_SECRET: '${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}'
+          APPLE_NOTARY_KEY_ID_SECRET: '${{ secrets.APPLE_NOTARY_KEY_ID }}'
+          APPLE_NOTARY_ISSUER_ID_SECRET: '${{ secrets.APPLE_NOTARY_ISSUER_ID }}'
           APPLE_TEAM_ID_SECRET: '${{ secrets.APPLE_TEAM_ID }}'
           MAC_CSC_KEY_PASSWORD_SECRET: '${{ secrets.MAC_CSC_KEY_PASSWORD }}'
           MAC_CSC_LINK_SECRET: '${{ secrets.MAC_CSC_LINK }}'
@@ -424,17 +429,25 @@ jobs:
               fi
 
               if [ "$IS_DRY_RUN" = "false" ]; then
-                if [ -z "$APPLE_ID_SECRET" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD_SECRET" ] || [ -z "$APPLE_TEAM_ID_SECRET" ]; then
-                  echo "::error::Published macOS desktop releases require APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, and APPLE_TEAM_ID for notarization."
+                if [ -z "$APPLE_NOTARY_API_KEY_P8_BASE64_SECRET" ] || [ -z "$APPLE_NOTARY_KEY_ID_SECRET" ] || [ -z "$APPLE_NOTARY_ISSUER_ID_SECRET" ] || [ -z "$APPLE_TEAM_ID_SECRET" ]; then
+                  echo "::error::Published macOS desktop releases require APPLE_NOTARY_API_KEY_P8_BASE64, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID, and APPLE_TEAM_ID for notarization."
                   exit 1
                 fi
-                append_env "NOTARIZE" "true"
+              fi
+
+              # Materialize the App Store Connect API key (.p8) so electron-builder
+              # (>=24) notarizes via notarytool. It reads APPLE_API_KEY (a path to
+              # the .p8 file), APPLE_API_KEY_ID, and APPLE_API_ISSUER from the env.
+              if [ -n "$APPLE_NOTARY_API_KEY_P8_BASE64_SECRET" ] && [ -n "$APPLE_NOTARY_KEY_ID_SECRET" ] && [ -n "$APPLE_NOTARY_ISSUER_ID_SECRET" ]; then
+                api_key_path="${RUNNER_TEMP}/apple-notary-key.p8"
+                printf '%s' "$APPLE_NOTARY_API_KEY_P8_BASE64_SECRET" | base64 --decode > "$api_key_path"
+                append_env "APPLE_API_KEY" "$api_key_path"
+                append_env "APPLE_API_KEY_ID" "$APPLE_NOTARY_KEY_ID_SECRET"
+                append_env "APPLE_API_ISSUER" "$APPLE_NOTARY_ISSUER_ID_SECRET"
               fi
 
               append_env "CSC_LINK" "$mac_csc_link"
               append_env "CSC_KEY_PASSWORD" "$mac_csc_key_password"
-              append_env "APPLE_ID" "$APPLE_ID_SECRET"
-              append_env "APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_APP_SPECIFIC_PASSWORD_SECRET"
               append_env "APPLE_TEAM_ID" "$APPLE_TEAM_ID_SECRET"
               echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
             else
@@ -455,12 +468,11 @@ jobs:
               append_env "WIN_CSC_LINK" "$WIN_CSC_LINK_SECRET"
               append_env "WIN_CSC_KEY_PASSWORD" "$WIN_CSC_KEY_PASSWORD_SECRET"
             else
-              if ! allow_unsigned_artifacts; then
-                echo "::error::Published Windows desktop releases require WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD."
-                exit 1
+              if [ "$IS_DRY_RUN" = "true" ]; then
+                echo "Windows signing certificate is not configured; Windows dry-run artifacts will be unsigned."
+              else
+                echo "::warning::Windows signing certificate is not configured; published Windows desktop releases will be unsigned."
               fi
-
-              echo "Windows signing certificate is not configured; Windows dry-run artifacts will be unsigned."
             fi
           else
             if [ "$RUNNER_OS" != "Linux" ] && [ -n "$CSC_LINK_SECRET" ]; then
@@ -520,6 +532,7 @@ jobs:
           RELEASE_NAME: '${{ inputs.release_name }}'
           RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
           RELEASE_TARGET: '${{ needs.release_metadata.outputs.release_ref }}'
+          UPDATE_FEED_TAG: '${{ env.DESKTOP_UPDATE_FEED_TAG }}'
           UPLOAD_CLOBBER: '${{ inputs.clobber }}'
         run: |
           set -euo pipefail
@@ -583,6 +596,30 @@ jobs:
             fi
             create_args+=(--latest=false)
             gh release create "${create_args[@]}"
+          fi
+
+          if [ "$RELEASE_DRAFT" = "true" ] || [ "$RELEASE_PRERELEASE" = "true" ]; then
+            echo "Skipping $UPDATE_FEED_TAG update for draft or prerelease desktop release."
+          else
+            feed_title="Qwen Code Desktop latest"
+            feed_notes="Auto-update feed for ${RELEASE_TAG}. See https://github.com/${GH_REPO}/releases/tag/${RELEASE_TAG}."
+            feed_upload_args=("$UPDATE_FEED_TAG" "${assets[@]}" --clobber)
+            if gh release view "$UPDATE_FEED_TAG" >/dev/null 2>&1; then
+              gh release edit "$UPDATE_FEED_TAG" \
+                --draft=false \
+                --prerelease=false \
+                --latest=false \
+                --target "$RELEASE_TARGET" \
+                --title "$feed_title" \
+                --notes "$feed_notes"
+              gh release upload "${feed_upload_args[@]}"
+            else
+              gh release create "$UPDATE_FEED_TAG" "${assets[@]}" \
+                --latest=false \
+                --target "$RELEASE_TARGET" \
+                --title "$feed_title" \
+                --notes "$feed_notes"
+            fi
           fi
 
   sync-version:

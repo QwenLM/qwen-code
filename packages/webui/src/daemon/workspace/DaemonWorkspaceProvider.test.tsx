@@ -56,6 +56,7 @@ const sdkMocks = vi.hoisted(() => {
     workspaceProviders = workspaceProviders;
     listWorkspaceSessions = listWorkspaceSessions;
     deleteSessionsData = deleteSessionsData;
+    dispose = vi.fn();
   }
 
   return {

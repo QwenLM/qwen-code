@@ -14,6 +14,7 @@ import {
 } from '../contexts/VimModeContext.js';
 import { execFile, execFileSync } from 'child_process';
 import { cpLen, cpSlice } from '../utils/textUtils.js';
+import { writeOsc52 } from '../utils/clipboardUtils.js';
 
 export type VimMode = 'NORMAL' | 'INSERT';
 
@@ -262,9 +263,20 @@ function writeClipboard(text: string): void {
     }
     if (linuxWriteCmd) {
       const [bin, ...args] = linuxWriteCmd;
-      const child = execFile(bin, args, { timeout: 500 }, cb);
+      const child = execFile(bin, args, { timeout: 500 }, (err) => {
+        if (err && !writeOsc52(text)) {
+          debugLogger.warn(
+            'writeClipboard: cached tool and OSC 52 both failed',
+          );
+        }
+      });
       child.stdin?.end(text);
       child.unref();
+    } else {
+      // No clipboard tool available (e.g., SSH without X11/Wayland) — try OSC 52
+      if (!writeOsc52(text)) {
+        debugLogger.warn('OSC 52 clipboard write failed - no TTY available');
+      }
     }
   } catch (e) {
     debugLogger.warn('writeClipboard failed:', e);

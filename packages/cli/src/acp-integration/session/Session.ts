@@ -94,8 +94,12 @@ import {
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
   sessionIdContext,
+  dedupeToolCallsById,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+// Single source of truth shared with the daemon-side answerer (BridgeClient),
+// so a rename can't desync caller and answerer into a silent -32601 latch.
+import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
@@ -126,6 +130,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
+import { MessageType, type HistoryItemGoalStatus } from '../../ui/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
@@ -133,6 +138,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 // Import modular session components
 import type {
   ApprovalModeValue,
+  CumulativeUsage,
   SessionContext,
   ToolCallStartParams,
 } from './types.js';
@@ -151,6 +157,8 @@ import {
 } from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
+const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
+const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -163,7 +171,6 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
-const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
 // means the client silently drops unknown methods; without a deadline the
@@ -413,6 +420,16 @@ export class Session implements SessionContext {
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
   private readonly createdAt: number = Date.now();
+  /**
+   * Running cumulative usage for this session, snapshotted onto each todo/plan
+   * update by PlanEmitter so the web-shell can show per-task token/API spend.
+   */
+  readonly cumulativeUsage: CumulativeUsage = {
+    promptTokens: 0,
+    cachedTokens: 0,
+    candidateTokens: 0,
+    apiTimeMs: 0,
+  };
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state
@@ -490,6 +507,23 @@ export class Session implements SessionContext {
     return this.sessionId;
   }
 
+  /**
+   * Starts the cron scheduler at session creation. Durable tasks live on
+   * disk; waiting for the end of the first prompt (the in-turn start at
+   * the bottom of prompt()) would leave them invisible to cron_list /
+   * cron_delete for the whole first turn and unfired while the session
+   * idles before any prompt — the TUI equivalent enables durable cron on
+   * mount.
+   */
+  startCronScheduler(): void {
+    // Best-effort: a cron startup failure must not break session creation.
+    this.#startCronSchedulerIfNeeded().catch((error) => {
+      debugLogger.warn(
+        `Cron scheduler startup failed [session ${this.sessionId}]: ${error}`,
+      );
+    });
+  }
+
   getConfig(): Config {
     return this.config;
   }
@@ -529,9 +563,18 @@ export class Session implements SessionContext {
     this.cronProcessing = false;
     this.cronCompletion = null;
 
+    // Stop the scheduler too: after dispose the drain guard drops fired
+    // prompts, but tick() would still mark durable fires (deleting
+    // one-shots from disk without executing them) and the held lock
+    // would block another session from taking over.
+    if (this.config.isCronEnabled()) {
+      this.config.getCronScheduler().stop();
+    }
+
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     clearGoalTerminalObserver(this.sessionId);
   }
 
@@ -558,6 +601,14 @@ export class Session implements SessionContext {
           `Failed to emit goal terminal update: ${this.#formatError(error)}`,
         );
       });
+    });
+  }
+
+  emitGoalStatus(status: Omit<HistoryItemGoalStatus, 'id' | 'type'>): void {
+    void this.messageEmitter.emitGoalStatus(status).catch((error) => {
+      debugLogger.warn(
+        `Failed to emit goal status update: ${this.#formatError(error)}`,
+      );
     });
   }
 
@@ -614,9 +665,20 @@ export class Session implements SessionContext {
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
 
-    this.config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-      truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex),
-    });
+    const fileHistoryService = this.config.getFileHistoryService();
+    const survivingSnapshots = fileHistoryService
+      .getSnapshots()
+      .slice(0, targetTurnIndex + 1);
+
+    fileHistoryService.restoreFromSnapshots(survivingSnapshots);
+
+    this.config
+      .getChatRecordingService()
+      ?.rewindRecording(
+        targetTurnIndex,
+        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
+        survivingSnapshots,
+      );
 
     return { targetTurnIndex, apiTruncateIndex };
   }
@@ -706,7 +768,7 @@ export class Session implements SessionContext {
     }
 
     if (this.pendingPrompt) {
-      this.pendingPrompt.abort();
+      this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
       this.pendingPrompt = null;
     }
 
@@ -809,7 +871,8 @@ export class Session implements SessionContext {
     try {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
-      this.#startCronSchedulerIfNeeded();
+      void this.#startCronSchedulerIfNeeded();
+      // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
@@ -967,10 +1030,23 @@ export class Session implements SessionContext {
               ),
             );
 
-            // record user message for session management
-            this.config
-              .getChatRecordingService()
-              ?.recordUserMessage(promptText);
+            // Retry: strip orphaned user entries so the model sees a clean
+            // history (no dangling user message from the failed attempt).
+            // Also skip recordUserMessage to avoid duplicating the user
+            // turn in the JSONL transcript.
+            const isRetry =
+              (params as { retry?: boolean }).retry === true ||
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_RETRY_META_KEY
+              ] === true;
+            if (isRetry) {
+              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+            } else {
+              // record user message for session management
+              this.config
+                .getChatRecordingService()
+                ?.recordUserMessage(promptText);
+            }
 
             // Check if the input contains a slash command
             // Extract text from the first text block if present
@@ -1052,6 +1128,27 @@ export class Session implements SessionContext {
               if (additionalContext) {
                 parts = [...parts, { text: additionalContext }];
               }
+            }
+
+            // Snapshot file state before this turn (mirrors the makeSnapshot
+            // block in GeminiClient.sendMessageStream). Placed after
+            // slash-command and hook early-returns so locally handled commands
+            // don't create phantom snapshots that desync the snapshot index.
+            try {
+              const fileHistoryService = this.config.getFileHistoryService();
+              await fileHistoryService.makeSnapshot(promptId);
+              try {
+                const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
+                if (latestSnapshot) {
+                  this.config
+                    .getChatRecordingService()
+                    ?.recordFileHistorySnapshot(latestSnapshot);
+                }
+              } catch (e) {
+                debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+              }
+            } catch (e) {
+              debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
             }
 
             // Prepend session-level system reminders (plan mode / subagent /
@@ -1158,6 +1255,17 @@ export class Session implements SessionContext {
                     }
                   }
                 } catch (error) {
+                  // Only explicit user cancellation maps to a normal
+                  // cancelled turn. Other aborts/errors should surface so
+                  // infra failures are not hidden as successful cancels.
+                  if (
+                    pendingSend.signal.aborted &&
+                    pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
+                    this.#isAbortError(error)
+                  ) {
+                    return { stopReason: 'cancelled' };
+                  }
+
                   // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
                   // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
                   const errorStatus = getErrorStatus(error);
@@ -1848,11 +1956,33 @@ export class Session implements SessionContext {
    * The scheduler runs in the background, pushing fired prompts into
    * `cronQueue` and triggering `#drainCronQueue`.
    */
-  #startCronSchedulerIfNeeded(): void {
+  async #startCronSchedulerIfNeeded(): Promise<void> {
+    if (this.disposed) return;
     if (!this.config.isCronEnabled()) return;
     if (this.cronDisabledByTokenLimit) return;
     const scheduler = this.config.getCronScheduler();
-    if (scheduler.size === 0) return;
+
+    // Enable durable cron support (loads tasks from disk, acquires lock).
+    // Awaited: on a fresh session the only jobs may live on disk, and
+    // checking for work before the load completes would skip start() and
+    // leave durable jobs dormant until the next prompt. Missed one-shots
+    // are delivered as late fires through the start() callback below.
+    // Durable tasks live under ~/.qwen (user-owned, not in the working
+    // tree), so no folder-trust gate is needed here.
+    try {
+      await scheduler.enableDurable(this.sessionId);
+    } catch (err) {
+      // Durable support is best-effort; session-only jobs still run.
+      debugLogger.warn(
+        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+      );
+    }
+
+    // dispose() may have run while the durable load was in flight; its
+    // stop() already tore the scheduler down — don't restart the tick.
+    if (this.disposed) return;
+
+    if (!scheduler.hasPendingWork) return;
 
     scheduler.start((job: { prompt: string }) => {
       if (this.cronDisabledByTokenLimit) return;
@@ -1891,10 +2021,13 @@ export class Session implements SessionContext {
 
       void this.#drainNotificationQueue();
 
-      // Stop scheduler if all jobs were deleted during execution
+      // Stop scheduler if all jobs were deleted during execution. With
+      // durable mode active hasPendingWork stays true even at zero
+      // in-memory jobs — the file watcher / lock takeover can still
+      // install tasks persisted by other sessions.
       if (this.config.isCronEnabled()) {
         const scheduler = this.config.getCronScheduler();
-        if (scheduler.size === 0) {
+        if (!scheduler.hasPendingWork) {
           scheduler.stop();
         }
       }
@@ -2120,6 +2253,31 @@ export class Session implements SessionContext {
         kind: 'shell',
       });
     });
+
+    // Session title recorded (auto-generated after a turn, or an in-process
+    // /rename) → notify attached clients. A title update is NOT an ACP
+    // `SessionUpdate` variant (the external @agentclientprotocol/sdk union
+    // would reject an unknown kind at validation), so — like
+    // `current_model_update` above — it goes over the agent→bridge
+    // `extNotification` side-channel. The bridge demuxes it into the
+    // canonical `session_metadata_updated` bus event so HTTP clients can
+    // refresh their session list immediately instead of discovering the
+    // new title on their next poll.
+    this.config
+      .getChatRecordingService()
+      ?.setTitleRecordedCallback((customTitle, titleSource) => {
+        void this.client
+          .extNotification('qwen/notify/session/title-update', {
+            v: 1,
+            sessionId: this.sessionId,
+            title: customTitle,
+            titleSource,
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the title
+            // until the client's next session-list refresh.
+          });
+      });
   }
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
@@ -2156,8 +2314,14 @@ export class Session implements SessionContext {
         ) {
           break;
         }
+        // ACP processes notifications one-at-a-time (no batch) because each
+        // notification carries distinct task metadata (taskId, status, kind,
+        // toolUseId) used in display and response _meta. Merging would
+        // misattribute the combined response to a single task.
         const item = this.notificationQueue.shift()!;
-        await this.#executeBackgroundNotificationPrompt(item);
+        await sessionIdContext.run(this.config.getSessionId(), () =>
+          this.#executeBackgroundNotificationPromptInner(item),
+        );
       }
     } finally {
       this.notificationProcessing = false;
@@ -2175,15 +2339,6 @@ export class Session implements SessionContext {
         void this.#drainNotificationQueue();
       }
     }
-  }
-
-  async #executeBackgroundNotificationPrompt(
-    item: BackgroundNotificationQueueItem,
-  ): Promise<void> {
-    // Same session-ID binding rationale as #executePrompt.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeBackgroundNotificationPromptInner(item),
-    );
   }
 
   async #executeBackgroundNotificationPromptInner(
@@ -2653,7 +2808,7 @@ export class Session implements SessionContext {
   ): Promise<Part[]> {
     type Batch = { concurrent: boolean; calls: FunctionCall[] };
     const batches: Batch[] = [];
-    for (const fc of functionCalls) {
+    for (const fc of dedupeToolCallsById(functionCalls)) {
       const isAgent = fc.name === ToolNames.AGENT;
       const last = batches[batches.length - 1];
       if (isAgent && last?.concurrent) {
@@ -2844,6 +2999,7 @@ export class Session implements SessionContext {
         const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
         const isAgentTool = tool.name === ToolNames.AGENT;
         const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
+        const isEnterPlanModeTool = tool.name === ToolNames.ENTER_PLAN_MODE;
 
         // Track cleanup functions for sub-agent event listeners
         let subAgentCleanupFunctions: Array<() => void> = [];
@@ -3078,6 +3234,7 @@ export class Session implements SessionContext {
                 isExitPlanModeTool,
                 isAskUserQuestionTool,
                 confirmationDetails,
+                isEnterPlanModeTool,
               )
             ) {
               return earlyErrorResponse(
@@ -3169,6 +3326,11 @@ export class Session implements SessionContext {
                   locations: invocation.toolLocations(),
                   kind: mappedKind,
                   rawInput: args,
+                  // Carry the tool name so consumers can give specific tools
+                  // (e.g. the Agent tool) dedicated permission UI without
+                  // relying on a protocol `kind` ACP can't carry. The tool_call
+                  // frame already ships _meta.toolName; mirror it here.
+                  _meta: { toolName },
                 },
               };
 
@@ -3331,6 +3493,23 @@ export class Session implements SessionContext {
 
           // Clean up event listeners
           subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+
+          // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
+          // approval mode inside execute() without going through the user-confirmation
+          // branch above, so notify the client of the current mode explicitly.
+          // Only send when the mode actually changed (a gate "blocked" result keeps
+          // the mode at PLAN, and a redundant notification would be misleading).
+          if (
+            (isEnterPlanModeTool || isExitPlanModeTool) &&
+            !didRequestPermission &&
+            !toolResult.error &&
+            this.config.getApprovalMode() !== approvalMode
+          ) {
+            await this.sendUpdate({
+              sessionUpdate: 'current_mode_update',
+              currentModeId: this.config.getApprovalMode() as ApprovalModeValue,
+            });
+          }
 
           // Create response parts first (needed for emitResult and recordToolResult)
           const responseParts = convertToFunctionResponse(
@@ -3547,6 +3726,30 @@ export class Session implements SessionContext {
     }
   }
 
+  #emitGoalStatusItems(result: NonInteractiveSlashCommandResult): void {
+    if (!('outputHistoryItems' in result)) {
+      return;
+    }
+    for (const item of result.outputHistoryItems ?? []) {
+      if (item.type === MessageType.GOAL_STATUS) {
+        this.emitGoalStatus({
+          kind: item.kind,
+          condition: item.condition,
+          ...(item.iterations !== undefined
+            ? { iterations: item.iterations }
+            : {}),
+          ...(item.setAt !== undefined ? { setAt: item.setAt } : {}),
+          ...(item.durationMs !== undefined
+            ? { durationMs: item.durationMs }
+            : {}),
+          ...(item.lastReason !== undefined
+            ? { lastReason: item.lastReason }
+            : {}),
+        });
+      }
+    }
+  }
+
   /**
    * Processes the result of a slash command execution.
    *
@@ -3567,6 +3770,8 @@ export class Session implements SessionContext {
     result: NonInteractiveSlashCommandResult,
     originalPrompt: ContentBlock[],
   ): Promise<Part[] | null> {
+    this.#emitGoalStatusItems(result);
+
     switch (result.type) {
       case 'submit_prompt':
         // Command wants to submit a prompt to the model

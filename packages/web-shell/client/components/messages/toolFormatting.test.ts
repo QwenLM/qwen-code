@@ -170,4 +170,24 @@ describe('toolFormatting', () => {
       ),
     ).toBe('3 line(s)');
   });
+
+  it('keeps long shell commands in full instead of capping at one line', () => {
+    const command = `echo ${'a'.repeat(200)}`;
+    expect(
+      getToolDescription(
+        tool({ toolName: 'run_shell_command', args: { command } }),
+      ),
+    ).toBe(command);
+  });
+
+  it('still bounds a pathologically long description', () => {
+    const result = getToolDescription(
+      tool({
+        toolName: 'run_shell_command',
+        args: { command: 'x'.repeat(5000) },
+      }),
+    );
+    expect(result.length).toBeLessThan(5000);
+    expect(result.endsWith('...')).toBe(true);
+  });
 });

@@ -33,6 +33,7 @@ function statusBlock(
   id: string,
   text: string,
   createdAt: number,
+  overrides: Partial<DaemonStatusTranscriptBlock> = {},
 ): DaemonStatusTranscriptBlock {
   return {
     id,
@@ -41,6 +42,7 @@ function statusBlock(
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: createdAt,
+    ...overrides,
   };
 }
 
@@ -148,6 +150,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'plan-1',
         role: 'plan',
+        timestamp: 1,
         todos: [
           {
             id: 'plan-0',
@@ -183,6 +186,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'plan-1',
         role: 'plan',
+        timestamp: 1,
         todos: [
           {
             id: 'plan-1',
@@ -225,17 +229,26 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }),
     ]);
 
-    // Adjacent tool blocks share one tool_group (Native CLI batch parity),
-    // but each TodoWrite call keeps its own tool entry and todo payload.
+    // Each TodoWrite update stands alone in its own group (it renders as a
+    // self-contained collapsible checklist), rather than merging with adjacent
+    // tool calls.
     expect(messages).toEqual([
       {
         id: 'tg-todo-1',
         role: 'tool_group',
+        timestamp: 1,
         tools: [
           expect.objectContaining({
             callId: 'todo-call-1',
             toolName: 'TodoWrite',
           }),
+        ],
+      },
+      {
+        id: 'tg-todo-2',
+        role: 'tool_group',
+        timestamp: 2,
+        tools: [
           expect.objectContaining({
             callId: 'todo-call-2',
             toolName: 'TodoWrite',
@@ -255,6 +268,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'tg-t1',
         role: 'tool_group',
+        timestamp: 1,
         tools: [
           expect.objectContaining({ callId: 'tc1', toolName: 'Read' }),
           expect.objectContaining({ callId: 'tc2', toolName: 'Grep' }),
@@ -274,6 +288,64 @@ describe('transcriptBlocksToDaemonMessages', () => {
       { role: 'tool_group', tools: [{ callId: 'tc1' }] },
       { role: 'assistant', content: 'found it, editing now' },
       { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+    ]);
+  });
+
+  it('carries token usage from an assistant block onto the message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'final answer', 1, false, {
+        usage: { inputTokens: 200, outputTokens: 80 },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'final answer',
+        usage: { inputTokens: 200, outputTokens: 80 },
+      },
+    ]);
+  });
+
+  it('sums usage when consecutive assistant blocks merge into one message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'hi ', 1, false, {
+        usage: { inputTokens: 100, outputTokens: 40 },
+      }),
+      textBlock('a2', 'assistant', 'there', 2, false, {
+        usage: { inputTokens: 20, outputTokens: 8 },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'hi there',
+        usage: { inputTokens: 120, outputTokens: 48 },
+      },
+    ]);
+  });
+
+  it('leaves usage undefined when no assistant block reports it', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'no usage here', 1),
+    ]);
+
+    expect((messages[0] as { usage?: unknown }).usage).toBeUndefined();
+  });
+
+  it('carries cached-read tokens through onto the message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'answer', 1, false, {
+        usage: { inputTokens: 200, outputTokens: 80, cachedTokens: 150 },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        usage: { inputTokens: 200, outputTokens: 80, cachedTokens: 150 },
+      },
     ]);
   });
 
@@ -322,6 +394,24 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toMatchObject([
       { role: 'tool_group', tools: [{ callId: 'tc1' }] },
       { role: 'tool_group', tools: [{ callId: 'agent-call-1' }] },
+      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+    ]);
+  });
+
+  it('never merges todo_write updates into or after a regular tool_group', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
+      toolBlock('todo-1', 'todo-call-1', 'completed', 2, {
+        toolName: 'todo_write',
+        toolKind: 'think',
+        rawInput: { todos: [{ id: '1', content: 'A', status: 'in_progress' }] },
+      }),
+      toolBlock('t2', 'tc2', 'completed', 3, { toolName: 'Edit' }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
+      { role: 'tool_group', tools: [{ callId: 'todo-call-1' }] },
       { role: 'tool_group', tools: [{ callId: 'tc2' }] },
     ]);
   });
@@ -378,6 +468,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'insight-1-ip',
         role: 'insight_progress',
+        timestamp: 1,
         stage: 'scan',
         progress: 0.5,
         detail: 'reading',
@@ -396,11 +487,36 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toEqual([
-      { id: 'insight-1-t-0', role: 'assistant', content: 'before' },
-      { id: 'insight-1-ir-0', role: 'insight_ready', path: '/tmp/report.md' },
-      { id: 'insight-1-t-2', role: 'assistant', content: 'middle' },
-      { id: 'insight-1-ie-0', role: 'insight_error', error: 'boom' },
-      { id: 'insight-1-t-4', role: 'assistant', content: 'after' },
+      {
+        id: 'insight-1-t-0',
+        role: 'assistant',
+        content: 'before',
+        timestamp: 1,
+      },
+      {
+        id: 'insight-1-ir-0',
+        role: 'insight_ready',
+        path: '/tmp/report.md',
+        timestamp: 1,
+      },
+      {
+        id: 'insight-1-t-2',
+        role: 'assistant',
+        content: 'middle',
+        timestamp: 1,
+      },
+      {
+        id: 'insight-1-ie-0',
+        role: 'insight_error',
+        error: 'boom',
+        timestamp: 1,
+      },
+      {
+        id: 'insight-1-t-4',
+        role: 'assistant',
+        content: 'after',
+        timestamp: 1,
+      },
     ]);
   });
 
@@ -813,6 +929,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'assistant',
         content: 'hello world',
         isStreaming: false,
+        timestamp: 1,
       },
     ]);
   });
@@ -836,6 +953,32 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'system',
       content: 'Shell command exited with code 0',
     });
+  });
+
+  it('preserves structured status source and data', () => {
+    const data = {
+      kind: 'set',
+      condition: 'ship goal sync',
+      setAt: 1234,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('goal-1', '', 1, {
+        source: 'goal',
+        data,
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'goal-1',
+        role: 'system',
+        content: '',
+        variant: 'info',
+        source: 'goal',
+        data,
+        timestamp: 1,
+      },
+    ]);
   });
 
   it('appends shell output to preceding tool_group', () => {
@@ -1875,6 +2018,34 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: 'Connection lost',
         variant: 'error',
+        retryable: false,
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('marks turn_error blocks as retryable system errors', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'err-1',
+        kind: 'error' as const,
+        source: 'turn_error' as const,
+        text: 'Request failed',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'err-1',
+        role: 'system',
+        content: 'Request failed',
+        variant: 'error',
+        retryable: true,
+        source: 'turn_error',
+        timestamp: 1,
       },
     ]);
   });
@@ -1897,6 +2068,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: 'Session initialized',
         variant: 'info',
+        timestamp: 1,
       },
     ]);
   });
@@ -1913,6 +2085,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         content: '',
         thinking: 'let me think about this',
         isStreaming: false,
+        timestamp: 1,
       },
     ]);
   });
@@ -1983,9 +2156,21 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toEqual([
-      { id: 'a1', role: 'assistant', content: 'first', isStreaming: false },
-      { id: 'u1', role: 'user', content: 'question' },
-      { id: 'a2', role: 'assistant', content: 'second', isStreaming: false },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'first',
+        isStreaming: false,
+        timestamp: 1,
+      },
+      { id: 'u1', role: 'user', content: 'question', timestamp: 2 },
+      {
+        id: 'a2',
+        role: 'assistant',
+        content: 'second',
+        isStreaming: false,
+        timestamp: 3,
+      },
     ]);
   });
 
@@ -2002,6 +2187,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         content: 'here is my answer',
         thinking: 'analyzing...',
         isStreaming: false,
+        timestamp: 1,
       },
     ]);
   });
@@ -2049,6 +2235,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: 'Request cancelled.',
         variant: 'info',
+        timestamp: 20,
       },
     ]);
   });
@@ -2065,6 +2252,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: '请求已取消。',
         variant: 'info',
+        timestamp: 20,
       },
     ]);
   });
@@ -2224,6 +2412,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
     const tool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     expect(tool?.rawOutput).toBeUndefined();
+    expect(tool?.content).toEqual([
+      {
+        type: 'content',
+        content: { type: 'text', text: 'rendered elsewhere' },
+      },
+    ]);
   });
 
   it('mergeToolCall updates fields from completion block', () => {
@@ -2478,7 +2672,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(execTool?.subContent).toBe('Running...');
   });
 
-  it('does not pass content, locations, or preview to DaemonMessageToolCall', () => {
+  it('passes content but not locations or preview to DaemonMessageToolCall', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, {
         toolName: 'Edit',
@@ -2499,7 +2693,14 @@ describe('transcriptBlocksToDaemonMessages', () => {
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     expect(tool).toBeDefined();
     expect(tool?.callId).toBe('tc1');
-    expect('content' in tool!).toBe(false);
+    expect(tool?.content).toEqual([
+      {
+        type: 'diff',
+        path: '/path/file.ts',
+        oldText: 'old',
+        newText: 'new',
+      },
+    ]);
     expect('locations' in tool!).toBe(false);
     expect('preview' in tool!).toBe(false);
   });

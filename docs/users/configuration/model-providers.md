@@ -299,11 +299,18 @@ Alibaba Cloud Coding Plan provides a pre-configured set of Qwen models optimized
 
 When you authenticate with an Alibaba Cloud Coding Plan API key using the `/auth` command, Qwen Code automatically configures the following models:
 
-| Model ID               | Name                 | Description                            |
-| ---------------------- | -------------------- | -------------------------------------- |
-| `qwen3.5-plus`         | qwen3.5-plus         | Advanced model with thinking enabled   |
-| `qwen3-coder-plus`     | qwen3-coder-plus     | Optimized for coding tasks             |
-| `qwen3-max-2026-01-23` | qwen3-max-2026-01-23 | Latest max model with thinking enabled |
+| Model ID               | Name                 | Description                                               |
+| ---------------------- | -------------------- | --------------------------------------------------------- |
+| `qwen3.5-plus`         | qwen3.5-plus         | Advanced model with thinking enabled                      |
+| `qwen3.6-plus`         | qwen3.6-plus         | Latest model with thinking enabled (Pro subscribers only) |
+| `qwen3.7-plus`         | qwen3.7-plus         | Advanced model with thinking enabled                      |
+| `qwen3-coder-plus`     | qwen3-coder-plus     | Optimized for coding tasks                                |
+| `qwen3-coder-next`     | qwen3-coder-next     | Experimental coding model                                 |
+| `qwen3-max-2026-01-23` | qwen3-max-2026-01-23 | Latest max model with thinking enabled                    |
+| `glm-5`                | glm-5                | GLM model with thinking enabled                           |
+| `glm-4.7`              | glm-4.7              | GLM model with thinking enabled                           |
+| `kimi-k2.5`            | kimi-k2.5            | Kimi model with thinking and vision/video support         |
+| `MiniMax-M2.5`         | MiniMax-M2.5         | MiniMax model with thinking enabled                       |
 
 ### Setup
 
@@ -326,7 +333,7 @@ Alibaba Cloud Coding Plan supports two regions:
 | China                | `https://coding.dashscope.aliyuncs.com/v1`      | Mainland China endpoint |
 | Global/International | `https://coding-intl.dashscope.aliyuncs.com/v1` | International endpoint  |
 
-The region is selected during authentication and stored in `settings.json` under `codingPlan.region`. To switch regions, re-run the `/auth` command and select a different region.
+The region is selected during authentication and stored in `settings.json` under the `modelProviders` configuration. To switch regions, re-run the `/auth` command and select a different region.
 
 ### API Key Storage
 

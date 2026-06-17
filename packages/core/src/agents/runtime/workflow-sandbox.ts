@@ -22,6 +22,33 @@
  * supported — model-authored `meta` should avoid them.
  */
 export function stripExportMeta(source: string): string {
+  const bounds = findMetaBlockBounds(source);
+  if (!bounds) return source;
+  return source.slice(0, bounds.exportIdx) + source.slice(bounds.afterMeta);
+}
+
+/**
+ * Locate the `export const meta = {...}` declaration's bounds in the source.
+ *
+ * Shared by stripExportMeta (P1) and extractAndStripMeta (P4). Anchors at file
+ * start (no `/m` flag — see T33 comment below); walks the brace block while
+ * skipping over comment / regex / string contexts; throws on unbalanced
+ * braces rather than returning a truncated string (T9/T17 — silently
+ * deleting the script body is the worst-case failure mode).
+ *
+ * Returns null when no meta declaration is present at the file start —
+ * callers treat this as "no meta", not an error.
+ */
+function findMetaBlockBounds(source: string): {
+  /** Start offset of the `export const meta` match. */
+  exportIdx: number;
+  /** Offset of the `{` opening the meta object literal. */
+  startBrace: number;
+  /** Offset of the matching `}` closing the literal (inclusive). */
+  endBraceIncl: number;
+  /** Offset past meta + any trailing whitespace + optional `;`. */
+  afterMeta: number;
+} | null {
   // T33 (PR #4732 R4): anchor at file start (no `/m` flag). Per the design
   // doc, `export const meta = {...}` must be the script's FIRST statement.
   // With `/m`, the regex matched every line-start occurrence — including
@@ -29,7 +56,7 @@ export function stripExportMeta(source: string): string {
   // out of the string body, silently corrupting the script.
   const re = /^\s*export\s+const\s+meta\s*=\s*\{/;
   const match = re.exec(source);
-  if (!match) return source;
+  if (!match) return null;
   const exportIdx = match.index;
   const startBrace = source.indexOf('{', exportIdx);
   let depth = 1;
@@ -101,9 +128,224 @@ export function stripExportMeta(source: string): string {
         'the workflow script cannot be safely stripped. Check the meta block syntax.',
     );
   }
+  const endBraceIncl = i - 1;
   // Skip trailing whitespace and an optional semicolon.
   while (i < source.length && /[\s;]/.test(source[i]!)) i++;
-  return source.slice(0, exportIdx) + source.slice(i);
+  return { exportIdx, startBrace, endBraceIncl, afterMeta: i };
+}
+
+/**
+ * The `meta` object shape — verbatim from upstream Claude Code 2.1.168.
+ * `name` and `description` are mandatory; `whenToUse` and `phases` are
+ * optional. Each phase carries a mandatory `title` and optional `detail`
+ * / `model`. P4 surfaces this shape on `WorkflowRunOutcome.meta` so
+ * `/workflows` listing and the phase-tree UI can read it directly.
+ */
+export interface WorkflowMeta {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  phases?: Array<{ title: string; detail?: string; model?: string }>;
+}
+
+/**
+ * Strip `export const meta = {...}` from the script AND extract the meta
+ * object as a plain host-realm value, ready to surface on `WorkflowRunOutcome`.
+ *
+ * Implementation:
+ *   1. `findMetaBlockBounds` (shared with `stripExportMeta`) locates the
+ *      object-literal source range via the brace-walker.
+ *   2. The literal source is evaluated as `(${metaSource})` inside a fresh
+ *      vm context whose globalThis is a null-prototyped object — no
+ *      bridge to the host realm, no access to host primitives like
+ *      `process` / `require` / the workflow-sandbox bridge globals
+ *      (`args` / `agent` / `phase` / `log` / etc.). The vm realm DOES
+ *      provide its own intrinsics (`Object`, `Array`, `Math`, `Date`,
+ *      `JSON`, …) which is fine: meta extraction is a one-shot at tool-
+ *      invocation time, not replayed during resume, so non-determinism in
+ *      the meta literal (a `Date.now()` call in `meta.name`) does not
+ *      break the resume contract that the script body honors.
+ *   3. The vm result is walked field-by-field and copied into a new
+ *      host-realm plain object. No JSON round-trip is needed because every
+ *      contract field is a primitive — strings and arrays of plain
+ *      objects with string fields — so prototype identity on the
+ *      intermediate values is irrelevant.
+ *
+ * Returns `{ stripped, meta: null }` when no meta declaration is present
+ * (callers treat this as "no meta"). Throws when meta is present but
+ * malformed: vm eval failure, missing required field, or wrong field type.
+ * Error messages for the missing-required-field cases match upstream
+ * 2.1.168 verbatim so script authors see one consistent error text.
+ */
+export function extractAndStripMeta(source: string): {
+  stripped: string;
+  meta: WorkflowMeta | null;
+} {
+  const bounds = findMetaBlockBounds(source);
+  if (!bounds) return { stripped: source, meta: null };
+
+  const metaSource = source.slice(bounds.startBrace, bounds.endBraceIncl + 1);
+  const stripped =
+    source.slice(0, bounds.exportIdx) + source.slice(bounds.afterMeta);
+
+  // Null-prototyped globalThis: no host bridge (no `process` / `require`
+  // / `args` / workflow-sandbox bridge globals). The vm realm still
+  // provides its own intrinsics, but that's intentional — see the
+  // docstring above.
+  const metaContext = vm.createContext(Object.create(null));
+  let raw: unknown;
+  try {
+    raw = new vm.Script(`(${metaSource})`).runInContext(metaContext);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `extractAndStripMeta: failed to evaluate meta object literal: ${msg}`,
+    );
+  }
+
+  // P4a R3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
+  // value in the meta literal would otherwise leave a dangling rejection
+  // behind — `runInContext` returns synchronously with the Promise scheduled
+  // to reject on the next tick, validateMeta drops the non-contract field
+  // silently, and the run completes successfully. Then Node's default
+  // `--unhandled-rejections=throw` terminates the host process, decoupled
+  // from the run that triggered it. Walk `raw`, neutralise any thenables
+  // with `.catch(() => {})` so the rejection is marked handled, and reject
+  // the meta literal up front.
+  rejectThenablesInMeta(raw);
+
+  const meta = validateMeta(raw);
+  return { stripped, meta };
+}
+
+/**
+ * Recursively scan a vm-eval'd value, marking any thenable as handled
+ * (so its rejection cannot terminate the host on the next tick) and
+ * throwing an explicit "meta values must not be Promises" so the
+ * malformed meta is reported clearly.
+ *
+ * Recurses through plain objects and arrays — `phases[]` entries may
+ * embed an `import()` below the top level.
+ */
+function rejectThenablesInMeta(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet(),
+): void {
+  if (value === null || typeof value !== 'object') return;
+  // P4 Round 4 (wenshao): a cyclic meta literal built via spread of a
+  // self-referential object would otherwise overflow the call stack on
+  // this walk — the walker exists to reject Promises before they leave
+  // a dangling rejection, but the walk itself must terminate on any
+  // shape vm-eval can return. Track visited nodes in a WeakSet so cycles
+  // and shared subgraphs both early-return without re-walking.
+  if (seen.has(value as object)) return;
+  seen.add(value as object);
+  const maybeThen = (value as { then?: unknown }).then;
+  if (typeof maybeThen === 'function') {
+    // Mark handled so Node's unhandled-rejection trap does not later kill
+    // the process. `.catch` on a non-Promise thenable would synchronously
+    // throw if the implementation is non-standard, so swallow defensively.
+    try {
+      (value as Promise<unknown>).catch(() => {});
+    } catch {
+      /* non-standard thenable — already rejecting below */
+    }
+    throw new Error(
+      'extractAndStripMeta: meta values must not be Promises ' +
+        '(no async / dynamic import allowed in meta literal)',
+    );
+  }
+  if (Array.isArray(value)) {
+    for (const v of value) rejectThenablesInMeta(v, seen);
+    return;
+  }
+  for (const v of Object.values(value as Record<string, unknown>)) {
+    rejectThenablesInMeta(v, seen);
+  }
+}
+
+/**
+ * Validate the vm-eval'd meta value and copy it into a fresh host-realm
+ * plain object. Throws on shape violation with the upstream-aligned error
+ * message text for the required-field cases.
+ *
+ * Field rules:
+ *   - `name`           required, non-empty string
+ *   - `description`    required, non-empty string
+ *   - `whenToUse`      optional, string (may be empty)
+ *   - `phases`         optional, Array of plain objects with:
+ *                        `title`   required, non-empty string
+ *                        `detail`  optional, string
+ *                        `model`   optional, string
+ */
+function validateMeta(value: unknown): WorkflowMeta {
+  if (value === null || typeof value !== 'object') {
+    throw new Error('meta must be an object');
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj['name'] !== 'string' || (obj['name'] as string).length === 0) {
+    // Verbatim from upstream Claude Code 2.1.168.
+    throw new Error('meta.name must be a non-empty string');
+  }
+  if (
+    typeof obj['description'] !== 'string' ||
+    (obj['description'] as string).length === 0
+  ) {
+    // Verbatim from upstream Claude Code 2.1.168.
+    throw new Error('meta.description must be a non-empty string');
+  }
+  if (obj['whenToUse'] !== undefined && typeof obj['whenToUse'] !== 'string') {
+    throw new Error('meta.whenToUse must be a string');
+  }
+  let phases:
+    | Array<{ title: string; detail?: string; model?: string }>
+    | undefined;
+  if (obj['phases'] !== undefined) {
+    if (!Array.isArray(obj['phases'])) {
+      throw new Error('meta.phases must be an array');
+    }
+    phases = [];
+    for (const p of obj['phases'] as unknown[]) {
+      if (p === null || typeof p !== 'object') {
+        throw new Error('meta.phases entries must be objects');
+      }
+      const ph = p as Record<string, unknown>;
+      if (
+        typeof ph['title'] !== 'string' ||
+        (ph['title'] as string).length === 0
+      ) {
+        throw new Error('meta.phases[].title must be a non-empty string');
+      }
+      const phase: { title: string; detail?: string; model?: string } = {
+        title: ph['title'] as string,
+      };
+      if (ph['detail'] !== undefined) {
+        if (typeof ph['detail'] !== 'string') {
+          throw new Error('meta.phases[].detail must be a string');
+        }
+        phase.detail = ph['detail'] as string;
+      }
+      if (ph['model'] !== undefined) {
+        if (typeof ph['model'] !== 'string') {
+          throw new Error('meta.phases[].model must be a string');
+        }
+        phase.model = ph['model'] as string;
+      }
+      phases.push(phase);
+    }
+  }
+
+  const out: WorkflowMeta = {
+    name: obj['name'] as string,
+    description: obj['description'] as string,
+  };
+  if (obj['whenToUse'] !== undefined) {
+    out.whenToUse = obj['whenToUse'] as string;
+  }
+  if (phases !== undefined) {
+    out.phases = phases;
+  }
+  return out;
 }
 
 /**
@@ -120,6 +362,13 @@ function isRegexContext(source: string, i: number): boolean {
 }
 
 import * as vm from 'node:vm';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+// Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
+// instance with the same 'WORKFLOW' namespace). Re-exported so orchestrator
+// imports the same instance — orchestrator already imports from this module,
+// so this is the natural direction (the reverse would be a circular dep).
+export const debugLogger = createDebugLogger('WORKFLOW');
 
 // Cap log + phase lines to prevent unbounded memory growth from runaway
 // model-authored loops.
@@ -151,10 +400,15 @@ export interface WorkflowAgentOpts {
 }
 
 /**
- * Forward-compatibility alias for the agent dispatch return type. P1: always
- * `string`. P3 will widen this to support StructuredOutput.
+ * Agent dispatch return type. P1/P2 was `string` (the subagent's final text
+ * verbatim). P3 widens to also allow a JSON-serializable object — the
+ * validated arguments of the subagent's `structured_output` call when
+ * `agent({schema})` is used. Strings remain the no-schema return shape;
+ * the sandbox's `agent` wrapper revives object returns into the vm realm
+ * per-call so a host-realm prototype escape (T1/T8/T14) cannot ride the
+ * structured payload back into a script.
  */
-export type WorkflowAgentResult = string;
+export type WorkflowAgentResult = string | object;
 
 /**
  * P5: budget global API surface. P1 default is throwing stubs (total = null,
@@ -164,6 +418,32 @@ export interface WorkflowBudget {
   total: number | null;
   spent(): number;
   remaining(): number;
+}
+
+/**
+ * P4b: host-side live-event channel for the orchestrator and sandbox to
+ * notify external consumers (typically the `WorkflowRunRegistry`) when
+ * a phase boundary or agent dispatch happens, or when the script logs
+ * something. Every method is host-realm (called from sandbox closures
+ * and `countedDispatch`) — no vm-realm bridge concerns.
+ *
+ * All methods are no-ops by default — implementations are free to
+ * implement only the events they care about.
+ *
+ * Truncation: `phaseStarted` / `logAppended` are NOT called once the
+ * sandbox's internal `MAX_PHASE_ENTRIES` / `MAX_LOG_LINES` cap has
+ * been reached, mirroring `getPhases()` / `getLogs()` so a chatty
+ * workflow does not flood the registry with thousands of events.
+ */
+export interface WorkflowOrchestratorEmitter {
+  /** Sandbox `phase(title)` was called. */
+  phaseStarted?(title: string): void;
+  /** Sandbox `log(...)` produced one line of output (or `console.log`). */
+  logAppended?(line: string): void;
+  /** Orchestrator's `countedDispatch` is about to invoke `dispatch(...)`. */
+  agentDispatched?(label?: string): void;
+  /** `dispatch(...)` settled (success or thrown). `error` set on rejection. */
+  agentCompleted?(label?: string, error?: string): void;
 }
 
 export interface SandboxOptions {
@@ -217,14 +497,28 @@ export interface SandboxOptions {
    * `abort()` in a `finally` block to cancel any straggler dispatch).
    */
   abortOnTimeout?: AbortController;
+  /**
+   * P4b: optional host-side event channel. When provided, the sandbox's
+   * `safePhase` / `safeLog` closures fire `phaseStarted` / `logAppended`
+   * on every accepted entry (after the per-cap truncation guard). The
+   * caller (typically `WorkflowTool` via `WorkflowOrchestrator`) wires
+   * these into the `WorkflowRunRegistry` so the UI surfaces (pill /
+   * dialog / detail body) can re-render without polling `getPhases()`.
+   */
+  emitter?: WorkflowOrchestratorEmitter;
 }
 
 /**
- * T23 (PR #4732 R2): default async wall-clock cap. 30 minutes is generous
- * for any realistic P1 sequential workflow (single agent capped at
- * 10 min × ~10 agents max practical → ~100 min upper bound, but typical
- * workflows finish in seconds). 30 min stops 0-token hang patterns
- * before they waste operator hours.
+ * T23 (PR #4732 R2): default async wall-clock cap. The wall clock is a
+ * 0-token-hang backstop, NOT a precise cost cap: it bounds patterns like an
+ * in-script `await new Promise(() => {})` that the vm timeout cannot reach.
+ * For genuine cost control, use the env-overridable per-run cap
+ * (`QWEN_CODE_MAX_WORKFLOW_AGENTS`) and concurrency window
+ * (`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`). 30 minutes is set generously
+ * enough that typical workflows never see it but a hang doesn't waste
+ * operator hours; raise via `QWEN_CODE_MAX_WORKFLOW_SECONDS` for long
+ * legitimate fan-outs (1000 agents × 10-min subagent cap ÷ default
+ * concurrency would already exceed 30 min).
  */
 const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 
@@ -242,12 +536,22 @@ export interface WorkflowSandbox {
    * Execute the user-authored script source. The script is wrapped as an async
    * IIFE so it may use top-level `await` and `return`. Returns the script's
    * top-level return value.
+   *
+   * `export const meta = {...}` is extracted before parsing and exposed via
+   * `getMeta()` — the script body sees the meta-stripped source.
    */
   run(scriptSource: string): Promise<unknown>;
   /** Phase titles announced by the script in order. */
   getPhases(): string[];
   /** Log lines emitted by the script in order. */
   getLogs(): string[];
+  /**
+   * The script's `export const meta = {...}` declaration, validated and
+   * extracted before the script body runs. `null` when the script omits
+   * the declaration. Throws (during `run`) when the declaration is
+   * present but malformed.
+   */
+  getMeta(): WorkflowMeta | null;
 }
 
 /**
@@ -302,7 +606,16 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
 
   const safeLog = (msg: unknown): void => {
     if (logs.length < MAX_LOG_LINES) {
-      logs.push(String(msg));
+      const line = String(msg);
+      logs.push(line);
+      // P4b: emit to host-side subscriber (registry). Defensive try/catch
+      // because a subscriber error must not interrupt script execution
+      // — the script body has no business knowing about UI plumbing.
+      try {
+        opts.emitter?.logAppended?.(line);
+      } catch (e) {
+        debugLogger.warn('emitter.logAppended threw:', e);
+      }
     } else if (logs.length === MAX_LOG_LINES) {
       logs.push(`[workflow log truncated at ${MAX_LOG_LINES} lines]`);
     }
@@ -310,7 +623,26 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
 
   const safePhase = (title: string): void => {
     if (phases.length < MAX_PHASE_ENTRIES) {
-      phases.push(String(title));
+      const t = String(title);
+      // R7 (wenshao): collapse consecutive identical titles so the
+      // sandbox is the single source of truth for the phase list.
+      // Without this, `outcome.phases` (terminal `returnDisplay` JSON)
+      // carried duplicates while `entry.phases` on the registry
+      // (live UI / `/workflows` detail) was deduped by the registry's
+      // own `onPhaseStarted` collapse — the same run showed different
+      // phase counts in the terminal output vs the live UI. The
+      // `agent({phase})` wrapper already dedups (see the `__b.lastPhase()`
+      // check); this brings the bare `phase()` global into the same
+      // contract.
+      if (phases[phases.length - 1] === t) return;
+      phases.push(t);
+      // P4b: emit to host-side subscriber. Same defensive try/catch as
+      // safeLog — subscriber errors must not bubble into the script.
+      try {
+        opts.emitter?.phaseStarted?.(t);
+      } catch (e) {
+        debugLogger.warn('emitter.phaseStarted threw:', e);
+      }
     } else if (phases.length === MAX_PHASE_ENTRIES) {
       phases.push(
         `[workflow phases truncated at ${MAX_PHASE_ENTRIES} entries]`,
@@ -341,6 +673,18 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     pushLog: safeLog,
     lastPhase: () => phases[phases.length - 1],
     hostAgent: opts.dispatch,
+    // PR #4947 R2 T7 (qwen-code-ci-bot): host-side log hook for reviveInRealm's
+    // catch path. Mirrors the rejection-logging in settleToNullArray so an
+    // operator running with debug logging can distinguish "thunk rejected"
+    // (settleToNullArray.warn) from "thunk resolved to a non-JSON-serializable
+    // value" (this warn). Receives only primitive strings/numbers — the bridge
+    // contract forbids host objects crossing back to the script.
+    logRevivalFailure: (idx: number, reason: string): void => {
+      debugLogger.warn(
+        `Workflow result revival failed at index ${idx}: ${reason}; ` +
+          `slot set to null (non-JSON-serializable thunk return).`,
+      );
+    },
     // The truthy flags distinguish "injected" from "default stub" inside the
     // init script without leaking the host function itself when not used.
     hasParallel: !!opts.parallel,
@@ -481,61 +825,162 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             );
           }
         }
-        if (agentOpts.schema !== undefined) {
+        // P3: schema + model + agentType + isolation are all wired through
+        // createProductionDispatch → SubagentManager.createAgentHeadless.
+        // The dispatch surfaces descriptive errors for "agent type not found",
+        // "isolation:'remote' is not available in this build", parent-dirty
+        // refuse, worktree creation failures, and StructuredOutput contract
+        // violations ("completed without calling StructuredOutput after 2
+        // in-conversation nudges").
+        if (
+          agentOpts.isolation !== undefined &&
+          agentOpts.isolation !== 'worktree' &&
+          agentOpts.isolation !== 'remote'
+        ) {
           throw new Error(
-            'agent({schema}) is not supported in P1. ' +
-            'Schema enforcement / StructuredOutput contract is scheduled for P3.'
+            "agent({isolation: '" + agentOpts.isolation + "'}): unknown isolation mode. " +
+            "Known modes are: 'worktree', 'remote'."
           );
-        }
-        if (agentOpts.isolation !== undefined) {
-          throw new Error(
-            "agent({isolation: '" + agentOpts.isolation + "'}) is not supported in P1. " +
-            'Worktree / remote isolation is scheduled for a later phase.'
-          );
-        }
-        if (agentOpts.model !== undefined) {
-          throw new Error(
-            'agent({model}) is not supported in P1. Model override is scheduled for a later phase.'
-          );
-        }
-        if (agentOpts.agentType !== undefined) {
-          throw new Error('agent({agentType}) is not supported in P1.');
         }
         if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
           if (__b.lastPhase() !== agentOpts.phase) {
             __b.pushPhase(agentOpts.phase);
           }
         }
-        return __b.hostAgent(prompt, agentOpts);
+        // SECURITY (P3 R2 self-review): user-script-controlled agentOpts
+        // cross the vm/host boundary verbatim via vmAsync's hostFn.apply.
+        // A Proxy / inherited-getter / non-plain object in agentOpts.schema
+        // would let host-side code (SyntheticOutputTool constructor + AJV
+        // compile) trigger user-controlled trap handlers that execute with
+        // the host realm's full surface. Revive agentOpts through JSON
+        // round-trip BEFORE crossing so the host only ever sees vm-realm
+        // plain objects with vm-realm prototypes. Same mechanism that
+        // makes args + parallel/pipeline results safe.
+        var safeOpts;
+        try {
+          safeOpts = JSON.parse(JSON.stringify(agentOpts));
+        } catch (e) {
+          throw new Error(
+            "agent() opts contain a non-JSON-serializable value: " +
+            String(e && e.message != null ? e.message : e)
+          );
+        }
+        // SECURITY (PR #4947 R1 wenshao, extended for P3): vmAsync's resolve
+        // path is verbatim (no re-wrap of resolved values). Host-realm
+        // strings cross the boundary harmlessly because primitives have no
+        // prototype identity. But P3's schema-mode dispatch returns the
+        // validated structured_output args as a host-realm OBJECT --
+        // handing that to the script reopens the T1/T8/T14 escape:
+        // result.constructor.constructor("return process")() would walk
+        // the host Object.prototype chain to the host Function
+        // constructor. Per-call JSON revival inside this vm runInContext
+        // block makes the returned object carry vm-realm prototypes (same
+        // mechanism as parallel/pipeline reviveInRealm and the args
+        // global revival). The fallback to null on a non-serializable
+        // resolve mirrors the errors-as-data convention parallel/pipeline
+        // already use for individual slot failures.
+        // R3 review (wenshao T3 [Suggestion]): the null fallback below is
+        // a SECURITY backstop, not a contract path. In schema mode the
+        // host return is the validated args of a structured_output tool
+        // call -- LLM tool_call payloads are always JSON-serializable
+        // (the model sends them through the OpenAI tool-call protocol
+        // which serializes through JSON itself) and SyntheticOutputTool's
+        // AJV validation runs over the parsed JSON, so a non-serializable
+        // host return is unreachable in production schema mode. The
+        // sentinel preserves the errors-as-data convention parallel /
+        // pipeline already use for individual slot failures, and stays as
+        // residual defense for any future dispatch path whose return
+        // value isn't a tool_call payload. logRevivalFailure surfaces
+        // the actionable detail (slot 0 + the error string) to operators
+        // so a real trigger in production isn't silent.
+        return __b.hostAgent(prompt, safeOpts).then(function (value) {
+          if (value === null || typeof value !== 'object') {
+            return value;
+          }
+          try {
+            return JSON.parse(JSON.stringify(value));
+          } catch (e) {
+            __b.logRevivalFailure(0, String(e && e.message != null ? e.message : e));
+            return null;
+          }
+        });
       });
 
       // --- parallel / pipeline ---
+      // SECURITY (PR #4732 P2): the host impl resolves with a HOST-realm array.
+      // vmAsync's resolve path is verbatim (it does NOT re-wrap resolved
+      // values), so handing that host array to the script would reopen the
+      // T1/T8/T14 escape: result.constructor.constructor('return process')()
+      // walks the host Array.prototype chain to the host Function constructor.
+      // We revive the array INSIDE the vm realm with JSON.parse(JSON.stringify)
+      // -- the same mechanism that makes the args global safe (see the args
+      // revival above) -- so the value the script sees has vm-realm prototypes
+      // whose constructors can't reach host process. Agent results are JSON
+      // strings (and null slots), so the round-trip is lossless for P2.
+      //
+      // EAD-1 (P2 self-review): revive PER-ELEMENT, not the whole array in one
+      // JSON.stringify. A single slot whose VALUE is non-serializable (a thunk
+      // that returns a BigInt or a circular object) must become null at its
+      // index -- it must NOT throw on the whole array and destroy every sibling
+      // result, which would defeat errors-as-data for return values. The outer
+      // [] is built in-realm here, so the result keeps vm-realm prototypes.
+      //
+      // SECURITY (PR #4947 R1 wenshao): reviveInRealm MUST remain inside this
+      // vm init runInContext block. JSON, Array, Object here are vm-realm
+      // globals; extracting this function to a host-side utility (e.g. a
+      // shared utils/jsonRevive.ts) would resolve those references against
+      // the HOST realm, silently reopening the T1/T8/T14 escape that the
+      // revival is designed to prevent. The textual identity to a host-side
+      // util is exactly the trap.
+      function reviveInRealm(hostArr) {
+        const out = [];
+        for (let i = 0; i < hostArr.length; i++) {
+          try {
+            out[i] = JSON.parse(JSON.stringify(hostArr[i]));
+          } catch (e) {
+            // Cross to host realm for debug logging. The bridge function
+            // accepts only primitive strings/numbers; the error message is
+            // coerced to a String here so no vm-realm Error object crosses.
+            __b.logRevivalFailure(i, String(e?.message ?? e));
+            out[i] = null;
+          }
+        }
+        return out;
+      }
       if (__b.hasParallel) {
-        globalThis.parallel = vmAsync(function (thunks) {
+        const callParallel = vmAsync(function (thunks) {
           return __b.hostParallel(thunks);
         });
+        globalThis.parallel = function parallel(thunks) {
+          return callParallel(thunks).then(reviveInRealm);
+        };
       } else {
         globalThis.parallel = function parallel() {
           return new Promise(function (_, reject) {
             reject(new Error(
-              'parallel() is not supported in P1. Sequential agent() is the only ' +
-              'execution mode in P1. Concurrent fan-out is scheduled for P2.'
+              'parallel() is unavailable: this sandbox was created without a ' +
+              'parallel implementation. The orchestrator injects one; a bare ' +
+              'sandbox has no concurrent-dispatch capability.'
             ));
           });
         };
       }
       if (__b.hasPipeline) {
-        globalThis.pipeline = vmAsync(function (items) {
+        const callPipeline = vmAsync(function (items) {
           const stages = [];
           for (let i = 1; i < arguments.length; i++) stages.push(arguments[i]);
           return __b.hostPipeline.apply(null, [items].concat(stages));
         });
+        globalThis.pipeline = function pipeline() {
+          return callPipeline.apply(null, arguments).then(reviveInRealm);
+        };
       } else {
         globalThis.pipeline = function pipeline() {
           return new Promise(function (_, reject) {
             reject(new Error(
-              'pipeline() is not supported in P1. Staggered multi-stage execution ' +
-              'is scheduled for P2.'
+              'pipeline() is unavailable: this sandbox was created without a ' +
+              'pipeline implementation. The orchestrator injects one; a bare ' +
+              'sandbox has no staggered multi-stage capability.'
             ));
           });
         };
@@ -591,9 +1036,15 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
 
   const maxWallClockMs = resolveMaxWallClockMs(opts);
 
+  let extractedMeta: WorkflowMeta | null = null;
   return {
     async run(scriptSource: string): Promise<unknown> {
-      const stripped = stripExportMeta(scriptSource);
+      // P4: extract `export const meta = {...}` once before the body runs.
+      // The stripped source is what the vm executes; the meta object is
+      // surfaced via `getMeta()` after the run (or after a malformed-meta
+      // throw, in which case the caller's catch block sees a clear error).
+      const { stripped, meta } = extractAndStripMeta(scriptSource);
+      extractedMeta = meta;
       const wrapped = `(async () => {\n${stripped}\n})()`;
       const script = new vm.Script(wrapped, {
         filename: 'workflow.js',
@@ -639,5 +1090,6 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     },
     getPhases: () => [...phases],
     getLogs: () => [...logs],
+    getMeta: () => extractedMeta,
   };
 }

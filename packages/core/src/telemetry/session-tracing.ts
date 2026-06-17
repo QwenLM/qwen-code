@@ -1024,8 +1024,16 @@ export function startToolBlockedOnUserSpan(
   const ctx = parentSpanCtx
     ? trace.setSpan(otelContext.active(), parentSpanCtx.span)
     : resolveParentContext(undefined);
+  const sessionParentCtx =
+    parentSpanCtx ??
+    subagentContext.getStore() ??
+    interactionContext.getStore() ??
+    undefined;
+  const sessionId = resolveSessionId(sessionParentCtx);
 
-  const attributes: Attributes = {};
+  const attributes: Attributes = {
+    ...(sessionId ? { 'session.id': sessionId } : {}),
+  };
   if (attrs?.tool_name !== undefined) attributes['tool.name'] = attrs.tool_name;
   if (attrs?.call_id !== undefined) attributes['tool.call_id'] = attrs.call_id;
 
@@ -1149,8 +1157,10 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
     interactionContext.getStore() ??
     undefined;
   const ctx = resolveParentContext(parentCtx);
+  const sessionId = resolveSessionId(parentCtx);
 
   const attributes: Attributes = {
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     hook_event: opts.hookEvent,
     'tool.name': opts.toolName,
   };

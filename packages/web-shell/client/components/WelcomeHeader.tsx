@@ -63,6 +63,7 @@ export interface WelcomeHeaderProps {
   cwd: string;
   currentModel: string;
   currentMode: string;
+  hideTips?: boolean;
 }
 
 export function WelcomeHeader({
@@ -70,6 +71,7 @@ export function WelcomeHeader({
   cwd,
   currentModel,
   currentMode,
+  hideTips = false,
 }: WelcomeHeaderProps) {
   const { language, t } = useI18n();
   const tip = useMemo(() => pickTip(language), [language]);
@@ -114,10 +116,12 @@ export function WelcomeHeader({
         </div>
       </div>
 
-      <div className={styles.tip}>
-        <span className={styles.tipLabel}>{t('welcome.tipLabel')}</span>
-        <span className={styles.tipText}>{tip}</span>
-      </div>
+      {!hideTips && (
+        <div className={styles.tip}>
+          <span className={styles.tipLabel}>{t('welcome.tipLabel')}</span>
+          <span className={styles.tipText}>{tip}</span>
+        </div>
+      )}
     </div>
   );
 }

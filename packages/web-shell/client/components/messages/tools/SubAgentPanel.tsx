@@ -1,7 +1,20 @@
-import { memo, useEffect, useRef, useState, useMemo } from 'react';
+import {
+  memo,
+  useEffect,
+  useRef,
+  useState,
+  useMemo,
+  type ReactNode,
+} from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { useWebShellCustomization } from '../../../customization';
+import { useI18n } from '../../../i18n';
+// Circular import with ToolGroup (agents render tool rows; agent tool
+// rows render SubAgentPanel). Safe only while both modules dereference
+// each other's exports at render time — never in top-level code.
+import { ToolLine } from '../ToolGroup';
 import { Markdown } from '../Markdown';
+import { formatTimestamp } from '../../MessageTimestamp';
 import {
   formatDurationMs,
   formatElapsed,
@@ -59,74 +72,40 @@ function isTaskExecution(raw: unknown): raw is TaskExecution {
   );
 }
 
-function getToolSummary(tool: ACPToolCall): string {
-  if (tool.title) {
-    const colonIdx = tool.title.indexOf(': ');
-    return colonIdx > 0 ? tool.title.slice(colonIdx + 2) : tool.title;
-  }
-  const args = tool.args || {};
-  if (args.command) return args.command as string;
-  if (args.file_path) return args.file_path as string;
-  if (args.path) return args.path as string;
-  if (args.query) return args.query as string;
-  if (args.description) return args.description as string;
-  return '';
-}
-
-function getToolOutput(tool: ACPToolCall): string {
-  if (tool.status !== 'completed' && tool.status !== 'failed') return '';
-  if (tool.content) {
-    for (const b of tool.content) {
-      if (b.type === 'content' && b.content?.text) {
-        const text = b.content.text;
-        const firstLine = text.split('\n')[0];
-        if (firstLine.length > 80) return firstLine.slice(0, 80) + '...';
-        return firstLine;
-      }
-    }
-  }
-  const raw = tool.rawOutput;
-  if (raw) {
-    const text =
-      typeof raw === 'string'
-        ? raw
-        : typeof raw === 'object' && !Array.isArray(raw)
-          ? typeof (raw as Record<string, unknown>).output === 'string'
-            ? ((raw as Record<string, unknown>).output as string)
-            : typeof (raw as Record<string, unknown>).content === 'string'
-              ? ((raw as Record<string, unknown>).content as string)
-              : typeof (raw as Record<string, unknown>).text === 'string'
-                ? ((raw as Record<string, unknown>).text as string)
-                : null
-          : null;
-    if (text) {
-      const firstLine = text.split('\n')[0] ?? '';
-      return firstLine.length > 80 ? firstLine.slice(0, 80) + '...' : firstLine;
-    }
-  }
-  return '';
+/**
+ * Reveals a single sub-tool's wall-clock start time on hover in its top-right
+ * corner, mirroring how the main transcript surfaces each message's time —
+ * but via a scoped class pair (not MessageTimestamp) so the nested tooltip
+ * stays independent of the enclosing message's own time tooltip.
+ */
+function SubToolTime({
+  timestamp,
+  children,
+}: {
+  timestamp?: number;
+  children: ReactNode;
+}) {
+  if (timestamp === undefined) return <>{children}</>;
+  return (
+    <div className={styles.toolTimeRow}>
+      {children}
+      <span className={styles.toolTimeTip} aria-hidden="true">
+        {formatTimestamp(timestamp)}
+      </span>
+    </div>
+  );
 }
 
 const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
-  if (tool.subTools || tool.subContent) return <SubAgentPanel tool={tool} />;
-
-  const summary = getToolSummary(tool);
-  const output = getToolOutput(tool);
-
-  return (
-    <div className={chromeStyles.line}>
-      <div className={chromeStyles.lineMain}>
-        <StatusIcon status={tool.status} />
-        <span className={chromeStyles.lineName}>{tool.toolName}</span>
-        {summary && (
-          <span className={chromeStyles.lineArg}>
-            {truncateText(summary, 70)}
-          </span>
-        )}
-      </div>
-      {output && <div className={chromeStyles.lineOutput}>{output}</div>}
-    </div>
-  );
+  // Same row as the main transcript: one-line summary, expandable to
+  // the full output / diff / file content where the tool has any.
+  const body =
+    tool.subTools || tool.subContent ? (
+      <SubAgentPanel tool={tool} />
+    ) : (
+      <ToolLine tool={tool} />
+    );
+  return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
@@ -181,6 +160,7 @@ type SubAgentTab = 'result' | 'tools';
  */
 function SubAgentStream({ text }: { text: string }) {
   const { compactThinking } = useWebShellCustomization();
+  const { t } = useI18n();
   const [streamExpanded, setStreamExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const streamRef = useRef<HTMLPreElement>(null);
@@ -218,14 +198,68 @@ function SubAgentStream({ text }: { text: string }) {
       </pre>
       {compactThinking && (overflowing || streamExpanded) && (
         <button
-          className={styles.streamToggle}
+          className={styles.expandToggle}
           onClick={() => setStreamExpanded((v) => !v)}
           aria-expanded={streamExpanded}
-          aria-label="Toggle agent stream details"
+          aria-label={t('subagent.toggleStream')}
         >
           {streamExpanded ? '▲' : '▼'}
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * Final agent result. The result is only on screen after the user
+ * explicitly opened the enclosing agent (tool row, accordion entry or
+ * panel header), so it renders in full straight away — capped to the
+ * same scrollable window as the live stream with compactThinking
+ * enabled, which keeps the opener within reach to collapse it again.
+ */
+function SubAgentResult({ content }: { content: string }) {
+  const { compactThinking } = useWebShellCustomization();
+  return (
+    <div className={compactThinking ? styles.scrollWindow : undefined}>
+      <Markdown content={content} source="assistant" />
+    </div>
+  );
+}
+
+/**
+ * Sub-tool list, capped to the same scrollable window as the result
+ * with compactThinking enabled. While the agent is still running the
+ * window follows the newest call; once it completes it snaps back to
+ * the top for reading.
+ */
+function SubAgentTools({
+  pinTail,
+  itemCount,
+  children,
+}: {
+  pinTail: boolean;
+  itemCount: number;
+  children: ReactNode;
+}) {
+  const { compactThinking } = useWebShellCustomization();
+  const windowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = windowRef.current;
+    if (!el || !compactThinking) return;
+    el.scrollTop = pinTail ? el.scrollHeight : 0;
+  }, [compactThinking, pinTail, itemCount]);
+
+  return (
+    <div
+      ref={windowRef}
+      className={
+        compactThinking
+          ? `${styles.tools} ${styles.scrollWindow}`
+          : styles.tools
+      }
+    >
+      {children}
     </div>
   );
 }
@@ -311,7 +345,7 @@ export function SubAgentPanel({
           {(!showTabs || activeTab === 'result') && hasResult && (
             <div className={styles.content}>
               {isComplete ? (
-                <Markdown content={tool.subContent || resultText} />
+                <SubAgentResult content={tool.subContent || resultText} />
               ) : (
                 tool.subContent && <SubAgentStream text={tool.subContent} />
               )}
@@ -321,18 +355,24 @@ export function SubAgentPanel({
           {(!showTabs || activeTab === 'tools') && (
             <>
               {tool.subTools && tool.subTools.length > 0 && (
-                <div className={styles.tools}>
+                <SubAgentTools
+                  pinTail={!isComplete}
+                  itemCount={tool.subTools.length}
+                >
                   {tool.subTools.map((sub) => (
                     <SubToolLine key={sub.callId} tool={sub} />
                   ))}
-                </div>
+                </SubAgentTools>
               )}
               {taskToolCalls && taskToolCalls.length > 0 && (
-                <div className={styles.tools}>
+                <SubAgentTools
+                  pinTail={!isComplete}
+                  itemCount={taskToolCalls.length}
+                >
                   {taskToolCalls.map((tc) => (
                     <TaskToolCallLine key={tc.callId} tc={tc} />
                   ))}
-                </div>
+                </SubAgentTools>
               )}
             </>
           )}

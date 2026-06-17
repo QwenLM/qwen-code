@@ -50,10 +50,6 @@
   background: var(--bg-tertiary);
 }
 
-.headerTotal {
-  font-weight: 600;
-}
-
 .rowStats {
   font-size: 11px;
   color: var(--text-dimmed);

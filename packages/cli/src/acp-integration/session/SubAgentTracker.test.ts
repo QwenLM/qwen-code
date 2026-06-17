@@ -468,6 +468,10 @@ describe('SubAgentTracker', () => {
                 newText: 'new',
               },
             ],
+            // Second producer path must mirror the tool name onto _meta so
+            // consumers (e.g. the Agent prompt) get the same identity the
+            // primary path in Session.ts provides.
+            _meta: expect.objectContaining({ toolName: 'edit_file' }),
           }),
         }),
       );

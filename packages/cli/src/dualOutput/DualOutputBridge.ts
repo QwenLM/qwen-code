@@ -53,6 +53,13 @@ export const SUPPORTED_EVENTS = [
 export const DUAL_OUTPUT_PROTOCOL_VERSION = 1;
 
 /**
+ * Maximum bytes buffered in the Node.js WriteStream before the bridge
+ * self-disables. Guards against unbounded memory growth when the output
+ * target is a FIFO opened with O_RDWR (no EPIPE on reader disconnect).
+ */
+const MAX_BUFFERED_BYTES = 1024 * 1024; // 1 MB
+
+/**
  * Optional metadata wired into the `session_start` capability handshake.
  */
 export interface DualOutputBridgeOptions {
@@ -107,8 +114,8 @@ export class DualOutputBridge {
     } else {
       // Open with O_WRONLY|O_NONBLOCK to avoid blocking the event loop on FIFOs.
       // On FIFO, a regular open(O_WRONLY) blocks until a reader connects.
-      // O_NONBLOCK makes it return immediately (ENXIO if no reader yet, which
-      // createWriteStream handles via its internal retry/error mechanism).
+      // O_NONBLOCK makes openSync return immediately; if no reader is
+      // connected yet (ENXIO), the catch block below retries with O_RDWR.
       try {
         const fd = openSync(
           target.filePath,
@@ -117,9 +124,30 @@ export class DualOutputBridge {
         this.stream = createWriteStream('', { fd });
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
-        // ENXIO: FIFO has no reader yet — fall back to blocking open.
-        // ENOENT: regular file doesn't exist yet — create it.
-        if (code === 'ENXIO' || code === 'ENOENT') {
+        if (code === 'ENXIO') {
+          // FIFO with no reader connected yet. Use O_RDWR | O_NONBLOCK so
+          // the open returns immediately (POSIX: process is both reader and
+          // writer, satisfying the "at least one reader" requirement).
+          // Trade-off: EPIPE won't fire on reader disconnect; the bridge
+          // self-disables when the pipe buffer fills instead.
+          try {
+            const fd = openSync(
+              target.filePath,
+              constants.O_RDWR | constants.O_NONBLOCK,
+            );
+            this.stream = createWriteStream('', { fd });
+          } catch (retryErr) {
+            if ((retryErr as NodeJS.ErrnoException).code === 'EACCES') {
+              throw new Error(
+                `--json-file "${target.filePath}": permission denied opening FIFO for read-write. ` +
+                  'Check read/write permissions on the file and its parent directories, ' +
+                  'or start a reader before launching Qwen Code.',
+              );
+            }
+            throw retryErr;
+          }
+        } else if (code === 'ENOENT') {
+          // Regular file doesn't exist yet — create it.
           this.stream = createWriteStream(target.filePath, { flags: 'w' });
         } else {
           throw err;
@@ -129,9 +157,13 @@ export class DualOutputBridge {
 
     this.stream.on('error', (err) => {
       const code = (err as NodeJS.ErrnoException).code;
-      // Consumer disconnected — gracefully stop writing, don't crash the TUI
       if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED') {
         debugLogger.warn('DualOutput: consumer disconnected, disabling');
+      } else if (code === 'ERR_SYSTEM_ERROR') {
+        debugLogger.warn(
+          'DualOutput: system error on stream, disabling:',
+          (err as NodeJS.ErrnoException).message,
+        );
       } else {
         debugLogger.error('DualOutput stream error:', err);
       }
@@ -165,6 +197,8 @@ export class DualOutputBridge {
 
   processEvent(event: ServerGeminiStreamEvent): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.processEvent(event);
     } catch (err) {
@@ -174,6 +208,8 @@ export class DualOutputBridge {
   }
 
   startAssistantMessage(): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
     if (!this.active) return;
     try {
       this.adapter.startAssistantMessage();
@@ -185,6 +221,8 @@ export class DualOutputBridge {
 
   finalizeAssistantMessage(): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.finalizeAssistantMessage();
     } catch (err) {
@@ -194,6 +232,8 @@ export class DualOutputBridge {
   }
 
   emitUserMessage(parts: Part[]): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
     if (!this.active) return;
     try {
       this.adapter.emitUserMessage(parts);
@@ -208,6 +248,8 @@ export class DualOutputBridge {
     response: ToolCallResponseInfo,
   ): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.emitToolResult(request, response);
     } catch (err) {
@@ -221,6 +263,16 @@ export class DualOutputBridge {
     return this.active;
   }
 
+  private disableIfBufferOverflowed(): void {
+    if (this.stream.writableLength > MAX_BUFFERED_BYTES) {
+      debugLogger.warn(
+        'DualOutput: buffered data exceeds limit, disabling (no consumer draining?)',
+      );
+      this.active = false;
+      this.stream.destroy();
+    }
+  }
+
   /**
    * Emits a `can_use_tool` permission request so an external consumer can
    * approve or deny the tool call. Pairs with {@link emitControlResponse}.
@@ -232,6 +284,8 @@ export class DualOutputBridge {
     input: unknown,
     blockedPath: string | null = null,
   ): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
     if (!this.active) return;
     try {
       this.adapter.emitPermissionRequest(
@@ -253,6 +307,8 @@ export class DualOutputBridge {
    */
   emitControlResponse(requestId: string, allowed: boolean): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.emitControlResponse(requestId, allowed);
     } catch (err) {
@@ -269,6 +325,8 @@ export class DualOutputBridge {
    */
   emitControlError(requestId: string, message: string): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.emitControlError(requestId, message);
     } catch (err) {
@@ -279,6 +337,8 @@ export class DualOutputBridge {
 
   /** General-purpose system event escape hatch. */
   emitSystemMessage(subtype: string, data?: unknown): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
     if (!this.active) return;
     try {
       this.adapter.emitSystemMessage(subtype, data);
@@ -305,7 +365,7 @@ export class DualOutputBridge {
     }
     this.active = false;
     this.shutdownPromise = new Promise((resolve) => {
-      if (this.stream.closed) {
+      if (this.stream.closed || this.stream.destroyed) {
         resolve();
         return;
       }

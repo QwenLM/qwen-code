@@ -1,0 +1,31 @@
+.row {
+  position: relative;
+}
+
+/*
+ * Anchored inside the message's top-right corner rather than floating above
+ * it: the message list (`.list`) is `overflow-y: auto`, so a tooltip spilling
+ * outside the row box would be clipped or trigger a scrollbar. Staying within
+ * the row keeps it visible at the scroll edges. `pointer-events: none` lets
+ * clicks and inner hover interactions (tool expand, links) pass through.
+ */
+.tip {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  z-index: 5;
+  color: var(--text-dimmed);
+  background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.row:hover > .tip {
+  opacity: 1;
+}

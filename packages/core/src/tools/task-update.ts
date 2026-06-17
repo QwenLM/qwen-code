@@ -30,6 +30,7 @@ import {
   getTask,
   listTasks,
   TaskOwnershipError,
+  RECIPROCAL_CALLER,
 } from '../agents/team/tasks.js';
 import type { SwarmTask } from '../agents/team/types.js';
 import { truncateForConfirmation } from './task-create.js';
@@ -403,12 +404,23 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     // would leave the dependent permanently blocked by an already-
     // completed task (verified repro: task_update({status:'completed',
     // addBlocks:['X']}) left X blockedBy the just-completed task).
+    // The reciprocal mirror must bypass the ownership guard (a teammate
+    // editing its own task's edges has to touch the neighbor it points
+    // at, which it may not own). Pass the RECIPROCAL_CALLER sentinel
+    // rather than an empty callerName so the intentional bypass is
+    // greppable in logs; it can never collide with a real teammate
+    // identity (agent names are sanitized to [a-z0-9-]).
     const reciprocalUpdates: Array<Promise<unknown>> = [];
     if (this.params.addBlocks?.length && this.params.status !== 'completed') {
       for (const blockedId of this.params.addBlocks) {
         if (blockedId === taskId) continue;
         reciprocalUpdates.push(
-          updateTask(teamName, blockedId, { addBlockedBy: [taskId] }),
+          updateTask(
+            teamName,
+            blockedId,
+            { addBlockedBy: [taskId] },
+            { callerName: RECIPROCAL_CALLER },
+          ),
         );
       }
     }
@@ -416,7 +428,12 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       for (const blockerId of this.params.addBlockedBy) {
         if (blockerId === taskId) continue;
         reciprocalUpdates.push(
-          updateTask(teamName, blockerId, { addBlocks: [taskId] }),
+          updateTask(
+            teamName,
+            blockerId,
+            { addBlocks: [taskId] },
+            { callerName: RECIPROCAL_CALLER },
+          ),
         );
       }
     }
