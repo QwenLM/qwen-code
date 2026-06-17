@@ -295,7 +295,7 @@ describe('QwenAgent slash command history', () => {
     agent.destroy();
   });
 
-  it('uses unique fallback ids for metadata-free image-only mid-turn messages', async () => {
+  it('acknowledges metadata-free image-only mid-turn messages by empty text', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);
 
@@ -344,13 +344,7 @@ describe('QwenAgent slash command history', () => {
         },
       ],
     });
-    const drainedIds = onMidTurnMessagesDrained.mock.calls[0]?.[0] as
-      | string[]
-      | undefined;
-    expect(drainedIds).toHaveLength(2);
-    expect(drainedIds?.[0]).toStartWith('mid-turn-');
-    expect(drainedIds?.[1]).toStartWith('mid-turn-');
-    expect(drainedIds?.[0]).not.toBe(drainedIds?.[1]);
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['', '']);
 
     agent.destroy();
   });

@@ -1633,6 +1633,59 @@ describe('Qwen native history loading', () => {
     expect(managed.messageQueue[0]?.messageId).toBe('message-with-id');
   });
 
+  it('acknowledges metadata-free Qwen mid-turn queued messages by empty text', () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-midturn-empty-text-ack';
+    const timestamp = Date.now();
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { isProcessing: true, messagesLoaded: true },
+    );
+    managed.messageQueue.push(
+      {
+        message: '',
+        midTurnPending: true,
+      },
+      {
+        message: '',
+        midTurnPending: true,
+      },
+    );
+
+    const manager = new SessionManager();
+    const onMidTurnMessagesDrained = (
+      manager as unknown as {
+        createMidTurnMessagesDrainedCallback: (
+          managedSession: unknown,
+        ) => (messageIds: string[]) => void;
+      }
+    ).createMidTurnMessagesDrainedCallback(managed);
+
+    onMidTurnMessagesDrained(['', '']);
+
+    expect(managed.messageQueue).toHaveLength(0);
+  });
+
   it('warns when Qwen mid-turn drain acknowledgements do not match', () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),

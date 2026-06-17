@@ -7,7 +7,6 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -2816,9 +2815,7 @@ export class QwenAgent extends BaseAgent {
         `Drained ${entries.length} mid-turn user message(s) to Qwen ACP`,
       );
       const messageIds = entries.map(
-        (entry) =>
-          (entry.messageId ?? entry.optimisticMessageId ?? entry.message) ||
-          `mid-turn-${randomUUID()}`,
+        (entry) => entry.messageId ?? entry.optimisticMessageId ?? entry.message,
       );
       this.config.onMidTurnMessagesDrained?.(messageIds);
     }
