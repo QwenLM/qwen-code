@@ -78,6 +78,7 @@ import type {
   BridgeClientRequestContext,
   CloseSessionOpts,
   AcpSessionBridge,
+  MidTurnQueueEntry,
   BridgeDaemonStatusSnapshot,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
@@ -230,6 +231,19 @@ interface SessionEntry {
   promptQueue: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
+  /**
+   * Mid-turn user messages pushed by the browser (`POST
+   * /session/:id/mid-turn-message`) while a turn is running. The ACP child
+   * drains these between tool batches via the `craft/drainMidTurnQueue`
+   * ext-method so the model sees them before the turn ends. The queue is
+   * accepted into only while the session is busy (`pendingPromptCount > 0`)
+   * and emptied when the session next goes idle — see the settle handler in
+   * `sendPrompt`. The browser keeps its own copy as the next-turn fallback,
+   * so a message left undrained here is NOT lost: it is dropped server-side
+   * (preventing a stale next-turn re-injection) and resent by the browser as
+   * a fresh prompt.
+   */
+  midTurnMessageQueue: MidTurnQueueEntry[];
   /**
    * Per-session model-change FIFO. Prevents two concurrent
    * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
@@ -651,6 +665,14 @@ const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
+// Per-session cap on undrained mid-turn messages: a busy turn with no drain
+// point (a long tool-free generation) must not let a client pin unbounded
+// messages in the in-memory queue. Past the cap, `enqueueMidTurnMessage`
+// returns `{ accepted: false }` and the browser keeps the message for the next
+// turn. Intentionally a fixed const for now; if this ever needs tuning, promote
+// it to a `BridgeOptions` knob the same way `maxPendingPromptsPerSession`
+// (the analogous bound `/prompt` enforces, default 5) is wired.
+const MAX_MID_TURN_QUEUE_DEPTH = 20;
 const DEFAULT_MAX_SESSIONS = 20;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
@@ -2003,6 +2025,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       events,
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
+      midTurnMessageQueue: [],
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
       modelPublishGeneration: 0,
@@ -2983,7 +3006,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         () => undefined,
         () => undefined,
       );
-      result.finally(releasePromptSlot).catch(() => {});
+      result
+        .finally(() => {
+          releasePromptSlot();
+          // Mid-turn messages are scoped to the turn the user typed them
+          // during. Once the session goes fully idle with some still
+          // undrained, drop the server-side copy: the browser still holds
+          // them in its own queue and resends them as the next turn. Leaving
+          // them here would let the NEXT turn's first tool batch inject a
+          // stale message the browser ALSO resends — double delivery. The
+          // `pendingPromptCount === 0` guard keeps queued messages intact
+          // across a back-to-back FIFO of prompts (still "one turn" to the
+          // user) and only clears at the true idle boundary.
+          if (
+            entry.pendingPromptCount === 0 &&
+            entry.midTurnMessageQueue.length > 0
+          ) {
+            // One line when we actually drop something — makes the
+            // "queued-but-never-drained, browser will resend" path visible.
+            writeStderrLine(
+              `[mid-turn] session=${entry.sessionId} dropped ${entry.midTurnMessageQueue.length} undrained message(s) at idle; browser resends next turn`,
+            );
+            entry.midTurnMessageQueue.length = 0;
+          }
+        })
+        .catch(() => {});
       return result;
     },
 
@@ -4072,6 +4119,53 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId: entry.sessionId,
         recap: response.recap ?? null,
       };
+    },
+
+    enqueueMidTurnMessage(sessionId, message, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Authorize the caller against THIS session before doing anything —
+      // mirrors `/prompt` and `/btw`. Throws `InvalidClientIdError` when the
+      // client-declared id isn't bound to the session, so a token-holding
+      // client attached to another session can't push into this turn. Returns
+      // the trusted id (or undefined for anonymous callers) — recorded as the
+      // message's originator so the drain's SSE echo only dedupes that client.
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      const trimmed = message.trim();
+      // Reject empty messages and — critically — messages that arrive while
+      // the session is idle. The browser only pushes here when it believes a
+      // turn is running, but the turn may have settled in the small window
+      // before its turn-complete frame landed. Accepting an idle message
+      // would strand it until the NEXT turn's first tool batch drained it,
+      // by which point the browser has already resent it as a fresh prompt —
+      // double delivery. Rejecting keeps the browser's next-turn fallback the
+      // single delivery path in that race.
+      if (trimmed.length === 0 || entry.pendingPromptCount === 0) {
+        // Rejects are low-volume (the browser only pushes when it believes a
+        // turn is running) but the silent path made "why wasn't my mid-turn
+        // message injected?" undiagnosable. Empty is a client bug; idle is the
+        // settle-window race the browser recovers from via its next-turn queue.
+        writeStderrLine(
+          `[mid-turn] session=${entry.sessionId} rejected: ${
+            trimmed.length === 0 ? 'empty message' : 'session idle'
+          }; browser keeps it for next turn`,
+        );
+        return { accepted: false };
+      }
+      // Bound queue depth (see MAX_MID_TURN_QUEUE_DEPTH). Full → reject so the
+      // browser keeps the message in its own queue for the next turn rather than
+      // pinning it here unboundedly when the turn has no drain point.
+      if (entry.midTurnMessageQueue.length >= MAX_MID_TURN_QUEUE_DEPTH) {
+        writeStderrLine(
+          `[mid-turn] session=${entry.sessionId} rejected: queue full (depth ${entry.midTurnMessageQueue.length} >= ${MAX_MID_TURN_QUEUE_DEPTH}); browser keeps it for next turn`,
+        );
+        return { accepted: false };
+      }
+      entry.midTurnMessageQueue.push({ text: trimmed, originatorClientId });
+      return { accepted: true };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {

@@ -39,7 +39,9 @@
   display: flex;
   align-items: baseline;
   width: fit-content;
-  margin-top: 2px;
+  margin-top: 5px;
+  /* Outdents to align with .body start: compensates for PromptChevron width (0.6em) + .message gap (8px). */
+  margin-left: calc(-0.6em - 8px);
   font-size: 12px;
   line-height: 1.2;
 }

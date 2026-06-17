@@ -99,7 +99,7 @@ export function splitChunks(text: string): string[] {
         buf += '\n```';
       }
       chunks.push(buf);
-      buf = inCode ? '```\n' : '';
+      buf = inCode ? '```' : '';
     }
 
     buf += (buf ? '\n' : '') + line;
