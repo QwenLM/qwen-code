@@ -275,9 +275,6 @@ function buildInterpretationBlock(
  * @param params.config Active config (provides the side-query client).
  * @param params.settings Parsed vision bridge settings.
  * @param params.parts The resolved request parts (text + inline images).
- * @param params.intentText Optional explicit user question used to focus the
- *   description. When omitted, the text of the request's non-image parts is
- *   used instead.
  * @param params.signal Abort signal from the surrounding turn.
  * @returns A {@link VisionBridgeResult} describing the outcome.
  */
@@ -285,10 +282,9 @@ export async function runVisionBridge(params: {
   config: Config;
   settings: VisionBridgeSettings;
   parts: PartListUnion;
-  intentText?: string;
   signal: AbortSignal;
 }): Promise<VisionBridgeResult> {
-  const { config, settings, parts, intentText, signal } = params;
+  const { config, settings, parts, signal } = params;
   const { imageParts, nonImageParts } = splitImageParts(parts);
 
   if (imageParts.length === 0) {
@@ -308,9 +304,8 @@ export async function runVisionBridge(params: {
   const toConvert = validImages.slice(0, Math.max(0, settings.maxImages));
   const omittedCount = imageParts.length - toConvert.length;
   const droppedAsInvalid = imageParts.length - validImages.length;
-  const fallbackText = collectText(nonImageParts);
-  // Use the explicit intent when provided, otherwise the request's own text.
-  const intent = (intentText ?? '').trim() || fallbackText;
+  // Focus the description with the request's own text (non-image parts).
+  const intent = collectText(nonImageParts);
 
   // Use the explicitly configured bridge model, or auto-pick an image-capable
   // model from the registered providers so the bridge works without hand

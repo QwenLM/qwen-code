@@ -900,12 +900,16 @@ export const useGeminiStream = (
           hasImageParts(localQueryToSendToGemini) &&
           config.getEffectiveInputModalities?.().image !== true
         ) {
+          debugLogger.debug('vision bridge: gate matched, running conversion');
           const bridgeResult = await runVisionBridge({
             config,
             settings: visionBridge,
             parts: localQueryToSendToGemini,
             signal: abortSignal,
           });
+          debugLogger.debug(
+            `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
+          );
           // Always surface one notice (egress disclosure on success, reason on
           // failure); the transcript body is gated by showTranscript inside.
           if (bridgeResult.status !== 'skipped') {
