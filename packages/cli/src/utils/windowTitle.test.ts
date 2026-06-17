@@ -56,6 +56,14 @@ describe('computeWindowTitle', () => {
 });
 
 describe('writeTerminalTitle', () => {
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('should write both common terminal title sequences with 80-char padding', () => {
     const write = vi.fn();
 
@@ -75,6 +83,38 @@ describe('writeTerminalTitle', () => {
     const padded = 'qwen'.padEnd(80, ' ');
     expect(write).toHaveBeenCalledWith(
       `\x1b]0;${padded}\x07\x1b]2;${padded}\x07`,
+    );
+  });
+
+  it('should only write OSC 2 inside tmux', () => {
+    vi.stubEnv('TMUX', '/tmp/tmux-0/default');
+    const write = vi.fn();
+
+    writeTerminalTitle(write, 'test');
+
+    const padded = 'test'.padEnd(80, ' ');
+    expect(write).toHaveBeenCalledWith(`\x1b]2;${padded}\x07`);
+  });
+
+  it('should only write OSC 2 inside screen', () => {
+    vi.stubEnv('STY', '12345.pts-0.host');
+    const write = vi.fn();
+
+    writeTerminalTitle(write, 'test');
+
+    const padded = 'test'.padEnd(80, ' ');
+    expect(write).toHaveBeenCalledWith(`\x1b]2;${padded}\x07`);
+  });
+
+  it('should truncate titles longer than 80 characters', () => {
+    const write = vi.fn();
+    const longTitle = 'A'.repeat(120);
+
+    writeTerminalTitle(write, longTitle);
+
+    const expected = 'A'.repeat(80);
+    expect(write).toHaveBeenCalledWith(
+      `\x1b]0;${expected}\x07\x1b]2;${expected}\x07`,
     );
   });
 });

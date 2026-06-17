@@ -134,7 +134,7 @@ import ansiEscapes from 'ansi-escapes';
 import * as fs from 'node:fs';
 import { basename } from 'node:path';
 import {
-  computeWindowTitle,
+  formatSessionWindowTitle,
   writeTerminalTitle,
 } from '../utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
@@ -290,13 +290,6 @@ export function mergeStartupWarnings(
   nextWarnings: readonly string[],
 ): string[] {
   return [...new Set([...currentWarnings, ...nextWarnings])];
-}
-
-export function formatSessionWindowTitle(
-  sessionName: string | null,
-  folderName?: string,
-): string {
-  return sessionName || computeWindowTitle(folderName);
 }
 
 interface AppContainerProps {
@@ -3221,12 +3214,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Update terminal title with the session name, or a fallback derived
   // from CLI_TITLE, the project folder, or the app default.
-  // Note: showStatusInTitle is intentionally not checked here because the
-  // title now shows the session name (not model activity status). The
-  // [idle]/[busy] prefix that was previously gated by showStatusInTitle
-  // has been removed.
+  // showStatusInTitle gates whether dynamic title updates happen at all;
+  // it is kept for backward compatibility and future status-flag support.
   useEffect(() => {
-    if (settings.merged.ui?.hideWindowTitle) return;
+    if (
+      settings.merged.ui?.hideWindowTitle ||
+      settings.merged.ui?.showStatusInTitle === false
+    )
+      return;
 
     const folderName = basename(config.getTargetDir());
     const title = formatSessionWindowTitle(sessionName, folderName);
@@ -3240,7 +3235,12 @@ export const AppContainer = (props: AppContainerProps) => {
       writeTerminalTitle((value) => process.stdout.write(value), title);
     }
     // Note: We don't need to reset the window title on exit because Qwen Code is already doing that elsewhere
-  }, [sessionName, settings.merged.ui?.hideWindowTitle, config]);
+  }, [
+    sessionName,
+    settings.merged.ui?.hideWindowTitle,
+    settings.merged.ui?.showStatusInTitle,
+    config,
+  ]);
 
   // Drain queued messages when idle. `queueDrainNonce` re-fires the effect
   // after each submission settles so multi-step queues drain end-to-end.

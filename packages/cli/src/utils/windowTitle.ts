@@ -12,7 +12,7 @@ export const DEFAULT_WINDOW_TITLE = 'qwen';
  * that terminals may interpret as sequence boundaries.
  * Preserves printable Unicode and common whitespace.
  */
-function sanitizeWindowTitle(title: string): string {
+export function sanitizeWindowTitle(title: string): string {
   return title.replace(
     // eslint-disable-next-line no-control-regex
     /[\x00-\x1F\x7F\x80-\x9F]/g,
@@ -44,15 +44,47 @@ export function computeWindowTitle(folderName?: string): string {
  * when the title length changes between updates.
  *
  * On Windows, also sets `process.title` so the title appears in Task Manager.
+ *
+ * In terminal multiplexers (tmux, screen), only OSC 2 (window title) is
+ * written to avoid cluttering the multiplexer's window list with padded
+ * titles. Outside multiplexers, both OSC 0 (icon name + window title)
+ * and OSC 2 are written for full terminal integration.
  */
 export function writeTerminalTitle(
   write: (value: string) => void,
   title: string,
 ): void {
   const clean = sanitizeWindowTitle(title);
-  const padded = clean.padEnd(80, ' ');
+  const padded = clean.substring(0, 80).padEnd(80, ' ');
   if (process.platform === 'win32') {
     process.title = clean;
   }
-  write(`\x1b]0;${padded}\x07\x1b]2;${padded}\x07`);
+  // Inside tmux/screen, OSC 0 causes padded titles to appear in the
+  // multiplexer window list. Only write OSC 2 in that case.
+  const inMultiplexer = !!process.env['TMUX'] || !!process.env['STY'];
+  if (inMultiplexer) {
+    write(`\x1b]2;${padded}\x07`);
+  } else {
+    write(`\x1b]0;${padded}\x07\x1b]2;${padded}\x07`);
+  }
+}
+
+/**
+ * Formats the terminal window title based on session name and fallback.
+ *
+ * Priority:
+ *  1. sessionName — from /rename, auto-title, or --resume
+ *  2. computeWindowTitle(folderName) — CLI_TITLE, project folder, or default
+ *
+ * @param sessionName - Current session name, or null if not set.
+ * @param folderName - Optional workspace folder name for the fallback chain.
+ * @returns The formatted title string with control characters removed.
+ */
+export function formatSessionWindowTitle(
+  sessionName: string | null,
+  folderName?: string,
+): string {
+  return sessionName
+    ? sanitizeWindowTitle(sessionName)
+    : computeWindowTitle(folderName);
 }

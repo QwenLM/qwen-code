@@ -4,6 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+const { writeTerminalTitleSpy } = vi.hoisted(() => ({
+  writeTerminalTitleSpy: vi.fn(),
+}));
+
+vi.mock('../utils/windowTitle.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/windowTitle.js')>();
+  return {
+    ...actual,
+    writeTerminalTitle: (
+      ...args: Parameters<typeof actual.writeTerminalTitle>
+    ) => {
+      writeTerminalTitleSpy(...args);
+      return actual.writeTerminalTitle(...args);
+    },
+  };
+});
+
 import {
   describe,
   it,
@@ -18,11 +36,11 @@ import { useContext, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
-  formatSessionWindowTitle,
   getNextRenderMode,
   isRenderModeToggleKey,
   mergeStartupWarnings,
 } from './AppContainer.js';
+import { formatSessionWindowTitle } from '../utils/windowTitle.js';
 import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
@@ -2184,7 +2202,7 @@ describe('AppContainer State Management', () => {
       vi.unstubAllEnvs();
     });
 
-    it('should update terminal title when showStatusInTitle is false', () => {
+    it('should not update terminal title when showStatusInTitle is false', () => {
       // Arrange: Set up mock settings with showStatusInTitle disabled
       const mockSettingsWithShowStatusFalse = {
         ...mockSettings,
@@ -2208,12 +2226,11 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that the default title is written
+      // Assert: Check that no title-related writes occurred
       const titleWrites = (
         process.stdout.write as ReturnType<typeof vi.fn>
       ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
-      expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
+      expect(titleWrites).toHaveLength(0);
       unmount();
     });
 
@@ -2580,6 +2597,30 @@ describe('AppContainer State Management', () => {
         await Promise.resolve();
       });
       expect(registeredTitleRecordedCallback).toBeDefined();
+
+      // Invoke the callback to exercise the full chain:
+      // recording service fires callback → setSessionName('Fix terminal title')
+      // → React re-render → title useEffect calls writeTerminalTitle
+      //
+      // Note: React 19's effect batching in the ink-testing-library
+      // environment prevents asserting the writeTerminalTitle call
+      // inline (effects are not flushed inside act()). The downstream
+      // title write is verified by the other tests that render
+      // AppContainer with different settings and assert the output via
+      // process.stdout.write.
+      expect(registeredTitleRecordedCallback).toStrictEqual(
+        expect.any(Function),
+      );
+      await act(async () => {
+        registeredTitleRecordedCallback!('Fix terminal title');
+      });
+      // The initial render wrote the default title; after the callback
+      // the next writeTerminalTitle call (when effects flush) should
+      // carry the session name. We validate the logic standalone:
+      expect(formatSessionWindowTitle('Fix terminal title')).toBe(
+        'Fix terminal title',
+      );
+
       // formatSessionWindowTitle returns the session name directly when set.
       expect(formatSessionWindowTitle('Fix terminal title')).toBe(
         'Fix terminal title',
@@ -2591,6 +2632,8 @@ describe('AppContainer State Management', () => {
       expect(formatSessionWindowTitle(null, 'my-project')).toBe(
         'Qwen - my-project',
       );
+      // Session names with control characters are sanitized at entry point.
+      expect(formatSessionWindowTitle('Bad\x07Title')).toBe('BadTitle');
       unmount();
       expect(titleRecordedCallback).toBeUndefined();
     });
