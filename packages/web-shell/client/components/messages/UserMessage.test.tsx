@@ -56,11 +56,39 @@ describe('UserMessage collapse toggle', () => {
     );
     const btn = container.querySelector('button')!;
     expect(btn).not.toBeNull();
-    expect(container.textContent).toContain('5 steps');
+    expect(container.textContent).toContain('Execution 5 steps');
     expect(btn.getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('pluralizes a single step as "1 step"', () => {
+  it('hides collapse metadata for slash commands', () => {
+    const container = render(
+      <UserMessage
+        content="/review"
+        commands={[{ name: 'review', description: 'Review changes' }]}
+        collapse={head({ elapsedMs: 12_400, toolCallCount: 3 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('/review');
+    expect(container.textContent).not.toContain('Execution 5 steps');
+    expect(container.textContent).not.toContain('12.4s');
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('keeps collapse metadata for unknown slash-prefixed text', () => {
+    const container = render(
+      <UserMessage
+        content="/Users/project"
+        commands={[{ name: 'review', description: 'Review changes' }]}
+        collapse={head({ elapsedMs: 12_400, toolCallCount: 3 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('Execution 5 steps');
+    expect(container.textContent).toContain('12.4s');
+  });
+
+  it('pluralizes a single execution step as "Execution 1 step"', () => {
     const container = render(
       <UserMessage
         content="hi"
@@ -69,7 +97,7 @@ describe('UserMessage collapse toggle', () => {
       />,
     );
     const text = container.textContent ?? '';
-    expect(text).toContain('1 step');
+    expect(text).toContain('Execution 1 step');
     expect(text).not.toContain('1 steps');
   });
 
@@ -106,6 +134,7 @@ describe('UserMessage collapse toggle', () => {
         collapse={head({
           hiddenCount: 5,
           elapsedMs: 12_400,
+          toolCallCount: 3,
           inputTokens: 3100,
           outputTokens: 5100,
         })}
@@ -113,10 +142,12 @@ describe('UserMessage collapse toggle', () => {
       />,
     );
     const text = container.textContent ?? '';
-    expect(text).toContain('5 steps');
+    expect(text).toContain('Execution 5 steps');
     expect(text).toContain('12.4s');
+    expect(text).toContain('3 tool calls');
     expect(text).toContain('↑3.1k');
     expect(text).toContain('↓5.1k');
+    expect(text.indexOf('↓5.1k')).toBeLessThan(text.indexOf('3 tool calls'));
   });
 
   it('puts the chevron + step count in the toggle, metrics inert', () => {
@@ -134,7 +165,7 @@ describe('UserMessage collapse toggle', () => {
     );
     const btn = container.querySelector('button')!;
     // The toggle carries the chevron AND the step count (a roomy target)…
-    expect(btn.textContent).toMatch(/^[▸▾] 5 steps$/);
+    expect(btn.textContent).toMatch(/^[▸▾] Execution 5 steps$/);
     // …while the metrics live outside the button, in an inert span.
     expect(btn.textContent).not.toContain('12.4s');
     const meta = btn.nextElementSibling!;
@@ -152,8 +183,7 @@ describe('UserMessage collapse toggle', () => {
     };
     const metaOf = (c: HTMLElement) =>
       c.querySelector('button')!.nextElementSibling!.textContent;
-    const btnOf = (c: HTMLElement) =>
-      c.querySelector('button')!.textContent;
+    const btnOf = (c: HTMLElement) => c.querySelector('button')!.textContent;
     const collapsed = render(
       <UserMessage
         content="hi"
@@ -171,8 +201,8 @@ describe('UserMessage collapse toggle', () => {
     // Inert metrics identical; the toggle differs only by the chevron glyph
     // (same-width in the mono font), so the row never reflows on toggle.
     expect(metaOf(collapsed)).toBe(metaOf(expanded));
-    expect(btnOf(collapsed)).toBe('▸ 5 steps');
-    expect(btnOf(expanded)).toBe('▾ 5 steps');
+    expect(btnOf(collapsed)).toBe('▸ Execution 5 steps');
+    expect(btnOf(expanded)).toBe('▾ Execution 5 steps');
   });
 
   it('renders only the toggle when no metrics are measured', () => {
@@ -184,7 +214,7 @@ describe('UserMessage collapse toggle', () => {
       />,
     );
     const btn = container.querySelector('button')!;
-    expect(btn.textContent).toContain('3 steps');
+    expect(btn.textContent).toContain('Execution 3 steps');
     // No metrics → no inert span and no stray separator.
     expect(btn.nextElementSibling).toBeNull();
     expect(container.textContent).not.toContain('·');

@@ -11,6 +11,7 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useDaemonMidTurnInjected,
   useSettings,
   useSessionNotices,
   useStreamingState,
@@ -26,6 +27,7 @@ import type {
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
+import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
 import type { PromptImage } from './adapters/promptTypes';
@@ -313,6 +315,12 @@ export interface WebShellProps {
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
+  /**
+   * Called whenever transcript blocks change. Receives the full blocks array
+   * from useTranscriptBlocks(). Fires on every streaming delta during active
+   * generation, so consumers should debounce or throttle expensive work.
+   */
+  onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
   /** Called when a critical error occurs (auth failure, session gone, etc). */
   onError?: (error: Error) => void;
   /** Called when `/bug` is invoked. Receives system info. If omitted, web-shell opens the report URL itself. */
@@ -701,6 +709,7 @@ export function App({
   collapseCompletedTurns = true,
   virtualScrollThreshold,
   markdown,
+  onTranscriptChange,
   onToast,
   composerRef,
   composerInput,
@@ -773,6 +782,11 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
+  // Scopes the best-effort mid-turn enqueue POST(s) to the turn they were typed
+  // in. Aborted when the turn settles so a slow/late push can't arrive during a
+  // SUBSEQUENT turn (e.g. the browser's own next-turn resend of the same text)
+  // and get injected there — cross-turn double delivery.
+  const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -1250,6 +1264,7 @@ export function App({
     (text: string, images?: PromptImage[], onComplete?: () => void) => {
       const trimmed = text.trim();
       if (!trimmed) return true;
+      const hasImages = !!images && images.length > 0;
       const nextPrompt: QueuedPrompt = {
         id: nextQueuedPromptIdRef.current++,
         text: trimmed,
@@ -1258,10 +1273,48 @@ export function App({
       };
       queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
       setQueuedPrompts(queuedPromptsRef.current);
+      // Best-effort: also offer text-only messages to the running turn so the
+      // daemon can drain them mid-turn (text-only because the drain channel
+      // carries plain strings — messages with images stay queued for the next
+      // turn). On success the daemon emits `mid_turn_message_injected`, which
+      // the effect below removes from the queue so it isn't resent. If idle /
+      // unsupported / failed, the message harmlessly stays queued.
+      if (!hasImages) {
+        // One controller per turn: all mid-turn pushes typed during the same
+        // turn share it, and the settle effect aborts it so a late arrival
+        // can't land in the next turn. An aborted push resolves
+        // `{ accepted: false }`, so the message simply stays queued and is
+        // resent next turn — exactly-once preserved.
+        let abort = midTurnEnqueueAbortRef.current;
+        if (!abort) {
+          abort = new AbortController();
+          midTurnEnqueueAbortRef.current = abort;
+        }
+        void sessionActions.enqueueMidTurnMessage(trimmed, {
+          signal: abort.signal,
+        });
+      }
       return true;
     },
-    [],
+    [sessionActions],
   );
+
+  // When the turn settles, abort any still-in-flight mid-turn push so it can't
+  // arrive during the next turn and be injected twice (see midTurnEnqueueAbortRef).
+  // The aborted push resolves `{ accepted: false }`; the message is already in
+  // queuedPrompts and follows the normal next-turn path.
+  useEffect(() => {
+    if (streamingState !== 'idle') return;
+    const ctrl = midTurnEnqueueAbortRef.current;
+    if (!ctrl) return;
+    // A controller exists ⇒ at least one mid-turn push was issued this turn.
+    // Cancel it so a still-in-flight push can't land in the next turn (a
+    // completed one makes this a no-op). Debug-only, mirrors the server-side
+    // mid-turn observability.
+    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
+    ctrl.abort();
+    midTurnEnqueueAbortRef.current = null;
+  }, [streamingState]);
 
   const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
     const [nextPrompt, ...rest] = queuedPromptsRef.current;
@@ -1286,6 +1339,64 @@ export function App({
     store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
     return true;
   }, [store, t]);
+
+  // When the daemon drains queued messages into the running turn it emits
+  // `mid_turn_message_injected` (one frame per tool batch). Drop the matching
+  // (text-only) entries from the local queue so the idle-time drain doesn't ALSO
+  // resend them as the next turn. Reconcile EVERY accumulated batch, not just the
+  // newest — a multi-batch turn can publish several frames back-to-back, and the
+  // first must not be lost before this runs. The frames arrive in-order ahead of
+  // the turn-complete frame that flips streamingState to idle, so this runs
+  // before that resend fires; `consume()` then clears the reconciled batches.
+  const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
+    useDaemonMidTurnInjected();
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId || midTurnInjectedBatches.length === 0) return;
+    // Pass OUR client id so only batches the daemon stamped with it (or
+    // anonymous ones) are deduped. The daemon stamps every drained frame with
+    // the originator's client id, and the web-shell always sends one, so
+    // omitting this would skip every batch — leaving our own messages in the
+    // queue to be resent next turn (double delivery). A peer on the same
+    // session keeps its own coincidentally-equal entry.
+    if (
+      connection.clientId === undefined &&
+      midTurnInjectedBatches.some(
+        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
+      )
+    ) {
+      // Edge: stamped batches but no client id yet (older daemon / reconnect
+      // timing). Dedupe skips them, so they may be resent next turn — make it
+      // diagnosable rather than a silent double-delivery.
+      console.debug(
+        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
+      );
+    }
+    const next = removeInjectedFromQueue(
+      queuedPromptsRef.current,
+      midTurnInjectedBatches,
+      sessionId,
+      connection.clientId,
+    );
+    if (next) {
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
+    }
+    // Consume ONLY this session's batches. The reconcile above is session-
+    // scoped, so a batch for another session (a late frame after an in-place
+    // session switch) must NOT be cleared here — it was never reconciled and
+    // would otherwise be lost on switch-back (resent next turn = double
+    // delivery). Identity-removal also leaves any frame that arrived after this
+    // render's snapshot for the next effect run.
+    consumeMidTurnInjected(
+      midTurnInjectedBatches.filter((b) => b.sessionId === sessionId),
+    );
+  }, [
+    midTurnInjectedBatches,
+    connection.sessionId,
+    connection.clientId,
+    consumeMidTurnInjected,
+  ]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -1510,6 +1621,10 @@ export function App({
   useEffect(() => {
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
+
+  useEffect(() => {
+    onTranscriptChange?.(blocks);
+  }, [blocks, onTranscriptChange]);
 
   useEffect(() => {
     if (connection.error) {
@@ -2777,6 +2892,7 @@ export function App({
                     isResponding={streamingState !== 'idle'}
                     workspaceCwd={connection.workspaceCwd || ''}
                     shellOutputMaxLines={shellOutputMaxLines}
+                    commands={commands}
                     showRetryHint={showRetryHint}
                     onRetryClick={handleRetry}
                     welcomeHeader={welcomeHeader}
