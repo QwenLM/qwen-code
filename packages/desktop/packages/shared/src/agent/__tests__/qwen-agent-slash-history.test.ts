@@ -295,6 +295,66 @@ describe('QwenAgent slash command history', () => {
     agent.destroy();
   });
 
+  it('uses unique fallback ids for metadata-free image-only mid-turn messages', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock((_messageIds: string[]) => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(agent.enqueueMidTurnMessage('', [attachment])).toBe(true);
+    expect(agent.enqueueMidTurnMessage('', [attachment])).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: '[User message with attachments]',
+        },
+        {
+          content: [
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: '[User message with attachments]',
+        },
+      ],
+    });
+    const drainedIds = onMidTurnMessagesDrained.mock.calls[0]?.[0] as
+      | string[]
+      | undefined;
+    expect(drainedIds).toHaveLength(2);
+    expect(drainedIds?.[0]).toStartWith('mid-turn-');
+    expect(drainedIds?.[1]).toStartWith('mid-turn-');
+    expect(drainedIds?.[0]).not.toBe(drainedIds?.[1]);
+
+    agent.destroy();
+  });
+
   it('drains queued mid-turn image attachments as ACP content blocks', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);

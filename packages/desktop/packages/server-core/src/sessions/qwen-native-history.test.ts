@@ -1578,6 +1578,61 @@ describe('Qwen native history loading', () => {
     );
   });
 
+  it('does not text-match identified Qwen mid-turn queued messages', () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-midturn-text-collision';
+    const timestamp = Date.now();
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { isProcessing: true, messagesLoaded: true },
+    );
+    managed.messageQueue.push(
+      {
+        message: 'duplicate response',
+        messageId: 'message-with-id',
+        midTurnPending: true,
+      },
+      {
+        message: 'duplicate response',
+        midTurnPending: true,
+      },
+    );
+
+    const manager = new SessionManager();
+    const onMidTurnMessagesDrained = (
+      manager as unknown as {
+        createMidTurnMessagesDrainedCallback: (
+          managedSession: unknown,
+        ) => (messageIds: string[]) => void;
+      }
+    ).createMidTurnMessagesDrainedCallback(managed);
+
+    onMidTurnMessagesDrained(['duplicate response']);
+
+    expect(managed.messageQueue).toHaveLength(1);
+    expect(managed.messageQueue[0]?.messageId).toBe('message-with-id');
+  });
+
   it('offers plain text follow-ups to Qwen mid-turn injection after visual messages', async () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),

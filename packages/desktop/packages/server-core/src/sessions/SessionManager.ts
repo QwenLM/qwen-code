@@ -4751,13 +4751,19 @@ export class SessionManager implements ISessionManager {
         optimisticMessageId?: string
       }> = []
       for (const messageId of messageIds) {
-        const index = managed.messageQueue.findIndex(
-          (entry) =>
-            entry.midTurnPending &&
-            (entry.messageId === messageId ||
-              entry.optimisticMessageId === messageId ||
-              entry.message === messageId),
-        )
+        const index = managed.messageQueue.findIndex((entry) => {
+          if (!entry.midTurnPending) return false
+          if (
+            entry.messageId === messageId ||
+            entry.optimisticMessageId === messageId
+          ) {
+            return true
+          }
+          if (!entry.messageId && !entry.optimisticMessageId) {
+            return entry.message === messageId
+          }
+          return false
+        })
         if (index >= 0) {
           const [entry] = managed.messageQueue.splice(index, 1)
           drainedEntries.push({

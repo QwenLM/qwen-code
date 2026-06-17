@@ -7,6 +7,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -2816,9 +2817,9 @@ export class QwenAgent extends BaseAgent {
       );
       const messageIds = entries
         .map(
-          (entry, index) =>
+          (entry) =>
             (entry.messageId ?? entry.optimisticMessageId ?? entry.message) ||
-            `mid-turn-${Date.now()}-${index}`,
+            `mid-turn-${randomUUID()}`,
         )
         .filter((messageId): messageId is string => !!messageId);
       if (messageIds.length > 0) {
