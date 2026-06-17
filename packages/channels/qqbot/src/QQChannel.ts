@@ -50,7 +50,11 @@ export class QQChannel extends ChannelBase {
   private heartbeatInterval: number = 45000;
   private seq: number = 0;
   private reconnectAttempts: number = 0;
-  private readonly maxReconnectAttempts: number = 10;
+  private readonly maxReconnectAttempts: number = 20;
+  /** QQ Bot session_id from READY, used for RESUME on reconnect. */
+  private sessionId: string = '';
+  /** Whether this connection attempt should try RESUME first. */
+  private tryResume: boolean = false;
   private readonly qqConfig: QQChannelConfig;
   /** Set when server sends RECONNECT opcode — close handler uses this to force reconnect. */
   private serverRequestedReconnect: boolean = false;
@@ -98,8 +102,23 @@ export class QQChannel extends ChannelBase {
   // ── ChannelBase interface ──────────────────────────────────────
 
   async connect(): Promise<void> {
-    await this.fetchToken();
-    await this.connectGateway();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await this.fetchToken();
+        await this.connectGateway();
+        return;
+      } catch (e: unknown) {
+        if (attempt < 2) {
+          const msg = e instanceof Error ? e.message : String(e);
+          process.stderr.write(
+            `[QQ:${this.name}] Connect attempt ${attempt + 1} failed: ${msg}, retrying...\n`,
+          );
+          await this.sleep(2000);
+        } else {
+          throw e;
+        }
+      }
+    }
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -437,24 +456,20 @@ export class QQChannel extends ChannelBase {
         process.stderr.write(
           `[QQ:${this.name}] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})\n`,
         );
-        setTimeout(() => {
-          // Refresh token before reconnecting if expired or near expiry
-          const tokenNear = this.tokenExpiresAt - Date.now() < 120_000;
-          const doConnect = () =>
-            this.connectGateway().catch((e) =>
-              process.stderr.write(
-                `[QQ:${this.name}] Reconnect failed: ${e}\n`,
-              ),
-            );
-
-          if (tokenNear) {
-            this.fetchToken()
-              .then(() => doConnect())
-              .catch(() => doConnect());
-          } else {
-            doConnect();
-          }
-        }, delay);
+        setTimeout(() => this.reconnectWithRetry(), delay);
+      } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+        process.stderr.write(
+          `[QQ:${this.name}] Max reconnect attempts (${this.maxReconnectAttempts}) reached, giving up\n`,
+        );
+        // Reject pending connect promise if we're not reconnecting
+        if (this.connectReject) {
+          this.connectReject(
+            new Error(
+              `WebSocket closed (max reconnect attempts, code=${code})`,
+            ),
+          );
+          this.connectReject = null;
+        }
       } else {
         // Reject pending connect promise if we're not reconnecting
         if (this.connectReject) {
@@ -496,6 +511,11 @@ export class QQChannel extends ChannelBase {
 
         if (t === 'READY') {
           this.reconnectAttempts = 0;
+          this.sessionId =
+            ((msg['d'] as Record<string, unknown> | undefined)?.[
+              'session_id'
+            ] as string) || '';
+          this.tryResume = true;
           this.connectReject = null;
           this.startHeartbeat();
           this.restoreGlobalSessions();
@@ -537,6 +557,7 @@ export class QQChannel extends ChannelBase {
         this.ws?.close(4000);
         break;
       case OpCode.INVALID_SESSION:
+        this.tryResume = false; // RESUME failed, fall back to IDENTIFY
         this.sendIdentify();
         break;
       default:
@@ -546,6 +567,22 @@ export class QQChannel extends ChannelBase {
 
   private sendIdentify(): void {
     if (!this.ws) return;
+    if (this.tryResume && this.sessionId) {
+      process.stderr.write(
+        `[QQ:${this.name}] Sending RESUME (session: ${this.sessionId})\n`,
+      );
+      this.ws.send(
+        JSON.stringify({
+          op: OpCode.RESUME,
+          d: {
+            token: `QQBot ${this.accessToken}`,
+            session_id: this.sessionId,
+            seq: this.seq,
+          },
+        }),
+      );
+      return;
+    }
     this.ws.send(
       JSON.stringify({
         op: OpCode.IDENTIFY,
@@ -557,6 +594,48 @@ export class QQChannel extends ChannelBase {
         },
       }),
     );
+  }
+
+  /**
+   * Reconnect loop with retry on gateway fetch failures.
+   * Refreshes token before each attempt, and retries GW HTTP failures
+   * with exponential backoff. Keeps retrying until success.
+   */
+  private async reconnectWithRetry(): Promise<void> {
+    const maxGwRetries = 5;
+    for (let attempt = 0; attempt < maxGwRetries; attempt++) {
+      try {
+        // Refresh token before reconnect attempt
+        try {
+          await this.fetchToken();
+        } catch {
+          process.stderr.write(
+            `[QQ:${this.name}] RC: token refresh failed, retrying...\n`,
+          );
+          await this.sleep(2000);
+          continue;
+        }
+        await this.connectGateway();
+        return; // success
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const backoff = Math.min(1000 * 2 ** (attempt + 1), 30000);
+        process.stderr.write(
+          `[QQ:${this.name}] RC: ${msg} (retry in ${backoff}ms, attempt ${attempt + 1}/${maxGwRetries})\n`,
+        );
+        if (attempt < maxGwRetries - 1) await this.sleep(backoff);
+      }
+    }
+    process.stderr.write(
+      `[QQ:${this.name}] RC: exhausted ${maxGwRetries} gateway retries, will retry in 60s\n`,
+    );
+    this.tryResume = false; // fall back to full IDENTIFY next time
+    // Schedule another attempt with longer delay
+    setTimeout(() => this.reconnectWithRetry(), 60000);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
   }
 
   private startHeartbeat(): void {
