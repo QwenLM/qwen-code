@@ -423,14 +423,16 @@ describe('CronScheduler', () => {
       expect(scheduler.hasPendingWork).toBe(true);
     });
 
-    it('rejects extending a pending wakeup chain past 24 hours', () => {
+    it('rejects extending a pending wakeup chain past 24 hours and leaves no wakeup behind', () => {
       scheduler.scheduleWakeup(3600, '/loop check status');
       vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
 
       expect(() =>
         scheduler.scheduleWakeup(3600, '/loop check status'),
       ).toThrow('24h session limit');
-      expect(scheduler.sessionSize).toBe(1);
+      // The rejected re-arm clears the prior wakeup. A stale entry would have
+      // a past fireAtMs and fire one iteration past the 24h budget it enforces.
+      expect(scheduler.sessionSize).toBe(0);
     });
 
     it('keeps the chain clock across fires (session-level 24h budget)', () => {

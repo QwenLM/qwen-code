@@ -305,6 +305,10 @@ export class CronScheduler {
     if (this.wakeupChainStartedAt === null) {
       this.wakeupChainStartedAt = now;
     }
+    // Drop any prior pending wakeup before the budget check: a rejected
+    // re-arm must leave nothing behind, or the stale wakeup (its fireAtMs now
+    // in the past) would fire one iteration past the 24h limit it enforces.
+    this.wakeups.clear();
     if (fireAtMs > this.wakeupChainStartedAt + WAKEUP_CHAIN_MAX_AGE_MS) {
       throw new Error(
         'Loop wakeup chain exceeded the 24h session limit. ' +
@@ -314,7 +318,6 @@ export class CronScheduler {
     if (replacedId) {
       debugLogger.debug(`Replacing pending wakeup ${replacedId}`);
     }
-    this.wakeups.clear();
     this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
     debugLogger.debug(
       `Wakeup ${id} scheduled for ${new Date(fireAtMs).toISOString()} ` +
