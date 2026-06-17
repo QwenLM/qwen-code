@@ -3316,7 +3316,7 @@ describe('Session', () => {
               sessionUpdate: 'agent_message_chunk',
               content: {
                 type: 'text',
-                text: 'Cron jobs disabled for the rest of this session due to token limit. Restart the session to re-enable.',
+                text: 'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
               },
             },
           });
@@ -5144,22 +5144,20 @@ describe('Session', () => {
         isOutputMarkdown: true,
       });
 
-      const parts = await (session as unknown as ToolCallInternals).runToolCalls(
-        new AbortController().signal,
-        'prompt-dup',
-        [
-          {
-            id: 'dup_id_0001',
-            name: 'read_file',
-            args: { file_path: 'a.ts' },
-          },
-          {
-            id: 'dup_id_0001',
-            name: 'read_file',
-            args: { file_path: 'b.ts' },
-          },
-        ],
-      );
+      const parts = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-dup', [
+        {
+          id: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+        {
+          id: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+        },
+      ]);
 
       expect(execute).toHaveBeenCalledOnce();
       expect(parts.map((part) => part.functionResponse?.id)).toEqual([
@@ -5189,22 +5187,20 @@ describe('Session', () => {
         isOutputMarkdown: true,
       });
 
-      const parts = await (session as unknown as ToolCallInternals).runToolCalls(
-        new AbortController().signal,
-        'prompt-empty',
-        [
-          {
-            id: '',
-            name: 'read_file',
-            args: { file_path: 'a.ts' },
-          },
-          {
-            id: '',
-            name: 'read_file',
-            args: { file_path: 'b.ts' },
-          },
-        ],
-      );
+      const parts = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-empty', [
+        {
+          id: '',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+        {
+          id: '',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+        },
+      ]);
 
       expect(execute).toHaveBeenCalledTimes(2);
       expect(parts).toHaveLength(2);

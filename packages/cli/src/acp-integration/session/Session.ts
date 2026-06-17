@@ -2214,7 +2214,7 @@ export class Session implements SessionContext {
     if (!this.config.isCronEnabled()) return;
     this.config.getCronScheduler().stop();
     void this.#emitAgentDiagnosticMessageSafely(
-      'Cron jobs disabled for the rest of this session due to token limit. Restart the session to re-enable.',
+      'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
       'Failed to emit cron-disabled diagnostic',
     );
   }

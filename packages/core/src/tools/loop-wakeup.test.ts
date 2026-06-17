@@ -33,9 +33,11 @@ describe('LoopWakeupTool', () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loop-wakeup-test-'));
     Storage.setRuntimeBaseDir(tmpDir);
     tool = new LoopWakeupTool(makeConfig());
+    scheduler.start(() => {});
   });
 
   afterEach(async () => {
+    scheduler.destroy();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
@@ -98,6 +100,21 @@ describe('LoopWakeupTool', () => {
       prompt: 'continue loop',
     });
     expect(scheduler.size).toBe(0);
+  });
+
+  it('rejects scheduling when the scheduler is stopped', async () => {
+    scheduler.stop();
+    const invocation = tool.build({
+      delaySeconds: 300,
+      prompt: 'continue loop',
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.message).toBe(
+      'Loop wakeups cannot be scheduled because the scheduler is stopped.',
+    );
+    expect(scheduler.sessionSize).toBe(0);
   });
 
   it('tells the model to re-arm to keep the loop alive', async () => {
@@ -207,6 +224,7 @@ describe('LoopWakeupTool', () => {
   it('surfaces a scheduler failure as a structured tool error', async () => {
     const failingConfig = {
       getCronScheduler: () => ({
+        running: true,
         scheduleWakeup: () => {
           throw new Error('scheduler boom', {
             cause: new Error('clock unavailable'),

@@ -71,10 +71,18 @@ class LoopWakeupInvocation extends BaseToolInvocation<
     }
 
     try {
+      const scheduler = this.config.getCronScheduler();
+      if (!scheduler.running) {
+        const message =
+          'Loop wakeups cannot be scheduled because the scheduler is stopped.';
+        return {
+          llmContent: message,
+          returnDisplay: message,
+          error: { message },
+        };
+      }
       const { id, scheduledFor, clampedDelaySeconds, wasClamped, replacedId } =
-        this.config
-          .getCronScheduler()
-          .scheduleWakeup(this.params.delaySeconds, prompt);
+        scheduler.scheduleWakeup(this.params.delaySeconds, prompt);
       const reason = this.params.reason?.trim();
 
       const llmContent = [

@@ -325,6 +325,7 @@ export class CronScheduler {
     const deleted = this.wakeups.delete(id);
     if (deleted) {
       debugLogger.debug(`Cancelled wakeup ${id}`);
+      if (this.wakeups.size === 0) this.wakeupChainStartedAt = null;
     }
     return deleted;
   }
@@ -336,6 +337,7 @@ export class CronScheduler {
   cancelAllWakeups(): number {
     const count = this.wakeups.size;
     this.wakeups.clear();
+    this.wakeupChainStartedAt = null;
     if (count > 0) debugLogger.debug(`Cancelled ${count} wakeup(s)`);
     return count;
   }
@@ -999,6 +1001,7 @@ export class CronScheduler {
       debugLogger.debug(`Firing wakeup ${wakeup.id}`);
       if (this.onFire) this.onFire(wakeupToJob(wakeup));
     }
+    if (this.wakeups.size === 0) this.wakeupChainStartedAt = null;
   }
 
   /**

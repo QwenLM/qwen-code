@@ -423,24 +423,19 @@ describe('CronScheduler', () => {
       expect(scheduler.hasPendingWork).toBe(true);
     });
 
-    it('rejects re-arming a wakeup chain past 24 hours', () => {
-      const fired: CronJob[] = [];
-      scheduler.start((job) => fired.push(job));
-
-      const first = scheduler.scheduleWakeup(3600, '/loop check status');
-      scheduler.tick(new Date(first.scheduledFor));
-
+    it('rejects extending a pending wakeup chain past 24 hours', () => {
+      scheduler.scheduleWakeup(3600, '/loop check status');
       vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
 
       expect(() =>
         scheduler.scheduleWakeup(3600, '/loop check status'),
       ).toThrow('24h session limit');
-      expect(fired).toHaveLength(1);
-      expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.sessionSize).toBe(1);
     });
 
-    it('does not reset the 24h chain limit when the prompt changes', () => {
+    it('starts a fresh chain after the last wakeup fires', () => {
       const fired: CronJob[] = [];
+      scheduler.create('*/5 * * * *', 'durable cron keeps session alive', true);
       scheduler.start((job) => fired.push(job));
 
       const first = scheduler.scheduleWakeup(3600, '/loop check status');
@@ -449,10 +444,12 @@ describe('CronScheduler', () => {
       vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
 
       expect(() =>
-        scheduler.scheduleWakeup(3600, '/loop check status now'),
-      ).toThrow('24h session limit');
-      expect(fired).toHaveLength(1);
-      expect(scheduler.sessionSize).toBe(0);
+        scheduler.scheduleWakeup(3600, '/loop check build'),
+      ).not.toThrow();
+      expect(fired.some((job) => job.prompt === '/loop check status')).toBe(
+        true,
+      );
+      expect(scheduler.sessionSize).toBe(2);
     });
 
     it('keeps second precision (does not round to the minute)', () => {
