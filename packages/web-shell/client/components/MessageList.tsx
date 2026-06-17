@@ -529,13 +529,15 @@ export function applyTurnCollapse(
     }
 
     const promptTs = head.message.timestamp;
+    const liveStartedAt = isActiveTurn ? (promptTs ?? Date.now()) : undefined;
     const elapsedMs =
       promptTs !== undefined &&
       lastStepTs !== undefined &&
       lastStepTs >= promptTs
         ? lastStepTs - promptTs
         : undefined;
-    const hasMetrics = hasUsage || elapsedMs !== undefined;
+    const hasMetrics =
+      hasUsage || elapsedMs !== undefined || liveStartedAt !== undefined;
 
     if (hasPendingApproval || (hiddenCount === 0 && !hasMetrics)) {
       // Nothing to add: the inline approve/reject UI must stay reachable, or the
@@ -568,9 +570,7 @@ export function applyTurnCollapse(
         ...(hasUsage ? { inputTokens, outputTokens } : {}),
         ...(cachedTokens > 0 ? { cachedTokens } : {}),
         ...(toolCallCount > 0 ? { toolCallCount } : {}),
-        ...(isActiveTurn && promptTs !== undefined
-          ? { liveStartedAt: promptTs }
-          : {}),
+        ...(liveStartedAt !== undefined ? { liveStartedAt } : {}),
       },
     });
 

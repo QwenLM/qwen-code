@@ -77,6 +77,7 @@ function metricsText(
   return parts.join(' · ');
 }
 
+// Must track the same non-duration fields rendered by metricsText().
 function hasNonDurationMetrics(collapse: TurnCollapseHead): boolean {
   return (
     (collapse.inputTokens !== undefined &&
@@ -110,23 +111,26 @@ export const UserMessage = memo(function UserMessage({
   const { t } = useI18n();
 
   const hasToggle = !!collapse && collapse.hiddenCount > 0;
-  const showDurationMetric =
-    !!collapse && (hasToggle || hasNonDurationMetrics(collapse));
+  const liveStartedAt = collapse?.liveStartedAt;
+  const showMetadataRow =
+    !!collapse &&
+    (hasToggle ||
+      liveStartedAt !== undefined ||
+      hasNonDurationMetrics(collapse));
 
   // A live turn ticks `now - liveStartedAt`; a completed turn shows its frozen
   // elapsedMs. The ref clamps the shown value monotonically so it never steps
   // backward when a live turn settles onto its (timestamp-derived) final figure.
-  const liveStartedAt = collapse?.liveStartedAt;
-  const now = useNowTicker(liveStartedAt !== undefined && showDurationMetric);
+  const now = useNowTicker(liveStartedAt !== undefined && showMetadataRow);
   const elapsedSeenRef = useRef(0);
   let displayElapsedMs: number | undefined;
-  if (liveStartedAt !== undefined && showDurationMetric) {
+  if (liveStartedAt !== undefined && showMetadataRow) {
     elapsedSeenRef.current = Math.max(
       elapsedSeenRef.current,
       Math.max(0, now - liveStartedAt),
     );
     displayElapsedMs = elapsedSeenRef.current;
-  } else if (collapse?.elapsedMs !== undefined) {
+  } else if (showMetadataRow && collapse?.elapsedMs !== undefined) {
     elapsedSeenRef.current = Math.max(
       elapsedSeenRef.current,
       collapse.elapsedMs,
@@ -139,7 +143,7 @@ export const UserMessage = memo(function UserMessage({
   // The chevron and step count toggle together (one comfortably-sized target);
   // the trailing metrics are inert. A step-less turn has no toggle, just metrics.
   const metrics = collapse ? metricsText(collapse, displayElapsedMs, t) : '';
-  const showMetrics = !!metrics && showDurationMetric;
+  const showMetrics = !!metrics && showMetadataRow;
 
   return (
     <div
