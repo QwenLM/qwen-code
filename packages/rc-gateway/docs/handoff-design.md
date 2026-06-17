@@ -157,8 +157,10 @@ terminal can come and go without reaping the session.
   that renders a daemon-hosted session in the rich TUI, the three inversions
   (streaming source / tool-call projection / permission round-trip), the opt-in
   `--attach-daemon` wiring, and the "grows" slicing. Built behind an opt-in flag;
-  `useGeminiStream` stays the default path untouched. **Built + verified on a real
-  machine** (real TTY + working `qwen serve`), not in the dev sandbox.
+  `useGeminiStream` stays the default path untouched. The hook logic + a live
+  loopback `qwen serve` round-trip are **verifiable in the sandbox** (the daemon
+  boots here — the old "WSL timeout" was a supervisor bug, not the environment);
+  only the **interactive TUI/handoff feel** needs a real terminal + phone.
 - **Phase 3 — `qwen --remote-control` launcher + handoff polish** (small glue once
   1 & 2 exist).
 

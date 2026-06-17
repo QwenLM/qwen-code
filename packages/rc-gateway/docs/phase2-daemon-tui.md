@@ -14,11 +14,34 @@ is the away surface; the terminal stays the primary experience.
 - **Fork-first.** Build in this fork now; the hook is shaped to be
   upstream-proposable later (it's how qwen-code would build `qwen attach`).
 
-**Build environment (non-negotiable).** This is an interactive TUI driving a live
-daemon over loopback SSE. It is **not verifiable in the dev sandbox** (no TTY; the
-spawned `qwen serve` health-probe times out under WSL). It must be **built and
-exercised on a real machine** — real terminal + a working `qwen serve`. This doc
-is the spec to build _from_ there; do not bash the implementation out blind here.
+**Build environment (what's verifiable where).** Earlier notes claimed the whole
+feature was "not verifiable in the dev sandbox" because a spawned `qwen serve`
+"times out under WSL." That was **wrong, and disproven empirically**: a real
+`qwen serve` boots in ~0.5s on the WSL sandbox box and answers `/health` 200 over
+loopback (a research pass ruled out WSL loopback, the undici `::1` trap, and
+sandbox netns isolation by direct test; the old "timeout" was a supervisor bug —
+no `child.on('error')` + a port-0 readback gap in `daemonSupervisor.ts` — not the
+environment). So the layers verify like this:
+
+- **Hook logic** (frame→history projection, optionId mapping) — unit-test against a
+  **stub** `DaemonSessionClient`, here.
+- **Live daemon round-trip** (attach→prompt→events→vote over loopback SSE) —
+  prerequisites **verified here**: the daemon boots + `/health` 200, AND the
+  configured model backend is an **OpenAI-compatible server on `127.0.0.1:11435`**
+  that answers `/v1/models` 200 from the sandbox (model "egress" is itself loopback —
+  no internet needed). The one link still to prove is that a real model turn
+  actually **streams `session_update`/`tool_call`/`permission_request` frames through
+  `events()`** — which is exactly slice 1's first integration test (fold the proof in
+  there rather than throw away a probe script).
+- **Headless TUI render** — `ink-testing-library` renders the TUI to a string for
+  assertions; no TTY needed, here.
+- **Interactive acceptance** (the rich TUI feel + the phone handoff) — this is the
+  **only** part that genuinely needs a human at a real terminal + phone. It's UX
+  acceptance, not correctness. A `pty` harness can cover some of it; the final
+  "does handoff feel right" is you.
+
+So: build and unit/integration-verify the hook **here**; reserve a real terminal
+(your workstation; SSH-TTY into a Linux box also works) for interactive acceptance.
 
 This is the first substantial diff in `packages/cli/` (Phase 1, the gateway
 attach-mode, shipped entirely inside `packages/rc-gateway/`). The user explicitly
@@ -175,7 +198,16 @@ default behavior.
    daemon, start the gateway attached (Phase 1), run the TUI attached (this), print
    the `/ui` URL + pairing code.
 
-## Verification plan (on the real machine)
+## Verification plan
+
+**Automated (here, every slice):** the hook's logic against a stub
+`DaemonSessionClient`, plus an integration test against a **real** loopback
+`qwen serve` (it boots in the sandbox), plus `ink-testing-library` render
+assertions. From `packages/cli/` (NOT repo root) run the package's own
+`tsc`/`eslint`/`vitest`; advisor() at approach-commit and done-gate; explicit
+`git add <paths>`; push.
+
+**Interactive acceptance (a real terminal + phone — the only human-gated part):**
 
 - Slice 1: `qwen --attach-daemon … --daemon-token …` against a hand-started
   `qwen serve`; type a prompt; see streamed text + thoughts; Ctrl+C cancels.
@@ -183,9 +215,6 @@ default behavior.
   daemon executed it; then approve from `/ui` on the phone and confirm the terminal
   reflects `permission_resolved` without a double-execute.
 - Slice 3: detach the terminal mid-turn, re-attach, confirm replay; switch model.
-- Each slice: from `packages/cli/` (NOT repo root) run the package's own
-  `tsc`/`eslint`/`vitest`; advisor() at approach-commit and done-gate; explicit
-  `git add <paths>`; push.
 
 ## Risks
 
