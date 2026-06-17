@@ -197,7 +197,18 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       },
       agentCompleted: () => {
         registry?.onAgentCompleted(runId);
-        safeEmitUpdate(updateOutput, registryEntry);
+        // P5 R2 (#12): defer the UI re-render to the `budgetUpdated`
+        // callback that the orchestrator fires immediately after this
+        // one. Without this skip, every dispatch completion produces
+        // TWO `safeEmitUpdate` calls (one here + one in budgetUpdated)
+        // — over a 1000-agent workflow that's 2000 TUI redraws when
+        // 1000 suffices. The budget snapshot lands AFTER the agent
+        // counter increment, so the deferred render shows both updates
+        // atomically. Production callers always wire a budget
+        // (`WorkflowBudgetImpl.fromEnv()` in `execute()` above), so the
+        // deferral is unconditional; test paths that omit budget go
+        // through the injected dispatch shape and don't exercise this
+        // emitter wiring.
       },
       logAppended: () => {
         // P4b: skip per-line emit; the tool snapshots logs at terminal

@@ -151,7 +151,16 @@ describe('WorkflowBudgetExceededError', () => {
     expect(err.message).toContain('wf_abc123');
     expect(err.message).toContain('12500');
     expect(err.message).toContain('10000');
-    expect(err.message).toContain(MAX_TOKENS_PER_WORKFLOW_ENV);
+  });
+
+  it('R2 #14: message does NOT advise removing/raising the cap (model-coaching mitigation)', () => {
+    const err = new WorkflowBudgetExceededError('wf_abc123', 10_000, 12_500);
+    // The error reaches the LLM via `tool_result`; the advisory tail
+    // would coach the model to tell the user how to disable the
+    // operator's budget. Keep the factual portion only.
+    expect(err.message).not.toMatch(/Increase /i);
+    expect(err.message).not.toMatch(/remove the cap/i);
+    expect(err.message).not.toContain(MAX_TOKENS_PER_WORKFLOW_ENV);
   });
 
   it('name is the class name (for duck-typed detection)', () => {

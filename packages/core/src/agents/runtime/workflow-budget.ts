@@ -178,10 +178,16 @@ export class WorkflowBudgetExceededError extends Error {
   readonly spent: number;
 
   constructor(runId: string, budgetTotal: number, spent: number) {
+    // P5 R2 (#14): keep the factual portion only — no advisory tail.
+    // The previous "Increase QWEN_CODE_MAX_TOKENS_PER_WORKFLOW or unset
+    // it to remove the cap" suffix reaches the LLM via `tool_result`,
+    // which could coach the model into telling the user how to disable
+    // the operator-set budget. Operators looking up the knob can still
+    // find it via `MAX_TOKENS_PER_WORKFLOW_ENV` in the debug log site
+    // in `countedDispatch`.
     super(
       `Workflow ${runId} exceeded the token budget ` +
-        `(${spent} / ${budgetTotal} output tokens spent). ` +
-        `Increase ${MAX_TOKENS_PER_WORKFLOW_ENV} or unset it to remove the cap.`,
+        `(${spent} / ${budgetTotal} output tokens spent).`,
     );
     this.runId = runId;
     this.budgetTotal = budgetTotal;
