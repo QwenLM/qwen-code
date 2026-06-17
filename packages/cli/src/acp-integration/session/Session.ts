@@ -1332,11 +1332,9 @@ export class Session implements SessionContext {
                     functionCalls,
                   );
                   if (toolRun.stopAfterUserQuestionCancel) {
-                    this.#preserveUnsentMessageHistory(
-                      { role: 'user', parts: toolRun.parts },
-                      false,
+                    await this.#preserveCancelledAskUserQuestionToolRun(
+                      toolRun,
                     );
-                    await this.messageRewriter?.waitForPendingRewrites();
                     return { stopReason: 'end_turn' };
                   }
                   nextMessage = {
@@ -1605,11 +1603,7 @@ export class Session implements SessionContext {
               functionCalls,
             );
             if (toolRun.stopAfterUserQuestionCancel) {
-              this.#preserveUnsentMessageHistory(
-                { role: 'user', parts: toolRun.parts },
-                false,
-              );
-              await this.messageRewriter?.waitForPendingRewrites();
+              await this.#preserveCancelledAskUserQuestionToolRun(toolRun);
               return { stopReason: 'end_turn' };
             }
             nextMessage = {
@@ -1777,6 +1771,19 @@ export class Session implements SessionContext {
         parts: functionResponseParts,
       });
     }
+  }
+
+  async #preserveCancelledAskUserQuestionToolRun(
+    toolRun: RunToolResult,
+  ): Promise<void> {
+    this.#preserveUnsentMessageHistory(
+      {
+        role: 'user',
+        parts: [...toolRun.parts, ...(await this.#drainMidTurnUserMessages())],
+      },
+      true,
+    );
+    await this.messageRewriter?.waitForPendingRewrites();
   }
 
   #recordCompressionTokenCount(info: ChatCompressionInfo): void {
@@ -2187,11 +2194,9 @@ export class Session implements SessionContext {
                     functionCalls,
                   );
                   if (toolRun.stopAfterUserQuestionCancel) {
-                    this.#preserveUnsentMessageHistory(
-                      { role: 'user', parts: toolRun.parts },
-                      false,
+                    await this.#preserveCancelledAskUserQuestionToolRun(
+                      toolRun,
                     );
-                    await this.messageRewriter?.waitForPendingRewrites();
                     return;
                   }
                   nextMessage = {
@@ -2501,11 +2506,7 @@ export class Session implements SessionContext {
                 functionCalls,
               );
               if (toolRun.stopAfterUserQuestionCancel) {
-                this.#preserveUnsentMessageHistory(
-                  { role: 'user', parts: toolRun.parts },
-                  false,
-                );
-                await this.messageRewriter?.waitForPendingRewrites();
+                await this.#preserveCancelledAskUserQuestionToolRun(toolRun);
                 await this.#emitBackgroundNotificationEndTurn('end_turn');
                 return;
               }
@@ -2860,9 +2861,10 @@ export class Session implements SessionContext {
       }
     }
 
+    let skippedToolCallCounter = 0;
     const recordSkippedToolCall = async (fc: FunctionCall): Promise<Part> => {
-      const callId = fc.id ?? `${fc.name}-${Date.now()}`;
       const toolName = fc.name ?? 'unknown_tool';
+      const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
       const part: Part = {
         functionResponse: {
           id: callId,
@@ -2871,20 +2873,24 @@ export class Session implements SessionContext {
         },
       };
       const error = new Error(ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE);
-      this.config.getChatRecordingService()?.recordToolResult([part], {
-        callId,
-        status: 'error',
-        resultDisplay: undefined,
-        error,
-        errorType: undefined,
-      });
-      await this.toolCallEmitter.emitStart({
-        callId,
-        toolName,
-        args: (fc.args ?? {}) as Record<string, unknown>,
-        status: 'pending',
-      });
-      await this.toolCallEmitter.emitError(callId, toolName, error);
+      try {
+        this.config.getChatRecordingService()?.recordToolResult([part], {
+          callId,
+          status: 'error',
+          resultDisplay: undefined,
+          error,
+          errorType: undefined,
+        });
+        await this.toolCallEmitter.emitStart({
+          callId,
+          toolName,
+          args: (fc.args ?? {}) as Record<string, unknown>,
+          status: 'pending',
+        });
+        await this.toolCallEmitter.emitError(callId, toolName, error);
+      } catch (recordError) {
+        debugLogger.error('Failed to record skipped tool call:', recordError);
+      }
       return part;
     };
 

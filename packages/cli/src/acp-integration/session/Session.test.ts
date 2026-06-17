@@ -364,6 +364,7 @@ describe('Session', () => {
       requestPermission: vi.fn().mockResolvedValue({
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
       }),
+      extMethod: vi.fn().mockResolvedValue({ messages: [] }),
       extNotification: vi.fn().mockResolvedValue(undefined),
     } as unknown as AgentSideConnection;
 
@@ -5152,6 +5153,9 @@ describe('Session', () => {
         mockChat.sendMessageStream = vi
           .fn()
           .mockResolvedValueOnce(createAskUserQuestionResponseStream());
+        vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+          messages: ['follow-up while waiting'],
+        });
 
         const promptPromise = session.prompt({
           sessionId: 'test-session-id',
@@ -5183,8 +5187,21 @@ describe('Session', () => {
                 name: core.ToolNames.ASK_USER_QUESTION,
               }),
             }),
+            {
+              text: '\n[User message received during tool execution]: follow-up while waiting',
+            },
           ],
         });
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: follow-up while waiting',
+            },
+          ],
+          'follow-up while waiting',
+        );
       });
 
       it('waits for pending rewrites before cron stops after cancelled ask_user_question', async () => {
@@ -5560,6 +5577,106 @@ describe('Session', () => {
       ]);
     });
 
+    it('preserves skipped tool responses when skipped tool updates fail', async () => {
+      const questionExecute = vi.fn();
+      const shellExecute = vi.fn().mockResolvedValue({
+        llmContent: 'shell result',
+        returnDisplay: 'shell result',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.ASK_USER_QUESTION
+          ? mockConfirmingTool(name, questionExecute)
+          : mockAllowedTool(name, shellExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+      vi.mocked(mockClient.sessionUpdate).mockImplementation(
+        async ({ update }) => {
+          if (
+            'toolCallId' in update &&
+            update.toolCallId === 'shell_call' &&
+            update.sessionUpdate === 'tool_call'
+          ) {
+            throw new Error('client disconnected');
+          }
+        },
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-question-shell-disconnect',
+        [
+          {
+            id: 'question_call',
+            name: core.ToolNames.ASK_USER_QUESTION,
+            args: {
+              questions: [{ header: 'Continue?', question: 'Continue?' }],
+            },
+          },
+          {
+            id: 'shell_call',
+            name: core.ToolNames.SHELL,
+            args: { command: 'echo should-not-run' },
+          },
+        ],
+      );
+
+      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(shellExecute).not.toHaveBeenCalled();
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'question_call',
+        'shell_call',
+      ]);
+      expect(result.parts[1]?.functionResponse?.response).toEqual({
+        error:
+          'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.',
+      });
+    });
+
+    it('uses stable unique ids for skipped tool calls without ids', async () => {
+      const questionExecute = vi.fn();
+      const shellExecute = vi.fn().mockResolvedValue({
+        llmContent: 'shell result',
+        returnDisplay: 'shell result',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.ASK_USER_QUESTION
+          ? mockConfirmingTool(name, questionExecute)
+          : mockAllowedTool(name, shellExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-skip-no-ids', [
+        {
+          id: 'question_call',
+          name: core.ToolNames.ASK_USER_QUESTION,
+          args: { questions: [{ header: 'Continue?', question: 'Continue?' }] },
+        },
+        {
+          name: core.ToolNames.SHELL,
+          args: { command: 'echo first' },
+        },
+        {
+          name: core.ToolNames.SHELL,
+          args: { command: 'echo second' },
+        },
+      ]);
+
+      expect(result.stopAfterUserQuestionCancel).toBe(true);
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'question_call',
+        `${core.ToolNames.SHELL}-skip-1`,
+        `${core.ToolNames.SHELL}-skip-2`,
+      ]);
+    });
+
     it('does not stop the turn for non-question permission cancellation', async () => {
       const execute = vi.fn();
       mockToolRegistry.getTool.mockReturnValue(
@@ -5783,6 +5900,57 @@ describe('Session', () => {
       expect(questionExecute).toHaveBeenCalledOnce();
       expect(siblingExecute).toHaveBeenCalledOnce();
       expect(siblingSignal?.aborted).toBe(true);
+    });
+
+    it('passes an already-aborted parent signal to Agent batches', async () => {
+      const eventEmitter = new EventEmitter();
+      const receivedAbortStates: boolean[] = [];
+      const execute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          receivedAbortStates.push(signal.aborted);
+          return {
+            llmContent: 'agent stopped',
+            returnDisplay: 'agent stopped',
+          };
+        });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build: vi.fn().mockReturnValue({
+          params: { subagent_type: 'explore' },
+          eventEmitter,
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Agent'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      const parentAbort = new AbortController();
+      parentAbort.abort('parent cancelled');
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(parentAbort.signal, 'prompt-agent-pre-aborted', [
+        {
+          id: 'agent_first',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'explore' },
+        },
+        {
+          id: 'agent_second',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'explore' },
+        },
+      ]);
+
+      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(receivedAbortStates).toEqual([true, true]);
     });
 
     it('skips unstarted Agent calls after nested ask_user_question cancellation', async () => {

@@ -244,12 +244,19 @@ export class SubAgentTracker {
           `Permission request failed for subagent tool ${event.name}:`,
           error,
         );
-        await event.respond(ToolConfirmationOutcome.Cancel);
         if (event.name === ToolNames.ASK_USER_QUESTION) {
           // Fail closed: if the client cannot answer a nested user question,
           // stop the parent turn instead of letting later tools run without the
           // required user input.
           this.onAskUserQuestionCancel?.();
+        }
+        try {
+          await event.respond(ToolConfirmationOutcome.Cancel);
+        } catch (respondError) {
+          debugLogger.error(
+            `Failed to cancel subagent tool ${event.name} after permission request failure:`,
+            respondError,
+          );
         }
       }
     };
