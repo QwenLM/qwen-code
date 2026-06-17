@@ -157,7 +157,7 @@ jobs:
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
-    if: "${{ !cancelled() }}"
+    if: '${{ !cancelled() }}'
     runs-on: '${{ matrix.os }}'
     permissions:
       contents: 'read'
