@@ -703,6 +703,8 @@ export interface ToolEditConfirmationDetails {
   originalContent: string | null;
   newContent: string;
   isModifying?: boolean;
+  /** Hide UI affordances that let the user edit the proposed content. */
+  hideModify?: boolean;
 }
 
 export interface ToolConfirmationPayload {
