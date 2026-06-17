@@ -287,6 +287,15 @@ jobs:
             echo "decision=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # If mergeability never settled (still UNKNOWN after the retries above),
+          # refs/pull/N/merge may be stale or missing just like the CONFLICTING
+          # case — skip rather than fall through to a checkout that fails and gets
+          # mis-reported as an infrastructure error.
+          if [ "$mergeable" = "UNKNOWN" ]; then
+            echo "::warning::Mergeability for PR #${PR_NUMBER} still UNKNOWN after retries; skipping tmux testing."
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Only drive the app for PRs that touch a user-facing/TUI surface;
           # otherwise a real-user test has nothing to exercise (e.g. CI-only PRs).
           if jq -r '.files[].path' <<< "$data" | grep -qE 'packages/cli/src/ui/|packages/cli/.*\.tsx$|windowTitle|packages/web-shell/client/'; then
@@ -382,6 +391,13 @@ jobs:
 
           if [ "$EXIT_CODE" -eq 124 ]; then
             VERDICT='timeout'
+          elif [ "$EXIT_CODE" -eq 137 ] || [ "$EXIT_CODE" -eq 139 ]; then
+            # Killed by a signal (SIGKILL 137 / SIGSEGV 139): OOM, a crash, or a
+            # timeout that ignored SIGTERM and got force-killed past --kill-after.
+            # None of these are a test outcome, so keep them distinct from a
+            # genuine 'fail' rather than letting the verdict mislead.
+            VERDICT='infra-error'
+            echo "::error::qwen killed by signal (exit $EXIT_CODE) — OOM, crash, or forced timeout, not a test failure."
           elif [ "$EXIT_CODE" -ne 0 ]; then
             VERDICT='fail'
           else
@@ -392,6 +408,9 @@ jobs:
 
       - name: 'Upload tmux results'
         if: "always() && steps.pr.outputs.decision == 'run'"
+        # Don't let a missing/empty results dir (qwen crashed before writing any)
+        # fail the job and mask the original error, mirroring the download step.
+        continue-on-error: true
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
           name: 'tmux-results-${{ steps.pr.outputs.pr_number }}'
@@ -416,10 +435,11 @@ jobs:
   # isolated from the untrusted-code execution in tmux-testing above.
   publish-tmux:
     needs: ['tmux-testing']
-    # Post when there is a verdict to report, OR when tmux-testing failed for
-    # infrastructure reasons (checkout/runner/setup error) so the requester gets
-    # an explicit signal instead of a silent void. The empty-verdict success
-    # case (PR closed/draft/conflicting/no-TUI handled upstream) stays silent.
+    # Post when there is a verdict to report (including the no-TUI 'n/a' case),
+    # OR when tmux-testing failed for infrastructure reasons (checkout/runner/
+    # setup error) so the requester gets an explicit signal instead of a silent
+    # void. Only the empty-verdict success cases — PR closed/draft/conflicting,
+    # or mergeability still UNKNOWN — stay silent.
     if: >-
       always() && github.event.inputs.no_comment != 'true' &&
       (needs.tmux-testing.result == 'failure' ||
@@ -451,26 +471,28 @@ jobs:
           fi
           BODY_FILE="${RUNNER_TEMP:-/tmp}/tmux-comment.md"
 
-          # Embed a file inside a collapsed <details> as a fenced code block.
-          # Fenced (not rendered) on purpose: PR-driven test output must not
-          # render markdown, fire @mentions, or break the comment layout.
+          # Embed a file inside a collapsed <details> as an HTML <pre><code>
+          # block (matches GitHub's own fenced-code rendering, incl. horizontal
+          # scroll for long lines). The content is untrusted PR output, so
+          # HTML-escape &, <, > before embedding. Inside it the escaped text
+          # renders back to literal characters but cannot open a tag, close the
+          # <details>, terminate a code fence, fire @mentions, or be interpreted
+          # as markdown — which a
+          # backtick fence (breakable by a long enough ``` run) cannot guarantee.
+          # Order matters: escape & first so the < / > entities aren't re-escaped.
           emit_block() {
-            local summary="$1" file="$2" max="$3" content longest width fence
+            local summary="$1" file="$2" max="$3" content
             [ -n "$file" ] && [ -f "$file" ] || return 0
             content="$(head -c "$max" "$file")"
             if [ "$(wc -c < "$file")" -gt "$max" ]; then
               content="${content}"$'\n\n...truncated -- full log in the run artifacts.'
             fi
-            # The content is untrusted PR output and may contain ``` runs that
-            # would close a 3-backtick fence early and let the rest render as
-            # markdown. Open/close with a fence one backtick longer than the
-            # longest backtick run in the content (min 3).
-            longest="$(printf '%s' "$content" | grep -oE '`+' | awk '{ if (length > m) m = length } END { print m + 0 }')"
-            width=$(( longest >= 3 ? longest + 1 : 3 ))
-            fence="$(printf '%*s' "$width" '' | tr ' ' '`')"
-            printf '<details>\n<summary>%s</summary>\n\n%stext\n' "$summary" "$fence"
+            content="${content//&/&amp;}"
+            content="${content//</&lt;}"
+            content="${content//>/&gt;}"
+            printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary"
             printf '%s\n' "$content"
-            printf '%s\n\n</details>\n\n' "$fence"
+            printf '</code></pre>\n\n</details>\n\n'
           }
 
           if [ "${TMUX_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
