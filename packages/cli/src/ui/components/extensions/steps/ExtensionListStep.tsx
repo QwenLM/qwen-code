@@ -12,7 +12,9 @@ import { keyMatchers, Command } from '../../../keyMatchers.js';
 import {
   type Extension,
   getExtensionDisplayName,
+  getExtensionDescription,
 } from '@qwen-code/qwen-code-core';
+import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 import { ExtensionUpdateState } from '../../../state/extensions.js';
 
@@ -29,17 +31,17 @@ export const ExtensionListStep = ({
 }: ExtensionListStepProps) => {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
+  const { columns: termWidth } = useTerminalSize();
+
   // Calculate max widths for each column for alignment
-  const { maxNameWidth, maxVersionWidth, maxStatusWidth } = useMemo(() => {
+  const { maxNameWidth, maxStatusWidth } = useMemo(() => {
     let maxName = 0;
-    let maxVersion = 0;
     let maxStatus = 0;
     for (const ext of extensions) {
       maxName = Math.max(
         maxName,
         getExtensionDisplayName(ext, getCurrentLanguage()).length,
       );
-      maxVersion = Math.max(maxVersion, ext.version.length);
       const statusLength = ext.isActive
         ? t('active').length
         : t('disabled').length;
@@ -47,7 +49,6 @@ export const ExtensionListStep = ({
     }
     return {
       maxNameWidth: maxName,
-      maxVersionWidth: maxVersion,
       maxStatusWidth: maxStatus,
     };
   }, [extensions]);
@@ -126,11 +127,36 @@ export const ExtensionListStep = ({
     return stateMap[state] || state;
   };
 
+  const truncateDescription = (
+    text: string,
+    maxWidth: number,
+    maxLines: number,
+  ): string[] => {
+    if (maxWidth <= 0) return [];
+    const lines: string[] = [];
+    let remaining = text;
+    for (let i = 0; i < maxLines; i++) {
+      if (!remaining) break;
+      if (remaining.length <= maxWidth || i === maxLines - 1) {
+        lines.push(
+          remaining.length > maxWidth
+            ? remaining.slice(0, maxWidth - 1) + '…'
+            : remaining,
+        );
+        break;
+      }
+      lines.push(remaining.slice(0, maxWidth));
+      remaining = remaining.slice(maxWidth);
+    }
+    return lines;
+  };
+
   const renderExtensionItem = (
     extension: Extension,
     index: number,
     isSelected: boolean,
   ) => {
+    const locale = getCurrentLanguage();
     const isActive = extension.isActive;
     const activeColor = isActive ? theme.status.success : theme.text.secondary;
     const activeString = isActive ? t('active') : t('disabled');
@@ -139,28 +165,42 @@ export const ExtensionListStep = ({
     const stateColor = getUpdateStateColor(updateState);
     const stateText = getLocalizedUpdateState(updateState);
 
+    const description = getExtensionDescription(extension, locale);
+    // selector(2) + name + gap(2) + status + gap(2) + update state
+    const fixedWidth = 2 + maxNameWidth + 2 + maxStatusWidth + 4 + 15;
+    const descWidth = Math.max(0, termWidth - fixedWidth);
+    const descLines = description
+      ? truncateDescription(description, descWidth, 2)
+      : [];
+
     return (
-      <Box key={extension.name} alignItems="center">
-        <Box minWidth={2} flexShrink={0}>
-          <Text color={isSelected ? theme.text.accent : theme.text.primary}>
-            {isSelected ? '●' : ' '}
-          </Text>
+      <Box key={extension.name} flexDirection="column" marginBottom={descLines.length > 0 ? 1 : 0}>
+        <Box alignItems="center">
+          <Box minWidth={2} flexShrink={0}>
+            <Text color={isSelected ? theme.text.accent : theme.text.primary}>
+              {isSelected ? '●' : ' '}
+            </Text>
+          </Box>
+          <Box width={maxNameWidth} flexShrink={0}>
+            <Text
+              color={isSelected ? theme.text.accent : theme.text.primary}
+              wrap="truncate"
+            >
+              {getExtensionDisplayName(extension, locale)}
+            </Text>
+          </Box>
+          <Box width={maxStatusWidth + 4} flexShrink={0}>
+            <Text color={activeColor}>  ({activeString})</Text>
+          </Box>
+          {stateText && <Text color={stateColor}>[{stateText}]</Text>}
         </Box>
-        <Box width={maxNameWidth} flexShrink={0}>
-          <Text
-            color={isSelected ? theme.text.accent : theme.text.primary}
-            wrap="truncate"
-          >
-            {getExtensionDisplayName(extension, getCurrentLanguage())}
-          </Text>
-        </Box>
-        <Box width={maxVersionWidth + 8} flexShrink={0}>
-          <Text color={theme.text.secondary}> v{extension.version}</Text>
-        </Box>
-        <Box width={maxStatusWidth + 8} flexShrink={0}>
-          <Text color={activeColor}>({activeString})</Text>
-        </Box>
-        {stateText && <Text color={stateColor}>[{stateText}]</Text>}
+        {descLines.length > 0 && (
+          <Box paddingLeft={2} flexDirection="column">
+            {descLines.map((line, i) => (
+              <Text key={i} color={theme.text.secondary}>{line}</Text>
+            ))}
+          </Box>
+        )}
       </Box>
     );
   };
