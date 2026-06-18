@@ -110,11 +110,9 @@ describe('markdownToPlainText', () => {
     );
   });
 
-  it('converts image syntax (link regex fires before image regex)', () => {
-    // In the current implementation, the link regex fires before the image regex,
-    // so `![alt](url)` becomes `!alt (url)` rather than `[alt]`
+  it('converts image syntax to alt text', () => {
     const result = markdownToPlainText('![alt](https://img.png)');
-    expect(result).toBe('!alt (https://img.png)');
+    expect(result).toBe('[alt]');
   });
 
   it('strips blockquote markers', () => {
