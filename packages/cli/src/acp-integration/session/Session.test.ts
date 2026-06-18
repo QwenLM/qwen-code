@@ -5103,22 +5103,20 @@ describe('Session', () => {
         isOutputMarkdown: true,
       });
 
-      const parts = await (session as unknown as ToolCallInternals).runToolCalls(
-        new AbortController().signal,
-        'prompt-dup',
-        [
-          {
-            id: 'dup_id_0001',
-            name: 'read_file',
-            args: { file_path: 'a.ts' },
-          },
-          {
-            id: 'dup_id_0001',
-            name: 'read_file',
-            args: { file_path: 'b.ts' },
-          },
-        ],
-      );
+      const parts = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-dup', [
+        {
+          id: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+        {
+          id: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+        },
+      ]);
 
       expect(execute).toHaveBeenCalledOnce();
       expect(parts.map((part) => part.functionResponse?.id)).toEqual([
@@ -5148,22 +5146,20 @@ describe('Session', () => {
         isOutputMarkdown: true,
       });
 
-      const parts = await (session as unknown as ToolCallInternals).runToolCalls(
-        new AbortController().signal,
-        'prompt-empty',
-        [
-          {
-            id: '',
-            name: 'read_file',
-            args: { file_path: 'a.ts' },
-          },
-          {
-            id: '',
-            name: 'read_file',
-            args: { file_path: 'b.ts' },
-          },
-        ],
-      );
+      const parts = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-empty', [
+        {
+          id: '',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+        {
+          id: '',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+        },
+      ]);
 
       expect(execute).toHaveBeenCalledTimes(2);
       expect(parts).toHaveLength(2);
@@ -5352,6 +5348,23 @@ describe('Session', () => {
           ([method]) => method === 'qwen/notify/session/prompt-suggestion',
         ),
       ).toBeUndefined();
+    });
+
+    it('emits when the setting is unset (on by default)', async () => {
+      // Regression for #5145 review: the schema default isn't applied by
+      // mergeSettings, so an unset value must be treated as enabled — only an
+      // explicit `false` opts out.
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {};
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(generateMock).toHaveBeenCalled();
+      });
     });
 
     it('does not emit in PLAN approval mode', async () => {

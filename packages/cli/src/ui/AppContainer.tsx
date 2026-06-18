@@ -2103,9 +2103,11 @@ export const AppContainer = (props: AppContainerProps) => {
     geminiClient,
   ]);
 
-  // Generate prompt suggestions when streaming completes
+  // Generate prompt suggestions when streaming completes. Enabled by default:
+  // `mergeSettings` doesn't apply the schema `default: true`, so the runtime
+  // gate must treat an unset value as enabled. Only an explicit `false` opts out.
   const followupSuggestionsEnabled =
-    settings.merged.ui?.enableFollowupSuggestions === true;
+    settings.merged.ui?.enableFollowupSuggestions !== false;
 
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime

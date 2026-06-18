@@ -906,7 +906,10 @@ export class Session implements SessionContext {
    */
   #maybeEmitFollowupSuggestion(result: PromptResponse): void {
     if (result.stopReason !== 'end_turn') return;
-    if (this.settings.merged.ui?.enableFollowupSuggestions !== true) return;
+    // Enabled by default — only an explicit `false` opts out. The schema
+    // `default: true` isn't applied at runtime by `mergeSettings`, so an unset
+    // value must be treated as enabled here.
+    if (this.settings.merged.ui?.enableFollowupSuggestions === false) return;
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) return;
 
     const chat = this.config.getGeminiClient()?.getChat();
