@@ -5,6 +5,16 @@
   align-items: baseline;
 }
 
+/*
+ * Collapsed turn: tighten the gap below the prompt+toggle seam so the fold
+ * summary sits snug against the final answer rather than carrying a full
+ * inter-message gap. Scoped to the collapsed state — an expanded turn keeps the
+ * normal 12px down to its first revealed step.
+ */
+.message.collapsedHead {
+  margin-bottom: 2px;
+}
+
 .prefix {
   color: var(--user-color);
   font-weight: 700;
@@ -12,9 +22,59 @@
 }
 
 .body {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--msg-body-color);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/*
+ * Per-turn fold seam: its own line below the prompt text, clear of the hover
+ * timestamp pinned to the row's top-right. Only the chevron button toggles the
+ * turn; the trailing summary is inert text. `fit-content` keeps the row hugging
+ * its content rather than spanning the width.
+ */
+.collapseRow {
+  display: flex;
+  align-items: baseline;
+  width: fit-content;
+  margin-top: 5px;
+  /* Outdents to align with .body start: compensates for PromptChevron width (0.6em) + .message gap (8px). */
+  margin-left: calc(-0.6em - 8px);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+/*
+ * The expand/collapse control: the chevron plus the step count, together, so
+ * the click target is comfortably sized (not a lone glyph). Only this toggles
+ * the turn — the trailing metrics are inert.
+ */
+.collapseToggle {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-dimmed);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.collapseToggle:hover {
+  color: var(--text-secondary);
+}
+
+/*
+ * Duration · tokens. Inert (no fold affordance) and identical collapsed vs
+ * expanded, so toggling never reflows the row. Carries its own leading "·"
+ * separator after the toggle.
+ */
+.collapseMeta {
+  color: var(--text-dimmed);
+  white-space: nowrap;
+  cursor: default;
 }
 
 .images {

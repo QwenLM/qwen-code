@@ -36,6 +36,7 @@ import {
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
@@ -89,6 +90,7 @@ import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
@@ -149,6 +151,7 @@ import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaul
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
   clearRuntimeStatus,
   writeRuntimeStatus,
@@ -175,6 +178,8 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
+
+const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
 import {
   ModelsConfig,
@@ -1122,6 +1127,7 @@ export class Config {
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  private readonly workflowRunRegistry = new WorkflowRunRegistry();
   // Field initializer runs once on the parent Config; child Configs
   // built via Object.create(parent) intentionally do NOT pick this up
   // — see getFileReadCache() for the per-instance lazy initialization
@@ -2141,6 +2147,33 @@ export class Config {
     );
   }
 
+  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+    const contextWindowSize =
+      this.getContentGeneratorConfig()?.contextWindowSize ??
+      this.modelsConfig.getGenerationConfig().contextWindowSize ??
+      tokenLimit(this.getModel(), 'input');
+    if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
+      return undefined;
+    }
+
+    const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
+    const thresholdTokens = Math.floor(
+      contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
+    );
+    if (estimatedTokens <= thresholdTokens) {
+      return undefined;
+    }
+
+    return (
+      `Warning: Loaded QWEN.md/context instructions use about ` +
+      `${estimatedTokens.toLocaleString()} tokens, more than ` +
+      `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
+      `model's ${contextWindowSize.toLocaleString()} token context window. ` +
+      `Consider trimming long always-loaded context or moving details into ` +
+      `on-demand files.`
+    );
+  }
+
   private getMemoryDiscoveryDirectories(): string[] {
     if (!this.shouldLoadMemoryFromIncludeDirectories()) {
       return [];
@@ -2295,7 +2328,12 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    return this.warnings;
+    const memoryContextWarning = this.buildMemoryContextWarning(
+      this.getUserMemory(),
+    );
+    return memoryContextWarning
+      ? [...this.warnings, memoryContextWarning]
+      : this.warnings;
   }
 
   getDebugLogger(): DebugLogger {
@@ -4460,6 +4498,10 @@ export class Config {
 
   getBackgroundShellRegistry(): BackgroundShellRegistry {
     return this.backgroundShellRegistry;
+  }
+
+  getWorkflowRunRegistry(): WorkflowRunRegistry {
+    return this.workflowRunRegistry;
   }
 
   /**

@@ -48,7 +48,7 @@
 
 .thinkingBody ul,
 .thinkingBody ol {
-  padding-left: 18px;
+  padding-left: 24px;
 }
 
 .thinkingBody pre {
@@ -66,24 +66,30 @@
   -webkit-line-clamp: 5;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  white-space: pre-wrap;
-  word-break: break-word;
+  padding-right: 18px;
+  line-height: inherit;
 }
 
-/* Streaming variant: same 5-line window, but scrolled to the tail via JS
-   so the newest thinking stays in view while it streams. */
 .thinkingPreviewTail {
+  display: block;
   max-height: calc(5 * 1.5em);
-  overflow: hidden;
-  white-space: pre-wrap;
-  word-break: break-word;
+  overflow-y: hidden;
+}
+
+.thinkingPreview > [data-markdown-source='thinking'] {
+  font: inherit;
+  line-height: inherit;
+}
+
+.thinkingPreview > [data-markdown-source='thinking'] > :first-child {
+  margin-top: 0;
 }
 
 .expandToggle {
   display: block;
   background: none;
   border: none;
-  color: color-mix(in srgb, var(--text-dimmed) 60%, transparent);
+  color: color-mix(in srgb, var(--text-dimmed) 72%, transparent);
   font-size: 12px;
   cursor: pointer;
   padding: 0 4px;
@@ -97,6 +103,41 @@
   bottom: 2px;
   background: var(--bg-primary);
   margin: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.thinkingPreviewOverflow::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 16px;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--bg-primary) 70%, transparent)
+  );
+  opacity: 0.45;
+}
+
+.thinkingPreviewWrap:hover .expandToggle,
+.thinkingPreviewWrap .expandToggle:focus-visible,
+.thinkingExpandedWrap:hover .expandToggle,
+.thinkingExpandedWrap .expandToggle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .thinkingPreviewWrap .expandToggle,
+  .thinkingExpandedWrap .expandToggle {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .expandToggle:hover {
@@ -120,4 +161,5 @@
   font-size: 14px;
   line-height: 1.6;
   color: var(--text-primary);
+  margin: 0;
 }

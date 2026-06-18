@@ -1113,6 +1113,16 @@ export interface DaemonSessionBtwResult {
   answer: string | null;
 }
 
+/**
+ * Result body of `POST /session/:id/mid-turn-message`. `accepted` is `true`
+ * when the message was queued for the running turn (the ACP child drains it
+ * between tool batches); `false` when the session was idle, in which case the
+ * caller should send the message as a normal next-turn prompt instead.
+ */
+export interface DaemonMidTurnMessageResult {
+  accepted: boolean;
+}
+
 export interface DaemonShellCommandResult {
   exitCode: number | null;
   output: string;

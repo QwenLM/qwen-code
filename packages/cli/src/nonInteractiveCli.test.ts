@@ -87,6 +87,7 @@ describe('runNonInteractive', () => {
     setNotificationCallback: ReturnType<typeof vi.fn>;
     setRegisterCallback: ReturnType<typeof vi.fn>;
     getRunning: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
   };
   let mockCoreExecuteToolCall: Mock;
@@ -146,6 +147,7 @@ describe('runNonInteractive', () => {
       setNotificationCallback: vi.fn(),
       setRegisterCallback: vi.fn(),
       getRunning: vi.fn().mockReturnValue([]),
+      get: vi.fn().mockReturnValue({ status: 'running' }),
       abortAll: vi.fn(),
     };
 

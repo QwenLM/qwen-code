@@ -152,7 +152,10 @@ describe('daemon UI normalizer and transcript reducer', () => {
       },
     });
 
-    expect(events).toMatchObject([{ type: 'assistant.text.delta' }]);
+    expect(events).toMatchObject([
+      { type: 'assistant.text.delta' },
+      { type: 'assistant.usage', usage: { inputTokens: 0, outputTokens: 1 } },
+    ]);
 
     let state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
@@ -175,6 +178,141 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       { kind: 'assistant', text: 'done', streaming: false },
     ]);
+  });
+
+  it('emits assistant.usage from an empty-text usage chunk (no text delta)', () => {
+    const events = normalizeDaemonEvent({
+      id: 9,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage: { inputTokens: 30, outputTokens: 12 } },
+        },
+      },
+    });
+
+    // The blank text would otherwise be dropped; the usage must still survive.
+    expect(events).toMatchObject([
+      { type: 'assistant.usage', usage: { inputTokens: 30, outputTokens: 12 } },
+    ]);
+  });
+
+  it('emits no usage event when the chunk carries no _meta.usage', () => {
+    const events = normalizeDaemonEvent({
+      id: 9,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    });
+
+    expect(events).toMatchObject([{ type: 'assistant.text.delta' }]);
+    expect(events).toHaveLength(1);
+  });
+
+  it('folds per-round usage onto the active assistant block, accumulating', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'answer' },
+        { type: 'assistant.usage', usage: { inputTokens: 100, outputTokens: 20 } },
+        { type: 'assistant.usage', usage: { inputTokens: 5, outputTokens: 3 } },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'assistant',
+        text: 'answer',
+        usage: { inputTokens: 105, outputTokens: 23 },
+      },
+    ]);
+  });
+
+  it('folds sub-agent usage (parentToolCallId) into the parent turn total', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'answer' },
+        // The parent's own round.
+        { type: 'assistant.usage', usage: { inputTokens: 100, outputTokens: 20 } },
+        // A round from a spawned sub-agent — part of the turn's real cost.
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 5000, outputTokens: 800 },
+          parentToolCallId: 'sub-1',
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'assistant',
+        text: 'answer',
+        usage: { inputTokens: 5100, outputTokens: 820 },
+      },
+    ]);
+  });
+
+  it('carries and accumulates cached-read tokens', () => {
+    const events = normalizeDaemonEvent({
+      id: 11,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            usage: { inputTokens: 30, outputTokens: 12, cachedReadTokens: 24 },
+          },
+        },
+      },
+    });
+    expect(events).toMatchObject([
+      {
+        type: 'assistant.usage',
+        usage: { inputTokens: 30, outputTokens: 12, cachedTokens: 24 },
+      },
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'a' },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 30, outputTokens: 12, cachedTokens: 24 },
+        },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 10, outputTokens: 3, cachedTokens: 8 },
+        },
+      ],
+      { now: 2 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      usage: { inputTokens: 40, outputTokens: 15, cachedTokens: 32 },
+    });
+  });
+
+  it('drops usage with no active assistant block rather than minting one', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [{ type: 'assistant.usage', usage: { inputTokens: 9, outputTokens: 9 } }],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toHaveLength(0);
   });
 
   it('finalizes scalar thought blocks when the assistant turn finishes', () => {
