@@ -213,17 +213,20 @@ export class ImageTokenizer {
     const format = buffer.subarray(12, 16).toString('ascii');
 
     if (format === 'VP8 ') {
+      // Lossy: 14-bit width/height at bytes 26-27 and 28-29 (little-endian)
       const width = buffer.readUInt16LE(26) & 0x3fff;
       const height = buffer.readUInt16LE(28) & 0x3fff;
       return { width, height };
     } else if (format === 'VP8L') {
+      // Lossless: 14-bit (width-1) then (height-1) packed from byte 21 (little-endian)
       const bits = buffer.readUInt32LE(21);
       const width = (bits & 0x3fff) + 1;
       const height = ((bits >> 14) & 0x3fff) + 1;
       return { width, height };
     } else if (format === 'VP8X') {
-      const width = (buffer.readUInt32LE(24) & 0xffffff) + 1;
-      const height = (buffer.readUInt32LE(26) & 0xffffff) + 1;
+      // Extended: 24-bit (canvas width-1) at bytes 24-26 and (height-1) at bytes 27-29 (little-endian)
+      const width = buffer.readUIntLE(24, 3) + 1;
+      const height = buffer.readUIntLE(27, 3) + 1;
       return { width, height };
     }
 
