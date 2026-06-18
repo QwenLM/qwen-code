@@ -10503,6 +10503,48 @@ describe('activePromptCount and lastActivityAt', () => {
     await bridge.shutdown();
   });
 
+  it('activePromptCount does not go negative when killSession cancels an active prompt', async () => {
+    let rejectPrompt: ((error?: unknown) => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: () =>
+        new Promise<PromptResponse>((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      cancelImpl: () => {
+        rejectPrompt?.(new Error('cancelled'));
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const promptResult = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'test' }],
+      })
+      .then(
+        () => ({ ok: true as const }),
+        (error) => ({ ok: false as const, error }),
+      );
+
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+    expect(bridge.activePromptCount).toBe(1);
+
+    await bridge.killSession(session.sessionId);
+    expect(bridge.activePromptCount).toBe(0);
+    expect(bridge.sessionCount).toBe(0);
+
+    const result = await promptResult;
+    expect(result.ok).toBe(false);
+    expect(bridge.activePromptCount).toBe(0);
+
+    await bridge.shutdown();
+  });
+
   it('activePromptCount returns to 0 when channel crashes during a hung prompt', async () => {
     const handle = makeChannel({
       promptImpl: () => new Promise<PromptResponse>(() => {}),
@@ -10537,6 +10579,59 @@ describe('activePromptCount and lastActivityAt', () => {
     const result = await promptResult;
     expect(result.ok).toBe(false);
     expect(bridge.activePromptCount).toBe(0);
+
+    await bridge.shutdown();
+  });
+
+  it('queued prompt rejects when the channel crashes before it starts', async () => {
+    const handle = makeChannel({
+      promptImpl: () => new Promise<PromptResponse>(() => {}),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const promptA = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'prompt A' }],
+      })
+      .then(
+        () => ({ ok: true as const }),
+        (error) => ({ ok: false as const, error }),
+      );
+
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    const promptB = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'prompt B' }],
+      })
+      .then(
+        () => ({ ok: true as const }),
+        (error) => ({ ok: false as const, error }),
+      );
+
+    handle.crash();
+
+    const [resultA, resultB] = await Promise.all([promptA, promptB]);
+
+    expect(handle.agent.promptCalls).toHaveLength(1);
+    expect(resultA.ok).toBe(false);
+    expect(resultB.ok).toBe(false);
+    if (resultB.ok) {
+      throw new Error('queued prompt unexpectedly resolved');
+    }
+    expect(resultB.error).toBeInstanceOf(SessionNotFoundError);
+
+    await vi.waitFor(() => {
+      expect(bridge.activePromptCount).toBe(0);
+      expect(bridge.sessionCount).toBe(0);
+    });
 
     await bridge.shutdown();
   });
