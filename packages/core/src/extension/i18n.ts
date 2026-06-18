@@ -117,5 +117,6 @@ export function getExtensionDescription(
 ): string | undefined {
   const raw = ext.config?._rawLocalizable?.description;
   if (raw) return resolveLocalizableString(raw, locale);
-  return ext.config?.description;
+  const desc = ext.config?.description;
+  return typeof desc === 'string' ? desc : undefined;
 }
