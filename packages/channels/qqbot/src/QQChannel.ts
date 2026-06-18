@@ -59,8 +59,14 @@ export function isValidChatId(id: string): boolean {
  * markdown in msg_type=0) would strip formatting, so we bias toward markdown.
  */
 export function hasMarkdownSyntax(text: string): boolean {
-  return /^#{1,6}\s|`{3}|\*\*|__|~~|`[^`]+`|\[[^\]]+\]\([^)]+\)|^[-*+]\s|^\d+\.\s/m.test(
-    text,
+  return (
+    /^#{1,6}\s/m.test(text) ||
+    text.includes('```') ||
+    /\*\*|__|~~/.test(text) ||
+    /`[^`]+`/.test(text) ||
+    /\[[^\]]+\]\([^)]+\)/.test(text) ||
+    /^[-*+]\s/m.test(text) ||
+    /^\d+\.\s/m.test(text)
   );
 }
 
