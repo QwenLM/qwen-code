@@ -26,12 +26,15 @@ import type {
   AutoModeDecision,
   AutoModeOutcome,
   GoalTerminalEvent,
+  ToolCallRequestInfo,
+  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
   convertToFunctionResponse,
+  createDuplicateProviderToolCallResponse,
   createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
@@ -95,6 +98,7 @@ import {
   setGoalTerminalObserver,
   sessionIdContext,
   dedupeToolCallsById,
+  getProviderToolCallId,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -3189,15 +3193,101 @@ export class Session implements SessionContext {
     functionCalls: FunctionCall[],
   ): Promise<RunToolResult> {
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
-    type Batch = { concurrent: boolean; calls: FunctionCall[] };
+    type ExecutableBatch = {
+      kind: 'execute';
+      concurrent: boolean;
+      calls: FunctionCall[];
+    };
+    type DuplicateBatch = {
+      kind: 'duplicate';
+      request: ToolCallRequestInfo;
+      response: ToolCallResponseInfo;
+    };
+    type Batch = ExecutableBatch | DuplicateBatch;
     const batches: Batch[] = [];
+    const handledProviderToolCallIds = new Set(
+      this.#getCurrentChat().getHistoryFunctionResponseIds(),
+    );
+
+    const pushDuplicateBatch = (request: ToolCallRequestInfo): void => {
+      const response = createDuplicateProviderToolCallResponse(request);
+      debugLogger.debug(
+        `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +
+          `${request.providerCallId} (tool: ${request.name})`,
+      );
+      batches.push({ kind: 'duplicate', request, response });
+    };
+
+    const emitDuplicateBatch = async (batch: DuplicateBatch): Promise<void> => {
+      const { request, response } = batch;
+      if (request.name === ToolNames.TODO_WRITE) {
+        const provenance = ToolCallEmitter.resolveToolProvenance(request.name);
+        await this.sendUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: response.callId,
+          status: 'failed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: response.error?.message ?? String(response.resultDisplay),
+              },
+            },
+          ],
+          rawOutput: response.resultDisplay,
+          _meta: {
+            toolName: request.name,
+            provenance: provenance.provenance,
+            ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+          },
+        });
+      } else {
+        await this.toolCallEmitter.emitResult({
+          callId: response.callId,
+          toolName: request.name,
+          args: request.args,
+          message: response.responseParts,
+          resultDisplay: response.resultDisplay,
+          error: response.error,
+          success: false,
+        });
+      }
+      this.config
+        .getChatRecordingService()
+        ?.recordToolResult(response.responseParts, {
+          callId: response.callId,
+          status: 'error',
+          resultDisplay: response.resultDisplay,
+          error: response.error,
+          errorType: response.errorType,
+        });
+    };
+
     for (const fc of dedupedFunctionCalls) {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      if (providerCallId) {
+        if (handledProviderToolCallIds.has(providerCallId)) {
+          const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+          pushDuplicateBatch({
+            callId,
+            providerCallId,
+            name: fc.name ?? 'unknown_tool',
+            args: (fc.args ?? {}) as Record<string, unknown>,
+            isClientInitiated: false,
+            prompt_id: promptId,
+          });
+          continue;
+        }
+        handledProviderToolCallIds.add(providerCallId);
+      }
+
       const isAgent = fc.name === ToolNames.AGENT;
       const last = batches[batches.length - 1];
-      if (isAgent && last?.concurrent) {
+      if (isAgent && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
       } else {
-        batches.push({ concurrent: isAgent, calls: [fc] });
+        batches.push({ kind: 'execute', concurrent: isAgent, calls: [fc] });
       }
     }
 
@@ -3291,6 +3381,11 @@ export class Session implements SessionContext {
 
     const parts: Part[] = [];
     for (const batch of batches) {
+      if (batch.kind === 'duplicate') {
+        await emitDuplicateBatch(batch);
+        parts.push(...batch.response.responseParts);
+        continue;
+      }
       if (batch.concurrent && batch.calls.length > 1) {
         const batchAbortController = new AbortController();
         let batchStopAfterUserQuestionCancel = false;

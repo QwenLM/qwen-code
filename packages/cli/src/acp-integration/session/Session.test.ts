@@ -274,6 +274,7 @@ describe('Session', () => {
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
       getHistoryShallow: vi.fn().mockReturnValue([]),
+      getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set<string>()),
       getLastModelMessageText: vi.fn().mockReturnValue(''),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
@@ -7383,6 +7384,221 @@ describe('Session', () => {
       ]);
       expect(result.stopAfterUserQuestionCancel).toBe(false);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledOnce();
+    });
+
+    it('suppresses duplicate provider functionCall ids already answered in history', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'should not run',
+        returnDisplay: 'should not run',
+      });
+      const build = vi.fn().mockReturnValue({
+        params: { file_path: 'b.ts' },
+        execute,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue('Read file'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read File',
+        description: 'Read file',
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      vi.mocked(mockChat.getHistoryFunctionResponseIds).mockReturnValue(
+        new Set(['shell_1']),
+      );
+      const [duplicatePart] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'shell_1',
+              name: 'read_file',
+              args: { file_path: 'b.ts' },
+            },
+          },
+        ],
+        new Set(['shell_1']),
+        new Set<string>(),
+      );
+      const duplicateCall = duplicatePart.functionCall!;
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-history-dup', [
+        duplicateCall,
+      ]);
+
+      expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
+      expect(build).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      const { parts } = result;
+      expect(parts).toHaveLength(1);
+      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(parts[0].functionResponse?.id).toBe('shell_1__qwen_dup_2');
+      expect(parts[0].functionResponse?.response).toEqual({
+        error: expect.stringContaining(
+          'Duplicate provider tool call id "shell_1"',
+        ),
+      });
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        parts,
+        expect.objectContaining({
+          callId: 'shell_1__qwen_dup_2',
+          status: 'error',
+          resultDisplay: expect.stringContaining(
+            'Duplicate provider tool call id "shell_1"',
+          ),
+          error: expect.any(Error),
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'shell_1__qwen_dup_2',
+            status: 'failed',
+          }),
+        }),
+      );
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'shell_1__qwen_dup_2',
+          }),
+        }),
+      );
+    });
+
+    it('suppresses duplicate TodoWrite calls without emitting plan updates', async () => {
+      vi.mocked(mockChat.getHistoryFunctionResponseIds).mockReturnValue(
+        new Set(['todo_1']),
+      );
+      const [duplicatePart] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'todo_1',
+              name: core.ToolNames.TODO_WRITE,
+              args: {
+                todos: [
+                  {
+                    id: 'task-1',
+                    content: 'Do not replay this',
+                    status: 'pending',
+                  },
+                ],
+              },
+            },
+          },
+        ],
+        new Set(['todo_1']),
+        new Set<string>(),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-todo-dup', [
+        duplicatePart.functionCall!,
+      ]);
+
+      expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
+      const { parts } = result;
+      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(parts[0].functionResponse?.id).toBe('todo_1__qwen_dup_2');
+      expect(parts[0].functionResponse?.response).toEqual({
+        error: expect.stringContaining(
+          'Duplicate provider tool call id "todo_1"',
+        ),
+      });
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'todo_1__qwen_dup_2',
+            status: 'failed',
+          }),
+        }),
+      );
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'plan',
+          }),
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        parts,
+        expect.objectContaining({
+          callId: 'todo_1__qwen_dup_2',
+          status: 'error',
+        }),
+      );
+    });
+
+    it('keeps duplicate synthetic responses ordered with executable calls', async () => {
+      const execute = vi.fn(async () => ({
+        llmContent: 'ran',
+        returnDisplay: 'ran',
+      }));
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read File',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { file_path: 'x.ts' },
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      const historyIds = new Set(['dup_mid']);
+      vi.mocked(mockChat.getHistoryFunctionResponseIds).mockReturnValue(
+        historyIds,
+      );
+      const [duplicatePart] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'dup_mid',
+              name: 'read_file',
+              args: { file_path: 'b.ts' },
+            },
+          },
+        ],
+        new Set(['dup_mid']),
+        new Set<string>(),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-mixed-dup', [
+        { id: 'call_a', name: 'read_file', args: { file_path: 'a.ts' } },
+        duplicatePart.functionCall!,
+        { id: 'call_c', name: 'read_file', args: { file_path: 'c.ts' } },
+      ]);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      const { parts } = result;
+      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(parts.map((part) => part.functionResponse?.id)).toEqual([
+        'call_a',
+        'dup_mid__qwen_dup_2',
+        'call_c',
+      ]);
+      expect(parts[1].functionResponse?.response).toEqual({
+        error: expect.stringContaining(
+          'Duplicate provider tool call id "dup_mid"',
+        ),
+      });
+      expect(historyIds).toEqual(new Set(['dup_mid']));
     });
 
     it('does not dedupe function calls with empty ids in one batch', async () => {

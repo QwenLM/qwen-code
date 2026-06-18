@@ -56,6 +56,7 @@ import {
   activeGoalEquals,
   setActiveGoal,
   clearActiveGoal,
+  createDuplicateProviderToolCallResponse,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -102,6 +103,12 @@ const debugLogger = createDebugLogger('GEMINI_STREAM');
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
+
+interface PendingDuplicateToolResponses {
+  executableCallIds: Set<string>;
+  promptId: string | undefined;
+  responseParts: Part[];
+}
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -424,6 +431,14 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
+  const pendingDuplicateToolResponsesRef = useRef<
+    PendingDuplicateToolResponses[]
+  >([]);
+  const immediateDuplicateToolResponsesRef = useRef<{
+    promptId: string | undefined;
+    responseParts: Part[];
+  } | null>(null);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
   // Uses a ref to avoid re-renders on every text_delta.
@@ -1708,7 +1723,59 @@ export const useGeminiStream = (
       }
       dualOutput?.finalizeAssistantMessage();
       if (toolCallRequests.length > 0 && !signal.aborted) {
-        scheduleToolCalls(toolCallRequests, signal);
+        const executableToolCallRequests: ToolCallRequestInfo[] = [];
+        const duplicateResponseParts: Part[] = [];
+        let duplicatePromptId: string | undefined;
+        const historyCallIdsWithResponse: Set<string> = geminiClient
+          ? geminiClient.getHistoryFunctionResponseIds()
+          : new Set<string>();
+
+        for (const request of toolCallRequests) {
+          const providerCallId = request.providerCallId;
+          if (!providerCallId) {
+            executableToolCallRequests.push(request);
+            continue;
+          }
+
+          if (
+            handledProviderToolCallIdsRef.current.has(providerCallId) ||
+            historyCallIdsWithResponse.has(providerCallId)
+          ) {
+            const response = createDuplicateProviderToolCallResponse(request);
+            debugLogger.debug(
+              `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
+            );
+            dualOutput?.emitToolResult(request, response);
+            duplicateResponseParts.push(...response.responseParts);
+            duplicatePromptId ??= request.prompt_id;
+            continue;
+          }
+
+          handledProviderToolCallIdsRef.current.add(providerCallId);
+          executableToolCallRequests.push(request);
+        }
+
+        if (duplicateResponseParts.length > 0) {
+          if (executableToolCallRequests.length > 0) {
+            pendingDuplicateToolResponsesRef.current.push({
+              executableCallIds: new Set(
+                executableToolCallRequests.map((request) => request.callId),
+              ),
+              promptId:
+                duplicatePromptId ?? executableToolCallRequests[0]?.prompt_id,
+              responseParts: duplicateResponseParts,
+            });
+          } else {
+            immediateDuplicateToolResponsesRef.current = {
+              promptId: duplicatePromptId,
+              responseParts: duplicateResponseParts,
+            };
+          }
+        }
+
+        if (executableToolCallRequests.length > 0) {
+          scheduleToolCalls(executableToolCallRequests, signal);
+        }
       }
       return StreamProcessingStatus.Completed;
     },
@@ -1718,6 +1785,7 @@ export const useGeminiStream = (
       handleUserCancelledEvent,
       handleErrorEvent,
       scheduleToolCalls,
+      geminiClient,
       handleChatCompressionEvent,
       handleFinishedEvent,
       handleMaxSessionTurnsEvent,
@@ -1789,6 +1857,9 @@ export const useGeminiStream = (
       ) {
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
+        handledProviderToolCallIdsRef.current.clear();
+        pendingDuplicateToolResponsesRef.current = [];
+        immediateDuplicateToolResponsesRef.current = null;
       }
 
       const userMessageTimestamp = Date.now();
@@ -1958,6 +2029,17 @@ export const useGeminiStream = (
           if (pendingHistoryItemRef.current) {
             addItem(pendingHistoryItemRef.current, userMessageTimestamp);
             setPendingHistoryItem(null);
+          }
+
+          const immediateDuplicateToolResponses =
+            immediateDuplicateToolResponsesRef.current;
+          if (immediateDuplicateToolResponses) {
+            immediateDuplicateToolResponsesRef.current = null;
+            await submitQuery(
+              immediateDuplicateToolResponses.responseParts,
+              SendMessageType.ToolResult,
+              immediateDuplicateToolResponses.promptId,
+            );
           }
           // Only clear auto-retry countdown errors (those with an active timer).
           // Do NOT clear static error+hint from handleErrorEvent — those should
@@ -2279,6 +2361,26 @@ export const useGeminiStream = (
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      const completedCallIds = new Set(
+        completedAndReadyToSubmitTools.map(
+          (toolCall) => toolCall.request.callId,
+        ),
+      );
+      const readyDuplicateBatches: PendingDuplicateToolResponses[] = [];
+      pendingDuplicateToolResponsesRef.current =
+        pendingDuplicateToolResponsesRef.current.filter((batch) => {
+          const isReady = [...batch.executableCallIds].some((callId) =>
+            completedCallIds.has(callId),
+          );
+          if (isReady) {
+            readyDuplicateBatches.push(batch);
+          }
+          return !isReady;
+        });
+      const pendingDuplicateResponseParts = readyDuplicateBatches.flatMap(
+        (batch) => batch.responseParts,
+      );
+      const pendingDuplicatePromptId = readyDuplicateBatches[0]?.promptId;
 
       for (const toolCall of geminiTools) {
         geminiClient?.recordCompletedToolCall(
@@ -2287,7 +2389,10 @@ export const useGeminiStream = (
         );
       }
 
-      if (geminiTools.length === 0) {
+      if (
+        geminiTools.length === 0 &&
+        pendingDuplicateResponseParts.length === 0
+      ) {
         return;
       }
 
@@ -2306,7 +2411,7 @@ export const useGeminiStream = (
         (tc) => tc.status === 'cancelled',
       );
 
-      if (allToolsCancelled) {
+      if (allToolsCancelled && pendingDuplicateResponseParts.length === 0) {
         if (geminiClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
@@ -2332,6 +2437,7 @@ export const useGeminiStream = (
       const responsesToSend: Part[] = geminiTools.flatMap(
         (toolCall) => toolCall.response.responseParts,
       );
+      responsesToSend.push(...pendingDuplicateResponseParts);
       const callIdsToMarkAsSubmitted = geminiTools.map(
         (toolCall) => toolCall.request.callId,
       );
@@ -2339,6 +2445,7 @@ export const useGeminiStream = (
       const prompt_ids = geminiTools.map(
         (toolCall) => toolCall.request.prompt_id,
       );
+      const promptId = prompt_ids[0] ?? pendingDuplicatePromptId;
 
       // Persist model override from skill tool results (last one wins).
       // Uses `in` so that undefined (from inherit/no-model skills) clears a
@@ -2585,7 +2692,7 @@ export const useGeminiStream = (
         return;
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
+      submitQuery(responsesToSend, SendMessageType.ToolResult, promptId);
     },
     [
       submitQuery,

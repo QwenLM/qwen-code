@@ -9,7 +9,12 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const DUPLICATE_ID_SUFFIX = '__qwen_dup_';
 const GENERATED_ID_PREFIX = 'call_qwen_';
+const PROVIDER_TOOL_CALL_ID = Symbol('providerToolCallId');
 const debugLogger = createDebugLogger('TOOL_CALL_IDS');
+
+type FunctionCallWithProviderId = FunctionCall & {
+  [PROVIDER_TOOL_CALL_ID]?: string;
+};
 
 function addId(ids: Set<string>, id: string | undefined): void {
   if (id) {
@@ -87,16 +92,30 @@ export function normalizeModelToolCallIds(
     }
     usedIds.add(id);
 
+    const normalizedFunctionCall: FunctionCallWithProviderId = {
+      ...functionCall,
+      id,
+    };
+    if (rawId) {
+      Object.defineProperty(normalizedFunctionCall, PROVIDER_TOOL_CALL_ID, {
+        value: rawId,
+        enumerable: false,
+      });
+    }
+
     normalized.push({
       ...part,
-      functionCall: {
-        ...functionCall,
-        id,
-      },
+      functionCall: normalizedFunctionCall,
     });
   }
 
   return normalized;
+}
+
+export function getProviderToolCallId(
+  functionCall: FunctionCall,
+): string | undefined {
+  return (functionCall as FunctionCallWithProviderId)[PROVIDER_TOOL_CALL_ID];
 }
 
 export function dedupeToolCallsById<T extends Pick<FunctionCall, 'id'>>(
