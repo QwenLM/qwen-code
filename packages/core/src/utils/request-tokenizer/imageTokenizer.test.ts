@@ -241,6 +241,22 @@ describe('ImageTokenizer', () => {
         expect(metadata.height).toBeGreaterThan(0);
       }
     });
+
+    it('should extract dimensions from GIF images', async () => {
+      const buf = Buffer.alloc(10);
+      buf.write('GIF89a', 0, 'ascii');
+      buf.writeUInt16LE(2, 6);
+      buf.writeUInt16LE(3, 8);
+
+      const metadata = await tokenizer.extractImageMetadata(
+        buf.toString('base64'),
+        'image/gif',
+      );
+
+      expect(metadata.width).toBe(2);
+      expect(metadata.height).toBe(3);
+      expect(metadata.mimeType).toBe('image/gif');
+    });
   });
 
   describe('TIFF dimension extraction', () => {
