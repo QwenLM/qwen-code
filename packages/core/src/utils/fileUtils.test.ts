@@ -872,6 +872,31 @@ describe('fileUtils', () => {
       expect(await detectFileType(filePathForDetectTest)).toBe('text');
     });
 
+    it('uses content detection for text-looking .dat files', async () => {
+      mockMimeGetType.mockReturnValueOnce(null);
+      const filePath = path.join(tempRootDir, 'controller.dat');
+      actualNodeFs.writeFileSync(
+        filePath,
+        '<?php\nfunction handleRequest() {\n  return true;\n}\n',
+      );
+      try {
+        expect(await detectFileType(filePath)).toBe('text');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
+    });
+
+    it('still treats binary-looking .dat files as binary', async () => {
+      mockMimeGetType.mockReturnValueOnce(null);
+      const filePath = path.join(tempRootDir, 'payload.dat');
+      actualNodeFs.writeFileSync(filePath, Buffer.from([0x00, 0xff, 0x00]));
+      try {
+        expect(await detectFileType(filePath)).toBe('binary');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
+    });
+
     it('returns text for files with a text/* mime even when the content looks binary (issue #3964 encrypted FS)', async () => {
       // Frank-Shaw-FS reports `.cpp` / `.c` / `.h` source files on
       // Windows encrypted / DRM-protected file systems being
@@ -1118,6 +1143,32 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file');
     });
 
+    it('strips image when preserveUnsupportedImage is true but the vision bridge is disabled', async () => {
+      const fakePngData = Buffer.from('fake png data');
+      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigBridgeDisabled = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+        getVisionBridgeConfig: () => ({ enabled: false }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfigBridgeDisabled,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('Unsupported image file');
+      expect(result.llmContent).toContain('does not support image input');
+      expect(result.returnDisplay).toContain('Skipped image file');
+    });
+
     it('still strips image for agent reads (no preserve flag) even when the bridge is enabled', async () => {
       const fakePngData = Buffer.from('fake png data');
       actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
@@ -1315,6 +1366,19 @@ describe('fileUtils', () => {
         'Cannot display content of binary file',
       );
       expect(result.returnDisplay).toContain('Skipped binary file: app.exe');
+    });
+
+    it('should read text-looking .dat files as text', async () => {
+      const filePath = path.join(tempRootDir, 'legacy-controller.dat');
+      const content = '<?php echo "ok";\n';
+      actualNodeFs.writeFileSync(filePath, content);
+      mockMimeGetType.mockReturnValueOnce(null);
+
+      const result = await processSingleFileContent(filePath, mockConfig);
+
+      expect(result.llmContent).toBe(content);
+      expect(result.returnDisplay).toBe('');
+      expect(result.error).toBeUndefined();
     });
 
     it('should handle path being a directory', async () => {

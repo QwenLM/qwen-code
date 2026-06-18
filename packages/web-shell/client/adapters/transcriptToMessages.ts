@@ -75,9 +75,15 @@ function parseDaemonTodoItemsFromEntries(
  * side has usage, so the message field stays absent rather than a spurious 0/0.
  */
 function mergeAssistantUsage(
-  a: { inputTokens: number; outputTokens: number; cachedTokens?: number } | undefined,
-  b: { inputTokens: number; outputTokens: number; cachedTokens?: number } | undefined,
-): { inputTokens: number; outputTokens: number; cachedTokens?: number } | undefined {
+  a:
+    | { inputTokens: number; outputTokens: number; cachedTokens?: number }
+    | undefined,
+  b:
+    | { inputTokens: number; outputTokens: number; cachedTokens?: number }
+    | undefined,
+):
+  | { inputTokens: number; outputTokens: number; cachedTokens?: number }
+  | undefined {
   if (!a) return b;
   if (!b) return a;
   const cachedTokens = (a.cachedTokens ?? 0) + (b.cachedTokens ?? 0);

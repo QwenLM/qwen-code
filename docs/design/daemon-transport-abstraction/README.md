@@ -66,7 +66,7 @@ One provider, one store, transport is an internal detail. Third parties pass
 
 ```typescript
 interface DaemonTransportFetchOptions {
-  timeout?: number;  // 0 = no timeout. undefined = transport default.
+  timeout?: number; // 0 = no timeout. undefined = transport default.
 }
 
 interface DaemonTransportSubscribeOptions {
@@ -141,11 +141,11 @@ class DaemonTransportClosedError extends Error {}
 
 `subscribeEvents` has fundamentally different wire semantics per transport:
 
-| Transport | Wire mechanism |
-|-----------|---------------|
-| REST | `GET /session/:id/events` → SSE → `parseSseStream` → `DaemonEvent` |
-| ACP HTTP | `GET /acp` (session-scoped SSE) → JSON-RPC notification unwrap |
-| ACP WS | Demux notifications from shared socket by sessionId |
+| Transport | Wire mechanism                                                     |
+| --------- | ------------------------------------------------------------------ |
+| REST      | `GET /session/:id/events` → SSE → `parseSseStream` → `DaemonEvent` |
+| ACP HTTP  | `GET /acp` (session-scoped SSE) → JSON-RPC notification unwrap     |
+| ACP WS    | Demux notifications from shared socket by sessionId                |
 
 Forcing these through a fetch-shaped hole requires SSE re-encoding/decoding
 (WS → fake SSE text → `parseSseStream` → DaemonEvent) — wasteful and fragile.
@@ -156,6 +156,7 @@ semantics regardless of transport.
 ### 2.3 Why fetch-level, not method-dispatch
 
 DaemonClient's 67 methods contain per-method HTTP branching:
+
 - `prompt()`: 202 vs 200 status check
 - `deleteWorkspaceAgent()`: 204 vs 404 with body inspection
 - `respondToPermission()`: 200 vs 404 for race detection
@@ -170,13 +171,14 @@ all this logic in every transport. Fetch-level keeps DaemonClient unchanged.
 export interface DaemonClientOptions {
   baseUrl: string;
   token?: string;
-  fetch?: typeof globalThis.fetch;    // Kept
-  fetchTimeoutMs?: number;            // Kept
-  transport?: DaemonTransport;        // NEW — optional override
+  fetch?: typeof globalThis.fetch; // Kept
+  fetchTimeoutMs?: number; // Kept
+  transport?: DaemonTransport; // NEW — optional override
 }
 ```
 
 Internal changes:
+
 - Constructor: `this.transport = opts.transport ?? new RestSseTransport(...)`
 - `fetchWithTimeout`: delegate to `this.transport.fetch(url, init, { timeout })`
 - 6 direct `this._fetch` sites (prompt, promptNonBlocking, recapSession,
@@ -198,7 +200,7 @@ bypassing the provider:
 interface DaemonWorkspaceProviderProps {
   baseUrl: string;
   token?: string;
-  transport?: DaemonTransport;  // NEW — forwarded to DaemonClient
+  transport?: DaemonTransport; // NEW — forwarded to DaemonClient
   // ...existing props
 }
 
@@ -207,8 +209,9 @@ interface DaemonWorkspaceProviderProps {
 ```
 
 When `transport` is provided, the provider passes it to `DaemonClient`:
+
 ```typescript
-new DaemonClient({ baseUrl, token, transport: props.transport })
+new DaemonClient({ baseUrl, token, transport: props.transport });
 ```
 
 When omitted: current behavior (REST+SSE). ~5 lines of provider change.
@@ -221,8 +224,8 @@ Wraps `globalThis.fetch` + extracts current SSE logic from
 ```typescript
 class RestSseTransport implements DaemonTransport {
   readonly type = 'rest' as const;
-  readonly supportsReplay = true;  // SSE supports Last-Event-ID
-  readonly connected = true;       // REST is stateless
+  readonly supportsReplay = true; // SSE supports Last-Event-ID
+  readonly connected = true; // REST is stateless
 
   constructor(
     private readonly baseUrl: string,
@@ -230,7 +233,9 @@ class RestSseTransport implements DaemonTransport {
     private readonly _fetch: typeof globalThis.fetch,
   ) {}
 
-  fetch(url, init, opts?) { return this._fetch(url, init); }
+  fetch(url, init, opts?) {
+    return this._fetch(url, init);
+  }
 
   async *subscribeEvents(sessionId, opts) {
     // Current DaemonClient.subscribeEvents logic moved here:
@@ -240,13 +245,14 @@ class RestSseTransport implements DaemonTransport {
     // - fetch → validate content-type → parseSseStream → yield
   }
 
-  dispose() {}  // no-op
+  dispose() {} // no-op
 }
 ```
 
 ### 2.6 ACP transport internals
 
 **AcpWsTransport** (~400-600 lines):
+
 - Lazy-init: first `fetch` call opens WS + sends `initialize`
 - URL→JSON-RPC mapping table: `/session/:id/prompt` → `{method: "session/prompt", params: {sessionId: id, ...body}}`
 - Request multiplexer: `Map<id, {resolve, reject}>` for pending requests
@@ -256,6 +262,7 @@ class RestSseTransport implements DaemonTransport {
 - Synthesizes `Response` objects with correct `.status`/`.json()`/`.text()`
 
 **AcpHttpTransport** (~800-1000 lines):
+
 - Lazy-init: first `fetch` call sends `POST /acp {initialize}`
 - Manages conn-scoped + session-scoped SSE streams internally
 - Same URL→JSON-RPC mapping + request correlation
@@ -281,6 +288,7 @@ const transport = await DaemonTransport.negotiate(baseUrl, token);
 ```
 
 Implementation:
+
 1. `GET /capabilities` → read `transports` array
 2. If `acp-ws` in list → try WS upgrade; on success return `AcpWsTransport`
 3. If WS fails or not in list → try `acp-http`; on success return `AcpHttpTransport`
@@ -314,6 +322,7 @@ The transport does not silently switch protocols — it fails loudly
 (`DaemonTransportClosedError`) and the consumer decides whether to rebuild.
 
 Rationale:
+
 - WS teardown destroys all owned sessions server-side (`registry.delete` →
   `conn.destroy`). A silent switch would hide this data loss.
 - `session/load` re-attaches to the existing bridge session (transcripts
@@ -355,35 +364,35 @@ code is additive and opt-in. `new DaemonClient({ baseUrl, token })` without
 
 ### Verdict: zero breaking changes
 
-| Public API | Change | Breaking? |
-|-----------|--------|:---------:|
-| `new DaemonClient({ baseUrl, token })` | No change | ❌ |
-| `DaemonClientOptions.*` | All kept, `transport` added | ❌ |
-| `DaemonHttpError` | Unchanged | ❌ |
-| `DaemonSessionClient` | Zero changes (delegates to DaemonClient) | ❌ |
-| All type exports (100+) | Unchanged | ❌ |
+| Public API                             | Change                                   | Breaking? |
+| -------------------------------------- | ---------------------------------------- | :-------: |
+| `new DaemonClient({ baseUrl, token })` | No change                                |    ❌     |
+| `DaemonClientOptions.*`                | All kept, `transport` added              |    ❌     |
+| `DaemonHttpError`                      | Unchanged                                |    ❌     |
+| `DaemonSessionClient`                  | Zero changes (delegates to DaemonClient) |    ❌     |
+| All type exports (100+)                | Unchanged                                |    ❌     |
 
 ### Per-consumer impact
 
-| Consumer | Impact |
-|----------|--------|
-| webui (25 files) | Zero code changes |
-| web-shell (4 files) | Zero code changes |
-| vscode-ide-companion (1 file) | Zero code changes |
-| Third-party | Zero for REST; pass `transport` for ACP |
+| Consumer                      | Impact                                  |
+| ----------------------------- | --------------------------------------- |
+| webui (25 files)              | Zero code changes                       |
+| web-shell (4 files)           | Zero code changes                       |
+| vscode-ide-companion (1 file) | Zero code changes                       |
+| Third-party                   | Zero for REST; pass `transport` for ACP |
 
 ---
 
 ## 4. Design decisions
 
-| Decision | Rationale |
-|----------|-----------|
-| `subscribeEvents` on transport, not just `fetch` | SSE re-encoding through fetch is wasteful and fragile |
-| `connected: boolean` on transport | Provider reconnect loop needs to distinguish "transport dead" from "transient 500" |
-| Lazy-init (not explicit `connect()`) | Keeps DaemonClient construction synchronous; default `new RestSseTransport()` needs no init |
-| Auto-detection is one-shot, not mid-session | `negotiate()` probes once at startup; runtime fallback is consumer-driven via `DaemonTransportClosedError`, not silent internal switch |
-| No error taxonomy prerequisite | ACP transports map errors to HTTP-equivalent status codes internally; `DaemonHttpError` works as-is |
-| Provider gets `transport` prop | `DaemonWorkspaceProvider` gains optional `transport` prop (~5 lines), forwarded to `DaemonClient` constructor. Third parties set this prop; omitting it = current REST behavior |
+| Decision                                         | Rationale                                                                                                                                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subscribeEvents` on transport, not just `fetch` | SSE re-encoding through fetch is wasteful and fragile                                                                                                                           |
+| `connected: boolean` on transport                | Provider reconnect loop needs to distinguish "transport dead" from "transient 500"                                                                                              |
+| Lazy-init (not explicit `connect()`)             | Keeps DaemonClient construction synchronous; default `new RestSseTransport()` needs no init                                                                                     |
+| Auto-detection is one-shot, not mid-session      | `negotiate()` probes once at startup; runtime fallback is consumer-driven via `DaemonTransportClosedError`, not silent internal switch                                          |
+| No error taxonomy prerequisite                   | ACP transports map errors to HTTP-equivalent status codes internally; `DaemonHttpError` works as-is                                                                             |
+| Provider gets `transport` prop                   | `DaemonWorkspaceProvider` gains optional `transport` prop (~5 lines), forwarded to `DaemonClient` constructor. Third parties set this prop; omitting it = current REST behavior |
 
 ---
 
@@ -419,20 +428,20 @@ Parallel `AcpSessionProvider` + `ChatBridgeContext` + `SessionBridgeContext`.
 
 All changes land in one PR. Estimated ~1300 lines total.
 
-| File | Change | Lines |
-|------|--------|-------|
-| `packages/sdk-typescript/src/daemon/DaemonTransport.ts` | Interface + types + `DaemonTransportClosedError` + `negotiate()` factory | ~110 |
-| `packages/sdk-typescript/src/daemon/RestSseTransport.ts` | Wraps `globalThis.fetch` + SSE logic extracted from DaemonClient | ~80 |
-| `packages/sdk-typescript/src/daemon/AcpWsTransport.ts` | WS multiplexer + URL→JSON-RPC mapping + request correlation | ~400 |
-| `packages/sdk-typescript/src/daemon/AcpHttpTransport.ts` | POST /acp + conn/session SSE management | ~300 |
-| `packages/sdk-typescript/src/daemon/AcpEventDenormalizer.ts` | JSON-RPC notification → DaemonEvent mapping | ~150 |
-| `packages/sdk-typescript/src/daemon/AutoReconnectTransport.ts` | Opt-in wrapper: reconnect + fallback | ~150 |
-| `packages/sdk-typescript/src/daemon/DaemonClient.ts` | Constructor + 6 `_fetch` sites + subscribeEvents rewrite | ~40 net |
-| `packages/sdk-typescript/src/daemon/index.ts` | Export new types | ~10 |
-| `packages/cli/src/serve/server.ts` | Add `transports` field to `GET /capabilities` | ~5 |
-| `packages/sdk-typescript/src/daemon/types.ts` | Add `transports` to `DaemonCapabilities` type | ~3 |
-| `packages/webui/src/daemon/workspace/DaemonWorkspaceProvider.tsx` | Add optional `transport` prop, forward to `DaemonClient` | ~5 |
-| Tests | Transport unit + integration tests | ~200 |
+| File                                                              | Change                                                                   | Lines   |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------ | ------- |
+| `packages/sdk-typescript/src/daemon/DaemonTransport.ts`           | Interface + types + `DaemonTransportClosedError` + `negotiate()` factory | ~110    |
+| `packages/sdk-typescript/src/daemon/RestSseTransport.ts`          | Wraps `globalThis.fetch` + SSE logic extracted from DaemonClient         | ~80     |
+| `packages/sdk-typescript/src/daemon/AcpWsTransport.ts`            | WS multiplexer + URL→JSON-RPC mapping + request correlation              | ~400    |
+| `packages/sdk-typescript/src/daemon/AcpHttpTransport.ts`          | POST /acp + conn/session SSE management                                  | ~300    |
+| `packages/sdk-typescript/src/daemon/AcpEventDenormalizer.ts`      | JSON-RPC notification → DaemonEvent mapping                              | ~150    |
+| `packages/sdk-typescript/src/daemon/AutoReconnectTransport.ts`    | Opt-in wrapper: reconnect + fallback                                     | ~150    |
+| `packages/sdk-typescript/src/daemon/DaemonClient.ts`              | Constructor + 6 `_fetch` sites + subscribeEvents rewrite                 | ~40 net |
+| `packages/sdk-typescript/src/daemon/index.ts`                     | Export new types                                                         | ~10     |
+| `packages/cli/src/serve/server.ts`                                | Add `transports` field to `GET /capabilities`                            | ~5      |
+| `packages/sdk-typescript/src/daemon/types.ts`                     | Add `transports` to `DaemonCapabilities` type                            | ~3      |
+| `packages/webui/src/daemon/workspace/DaemonWorkspaceProvider.tsx` | Add optional `transport` prop, forward to `DaemonClient`                 | ~5      |
+| Tests                                                             | Transport unit + integration tests                                       | ~200    |
 
 **Backward compatibility**: `new DaemonClient({ baseUrl, token })` without
 `transport` = identical REST+SSE behavior. All existing tests pass unchanged.
@@ -464,10 +473,10 @@ All changes land in one PR. Estimated ~1300 lines total.
 
 ## 8. Risks
 
-| Risk | Mitigation |
-|------|-----------|
-| URL→JSON-RPC mapping table maintenance | Table co-located with transport; daemon route changes require transport update |
-| ACP WS synthesized Response fidelity | Provide `syntheticResponse(status, json)` helper; document contract (`.json()`, `.text()`, `.status`, `.body?.cancel()`) |
-| `DaemonEvent.id` monotonicity for WS | ACP server's JSON-RPC notifications carry event id; transport surfaces it directly |
-| Prompt 202 vs 200 for WS | Transport maps JSON-RPC response → 200 with result body (blocking path); events still flow via `subscribeEvents` |
-| WS connection drop detection | `connected: boolean` + `DaemonTransportClosedError` thrown from `fetch` |
+| Risk                                   | Mitigation                                                                                                               |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| URL→JSON-RPC mapping table maintenance | Table co-located with transport; daemon route changes require transport update                                           |
+| ACP WS synthesized Response fidelity   | Provide `syntheticResponse(status, json)` helper; document contract (`.json()`, `.text()`, `.status`, `.body?.cancel()`) |
+| `DaemonEvent.id` monotonicity for WS   | ACP server's JSON-RPC notifications carry event id; transport surfaces it directly                                       |
+| Prompt 202 vs 200 for WS               | Transport maps JSON-RPC response → 200 with result body (blocking path); events still flow via `subscribeEvents`         |
+| WS connection drop detection           | `connected: boolean` + `DaemonTransportClosedError` thrown from `fetch`                                                  |

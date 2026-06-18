@@ -272,6 +272,76 @@ describe('runVisionBridge', () => {
     expect(mockSideQuery.mock.calls[0][1].model).toBe('explicit-model');
   });
 
+  it('fails loudly when an explicit bridge model is not registered as image-capable', async () => {
+    const configWithRegistry = {
+      getAllConfiguredModels: () => [
+        {
+          id: 'qwen-flash',
+          authType: 'openai',
+          modalities: { image: false },
+        },
+      ],
+    } as unknown as Config;
+
+    const result = await runVisionBridge({
+      config: configWithRegistry,
+      settings: { ...settings, model: 'qwen-vl-plus' },
+      parts: ['look', image()],
+      signal: signal(),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toMatch(/qwen-vl-plus/);
+    expect(result.error).toMatch(/not registered|not image-capable/);
+    expect(mockSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('uses the registered provider for an explicit bridge model', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    const configWithRegistry = {
+      getAllConfiguredModels: () => [
+        {
+          id: 'explicit-model',
+          authType: 'openai',
+          baseUrl: 'https://vision.example.com/v1',
+          modalities: { image: true },
+        },
+      ],
+    } as unknown as Config;
+
+    await runVisionBridge({
+      config: configWithRegistry,
+      settings: { ...settings, model: 'explicit-model' },
+      parts: ['look', image()],
+      signal: signal(),
+    });
+
+    expect(mockSideQuery.mock.calls[0][1]).toMatchObject({
+      model: 'explicit-model',
+      modelAuthType: 'openai',
+      modelBaseUrl: 'https://vision.example.com/v1',
+    });
+  });
+
+  it('does not report a bridge failure when the turn is cancelled', async () => {
+    const controller = new AbortController();
+    mockSideQuery.mockImplementation(() => {
+      controller.abort();
+      return Promise.reject(new DOMException('Aborted', 'AbortError'));
+    });
+
+    const result = await runVisionBridge({
+      config,
+      settings,
+      parts: ['look', image()],
+      signal: controller.signal,
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.applied).toBe(false);
+    expect(result.error).toBeUndefined();
+  });
+
   it('does not apply on failure even when the user also asked a question (turn stops)', async () => {
     mockSideQuery.mockRejectedValue(new Error('boom'));
     const result = await runVisionBridge({

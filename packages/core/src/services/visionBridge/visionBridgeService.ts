@@ -17,6 +17,13 @@ import {
 } from './imagePartUtils.js';
 
 const debugLogger = createDebugLogger('VISION_BRIDGE');
+const AUTH_TYPE_PREFIXES = new Set([
+  'openai',
+  'qwen-oauth',
+  'gemini',
+  'vertex-ai',
+  'anthropic',
+]);
 
 /** Minimal shape of a registered model needed to auto-pick a bridge model. */
 export interface VisionModelCandidate {
@@ -89,6 +96,10 @@ function findPrimaryModel(
   return idMatches[0];
 }
 
+function isImageCapable(model: VisionModelCandidate): boolean {
+  return (model.modalities ?? defaultModalities(model.id)).image === true;
+}
+
 /**
  * Pick an image-capable model to use as the vision bridge from the registered
  * models, preferring one on the SAME provider as the primary model so the
@@ -111,9 +122,6 @@ export function selectVisionBridgeModel(
   models: VisionModelCandidate[],
   primaryProvider: VisionBridgeProviderHint = {},
 ): VisionBridgeModelSelection | undefined {
-  const isImageCapable = (m: VisionModelCandidate): boolean =>
-    (m.modalities ?? defaultModalities(m.id)).image === true;
-
   const candidates = models.filter(
     (m) =>
       !isPrimaryModel(m, primaryModelId, primaryProvider) && isImageCapable(m),
@@ -170,10 +178,97 @@ const MAX_TIMEOUT_MS = 120_000;
 
 type VisionBridgeModelReference = string | VisionBridgeModelSelection;
 
+interface VisionBridgeModelResolution {
+  selection?: VisionBridgeModelSelection;
+  error?: string;
+}
+
+function parseExplicitModelRef(modelRef: string): {
+  modelId: string;
+  authType?: string;
+  error?: string;
+} {
+  const trimmed = modelRef.trim();
+  const colonIndex = trimmed.indexOf(':');
+  if (colonIndex === -1) {
+    return { modelId: trimmed };
+  }
+
+  const maybeAuthType = trimmed.slice(0, colonIndex).trim();
+  const modelId = trimmed.slice(colonIndex + 1).trim();
+  if (!AUTH_TYPE_PREFIXES.has(maybeAuthType)) {
+    return { modelId: trimmed };
+  }
+  if (!modelId) {
+    return {
+      modelId: trimmed,
+      error: 'Model selector must include a model ID after the authType',
+    };
+  }
+  return { modelId, authType: maybeAuthType };
+}
+
 function normalizeVisionBridgeModel(
   model: VisionBridgeModelReference | undefined,
 ): VisionBridgeModelSelection | undefined {
   return typeof model === 'string' ? { id: model } : model;
+}
+
+function resolveExplicitVisionBridgeModel(
+  config: Config,
+  modelRef: string,
+): VisionBridgeModelResolution {
+  const parsed = parseExplicitModelRef(modelRef);
+  if (parsed.error) {
+    return {
+      error: `vision bridge model "${modelRef}" is invalid: ${parsed.error}`,
+    };
+  }
+
+  const { modelId, authType } = parsed;
+  const configuredModels = config.getAllConfiguredModels?.(
+    authType ? [authType as AuthType] : undefined,
+  );
+
+  if (!configuredModels) {
+    return {
+      selection: {
+        id: modelId,
+        ...(authType && { authType }),
+      },
+    };
+  }
+
+  const matches = configuredModels.filter(
+    (model) =>
+      model.id === modelId && (!authType || model.authType === authType),
+  );
+  const imageCapable = matches.find(isImageCapable);
+  if (!imageCapable) {
+    const reason =
+      matches.length > 0 ? 'is not image-capable' : 'is not registered';
+    return {
+      error:
+        `vision bridge model "${modelRef}" ${reason}; ` +
+        'register an image-capable model in modelProviders or leave visionBridge.model empty for auto-selection',
+    };
+  }
+
+  return { selection: toSelection(imageCapable) };
+}
+
+function resolveVisionBridgeModel(
+  config: Config,
+  settings: VisionBridgeSettings,
+): VisionBridgeModelResolution {
+  if (settings.model) {
+    return resolveExplicitVisionBridgeModel(config, settings.model);
+  }
+  return {
+    selection: normalizeVisionBridgeModel(
+      config.getDefaultVisionBridgeModel?.(),
+    ),
+  };
 }
 
 /** Clamp a possibly-invalid number into [lo, hi], falling back when not finite. */
@@ -387,9 +482,12 @@ export async function runVisionBridge(params: {
   // Use the explicitly configured bridge model, or auto-pick an image-capable
   // model from the registered providers so the bridge works without hand
   // configuration when a multimodal provider is already available.
-  const modelSelection = normalizeVisionBridgeModel(
-    settings.model || config.getDefaultVisionBridgeModel?.(),
-  );
+  const modelResolution = resolveVisionBridgeModel(config, settings);
+  if (modelResolution.error) {
+    debugLogger.warn(modelResolution.error);
+    return failure(modelResolution.error, imageParts.length, omittedCount);
+  }
+  const modelSelection = modelResolution.selection;
   const model = modelSelection?.id;
   debugLogger.debug(
     `model=${model ?? '(none)'} (explicit=${!!settings.model}), images=${imageParts.length} convert=${toConvert.length} omitted=${omittedCount} invalid=${droppedAsInvalid}`,
@@ -466,6 +564,16 @@ export async function runVisionBridge(params: {
       modelEndpoint: resolveEndpointHost(config, modelSelection),
     };
   } catch (error) {
+    if (signal.aborted && !timeoutSignal.aborted) {
+      debugLogger.debug(`conversion cancelled via ${model}`);
+      return {
+        applied: false,
+        status: 'skipped',
+        imageCount: imageParts.length,
+        convertedCount: 0,
+        omittedCount,
+      };
+    }
     const reason =
       combinedSignal.aborted && timeoutSignal.aborted
         ? `timed out after ${settings.timeoutMs}ms`

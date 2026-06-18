@@ -5,11 +5,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  AuthType,
-  idealabProvider,
-  buildInstallPlan,
-} from '@qwen-code/qwen-code-core';
+import { AuthType } from '../../../core/contentGenerator.js';
+import { idealabProvider } from '../../presets/idealab.js';
+import { buildInstallPlan } from '../../provider-config.js';
 
 describe('idealabProvider', () => {
   it('has correct provider config', () => {
@@ -40,7 +38,28 @@ describe('idealabProvider', () => {
     expect(models?.[1]).toMatchObject({
       id: 'bailian/deepseek-v4-pro',
       name: '[Idealab] bailian/deepseek-v4-pro',
-      generationConfig: { contextWindowSize: 1000000 },
+      generationConfig: {
+        extra_body: { enable_thinking: true },
+        contextWindowSize: 1000000,
+      },
+    });
+  });
+
+  it('does not mark DeepSeek models as multimodal', () => {
+    const plan = buildInstallPlan(idealabProvider, {
+      baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+      apiKey: 'sk-idealab',
+      modelIds: ['bailian/deepseek-v4-pro', 'bailian/deepseek-v4-flash'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models?.[0]?.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 1000000,
+    });
+    expect(models?.[1]?.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 1000000,
     });
   });
 

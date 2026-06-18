@@ -83,13 +83,22 @@ export function useShellHistory(
   const [historyFilePath, setHistoryFilePath] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+
     async function loadHistory() {
       const filePath = await getHistoryFilePath(projectRoot, storage);
+      if (cancelled) return;
       setHistoryFilePath(filePath);
       const loadedHistory = await readHistoryFile(filePath);
-      setHistory(loadedHistory.reverse()); // Newest first
+      if (!cancelled) {
+        setHistory(loadedHistory.reverse()); // Newest first
+      }
     }
     loadHistory();
+
+    return () => {
+      cancelled = true;
+    };
   }, [projectRoot, storage]);
 
   const addCommandToHistory = useCallback(

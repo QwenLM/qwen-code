@@ -123,6 +123,7 @@ import type {
 import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
   getAvailableCommands,
@@ -184,11 +185,209 @@ const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
 // means the client silently drops unknown methods; without a deadline the
 // await would wedge the prompt turn forever.
 const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
+// Secondary deadline for recovering a drain whose response arrives AFTER the
+// 2s race timeout: within this window the late answer is re-injected on the next
+// batch; beyond it (e.g. degraded transport) it is dropped rather than pushed
+// into an unrelated turn's context.
+const MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS = 30_000;
+const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
+const MAX_MID_TURN_DRAIN_ITEMS = 10;
+const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
+  '[Attachment could not be processed]';
+const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // Latch the drain off only after this many consecutive timeouts: one slow
 // answer must not permanently disable mid-turn messages for a
 // conforming-but-busy client, while a client that never answers stops
 // costing a stall per tool batch after a few batches.
 const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
+
+type DrainedMidTurnMessage =
+  | { kind: 'text'; message: string }
+  | { kind: 'structured'; content: ContentBlock[]; displayText: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
+}
+
+function isContentBlock(value: unknown): value is ContentBlock {
+  if (!isRecord(value) || typeof value['type'] !== 'string') return false;
+
+  switch (value['type']) {
+    case 'text':
+      return typeof value['text'] === 'string';
+    case 'image':
+      return (
+        typeof value['mimeType'] === 'string' &&
+        value['mimeType'].startsWith('image/') &&
+        typeof value['data'] === 'string'
+      );
+    case 'audio':
+      return (
+        typeof value['mimeType'] === 'string' &&
+        value['mimeType'].startsWith('audio/') &&
+        typeof value['data'] === 'string'
+      );
+    case 'resource_link':
+      return false;
+    case 'resource':
+      return isEmbeddedResourceResource(value['resource']);
+    default:
+      debugLogger.warn(`Unknown ContentBlock type: ${value['type']}`);
+      return false;
+  }
+}
+
+async function withTimeoutSignal<T>(
+  parentSignal: AbortSignal,
+  timeoutMs: number,
+  fn: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const signal = AbortSignal.any([
+    parentSignal,
+    AbortSignal.timeout(timeoutMs),
+  ]);
+
+  const toAbortError = () =>
+    signal.reason instanceof Error
+      ? signal.reason
+      : new Error('Mid-turn message resolution aborted');
+
+  if (signal.aborted) throw toAbortError();
+
+  let rejectOnAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    rejectOnAbort = () => reject(toAbortError());
+    signal.addEventListener('abort', rejectOnAbort, { once: true });
+    if (signal.aborted) rejectOnAbort();
+  });
+
+  try {
+    return await Promise.race([fn(signal), abortPromise]);
+  } finally {
+    if (rejectOnAbort) signal.removeEventListener('abort', rejectOnAbort);
+  }
+}
+
+function isEmbeddedResourceResource(
+  value: unknown,
+): value is EmbeddedResourceResource {
+  if (!isRecord(value) || typeof value['uri'] !== 'string') return false;
+  if (typeof value['text'] === 'string') {
+    return value['text'].length <= MAX_MID_TURN_RESOURCE_TEXT_LENGTH;
+  }
+  return typeof value['blob'] === 'string';
+}
+
+function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
+  return content.some((part) => part.type === 'image' || part.type === 'audio');
+}
+
+function capMidTurnDrainItems<T>(items: T[], fieldName: string): T[] {
+  if (items.length <= MAX_MID_TURN_DRAIN_ITEMS) return items;
+
+  debugLogger.warn(
+    `Mid-turn drain response had ${items.length} ${fieldName}; processing first ${MAX_MID_TURN_DRAIN_ITEMS}`,
+  );
+  return items.slice(0, MAX_MID_TURN_DRAIN_ITEMS);
+}
+
+function getMidTurnItemDisplayTextForLog(displayText: unknown): string {
+  if (typeof displayText !== 'string' || displayText.trim().length === 0) {
+    return '(no display text)';
+  }
+  return JSON.stringify(displayText.trim().slice(0, 120));
+}
+
+function getValidMidTurnContentBlocks(
+  content: unknown,
+  displayText: unknown,
+): ContentBlock[] {
+  if (!Array.isArray(content)) {
+    debugLogger.warn(
+      `Dropped invalid mid-turn item: ${getMidTurnItemDisplayTextForLog(
+        displayText,
+      )}`,
+    );
+    return [];
+  }
+
+  const validBlocks = content.filter(isContentBlock);
+  const invalidBlockCount = content.length - validBlocks.length;
+  if (invalidBlockCount > 0) {
+    debugLogger.warn(
+      `Dropped ${invalidBlockCount} invalid mid-turn content block(s): ${getMidTurnItemDisplayTextForLog(
+        displayText,
+      )}`,
+    );
+  }
+
+  return validBlocks;
+}
+
+function getStructuredMidTurnDisplayText(
+  content: ContentBlock[],
+  displayText: unknown,
+): string {
+  if (typeof displayText === 'string' && displayText.trim().length > 0) {
+    return displayText.trim();
+  }
+
+  const text = content
+    .filter(
+      (part): part is Extract<ContentBlock, { type: 'text' }> =>
+        part.type === 'text',
+    )
+    .map((part) => part.text)
+    .join('\n')
+    .trim();
+
+  return text || '[User message with attachments]';
+}
+
+function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
+  if (!isRecord(response)) return [];
+
+  if (Array.isArray(response['items'])) {
+    return capMidTurnDrainItems(response['items'], 'item(s)').flatMap(
+      (item): DrainedMidTurnMessage[] => {
+        if (!isRecord(item)) {
+          return [];
+        }
+        const content = getValidMidTurnContentBlocks(
+          item['content'],
+          item['displayText'],
+        );
+        if (content.length === 0) return [];
+        return [
+          {
+            kind: 'structured',
+            content,
+            displayText: getStructuredMidTurnDisplayText(
+              content,
+              item['displayText'],
+            ),
+          },
+        ];
+      },
+    );
+  }
+
+  if (!Array.isArray(response['messages'])) {
+    debugLogger.warn(
+      `Mid-turn drain response had no recognized 'items' or 'messages' field; keys: ${Object.keys(
+        response,
+      ).join(', ')}`,
+    );
+    return [];
+  }
+
+  return capMidTurnDrainItems(response['messages'], 'message(s)')
+    .filter(
+      (message): message is string =>
+        typeof message === 'string' && message.trim().length > 0,
+    )
+    .map((message) => ({ kind: 'text', message }));
+}
 
 class MidTurnDrainTimeoutError extends Error {
   constructor() {
@@ -261,6 +460,7 @@ export async function fireSessionPermissionDeniedForAutoMode(
           callId,
           getAutoModePermissionDeniedReason(decision),
           signal,
+          callId,
         );
     } catch (hookError) {
       debugLogger.warn(
@@ -450,6 +650,11 @@ export class Session implements SessionContext {
   private lastPromptTokenCountChat: GeminiChat | null = null;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
+  // Messages from a drain that the daemon answered but we timed out waiting for
+  // (the daemon already spliced + SSE-published them). Re-injected on the next
+  // batch so a transient stall can't silently lose them. See
+  // `#drainMidTurnUserMessages`.
+  private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -1334,6 +1539,7 @@ export class Session implements SessionContext {
                   if (toolRun.stopAfterUserQuestionCancel) {
                     await this.#preserveCancelledAskUserQuestionToolRun(
                       toolRun,
+                      pendingSend.signal,
                     );
                     return { stopReason: 'end_turn' };
                   }
@@ -1341,7 +1547,9 @@ export class Session implements SessionContext {
                     role: 'user',
                     parts: [
                       ...toolRun.parts,
-                      ...(await this.#drainMidTurnUserMessages()),
+                      ...(await this.#drainMidTurnUserMessages(
+                        pendingSend.signal,
+                      )),
                     ],
                   };
                 }
@@ -1603,14 +1811,17 @@ export class Session implements SessionContext {
               functionCalls,
             );
             if (toolRun.stopAfterUserQuestionCancel) {
-              await this.#preserveCancelledAskUserQuestionToolRun(toolRun);
+              await this.#preserveCancelledAskUserQuestionToolRun(
+                toolRun,
+                pendingSend.signal,
+              );
               return { stopReason: 'end_turn' };
             }
             nextMessage = {
               role: 'user',
               parts: [
                 ...toolRun.parts,
-                ...(await this.#drainMidTurnUserMessages()),
+                ...(await this.#drainMidTurnUserMessages(pendingSend.signal)),
               ],
             };
           }
@@ -1775,11 +1986,15 @@ export class Session implements SessionContext {
 
   async #preserveCancelledAskUserQuestionToolRun(
     toolRun: RunToolResult,
+    abortSignal: AbortSignal,
   ): Promise<void> {
     this.#preserveUnsentMessageHistory(
       {
         role: 'user',
-        parts: [...toolRun.parts, ...(await this.#drainMidTurnUserMessages())],
+        parts: [
+          ...toolRun.parts,
+          ...(await this.#drainMidTurnUserMessages(abortSignal)),
+        ],
       },
       true,
     );
@@ -1892,8 +2107,17 @@ export class Session implements SessionContext {
     });
   }
 
-  async #drainMidTurnUserMessages(): Promise<Part[]> {
-    if (this.midTurnDrainUnavailable) return [];
+  async #drainMidTurnUserMessages(abortSignal: AbortSignal): Promise<Part[]> {
+    // Flush anything recovered from a PRIOR timed-out drain first: the daemon
+    // splices + SSE-publishes synchronously, so on a timeout the browser has
+    // already deduped those messages — discarding the late response would lose
+    // them from both queues. We stash them (see the timeout branch) and
+    // re-inject them here on the next batch.
+    const recovered = this.#takeRecoveredMidTurnMessages();
+
+    if (this.midTurnDrainUnavailable) {
+      return this.#buildMidTurnParts(recovered, abortSignal);
+    }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
@@ -1914,28 +2138,10 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      // A client may legally resolve with `result: null` (passed through
-      // unwrapped by the ACP SDK); guard the object access so that doesn't
-      // throw a TypeError and get misclassified as a transient drain error.
-      const messages =
-        response &&
-        typeof response === 'object' &&
-        Array.isArray(response['messages'])
-          ? response['messages'].filter(
-              (message): message is string =>
-                typeof message === 'string' && message.trim().length > 0,
-            )
-          : [];
-
-      return messages.map((message) => {
-        const part = {
-          text: `\n[User message received during tool execution]: ${message}`,
-        };
-        this.config
-          .getChatRecordingService()
-          ?.recordMidTurnUserMessage([part], message);
-        return part;
-      });
+      return this.#buildMidTurnParts(
+        [...recovered, ...parseMidTurnDrainResponse(response)],
+        abortSignal,
+      );
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so
@@ -1955,9 +2161,14 @@ export class Session implements SessionContext {
       const isTimeout = error instanceof MidTurnDrainTimeoutError;
       if (isTimeout) {
         this.midTurnDrainTimeoutStrikes += 1;
-        // The lost race leaves the request pending; if the client settles it
-        // later, a rejection must not surface as an unhandled rejection.
-        drainPromise?.catch(() => {});
+        // The lost race leaves the drain request pending. The daemon answers it
+        // by splicing the queue + publishing the SSE echo (so the browser has
+        // already deduped), then returns the messages we just timed out waiting
+        // for. Recover that late response and inject it on the next batch instead
+        // of discarding it (which would lose the messages from both queues —
+        // silent loss). `#recoverLateDrain` bounds the wait and swallows a late
+        // rejection.
+        if (drainPromise) void this.#recoverLateDrain(drainPromise);
       }
       // Repeated timeouts are also permanent: a conforming client answers
       // (or rejects with -32601) immediately, so sustained silence means the
@@ -1978,8 +2189,108 @@ export class Session implements SessionContext {
       debugLogger.warn(
         `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
-      return [];
+      // Even on a failed/timed-out drain, still inject anything recovered from
+      // an EARLIER timeout so a transient stall never strands those messages.
+      return this.#buildMidTurnParts(recovered, abortSignal);
     }
+  }
+
+  /** Read and clear the buffer of messages recovered from a timed-out drain. */
+  #takeRecoveredMidTurnMessages(): DrainedMidTurnMessage[] {
+    if (this.midTurnRecoveredMessages.length === 0) return [];
+    const out = this.midTurnRecoveredMessages;
+    this.midTurnRecoveredMessages = [];
+    return out;
+  }
+
+  /**
+   * After a drain times out, the request is still pending; the daemon settles it
+   * shortly after (it splices + SSE-publishes synchronously, so the browser has
+   * already deduped). Recover that late response for the next batch instead of
+   * discarding it, but bound the wait with a secondary deadline so a response
+   * that only arrives long after the turn isn't pushed into an unrelated
+   * context. A late rejection is swallowed (no unhandled rejection).
+   */
+  async #recoverLateDrain(
+    pending: ReturnType<AgentSideConnection['extMethod']>,
+  ): Promise<void> {
+    // Swallow a late rejection regardless of which branch of the race wins.
+    pending.catch(() => {});
+    const expired = Symbol('mid-turn-recovery-expired');
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<typeof expired>((resolve) => {
+      timer = setTimeout(
+        () => resolve(expired),
+        MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    });
+    let late: unknown;
+    try {
+      late = await Promise.race([pending, deadline]);
+    } catch {
+      return; // late rejection — nothing to recover
+    } finally {
+      clearTimeout(timer);
+    }
+    if (late === expired) {
+      debugLogger.warn(
+        `[mid-turn] dropped a drain response that arrived after the ${MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS}ms recovery deadline [session ${this.sessionId}]`,
+      );
+      return;
+    }
+    const lateMessages = parseMidTurnDrainResponse(late);
+    if (lateMessages.length > 0) {
+      debugLogger.debug(
+        `[mid-turn] recovered ${lateMessages.length} message(s) from a timed-out drain [session ${this.sessionId}]`,
+      );
+      this.midTurnRecoveredMessages.push(...lateMessages);
+    }
+  }
+
+  /**
+   * Resolve each drained mid-turn message (text or structured content) into
+   * agent-visible `Part`s and record it once to the chat transcript. Recording
+   * happens on injection (here), so a message recovered from an earlier
+   * timed-out drain is still recorded exactly once.
+   */
+  async #buildMidTurnParts(
+    messages: DrainedMidTurnMessage[],
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    const parts: Part[] = [];
+    for (const message of messages) {
+      const displayText =
+        message.kind === 'text' ? message.message : message.displayText;
+      let rawParts: Part[];
+      try {
+        rawParts =
+          message.kind === 'text'
+            ? [{ text: message.message }]
+            : await withTimeoutSignal(
+                abortSignal,
+                MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+                (signal) => this.#resolvePrompt(message.content, signal),
+              );
+      } catch (messageError) {
+        if (abortSignal.aborted) return parts;
+        const errorMessage = this.#formatError(messageError);
+        debugLogger.warn(`Failed to resolve mid-turn message: ${errorMessage}`);
+        rawParts = [{ text: displayText }];
+        if (
+          message.kind === 'structured' &&
+          hasInlineMediaContentBlock(message.content)
+        ) {
+          rawParts.push({ text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT });
+        }
+      }
+      const built = prefixMidTurnUserMessageParts(rawParts, displayText);
+      this.config
+        .getChatRecordingService()
+        ?.recordMidTurnUserMessage(built, displayText);
+      parts.push(...built);
+    }
+    return parts;
   }
 
   /**
@@ -2196,6 +2507,7 @@ export class Session implements SessionContext {
                   if (toolRun.stopAfterUserQuestionCancel) {
                     await this.#preserveCancelledAskUserQuestionToolRun(
                       toolRun,
+                      ac.signal,
                     );
                     return;
                   }
@@ -2203,7 +2515,7 @@ export class Session implements SessionContext {
                     role: 'user',
                     parts: [
                       ...toolRun.parts,
-                      ...(await this.#drainMidTurnUserMessages()),
+                      ...(await this.#drainMidTurnUserMessages(ac.signal)),
                     ],
                   };
                 }
@@ -2506,7 +2818,10 @@ export class Session implements SessionContext {
                 functionCalls,
               );
               if (toolRun.stopAfterUserQuestionCancel) {
-                await this.#preserveCancelledAskUserQuestionToolRun(toolRun);
+                await this.#preserveCancelledAskUserQuestionToolRun(
+                  toolRun,
+                  ac.signal,
+                );
                 await this.#emitBackgroundNotificationEndTurn('end_turn');
                 return;
               }
@@ -2514,7 +2829,7 @@ export class Session implements SessionContext {
                 role: 'user',
                 parts: [
                   ...toolRun.parts,
-                  ...(await this.#drainMidTurnUserMessages()),
+                  ...(await this.#drainMidTurnUserMessages(ac.signal)),
                 ],
               };
             }
@@ -2758,6 +3073,12 @@ export class Session implements SessionContext {
     if (options.persistDefault ?? true) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(persistScope, 'model.name', parsed.modelId);
+      // Id-only switch: clear any baseUrl disambiguator left by a previous
+      // model-picker selection so the next launch resolves to this provider,
+      // not a stale one sharing the same model id. Empty-string tombstone so
+      // the clear overrides a lower-scope value on merge (undefined is dropped
+      // from JSON and would not override).
+      this.settings.setValue(persistScope, 'model.baseUrl', '');
       this.settings.setValue(
         persistScope,
         'security.auth.selectedType',
@@ -3615,6 +3936,7 @@ export class Session implements SessionContext {
               toolUseId,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             if (!preHookResult.shouldProceed) {
@@ -3734,6 +4056,7 @@ export class Session implements SessionContext {
               toolUseId,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             // If hook indicates to stop, return an error response
@@ -3769,6 +4092,7 @@ export class Session implements SessionContext {
               isInterrupt,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             // Log additional context if provided
@@ -3876,6 +4200,7 @@ export class Session implements SessionContext {
               isInterrupt,
               String(approvalMode),
               activeToolAbortSignal,
+              callId,
             );
 
             // Log additional context if provided

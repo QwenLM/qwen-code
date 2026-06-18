@@ -54,6 +54,7 @@ interface ServeArgs {
   'channel-idle-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
+  'permission-response-timeout-ms'?: number;
   'rate-limit'?: boolean;
   'rate-limit-prompt'?: number;
   'rate-limit-mutation'?: number;
@@ -216,6 +217,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Idle timeout before a disconnected session is reaped (ms). ' +
           '0 = disabled. Default: 1800000 (30 min).',
+      })
+      .option('permission-response-timeout-ms', {
+        type: 'number',
+        description:
+          'Wall-clock timeout for a single human permission / ' +
+          'ask_user_question response in daemon (ACP) mode (ms). ' +
+          '0 = disabled (wait forever). Default: 300000 (5 min).',
       })
       .option('rate-limit', {
         type: 'boolean',
@@ -436,6 +444,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['session-idle-timeout-ms'] !== undefined
           ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
+          : {}),
+        ...(argv['permission-response-timeout-ms'] !== undefined
+          ? {
+              permissionResponseTimeoutMs:
+                argv['permission-response-timeout-ms'],
+            }
           : {}),
         ...(rateLimit ? { rateLimit: true } : {}),
         ...(rateLimitPrompt !== undefined ? { rateLimitPrompt } : {}),

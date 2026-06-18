@@ -281,6 +281,7 @@ async function safelyFirePostToolUseFailureHook(
   errorMessage: string,
   isInterrupt: boolean,
   permissionMode?: string,
+  tool_call_id?: string,
 ): ReturnType<typeof firePostToolUseFailureHook> {
   try {
     return await firePostToolUseFailureHook(
@@ -291,6 +292,8 @@ async function safelyFirePostToolUseFailureHook(
       errorMessage,
       isInterrupt,
       permissionMode,
+      undefined,
+      tool_call_id,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -848,6 +851,11 @@ function toPostToolBatchToolCall(
     tool_name: call.request.name,
     tool_input: call.request.args,
     tool_use_id: call.request.callId,
+    tool_call_id: call.request.callId,
+    // Note: tool_use_id here is also populated from call.request.callId, so
+    // tool_call_id duplicates the same value under a different name. The
+    // semantics of tool_use_id are inconsistent across hook events (synthetic
+    // in Pre/Post/Failure, API ID in PostToolBatch).
     status: call.status,
     tool_response: serializeToolResponse(call.response),
   };
@@ -2038,6 +2046,7 @@ export class CoreToolScheduler {
                     reqInfo.callId,
                     getAutoModePermissionDeniedReason(decision),
                     signal,
+                    reqInfo.callId,
                   );
               } catch (hookError) {
                 debugLogger.warn(
@@ -2999,6 +3008,8 @@ export class CoreToolScheduler {
             toolInput,
             toolUseId,
             permissionMode,
+            undefined, // signal
+            callId, // Original API call ID (e.g., call_xxx)
           ),
         (r) =>
           r.hookError
@@ -3159,6 +3170,7 @@ export class CoreToolScheduler {
                 cancelMessage,
                 true,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3208,6 +3220,8 @@ export class CoreToolScheduler {
                 toolResponse,
                 toolUseId,
                 permissionMode,
+                undefined, // signal
+                callId, // Original API call ID (e.g., call_xxx)
               ),
             (r) =>
               r.hookError
@@ -3540,6 +3554,7 @@ export class CoreToolScheduler {
                 toolResult.error!.message,
                 false,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3625,6 +3640,7 @@ export class CoreToolScheduler {
                 cancelMessage,
                 true,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3663,6 +3679,7 @@ export class CoreToolScheduler {
                 errorMessage,
                 false,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -4072,6 +4089,7 @@ export class CoreToolScheduler {
                   pendingTool.request.callId,
                   getAutoModePermissionDeniedReason(decision),
                   signal,
+                  pendingTool.request.callId,
                 );
             } catch (hookError) {
               debugLogger.warn(
