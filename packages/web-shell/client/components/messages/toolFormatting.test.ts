@@ -135,6 +135,99 @@ describe('toolFormatting', () => {
     ).toBe('Found 1 matching file(s)');
   });
 
+  it('matches CLI-style grep_search result summaries', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'src/a.ts:1:TODO\nsrc/b.ts:2:TODO\n',
+        }),
+      ),
+    ).toBe('2 result(s)');
+  });
+
+  it('keeps grep_search returnDisplay summaries unchanged', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'Found 2 matches',
+        }),
+      ),
+    ).toBe('Found 2 matches');
+
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'Found 1 match',
+        }),
+      ),
+    ).toBe('Found 1 match');
+  });
+
+  it('keeps truncated grep_search returnDisplay summaries unchanged', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'Found 12 matches (truncated)',
+        }),
+      ),
+    ).toBe('Found 12 matches (truncated)');
+  });
+
+  it('keeps empty grep_search returnDisplay summaries unchanged', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'No matches found',
+        }),
+      ),
+    ).toBe('No matches found');
+  });
+
+  it('prefers grep_search returnDisplay when content is also present', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'Found 2 matches',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'Found 2 matches for pattern "TODO" in path "./":\n---\nsrc/a.ts:1:TODO\nsrc/b.ts:2:TODO',
+              },
+            },
+          ],
+        }),
+      ),
+    ).toBe('Found 2 matches');
+  });
+
+  it('prefers empty grep_search returnDisplay when content is also present', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'No matches found',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'No matches found for pattern "TODO" in path "./".',
+              },
+            },
+          ],
+        }),
+      ),
+    ).toBe('No matches found');
+  });
+
   it('matches CLI-style shell fallback descriptions', () => {
     expect(
       getToolDescription(
