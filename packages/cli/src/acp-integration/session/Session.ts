@@ -123,6 +123,7 @@ import type {
 import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
   getAvailableCommands,
@@ -184,11 +185,204 @@ const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
 // means the client silently drops unknown methods; without a deadline the
 // await would wedge the prompt turn forever.
 const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
+const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
+const MAX_MID_TURN_DRAIN_ITEMS = 10;
+const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
+  '[Attachment could not be processed]';
+const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // Latch the drain off only after this many consecutive timeouts: one slow
 // answer must not permanently disable mid-turn messages for a
 // conforming-but-busy client, while a client that never answers stops
 // costing a stall per tool batch after a few batches.
 const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
+
+type DrainedMidTurnMessage =
+  | { kind: 'text'; message: string }
+  | { kind: 'structured'; content: ContentBlock[]; displayText: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
+}
+
+function isContentBlock(value: unknown): value is ContentBlock {
+  if (!isRecord(value) || typeof value['type'] !== 'string') return false;
+
+  switch (value['type']) {
+    case 'text':
+      return typeof value['text'] === 'string';
+    case 'image':
+      return (
+        typeof value['mimeType'] === 'string' &&
+        value['mimeType'].startsWith('image/') &&
+        typeof value['data'] === 'string'
+      );
+    case 'audio':
+      return (
+        typeof value['mimeType'] === 'string' &&
+        value['mimeType'].startsWith('audio/') &&
+        typeof value['data'] === 'string'
+      );
+    case 'resource_link':
+      return false;
+    case 'resource':
+      return isEmbeddedResourceResource(value['resource']);
+    default:
+      debugLogger.warn(`Unknown ContentBlock type: ${value['type']}`);
+      return false;
+  }
+}
+
+async function withTimeoutSignal<T>(
+  parentSignal: AbortSignal,
+  timeoutMs: number,
+  fn: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const signal = AbortSignal.any([
+    parentSignal,
+    AbortSignal.timeout(timeoutMs),
+  ]);
+
+  const toAbortError = () =>
+    signal.reason instanceof Error
+      ? signal.reason
+      : new Error('Mid-turn message resolution aborted');
+
+  if (signal.aborted) throw toAbortError();
+
+  let rejectOnAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    rejectOnAbort = () => reject(toAbortError());
+    signal.addEventListener('abort', rejectOnAbort, { once: true });
+    if (signal.aborted) rejectOnAbort();
+  });
+
+  try {
+    return await Promise.race([fn(signal), abortPromise]);
+  } finally {
+    if (rejectOnAbort) signal.removeEventListener('abort', rejectOnAbort);
+  }
+}
+
+function isEmbeddedResourceResource(
+  value: unknown,
+): value is EmbeddedResourceResource {
+  if (!isRecord(value) || typeof value['uri'] !== 'string') return false;
+  if (typeof value['text'] === 'string') {
+    return value['text'].length <= MAX_MID_TURN_RESOURCE_TEXT_LENGTH;
+  }
+  return typeof value['blob'] === 'string';
+}
+
+function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
+  return content.some((part) => part.type === 'image' || part.type === 'audio');
+}
+
+function capMidTurnDrainItems<T>(items: T[], fieldName: string): T[] {
+  if (items.length <= MAX_MID_TURN_DRAIN_ITEMS) return items;
+
+  debugLogger.warn(
+    `Mid-turn drain response had ${items.length} ${fieldName}; processing first ${MAX_MID_TURN_DRAIN_ITEMS}`,
+  );
+  return items.slice(0, MAX_MID_TURN_DRAIN_ITEMS);
+}
+
+function getMidTurnItemDisplayTextForLog(displayText: unknown): string {
+  if (typeof displayText !== 'string' || displayText.trim().length === 0) {
+    return '(no display text)';
+  }
+  return JSON.stringify(displayText.trim().slice(0, 120));
+}
+
+function getValidMidTurnContentBlocks(
+  content: unknown,
+  displayText: unknown,
+): ContentBlock[] {
+  if (!Array.isArray(content)) {
+    debugLogger.warn(
+      `Dropped invalid mid-turn item: ${getMidTurnItemDisplayTextForLog(
+        displayText,
+      )}`,
+    );
+    return [];
+  }
+
+  const validBlocks = content.filter(isContentBlock);
+  const invalidBlockCount = content.length - validBlocks.length;
+  if (invalidBlockCount > 0) {
+    debugLogger.warn(
+      `Dropped ${invalidBlockCount} invalid mid-turn content block(s): ${getMidTurnItemDisplayTextForLog(
+        displayText,
+      )}`,
+    );
+  }
+
+  return validBlocks;
+}
+
+function getStructuredMidTurnDisplayText(
+  content: ContentBlock[],
+  displayText: unknown,
+): string {
+  if (typeof displayText === 'string' && displayText.trim().length > 0) {
+    return displayText.trim();
+  }
+
+  const text = content
+    .filter(
+      (part): part is Extract<ContentBlock, { type: 'text' }> =>
+        part.type === 'text',
+    )
+    .map((part) => part.text)
+    .join('\n')
+    .trim();
+
+  return text || '[User message with attachments]';
+}
+
+function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
+  if (!isRecord(response)) return [];
+
+  if (Array.isArray(response['items'])) {
+    return capMidTurnDrainItems(response['items'], 'item(s)').flatMap(
+      (item): DrainedMidTurnMessage[] => {
+        if (!isRecord(item)) {
+          return [];
+        }
+        const content = getValidMidTurnContentBlocks(
+          item['content'],
+          item['displayText'],
+        );
+        if (content.length === 0) return [];
+        return [
+          {
+            kind: 'structured',
+            content,
+            displayText: getStructuredMidTurnDisplayText(
+              content,
+              item['displayText'],
+            ),
+          },
+        ];
+      },
+    );
+  }
+
+  if (!Array.isArray(response['messages'])) {
+    debugLogger.warn(
+      `Mid-turn drain response had no recognized 'items' or 'messages' field; keys: ${Object.keys(
+        response,
+      ).join(', ')}`,
+    );
+    return [];
+  }
+
+  return capMidTurnDrainItems(response['messages'], 'message(s)')
+    .filter(
+      (message): message is string =>
+        typeof message === 'string' && message.trim().length > 0,
+    )
+    .map((message) => ({ kind: 'text', message }));
+}
 
 class MidTurnDrainTimeoutError extends Error {
   constructor() {
@@ -1334,6 +1528,7 @@ export class Session implements SessionContext {
                   if (toolRun.stopAfterUserQuestionCancel) {
                     await this.#preserveCancelledAskUserQuestionToolRun(
                       toolRun,
+                      pendingSend.signal,
                     );
                     return { stopReason: 'end_turn' };
                   }
@@ -1341,7 +1536,9 @@ export class Session implements SessionContext {
                     role: 'user',
                     parts: [
                       ...toolRun.parts,
-                      ...(await this.#drainMidTurnUserMessages()),
+                      ...(await this.#drainMidTurnUserMessages(
+                        pendingSend.signal,
+                      )),
                     ],
                   };
                 }
@@ -1603,14 +1800,17 @@ export class Session implements SessionContext {
               functionCalls,
             );
             if (toolRun.stopAfterUserQuestionCancel) {
-              await this.#preserveCancelledAskUserQuestionToolRun(toolRun);
+              await this.#preserveCancelledAskUserQuestionToolRun(
+                toolRun,
+                pendingSend.signal,
+              );
               return { stopReason: 'end_turn' };
             }
             nextMessage = {
               role: 'user',
               parts: [
                 ...toolRun.parts,
-                ...(await this.#drainMidTurnUserMessages()),
+                ...(await this.#drainMidTurnUserMessages(pendingSend.signal)),
               ],
             };
           }
@@ -1775,11 +1975,15 @@ export class Session implements SessionContext {
 
   async #preserveCancelledAskUserQuestionToolRun(
     toolRun: RunToolResult,
+    abortSignal: AbortSignal,
   ): Promise<void> {
     this.#preserveUnsentMessageHistory(
       {
         role: 'user',
-        parts: [...toolRun.parts, ...(await this.#drainMidTurnUserMessages())],
+        parts: [
+          ...toolRun.parts,
+          ...(await this.#drainMidTurnUserMessages(abortSignal)),
+        ],
       },
       true,
     );
@@ -1892,7 +2096,7 @@ export class Session implements SessionContext {
     });
   }
 
-  async #drainMidTurnUserMessages(): Promise<Part[]> {
+  async #drainMidTurnUserMessages(abortSignal: AbortSignal): Promise<Part[]> {
     if (this.midTurnDrainUnavailable) return [];
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
@@ -1914,28 +2118,49 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      // A client may legally resolve with `result: null` (passed through
-      // unwrapped by the ACP SDK); guard the object access so that doesn't
-      // throw a TypeError and get misclassified as a transient drain error.
-      const messages =
-        response &&
-        typeof response === 'object' &&
-        Array.isArray(response['messages'])
-          ? response['messages'].filter(
-              (message): message is string =>
-                typeof message === 'string' && message.trim().length > 0,
-            )
-          : [];
-
-      return messages.map((message) => {
-        const part = {
-          text: `\n[User message received during tool execution]: ${message}`,
-        };
+      const drainedMessages = parseMidTurnDrainResponse(response);
+      const drainedParts: Part[] = [];
+      for (const message of drainedMessages) {
+        const displayText =
+          message.kind === 'text' ? message.message : message.displayText;
+        let rawParts: Part[];
+        try {
+          rawParts =
+            message.kind === 'text'
+              ? [{ text: message.message }]
+              : await withTimeoutSignal(
+                  abortSignal,
+                  MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+                  (signal) => this.#resolvePrompt(message.content, signal),
+                );
+        } catch (messageError) {
+          if (abortSignal.aborted) return drainedParts;
+          const errorMessage = this.#formatError(messageError);
+          debugLogger.warn(
+            `Failed to resolve mid-turn message: ${errorMessage}`,
+          );
+          rawParts = [
+            {
+              text: displayText,
+            },
+          ];
+          if (
+            message.kind === 'structured' &&
+            hasInlineMediaContentBlock(message.content)
+          ) {
+            rawParts.push({
+              text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT,
+            });
+          }
+        }
+        const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
         this.config
           .getChatRecordingService()
-          ?.recordMidTurnUserMessage([part], message);
-        return part;
-      });
+          ?.recordMidTurnUserMessage(parts, displayText);
+        drainedParts.push(...parts);
+      }
+
+      return drainedParts;
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so
@@ -2196,6 +2421,7 @@ export class Session implements SessionContext {
                   if (toolRun.stopAfterUserQuestionCancel) {
                     await this.#preserveCancelledAskUserQuestionToolRun(
                       toolRun,
+                      ac.signal,
                     );
                     return;
                   }
@@ -2203,7 +2429,7 @@ export class Session implements SessionContext {
                     role: 'user',
                     parts: [
                       ...toolRun.parts,
-                      ...(await this.#drainMidTurnUserMessages()),
+                      ...(await this.#drainMidTurnUserMessages(ac.signal)),
                     ],
                   };
                 }
@@ -2506,7 +2732,10 @@ export class Session implements SessionContext {
                 functionCalls,
               );
               if (toolRun.stopAfterUserQuestionCancel) {
-                await this.#preserveCancelledAskUserQuestionToolRun(toolRun);
+                await this.#preserveCancelledAskUserQuestionToolRun(
+                  toolRun,
+                  ac.signal,
+                );
                 await this.#emitBackgroundNotificationEndTurn('end_turn');
                 return;
               }
@@ -2514,7 +2743,7 @@ export class Session implements SessionContext {
                 role: 'user',
                 parts: [
                   ...toolRun.parts,
-                  ...(await this.#drainMidTurnUserMessages()),
+                  ...(await this.#drainMidTurnUserMessages(ac.signal)),
                 ],
               };
             }

@@ -56,6 +56,7 @@ import type {
   BackendRewindResult,
   ChatOptions,
   BackendHostRuntimeContext,
+  MidTurnMessageMetadata,
   PermissionRequestType,
   SdkMcpServerConfig,
 } from './backend/types.ts';
@@ -102,6 +103,9 @@ type JsonRecord = Record<string, unknown>;
 
 const QWEN_RESPONSE_INTERRUPTED_MESSAGE = 'Response interrupted';
 const QWEN_TOOL_RESULT_MISSING_MESSAGE = 'Tool result was not recorded.';
+const MAX_MID_TURN_CONTENT_BUILD_FAILURES = 3;
+const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
+  '[Attachment could not be processed]';
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -1624,6 +1628,12 @@ function permissionTypeForKind(
   }
 }
 
+interface QueuedMidTurnMessage extends MidTurnMessageMetadata {
+  message: string;
+  attachments?: FileAttachment[];
+  buildFailureCount?: number;
+}
+
 export class QwenAgent extends BaseAgent {
   protected backendName = 'Qwen Code';
 
@@ -1671,7 +1681,7 @@ export class QwenAgent extends BaseAgent {
   private toolNames = new Map<string, string>();
   private toolInputs = new Map<string, Record<string, unknown>>();
   private activeParentToolUseIds = new Set<string>();
-  private midTurnMessageQueue: string[] = [];
+  private midTurnMessageQueue: QueuedMidTurnMessage[] = [];
 
   constructor(config: BackendConfig) {
     super(config, config.model || '');
@@ -1937,11 +1947,26 @@ export class QwenAgent extends BaseAgent {
     }
   }
 
-  enqueueMidTurnMessage(message: string): boolean {
+  enqueueMidTurnMessage(
+    message: string,
+    attachments?: FileAttachment[],
+    metadata?: MidTurnMessageMetadata,
+  ): boolean {
     const trimmed = message.trim();
-    if (!trimmed || !this._isProcessing || this.abortReason) return false;
+    if (
+      (!trimmed && !attachments?.length) ||
+      !this._isProcessing ||
+      this.abortReason
+    ) {
+      return false;
+    }
 
-    this.midTurnMessageQueue.push(trimmed);
+    this.midTurnMessageQueue.push({
+      message: trimmed,
+      attachments,
+      messageId: metadata?.messageId,
+      optimisticMessageId: metadata?.optimisticMessageId,
+    });
     this.debug(
       `Queued mid-turn user message for Qwen ACP injection (${this.midTurnMessageQueue.length} pending)`,
     );
@@ -2788,14 +2813,76 @@ export class QwenAgent extends BaseAgent {
       return {};
     }
 
-    const messages = this.midTurnMessageQueue.splice(0);
-    if (messages.length > 0) {
-      this.debug(
-        `Drained ${messages.length} mid-turn user message(s) to Qwen ACP`,
-      );
-      this.config.onMidTurnMessagesDrained?.(messages);
+    const entries = this.midTurnMessageQueue.splice(0);
+
+    const hasAttachments = entries.some(
+      (entry) => entry.attachments && entry.attachments.length > 0,
+    );
+    if (!hasAttachments) {
+      if (entries.length > 0) {
+        this.debug(
+          `Drained ${entries.length} mid-turn user message(s) to Qwen ACP`,
+        );
+        this.config.onMidTurnMessagesDrained?.(
+          entries.map(
+            (entry) =>
+              entry.messageId ?? entry.optimisticMessageId ?? entry.message,
+          ),
+        );
+      }
+      return { messages: entries.map((entry) => entry.message) };
     }
-    return { messages };
+
+    const items: Array<{ content: ContentBlock[]; displayText: string }> = [];
+    const messageIds: string[] = [];
+    const failedEntries: QueuedMidTurnMessage[] = [];
+    for (const entry of entries) {
+      const displayText = entry.message || '[User message with attachments]';
+      try {
+        items.push({
+          content: this.buildPromptBlocks(entry.message, entry.attachments, {
+            includeContext: false,
+          }),
+          displayText,
+        });
+        messageIds.push(
+          entry.messageId ?? entry.optimisticMessageId ?? entry.message,
+        );
+      } catch (error) {
+        const buildFailureCount = (entry.buildFailureCount ?? 0) + 1;
+        this.debug(
+          `Failed to build mid-turn content blocks (${buildFailureCount}/${MAX_MID_TURN_CONTENT_BUILD_FAILURES}): ${getErrorMessage(error)}`,
+        );
+        if (buildFailureCount >= MAX_MID_TURN_CONTENT_BUILD_FAILURES) {
+          items.push({
+            content: [
+              { type: 'text', text: displayText },
+              { type: 'text', text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT },
+            ],
+            displayText,
+          });
+          messageIds.push(
+            entry.messageId ?? entry.optimisticMessageId ?? entry.message,
+          );
+        } else {
+          failedEntries.push({ ...entry, buildFailureCount });
+        }
+      }
+    }
+
+    if (failedEntries.length > 0) {
+      this.midTurnMessageQueue.unshift(...failedEntries);
+    }
+    if (messageIds.length > 0) {
+      this.debug(
+        `Drained ${messageIds.length} mid-turn user message(s) to Qwen ACP`,
+      );
+      this.config.onMidTurnMessagesDrained?.(messageIds);
+    }
+
+    return {
+      items,
+    };
   }
 
   private getAcpConnection(): ClientSideConnection {
@@ -3447,13 +3534,15 @@ export class QwenAgent extends BaseAgent {
   private buildPromptBlocks(
     message: string,
     attachments?: FileAttachment[],
+    options?: { includeContext?: boolean },
   ): ContentBlock[] {
-    if (isSlashCommandPrompt(message, attachments)) {
+    const includeContext = options?.includeContext ?? true;
+    if (includeContext && isSlashCommandPrompt(message, attachments)) {
       return [{ type: 'text', text: message.trim() }];
     }
 
     const textParts: string[] = [];
-    const context = INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS
+    const context = includeContext && INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS
       ? this.buildCraftContext()
       : '';
 
@@ -3471,17 +3560,22 @@ export class QwenAgent extends BaseAgent {
         textParts.push(
           `[Attached text: ${attachment.name}]\n${attachment.text}`,
         );
+      } else {
+        this.debug(
+          `Skipping attachment ${attachment.name} while building prompt blocks: no readable content`,
+        );
       }
     }
 
     textParts.push(message);
     const text = textParts.filter(Boolean).join('\n\n');
-    const blocks: ContentBlock[] = [
-      {
+    const blocks: ContentBlock[] = [];
+    if (text || context) {
+      blocks.push({
         type: 'text',
         text: context ? `${text}\n\n` : text,
-      },
-    ];
+      });
+    }
 
     if (context) {
       blocks.push({
