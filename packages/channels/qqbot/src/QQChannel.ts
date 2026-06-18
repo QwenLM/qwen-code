@@ -160,6 +160,7 @@ export class QQChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    if (this.disposed) return;
     if (Date.now() >= this.tokenExpiresAt) {
       try {
         await this.fetchToken();
@@ -449,10 +450,16 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
           );
-          this.tokenRefreshTimer = setTimeout(
-            () => this.scheduleTokenRefresh(),
-            60_000,
-          );
+          // Retry fetchToken directly instead of going through
+          // scheduleTokenRefresh (which would add another ~60s of
+          // delay from the stale tokenExpiresAt).
+          this.tokenRefreshTimer = setTimeout(() => {
+            this.fetchToken().catch(() => {
+              process.stderr.write(
+                `[QQ:${this.name}] Token refresh failed again after retry\n`,
+              );
+            });
+          }, 60_000);
         });
       }, delay);
     }
@@ -513,7 +520,16 @@ export class QQChannel extends ChannelBase {
 
       this.serverRequestedReconnect = false;
 
-      if (shouldReconnect) {
+      if (shouldReconnect && this.connectReject) {
+        // Pre-READY close: reject so the caller's retry loop retries.
+        // connectReject is null after READY; when it's still set,
+        // we're waiting for the first READY and must not internal-reconnect
+        // (which would create a competing WebSocket and leak the Promise).
+        this.connectReject(
+          new Error(`WebSocket closed before READY (code=${code})`),
+        );
+        this.connectReject = null;
+      } else if (shouldReconnect) {
         this.reconnectAttempts++;
         const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 30000);
         process.stderr.write(
@@ -614,6 +630,11 @@ export class QQChannel extends ChannelBase {
           this.reconnectAttempts = 0;
           this.connectReject = null;
           this.startHeartbeat();
+          // Defensive: restore state in case the daemon restarted between
+          // the original READY and this RESUME. Normally these are no-ops
+          // (backup already restored, QQ state already in memory).
+          this.restoreGlobalSessions();
+          this.restoreQQState();
           this.router
             .restoreSessions()
             .then(() => {
