@@ -66,6 +66,67 @@ function hasMarkdownSyntax(text: string): boolean {
   );
 }
 
+/**
+ * Parse !ark(template_id, key=val, …) syntax from LLM text.
+ * Returns null if the text doesn't start with !ark(.
+ */
+function parseArkCommand(
+  text: string,
+): { templateId: number; kv: ArkKV[] } | null {
+  const m = text.match(/^!ark\((\d+),\s*(.+)\)$/s);
+  if (!m) return null;
+  const templateId = parseInt(m[1]!, 10);
+  const kv: ArkKV[] = [];
+  // Split on commas, but respect quoted values and parentheses nesting
+  const pairs = m[2]!.match(/(?:[^,"']+|"[^"]*"|'[^']*')+/g) || [];
+  for (const p of pairs) {
+    const eq = p.indexOf('=');
+    if (eq === -1) continue;
+    const key = p.slice(0, eq).trim();
+    const value = p
+      .slice(eq + 1)
+      .trim()
+      .replace(/^["']|["']$/g, '');
+    kv.push({ key, value });
+  }
+  return { templateId, kv };
+}
+
+/**
+ * Parse !media(type, url, [caption]) syntax from LLM text.
+ * Returns null if the text doesn't start with !media(.
+ */
+function parseMediaCommand(
+  text: string,
+): { fileType: number; url: string; caption?: string } | null {
+  const m = text.match(/^!media\((\w+),\s*([^,\n]+?)(?:,\s*(.+))?\)$/s);
+  if (!m) return null;
+  const typeMap: Record<string, number> = {
+    image: 1,
+    img: 1,
+    picture: 1,
+    photo: 1,
+    图片: 1,
+    video: 2,
+    视频: 2,
+    voice: 3,
+    audio: 3,
+    语音: 3,
+    音频: 3,
+    file: 4,
+    doc: 4,
+    document: 4,
+    文件: 4,
+  };
+  const fileType = typeMap[m[1]!.toLowerCase()];
+  if (!fileType) return null;
+  return {
+    fileType,
+    url: m[2]!.trim(),
+    caption: m[3]?.trim() || undefined,
+  };
+}
+
 export class QQChannel extends ChannelBase {
   private ws: WebSocket | null = null;
   private accessToken: string = '';
@@ -165,6 +226,25 @@ export class QQChannel extends ChannelBase {
 
   async sendMessage(chatId: string, text: string): Promise<void> {
     if (this.disposed) return;
+
+    // ── Route !ark / !media commands from LLM text ───────────
+    const arkCmd = parseArkCommand(text.trim());
+    if (arkCmd) {
+      await this.sendArk(chatId, arkCmd.templateId, arkCmd.kv);
+      return;
+    }
+    const mediaCmd = parseMediaCommand(text.trim());
+    if (mediaCmd) {
+      await this.sendMedia(
+        chatId,
+        mediaCmd.fileType,
+        mediaCmd.url,
+        mediaCmd.caption,
+      );
+      return;
+    }
+    // ── Normal text / markdown flow ──────────────────────────
+
     if (Date.now() >= this.tokenExpiresAt) {
       try {
         await this.fetchToken();
