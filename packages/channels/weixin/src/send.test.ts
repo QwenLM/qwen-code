@@ -266,6 +266,20 @@ describe('validateImagePath', () => {
     );
   });
 
+  it('reports the allowed directories when a Windows image path is rejected', () => {
+    const imagePath = 'D:\\WorkGroup\\QwenCode\\002\\hello.png';
+    const workspaceDir = 'D:\\OtherProject';
+    mockRealpathSync.mockImplementation((p: string) => {
+      if (p.includes('hello.png')) return imagePath;
+      if (p.includes('OtherProject')) return workspaceDir;
+      return p;
+    });
+
+    expect(() => validateImagePath(imagePath, [workspaceDir])).toThrow(
+      `Image path outside allowed directories: ${imagePath}. Allowed directories: /tmp, ${workspaceDir}`,
+    );
+  });
+
   it('does not treat POSIX backslashes as directory separators', () => {
     const imagePath = '/home/user/project\\escape.png';
     mockRealpathSync.mockImplementation((p: string) => {

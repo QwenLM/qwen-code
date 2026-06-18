@@ -67,6 +67,16 @@ function isInsideAllowedDir(realPath: string, allowedDir: string): boolean {
   );
 }
 
+function trimDisplayDir(dir: string): string {
+  if (/^[a-zA-Z]:[\\/]?$/.test(dir)) return dir;
+  const trimmed = dir.replace(/[\\/]+$/, '');
+  return trimmed || dir;
+}
+
+function formatAllowedImageDirs(dirs: readonly string[]): string {
+  return Array.from(new Set(dirs.map(trimDisplayDir))).join(', ');
+}
+
 /** Image magic bytes → MIME type mapping. */
 export function detectImageMime(data: Buffer): string {
   if (
@@ -148,7 +158,9 @@ export function validateImagePath(
   ];
 
   if (!ALLOWED_DIRS.some((dir) => isInsideAllowedDir(real, dir))) {
-    throw new Error(`Image path outside allowed directories: ${real}`);
+    throw new Error(
+      `Image path outside allowed directories: ${real}. Allowed directories: ${formatAllowedImageDirs(ALLOWED_DIRS)}`,
+    );
   }
 
   // Verify magic bytes match the extension (read only first 16 bytes to
