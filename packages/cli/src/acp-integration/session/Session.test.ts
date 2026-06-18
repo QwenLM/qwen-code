@@ -3587,6 +3587,103 @@ describe('Session', () => {
         expect(drainCalls).toHaveLength(5);
       }, 30_000);
 
+      it('recovers a drain that timed out and injects it on the next batch', async () => {
+        // The daemon answers the drain (splices + SSE-publishes, so the browser
+        // already deduped) but we time out waiting. The late response must not be
+        // discarded — it is recovered and injected on the NEXT batch instead of
+        // being lost from both queues.
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+
+        // Prompt 1's drain: a promise we resolve LATE (after the timeout fires)
+        // with the messages the daemon drained. Prompt 2's drain: empty.
+        let resolveLate: (value: { messages: string[] }) => void = () => {};
+        const latePromise = new Promise<{ messages: string[] }>((res) => {
+          resolveLate = res;
+        });
+        let drainCalls = 0;
+        mockClient.extMethod = vi.fn((method: string) => {
+          if (method !== 'craft/drainMidTurnQueue') return Promise.resolve({});
+          drainCalls += 1;
+          return drainCalls === 1
+            ? latePromise
+            : Promise.resolve({ messages: [] });
+        });
+
+        const toolCallStream = () =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'c',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]);
+        const streamMock = vi.fn();
+        for (let i = 0; i < 2; i++) {
+          streamMock
+            .mockResolvedValueOnce(toolCallStream())
+            .mockResolvedValueOnce(createEmptyStream());
+        }
+        mockChat.sendMessageStream = streamMock;
+
+        const prompt = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text' as const, text: 'read file' }],
+        };
+
+        // Prompt 1: the drain times out (latePromise still pending). Nothing is
+        // injected yet.
+        await session.prompt(prompt);
+
+        // The daemon's answer finally arrives. The timeout branch's handler
+        // stashes it for recovery; flush microtasks so the push lands.
+        resolveLate({ messages: ['please also check tests'] });
+        await new Promise((r) => setTimeout(r, 0));
+
+        // Prompt 2: the drain flushes the recovered message into this batch.
+        await session.prompt(prompt);
+
+        const midTurnPart = {
+          text: '\n[User message received during tool execution]: please also check tests',
+        };
+        // Injected into prompt 2's follow-up (4th sendMessageStream call), not
+        // prompt 1's (which timed out with nothing to inject).
+        const calls = vi.mocked(mockChat.sendMessageStream).mock.calls;
+        expect(calls[1]?.[1].message).not.toEqual(
+          expect.arrayContaining([midTurnPart]),
+        );
+        expect(calls[3]?.[1].message).toEqual(
+          expect.arrayContaining([midTurnPart]),
+        );
+        // Recorded exactly once, at injection time.
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith([midTurnPart], 'please also check tests');
+      }, 20_000);
+
       it('keeps mid-turn drain enabled after a transient error', async () => {
         const tool = {
           name: 'read_file',

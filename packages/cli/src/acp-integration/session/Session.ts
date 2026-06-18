@@ -185,6 +185,11 @@ const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
 // means the client silently drops unknown methods; without a deadline the
 // await would wedge the prompt turn forever.
 const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
+// Secondary deadline for recovering a drain whose response arrives AFTER the
+// 2s race timeout: within this window the late answer is re-injected on the next
+// batch; beyond it (e.g. degraded transport) it is dropped rather than pushed
+// into an unrelated turn's context.
+const MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS = 30_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
 const MAX_MID_TURN_DRAIN_ITEMS = 10;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
@@ -644,6 +649,11 @@ export class Session implements SessionContext {
   private lastPromptTokenCountChat: GeminiChat | null = null;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
+  // Messages from a drain that the daemon answered but we timed out waiting for
+  // (the daemon already spliced + SSE-published them). Re-injected on the next
+  // batch so a transient stall can't silently lose them. See
+  // `#drainMidTurnUserMessages`.
+  private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -2097,7 +2107,16 @@ export class Session implements SessionContext {
   }
 
   async #drainMidTurnUserMessages(abortSignal: AbortSignal): Promise<Part[]> {
-    if (this.midTurnDrainUnavailable) return [];
+    // Flush anything recovered from a PRIOR timed-out drain first: the daemon
+    // splices + SSE-publishes synchronously, so on a timeout the browser has
+    // already deduped those messages — discarding the late response would lose
+    // them from both queues. We stash them (see the timeout branch) and
+    // re-inject them here on the next batch.
+    const recovered = this.#takeRecoveredMidTurnMessages();
+
+    if (this.midTurnDrainUnavailable) {
+      return this.#buildMidTurnParts(recovered, abortSignal);
+    }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
@@ -2118,49 +2137,10 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      const drainedMessages = parseMidTurnDrainResponse(response);
-      const drainedParts: Part[] = [];
-      for (const message of drainedMessages) {
-        const displayText =
-          message.kind === 'text' ? message.message : message.displayText;
-        let rawParts: Part[];
-        try {
-          rawParts =
-            message.kind === 'text'
-              ? [{ text: message.message }]
-              : await withTimeoutSignal(
-                  abortSignal,
-                  MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                  (signal) => this.#resolvePrompt(message.content, signal),
-                );
-        } catch (messageError) {
-          if (abortSignal.aborted) return drainedParts;
-          const errorMessage = this.#formatError(messageError);
-          debugLogger.warn(
-            `Failed to resolve mid-turn message: ${errorMessage}`,
-          );
-          rawParts = [
-            {
-              text: displayText,
-            },
-          ];
-          if (
-            message.kind === 'structured' &&
-            hasInlineMediaContentBlock(message.content)
-          ) {
-            rawParts.push({
-              text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT,
-            });
-          }
-        }
-        const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
-        this.config
-          .getChatRecordingService()
-          ?.recordMidTurnUserMessage(parts, displayText);
-        drainedParts.push(...parts);
-      }
-
-      return drainedParts;
+      return this.#buildMidTurnParts(
+        [...recovered, ...parseMidTurnDrainResponse(response)],
+        abortSignal,
+      );
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so
@@ -2180,9 +2160,14 @@ export class Session implements SessionContext {
       const isTimeout = error instanceof MidTurnDrainTimeoutError;
       if (isTimeout) {
         this.midTurnDrainTimeoutStrikes += 1;
-        // The lost race leaves the request pending; if the client settles it
-        // later, a rejection must not surface as an unhandled rejection.
-        drainPromise?.catch(() => {});
+        // The lost race leaves the drain request pending. The daemon answers it
+        // by splicing the queue + publishing the SSE echo (so the browser has
+        // already deduped), then returns the messages we just timed out waiting
+        // for. Recover that late response and inject it on the next batch instead
+        // of discarding it (which would lose the messages from both queues —
+        // silent loss). `#recoverLateDrain` bounds the wait and swallows a late
+        // rejection.
+        if (drainPromise) void this.#recoverLateDrain(drainPromise);
       }
       // Repeated timeouts are also permanent: a conforming client answers
       // (or rejects with -32601) immediately, so sustained silence means the
@@ -2203,8 +2188,108 @@ export class Session implements SessionContext {
       debugLogger.warn(
         `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
-      return [];
+      // Even on a failed/timed-out drain, still inject anything recovered from
+      // an EARLIER timeout so a transient stall never strands those messages.
+      return this.#buildMidTurnParts(recovered, abortSignal);
     }
+  }
+
+  /** Read and clear the buffer of messages recovered from a timed-out drain. */
+  #takeRecoveredMidTurnMessages(): DrainedMidTurnMessage[] {
+    if (this.midTurnRecoveredMessages.length === 0) return [];
+    const out = this.midTurnRecoveredMessages;
+    this.midTurnRecoveredMessages = [];
+    return out;
+  }
+
+  /**
+   * After a drain times out, the request is still pending; the daemon settles it
+   * shortly after (it splices + SSE-publishes synchronously, so the browser has
+   * already deduped). Recover that late response for the next batch instead of
+   * discarding it, but bound the wait with a secondary deadline so a response
+   * that only arrives long after the turn isn't pushed into an unrelated
+   * context. A late rejection is swallowed (no unhandled rejection).
+   */
+  async #recoverLateDrain(
+    pending: ReturnType<AgentSideConnection['extMethod']>,
+  ): Promise<void> {
+    // Swallow a late rejection regardless of which branch of the race wins.
+    pending.catch(() => {});
+    const expired = Symbol('mid-turn-recovery-expired');
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<typeof expired>((resolve) => {
+      timer = setTimeout(
+        () => resolve(expired),
+        MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    });
+    let late: unknown;
+    try {
+      late = await Promise.race([pending, deadline]);
+    } catch {
+      return; // late rejection — nothing to recover
+    } finally {
+      clearTimeout(timer);
+    }
+    if (late === expired) {
+      debugLogger.warn(
+        `[mid-turn] dropped a drain response that arrived after the ${MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS}ms recovery deadline [session ${this.sessionId}]`,
+      );
+      return;
+    }
+    const lateMessages = parseMidTurnDrainResponse(late);
+    if (lateMessages.length > 0) {
+      debugLogger.debug(
+        `[mid-turn] recovered ${lateMessages.length} message(s) from a timed-out drain [session ${this.sessionId}]`,
+      );
+      this.midTurnRecoveredMessages.push(...lateMessages);
+    }
+  }
+
+  /**
+   * Resolve each drained mid-turn message (text or structured content) into
+   * agent-visible `Part`s and record it once to the chat transcript. Recording
+   * happens on injection (here), so a message recovered from an earlier
+   * timed-out drain is still recorded exactly once.
+   */
+  async #buildMidTurnParts(
+    messages: DrainedMidTurnMessage[],
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    const parts: Part[] = [];
+    for (const message of messages) {
+      const displayText =
+        message.kind === 'text' ? message.message : message.displayText;
+      let rawParts: Part[];
+      try {
+        rawParts =
+          message.kind === 'text'
+            ? [{ text: message.message }]
+            : await withTimeoutSignal(
+                abortSignal,
+                MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+                (signal) => this.#resolvePrompt(message.content, signal),
+              );
+      } catch (messageError) {
+        if (abortSignal.aborted) return parts;
+        const errorMessage = this.#formatError(messageError);
+        debugLogger.warn(`Failed to resolve mid-turn message: ${errorMessage}`);
+        rawParts = [{ text: displayText }];
+        if (
+          message.kind === 'structured' &&
+          hasInlineMediaContentBlock(message.content)
+        ) {
+          rawParts.push({ text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT });
+        }
+      }
+      const built = prefixMidTurnUserMessageParts(rawParts, displayText);
+      this.config
+        .getChatRecordingService()
+        ?.recordMidTurnUserMessage(built, displayText);
+      parts.push(...built);
+    }
+    return parts;
   }
 
   /**
