@@ -9,6 +9,13 @@ import {
   convertTomlToMarkdown,
   isTomlFormat,
 } from './toml-to-markdown-converter.js';
+import { parse as parseYaml } from './yaml-parser.js';
+
+function readDescriptionFromFrontmatter(markdown: string): unknown {
+  const match = markdown.match(/^---\n([\s\S]*?)\n---\n/);
+  expect(match).not.toBeNull();
+  return parseYaml(match![1])['description'];
+}
 
 describe('convertTomlToMarkdown', () => {
   it('should convert TOML with description to Markdown', () => {
@@ -69,7 +76,20 @@ description = "Command with: special, characters!"`;
 
     const result = convertTomlToMarkdown(tomlContent);
 
-    expect(result).toContain('description: Command with: special, characters!');
+    expect(readDescriptionFromFrontmatter(result)).toBe(
+      'Command with: special, characters!',
+    );
+  });
+
+  it('should preserve YAML-like description strings as strings', () => {
+    for (const description of ['false', '123', 'null', 'line one\nline two']) {
+      const tomlContent = `prompt = "Test prompt"
+description = ${JSON.stringify(description)}`;
+
+      const result = convertTomlToMarkdown(tomlContent);
+
+      expect(readDescriptionFromFrontmatter(result)).toBe(description);
+    }
   });
 });
 
