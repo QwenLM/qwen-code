@@ -2126,9 +2126,13 @@ export class GeminiClient {
         // Always-on safety checks (turn tool-call cap). These fire before
         // the skipLoopDetection gate so they cannot be bypassed by
         // configuration.
-        const alwaysOnLoop =
-          this.loopDetector.checkAlwaysOnSafeties(event);
+        const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
         if (alwaysOnLoop) {
+          // The tripping response may carry several tool calls collected
+          // before the cap fired. Drop them so the run halts here instead of
+          // executing them, spawning a continuation, and re-tripping the cap
+          // (which would double-print the halt message and waste a request).
+          turn.pendingToolCalls.length = 0;
           yield {
             type: GeminiEventType.LoopDetected,
             value: { loopType: this.loopDetector.getLastLoopType()! },

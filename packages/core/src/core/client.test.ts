@@ -4286,6 +4286,73 @@ hello
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
 
+    it('should halt via the always-on turn cap before the skipLoopDetection gate', async () => {
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // The always-on cap trips on the first event — it runs before (and
+      // independently of) the gated detectors.
+      const loopDetector = client['loopDetector'];
+      const alwaysOnSpy = vi
+        .spyOn(loopDetector, 'checkAlwaysOnSafeties')
+        .mockReturnValue(true);
+      const deterministicSpy = vi.spyOn(
+        loopDetector,
+        'addAndCheckDeterministicToolCallLoop',
+      );
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger the cap' }],
+        new AbortController().signal,
+        'prompt-id-cap',
+        { type: SendMessageType.UserQuery },
+      );
+      const events = [];
+      let result = await stream.next();
+      while (!result.done) {
+        events.push(result.value);
+        result = await stream.next();
+      }
+      const returnedTurn = result.value as
+        | { pendingToolCalls: unknown[] }
+        | undefined;
+
+      // Always-on cap fires and short-circuits before the gated detectors run.
+      expect(alwaysOnSpy).toHaveBeenCalled();
+      expect(deterministicSpy).not.toHaveBeenCalled();
+      const loopEvent = events.find(
+        (e) => e.type === GeminiEventType.LoopDetected,
+      );
+      expect(loopEvent?.value?.loopType).toBe(LoopType.TURN_TOOL_CALL_CAP);
+      // Pending tool calls are dropped so the halt doesn't spawn a continuation
+      // that re-trips the cap and double-prints the message.
+      expect(returnedTurn?.pendingToolCalls).toHaveLength(0);
+      // The mid-stream memory prefetch is cancelled.
+      expect(abortHandlerInvoked).toBe(true);
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
     it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {
       // Self-inflicted-regression guard for the round-4 finding:
       // the bottom-of-try `normalCompletion = true` doesn't cover the

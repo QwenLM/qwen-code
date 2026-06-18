@@ -109,8 +109,16 @@ export class LoopDetectionService {
   private recentToolCallKeys: string[] = [];
 
   // Total tool calls emitted in the current turn. Always-on circuit breaker;
-  // exceeds TURN_TOOL_CALL_CAP → hard-stop.
+  // exceeds TURN_TOOL_CALL_CAP → hard-stop. Accumulates across ToolResult
+  // continuations within a turn (reset() only runs for top-level interactions).
   private turnToolCallTotal = 0;
+
+  // Rollback floor for turnToolCallTotal: the committed total as of the last
+  // completed round-trip (Finished event). A retry re-streams the failed
+  // attempt's tool calls (Turn clears pendingToolCalls on retry), so on Retry
+  // we roll back to this floor — discarding only the failed attempt, not the
+  // counts from prior completed round-trips.
+  private turnToolCallTotalCommitted = 0;
 
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
@@ -179,12 +187,9 @@ export class LoopDetectionService {
         this.thoughtHistory = [];
 
         this.trackToolCall(event.value);
-        const globalDup = this.checkGlobalDuplicate(
-          this.getToolCallKey(event.value),
-        );
-        const alternating = this.checkAlternatingPattern(
-          this.getToolCallKey(event.value),
-        );
+        const toolCallKey = this.getToolCallKey(event.value);
+        const globalDup = this.checkGlobalDuplicate(toolCallKey);
+        const alternating = this.checkAlternatingPattern(toolCallKey);
         const readFileLoop = this.checkReadFileLoop();
         const actionStagnation = this.checkActionStagnation();
 
@@ -242,12 +247,28 @@ export class LoopDetectionService {
       return true;
     }
 
+    // A model response (round-trip) finished cleanly: commit its tool-call
+    // count as the rollback floor. The per-turn total accumulates across
+    // ToolResult continuations, so the floor must track the last committed
+    // round-trip rather than resetting to zero.
+    if (event.type === GeminiEventType.Finished) {
+      this.turnToolCallTotalCommitted = this.turnToolCallTotal;
+      return false;
+    }
+
+    // A retry re-streams the failed attempt's tool calls, which would
+    // double-count against the cap. Roll back to the last committed round-trip
+    // so only executed calls count — never below it (prior round-trips stay).
+    if (event.type === GeminiEventType.Retry) {
+      this.turnToolCallTotal = this.turnToolCallTotalCommitted;
+      return false;
+    }
+
     if (event.type !== GeminiEventType.ToolCallRequest) {
       return false;
     }
 
-    const key = this.getToolCallKey(event.value);
-    if (this.checkTurnToolCallCap(key)) {
+    if (this.checkTurnToolCallCap()) {
       this.loopDetected = true;
       return true;
     }
@@ -612,7 +633,7 @@ export class LoopDetectionService {
    * skipLoopDetection and fires on the very next tool call that pushes the
    * total past the cap, not retroactively.
    */
-  private checkTurnToolCallCap(_toolCallKey: string): boolean {
+  private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
     if (this.turnToolCallTotal > TURN_TOOL_CALL_CAP) {
       this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
@@ -708,6 +729,7 @@ export class LoopDetectionService {
     this.globalToolCallCounts.clear();
     this.recentToolCallKeys = [];
     this.turnToolCallTotal = 0;
+    this.turnToolCallTotalCommitted = 0;
   }
 
   private resetToolCallCount(): void {

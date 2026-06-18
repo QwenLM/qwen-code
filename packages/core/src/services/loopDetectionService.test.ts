@@ -1076,6 +1076,87 @@ describe('LoopDetectionService', () => {
       // still fires.
       expect(isLoop).toBe(true);
     });
+
+    const retryEvent = {
+      type: GeminiEventType.Retry,
+    } as ServerGeminiStreamEvent;
+    const finishedEvent = {
+      type: GeminiEventType.Finished,
+      value: { reason: 'STOP' },
+    } as unknown as ServerGeminiStreamEvent;
+
+    it('rolls back a failed attempt on retry so its calls do not count', () => {
+      service.reset('');
+      // Attempt makes 60 calls, then the API retries (no round-trip committed
+      // yet, so the rollback floor is 0).
+      for (let i = 0; i < 60; i++) {
+        service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
+      }
+      service.checkAlwaysOnSafeties(retryEvent);
+      // The 60 discarded calls must not count: a full cap's worth of fresh
+      // calls stays under the limit, and only the (cap+1)-th fires.
+      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', { j: i }),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { last: true }),
+        ),
+      ).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves committed round-trip counts when a later attempt retries', () => {
+      service.reset('');
+      // Round-trip 1: 60 calls, then Finished commits them as the floor.
+      for (let i = 0; i < 60; i++) {
+        service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
+      }
+      service.checkAlwaysOnSafeties(finishedEvent);
+      // Round-trip 2: 30 calls, then a retry discards only these 30.
+      for (let i = 0; i < 30; i++) {
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { k: i }),
+        );
+      }
+      service.checkAlwaysOnSafeties(retryEvent);
+      // Total is back to the committed 60 (NOT zero): 40 more reach exactly the
+      // cap without firing, and the next call trips it.
+      for (let i = 0; i < TURN_TOOL_CALL_CAP - 60; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', { m: i }),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { last: true }),
+        ),
+      ).toBe(true);
+    });
+
+    it('still accumulates across committed round-trips to trip the cap', () => {
+      service.reset('');
+      let fired = false;
+      // 11 calls/round-trip; the cap (100) is crossed partway through.
+      for (let rt = 0; rt < 12 && !fired; rt++) {
+        for (let i = 0; i < 11 && !fired; i++) {
+          fired = service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', { rt, i }),
+          );
+        }
+        if (!fired) {
+          service.checkAlwaysOnSafeties(finishedEvent);
+        }
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
   });
 
   describe('Global Tool Call Duplicate Detection', () => {
