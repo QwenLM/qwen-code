@@ -19,6 +19,9 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
+// Wire constants shared with the child-side caller (`Session.ts`) and, for the
+// SSE event type, the SDK validator + browser consumer — single sources of truth
+// so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
 import type { MidTurnQueueEntry } from './bridgeTypes.js';
@@ -199,20 +202,6 @@ function sliceLineRange(
  * `SessionEntry` is required to provide them — TS enforces the
  * structural match at the callback signature).
  */
-// `MID_TURN_QUEUE_DRAIN_METHOD` is imported from `./bridgeTypes.js` (the single
-// source of truth shared with the child-side caller in `Session.ts`).
-
-/**
- * `MID_TURN_MESSAGE_INJECTED_EVENT` (the SSE frame `type` published when mid-turn
- * messages are drained into the running turn) is imported from
- * `./daemonEventTypes.js` — the single source of truth the SDK re-exports, so the
- * validator and the browser consumer share the same literal. The browser consumes
- * the frame to
- * move those messages out of its pending queue so they aren't resent as the next
- * turn (a transient dedupe signal — it isn't rendered as a transcript item).
- * `data: { sessionId, messages: string[] }`.
- */
-
 export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;

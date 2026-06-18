@@ -354,7 +354,9 @@ export class ImageTokenizer {
     }
 
     const width = buffer.readUInt32LE(18);
-    const height = buffer.readUInt32LE(22);
+    // Height is a signed int32: a negative value means a top-down BMP. Read it
+    // signed so Math.abs recovers the real height instead of a ~4-billion value.
+    const height = buffer.readInt32LE(22);
 
     return { width, height: Math.abs(height) }; // Height can be negative for top-down BMPs
   }

@@ -72,9 +72,13 @@ import {
   isSlashCommand,
 } from '../utils/commandUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
-import { handleAtCommand } from './atCommandProcessor.js';
+import {
+  handleAtCommand,
+  resolveAtCommandQuery,
+} from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
+import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
   useReactToolScheduler,
@@ -95,6 +99,9 @@ import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
+  'Mid-turn @ command resolution timed out';
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -117,6 +124,35 @@ function extractLastAssistantText(history: HistoryItem[]): string | undefined {
 
 function stripLeadingBlankLines(text: string): string {
   return text.replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
+async function resolveWithAbort<T>(
+  signal: AbortSignal,
+  run: () => Promise<T>,
+): Promise<T> {
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new Error('Mid-turn @ command resolution aborted'),
+      );
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([run(), abortPromise]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
 }
 
 /**
@@ -359,13 +395,11 @@ export const useGeminiStream = (
   useLayoutEffect(() => {
     historyRef.current = history;
   }, [history]);
-  // In-flight tool-use-summary aborters. Each batch gets its own AbortController
-  // because the captured turn controller is replaced when submitQuery starts
-  // the next turn, and the summary call outlives the current turn (that's the
-  // whole point — it overlaps with the next turn's streaming). cancelOngoingRequest
-  // aborts all in-flight summaries so Ctrl+C during the next turn also kills
-  // this turn's stale summary work.
-  const summaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
+  // In-flight auxiliary work. Some work is batch-scoped rather than turn-scoped:
+  // summaries intentionally outlive the turn, and mid-turn @ resolution may run
+  // before submitQuery installs the next turn controller.
+  // cancelOngoingRequest aborts these controllers so Ctrl+C still cancels them.
+  const auxiliaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   // Streamed model reasoning for the current turn. Rendered (height-limited)
@@ -645,12 +679,12 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
-    // Cancel any in-flight tool-use-summary generations so their Promise.then
-    // doesn't addItem a stale label after the user cancelled.
-    for (const ac of summaryAbortRefsRef.current) {
+    // Cancel any in-flight auxiliary work so its Promise.then doesn't add
+    // stale content after the user cancelled.
+    for (const ac of auxiliaryAbortRefsRef.current) {
       ac.abort();
     }
-    summaryAbortRefsRef.current.clear();
+    auxiliaryAbortRefsRef.current.clear();
 
     // Report cancellation to arena status reporter (if in arena mode).
     // This is needed because cancellation during tool execution won't
@@ -2357,7 +2391,7 @@ export const useGeminiStream = (
           // resolve time (which covers both Ctrl+C on the next turn and
           // mid-flight cancellation of this batch via turnCancelledRef).
           const summaryAbort = new AbortController();
-          summaryAbortRefsRef.current.add(summaryAbort);
+          auxiliaryAbortRefsRef.current.add(summaryAbort);
 
           // Capture the first callId so we can locate "our" tool_group at
           // resolve time. If a newer tool_group has been added since we
@@ -2372,7 +2406,7 @@ export const useGeminiStream = (
             lastAssistantText,
           })
             .then((summary) => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
               const cancelled =
                 turnCancelledRef.current ||
                 abortControllerRef.current?.signal.aborted ||
@@ -2409,7 +2443,7 @@ export const useGeminiStream = (
               }
             })
             .catch(() => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
             });
         }
       }
@@ -2427,16 +2461,128 @@ export const useGeminiStream = (
           ? []
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
-        for (const msg of drained) {
-          const midTurnUserMessage = {
-            text: `\n[User message received during tool execution]: ${msg}`,
-          };
-          responsesToSend.push(midTurnUserMessage);
-          config
-            .getChatRecordingService()
-            ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
-          addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+        const midTurnTimestamp = Date.now();
+        const midTurnAbort =
+          abortControllerRef.current ?? new AbortController();
+        const shouldTrackMidTurnAbort = !abortControllerRef.current;
+        if (shouldTrackMidTurnAbort) {
+          auxiliaryAbortRefsRef.current.add(midTurnAbort);
         }
+        try {
+          for (let index = 0; index < drained.length; index += 1) {
+            if (midTurnAbort.signal.aborted) {
+              break;
+            }
+            const msg = drained[index];
+            let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
+            if (isAtCommand(msg)) {
+              const atCommandTimeout = new AbortController();
+              const atCommandSignal = AbortSignal.any([
+                midTurnAbort.signal,
+                atCommandTimeout.signal,
+              ]);
+              const atCommandTimeoutId = setTimeout(() => {
+                atCommandTimeout.abort(
+                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+                );
+              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+              try {
+                const atCommandResult = await resolveWithAbort(
+                  atCommandSignal,
+                  () =>
+                    resolveAtCommandQuery({
+                      query: msg,
+                      config,
+                      onDebugMessage,
+                      messageId: midTurnTimestamp + index,
+                      signal: atCommandSignal,
+                    }),
+                );
+                const shouldSkipMidTurnMessage =
+                  !atCommandResult.shouldProceed &&
+                  (atCommandResult.toolDisplays?.length ?? 0) > 0;
+                if (
+                  atCommandResult.shouldProceed &&
+                  atCommandResult.processedQuery !== null
+                ) {
+                  resolvedMidTurnQuery = atCommandResult.processedQuery;
+                } else if (atCommandResult.toolDisplays?.length) {
+                  addItem(
+                    { type: 'tool_group', tools: atCommandResult.toolDisplays },
+                    midTurnTimestamp + index,
+                  );
+                }
+                if (atCommandResult.recording) {
+                  config.getChatRecordingService()?.recordAtCommand?.({
+                    filesRead: atCommandResult.recording.filesRead,
+                    status: atCommandResult.recording.status,
+                    ...(atCommandResult.recording.message
+                      ? { message: atCommandResult.recording.message }
+                      : {}),
+                    userText: msg,
+                  });
+                }
+                if (shouldSkipMidTurnMessage) {
+                  continue;
+                }
+              } catch (error) {
+                const errorMessage = getErrorMessage(error);
+                onDebugMessage(
+                  `Failed to resolve mid-turn @ command: ${errorMessage}`,
+                );
+                if (!midTurnAbort.signal.aborted) {
+                  addItem(
+                    {
+                      type: MessageType.WARNING,
+                      text: `Could not attach file: ${errorMessage}`,
+                    },
+                    Date.now(),
+                  );
+                }
+                continue;
+              } finally {
+                clearTimeout(atCommandTimeoutId);
+              }
+              if (midTurnAbort.signal.aborted) {
+                break;
+              }
+            }
+
+            const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
+              resolvedMidTurnQuery,
+              msg,
+            );
+            const formatCheck = checkImageFormatsSupport(
+              midTurnUserMessageParts,
+            );
+            if (formatCheck.hasUnsupportedFormats) {
+              addItem(
+                {
+                  type: MessageType.INFO,
+                  text: getUnsupportedImageFormatWarning(),
+                },
+                Date.now(),
+              );
+            }
+            responsesToSend.push(...midTurnUserMessageParts);
+            config
+              .getChatRecordingService()
+              ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
+            addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+          }
+        } finally {
+          if (shouldTrackMidTurnAbort) {
+            auxiliaryAbortRefsRef.current.delete(midTurnAbort);
+            midTurnAbort.abort();
+          }
+        }
+      }
+
+      if (
+        turnCancelledRef.current ||
+        abortControllerRef.current?.signal.aborted
+      ) {
+        return;
       }
 
       submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
@@ -2451,6 +2597,7 @@ export const useGeminiStream = (
       midTurnDrainRef,
       addItem,
       dualOutput,
+      onDebugMessage,
     ],
   );
 
