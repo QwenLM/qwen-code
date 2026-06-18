@@ -638,6 +638,30 @@ describe('RipGrepTool', () => {
         returnDisplay: 'Error: ripgrep binary not found.',
       });
     });
+
+    it('should pass useBuiltinRipgrep setting to ripgrep execution', async () => {
+      const systemOnlyConfig = {
+        ...mockConfig,
+        getUseBuiltinRipgrep: () => false,
+      } as unknown as Config;
+      const systemOnlyGrepTool = new RipGrepTool(systemOnlyConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'hello' };
+      const invocation = systemOnlyGrepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      expect(runRipgrep).toHaveBeenCalledWith(
+        expect.any(Array),
+        abortSignal,
+        false,
+      );
+    });
   });
 
   describe('multi-directory workspace', () => {
@@ -684,6 +708,7 @@ describe('RipGrepTool', () => {
           secondDir,
         ]),
         expect.anything(),
+        true,
       );
 
       await fs.rm(secondDir, { recursive: true, force: true });
