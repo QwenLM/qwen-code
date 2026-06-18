@@ -1906,7 +1906,7 @@ export class Session implements SessionContext {
     const recovered = this.#takeRecoveredMidTurnMessages();
 
     if (this.midTurnDrainUnavailable) {
-      return this.#formatMidTurnParts(recovered);
+      return this.#buildMidTurnParts(recovered);
     }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
@@ -1928,7 +1928,7 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      return this.#formatMidTurnParts([
+      return this.#buildMidTurnParts([
         ...recovered,
         ...this.#extractMidTurnMessages(response),
       ]);
@@ -1960,9 +1960,13 @@ export class Session implements SessionContext {
         // rejection); only a resolved payload carries messages.
         drainPromise
           ?.then((late) => {
-            this.midTurnRecoveredMessages.push(
-              ...this.#extractMidTurnMessages(late),
-            );
+            const recovered = this.#extractMidTurnMessages(late);
+            if (recovered.length > 0) {
+              debugLogger.debug(
+                `[mid-turn] recovered ${recovered.length} message(s) from a timed-out drain [session ${this.sessionId}]`,
+              );
+              this.midTurnRecoveredMessages.push(...recovered);
+            }
           })
           .catch(() => {});
       }
@@ -1987,7 +1991,7 @@ export class Session implements SessionContext {
       );
       // Even on a failed/timed-out drain, still inject anything recovered from
       // an EARLIER timeout so a transient stall never strands those messages.
-      return this.#formatMidTurnParts(recovered);
+      return this.#buildMidTurnParts(recovered);
     }
   }
 
@@ -2021,7 +2025,7 @@ export class Session implements SessionContext {
    * the chat transcript. Recording happens on injection (here), so a recovered
    * message is recorded exactly once even though its drain timed out earlier.
    */
-  #formatMidTurnParts(messages: string[]): Part[] {
+  #buildMidTurnParts(messages: string[]): Part[] {
     return messages.map((message) => {
       const part = {
         text: `\n[User message received during tool execution]: ${message}`,
