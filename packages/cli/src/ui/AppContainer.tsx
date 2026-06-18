@@ -1040,12 +1040,16 @@ export const AppContainer = (props: AppContainerProps) => {
     const chatRecordingService = config.getChatRecordingService();
     if (!chatRecordingService?.setTitleRecordedCallback) return;
 
-    chatRecordingService.setTitleRecordedCallback((customTitle) => {
+    // Chain with existing callback (e.g., Session's ACP notification)
+    const existingCallback = chatRecordingService.getTitleRecordedCallback();
+    chatRecordingService.setTitleRecordedCallback((customTitle, source) => {
+      existingCallback?.(customTitle, source);
       setSessionName(customTitle);
     });
 
     return () => {
-      chatRecordingService.setTitleRecordedCallback(undefined);
+      // Restore original callback on unmount
+      chatRecordingService.setTitleRecordedCallback(existingCallback);
     };
   }, [config]);
 

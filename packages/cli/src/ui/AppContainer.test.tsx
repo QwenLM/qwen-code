@@ -2568,8 +2568,10 @@ describe('AppContainer State Management', () => {
           }
         },
       );
+      const getTitleRecordedCallback = vi.fn(() => titleRecordedCallback);
       vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
         setTitleRecordedCallback,
+        getTitleRecordedCallback,
       } as unknown as NonNullable<
         ReturnType<Config['getChatRecordingService']>
       >);
