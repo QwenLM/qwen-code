@@ -24,4 +24,16 @@ describe('serve command args', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['enable-session-shell']).toBe(false);
   });
+
+  it('parses --permission-response-timeout-ms as a number', () => {
+    const parsed = buildParser().parseSync(
+      '--permission-response-timeout-ms 60000',
+    );
+    expect(parsed['permission-response-timeout-ms']).toBe(60000);
+  });
+
+  it('leaves --permission-response-timeout-ms unset by default', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['permission-response-timeout-ms']).toBeUndefined();
+  });
 });

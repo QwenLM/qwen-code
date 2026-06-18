@@ -49,11 +49,18 @@ async function switchMainModel(
     );
     persistSetting(settings, 'security.auth.selectedType', parsed.authType);
     persistSetting(settings, 'model.name', parsed.modelId);
+    // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
+    // by a previous model-picker selection — otherwise next launch would
+    // resolve to a different provider than this switch just chose. Use an
+    // empty-string tombstone so the clear overrides a lower-scope value (an
+    // undefined write is dropped from JSON and would not override on merge).
+    persistSetting(settings, 'model.baseUrl', '');
     return parsed.modelId;
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
   persistSetting(settings, 'model.name', modelArg);
+  persistSetting(settings, 'model.baseUrl', '');
   return modelArg;
 }
 

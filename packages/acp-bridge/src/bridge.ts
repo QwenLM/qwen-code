@@ -784,7 +784,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     opts.permissionResponseTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
   const permissionTimeoutMs =
     permissionTimeoutRaw > 0 && Number.isFinite(permissionTimeoutRaw)
-      ? permissionTimeoutRaw
+      ? // Clamp to 2^31-1: Node treats setTimeout delays larger than
+        // this as 1ms (TimeoutOverflowWarning), which would make a
+        // huge "effectively never" timeout cancel prompts almost
+        // immediately — the opposite of intent. Mirrors the sibling
+        // `resolvePositiveFiniteMs` / `resolvedChannelIdleTimeoutMs`.
+        Math.min(permissionTimeoutRaw, 2_147_483_647)
       : 0; // 0 = disabled
   const maxPendingRaw =
     opts.maxPendingPermissionsPerSession ?? DEFAULT_MAX_PENDING_PER_SESSION;

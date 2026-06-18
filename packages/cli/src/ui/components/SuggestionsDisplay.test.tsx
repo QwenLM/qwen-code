@@ -8,7 +8,10 @@
 
 import { render } from 'ink-testing-library';
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { SuggestionsDisplay } from './SuggestionsDisplay.js';
+import {
+  SuggestionsDisplay,
+  normalizeDescription,
+} from './SuggestionsDisplay.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 
 describe('SuggestionsDisplay', () => {
@@ -38,9 +41,9 @@ describe('SuggestionsDisplay', () => {
     expect(lastFrame()).toContain('正在加载建议...');
   });
 
-  it('wraps long slash command descriptions instead of truncating them', () => {
+  it('truncates long slash command descriptions to a single line by default', () => {
     const description =
-      'This long command description should wrap across multiple lines and remain fully visible in the menu.';
+      'This long command description should be truncated to a single line so it cannot fill the entire terminal window.';
     const { lastFrame } = render(
       <SuggestionsDisplay
         suggestions={[
@@ -60,9 +63,44 @@ describe('SuggestionsDisplay', () => {
     );
 
     const output = lastFrame() ?? '';
-    const normalizedOutput = output.replace(/\s+/g, ' ').trim();
 
-    expect(normalizedOutput).toContain(description);
-    expect(output.split('\n').length).toBeGreaterThan(1);
+    // The description is cut off with an ellipsis and the full text is gone.
+    expect(output).toContain('…');
+    expect(output).not.toContain('entire terminal window');
+    // A single suggestion with a long description must not blow up vertically.
+    expect(output.split('\n').length).toBeLessThanOrEqual(2);
+  });
+
+  it('collapses newlines in multi-line descriptions so a row stays one line', () => {
+    const description = [
+      'First line of the skill description.',
+      '',
+      '- bullet one',
+      '- bullet two',
+    ].join('\n');
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[{ label: 'skill', value: 'skill', description }]}
+        activeIndex={0}
+        isLoading={false}
+        width={120}
+        scrollOffset={0}
+        userInput="/sk"
+        mode="slash"
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    // The verbatim multi-line layout (with the blank line / bullets stacked)
+    // must not appear; everything collapses onto the single command row.
+    expect(output).not.toContain('\n\n');
+    expect(output).toContain('First line of the skill description.');
+    expect(output).toContain('- bullet one - bullet two');
+  });
+});
+
+describe('normalizeDescription', () => {
+  it('collapses all whitespace runs into single spaces and trims', () => {
+    expect(normalizeDescription('  a\n\nb\t c  ')).toBe('a b c');
   });
 });

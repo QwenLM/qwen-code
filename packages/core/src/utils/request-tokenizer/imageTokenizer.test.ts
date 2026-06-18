@@ -201,4 +201,33 @@ describe('ImageTokenizer', () => {
       expect(metadata.height).toBe(768);
     });
   });
+
+  describe('BMP dimension extraction', () => {
+    function buildBmp(width: number, height: number): string {
+      // A negative height encodes a top-down BMP per the BITMAPINFOHEADER spec.
+      const buf = Buffer.alloc(26);
+      buf.write('BM', 0, 'ascii');
+      buf.writeUInt32LE(26, 2); // file size
+      buf.writeUInt32LE(0, 6); // reserved
+      buf.writeUInt32LE(26, 10); // pixel data offset
+      buf.writeUInt32LE(40, 14); // BITMAPINFOHEADER size
+      buf.writeInt32LE(width, 18);
+      buf.writeInt32LE(height, 22);
+      return buf.toString('base64');
+    }
+
+    it('reads a bottom-up (positive height) BMP', async () => {
+      const bmp = buildBmp(120, 80);
+      const metadata = await tokenizer.extractImageMetadata(bmp, 'image/bmp');
+      expect(metadata.width).toBe(120);
+      expect(metadata.height).toBe(80);
+    });
+
+    it('reads a top-down (negative height) BMP as its absolute height', async () => {
+      const bmp = buildBmp(100, -50);
+      const metadata = await tokenizer.extractImageMetadata(bmp, 'image/bmp');
+      expect(metadata.width).toBe(100);
+      expect(metadata.height).toBe(50);
+    });
+  });
 });
