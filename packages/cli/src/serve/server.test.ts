@@ -979,6 +979,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     get sessionCount() {
       return calls.length;
     },
+    get activePromptCount() {
+      return 0;
+    },
+    get lastActivityAt() {
+      return null;
+    },
+    get idleSinceMs() {
+      return null;
+    },
     get pendingPermissionCount() {
       return 0;
     },
@@ -6383,6 +6392,53 @@ describe('createServeApp', () => {
         sessions: 0,
         pendingPermissions: 0,
       });
+    });
+
+    it('deep=1 includes idle detection fields with no activity', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get('/health?deep=1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        status: 'ok',
+        activePrompts: 0,
+        connectedClients: 0,
+        channelAlive: false,
+        lastActivityAt: null,
+        idleSinceMs: null,
+      });
+    });
+
+    it('deep=1 derives idleSinceMs from the same lastActivityAt snapshot', async () => {
+      const now = 1_700_000_060_000;
+      const activityTime = now - 60_000;
+      const bridge = fakeBridge();
+      Object.defineProperty(bridge, 'lastActivityAt', {
+        get() {
+          return activityTime;
+        },
+      });
+      Object.defineProperty(bridge, 'idleSinceMs', {
+        get() {
+          throw new Error('idleSinceMs getter should not be read');
+        },
+      });
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      try {
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .get('/health?deep=1')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.lastActivityAt).toBe(
+          new Date(activityTime).toISOString(),
+        );
+        expect(res.body.idleSinceMs).toBe(60_000);
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
 
     it('deep=1 returns 503 when bridge state access throws', async () => {
