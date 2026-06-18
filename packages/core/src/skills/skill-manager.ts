@@ -11,7 +11,6 @@ import * as os from 'os';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
-import * as yaml from 'yaml';
 import type {
   SkillConfig,
   SkillLevel,
@@ -22,8 +21,10 @@ import type {
 import {
   SkillError,
   SkillErrorCode,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
+  parseUserInvocableField,
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
@@ -78,6 +79,14 @@ export class SkillManager {
   // `Promise.resolve().then(listener)` runtime adapter to swallow the
   // mismatch silently.
   private readonly changeListeners: Set<() => void | Promise<void>> = new Set();
+  // One-shot signal: when true, the *next* `notifyChangeListeners()` run
+  // will tell `slashCommandProcessor`'s reload-listener (and any other
+  // opt-in consumer) that an external reload is about to be redundant —
+  // the dialog has already orchestrated `reloadCommands()` itself, so a
+  // listener-driven second reload would be a wasted CommandService
+  // rebuild. Consumed exactly once. See `notifyConfigChanged` &
+  // `slashCommandProcessor.ts:416`.
+  private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
@@ -113,12 +122,61 @@ export class SkillManager {
   }
 
   /**
+   * Public re-entry into the change-listener pipeline for non-disk events,
+   * specifically when the user toggles `skills.disabled` via the
+   * `/skills` dialog. The underlying
+   * `SKILL.md` files have not changed, so `refreshCache` is unnecessary —
+   * we just need every consumer (`SkillTool.refreshSkills`, the slash
+   * command list reload bridged in `slashCommandProcessor`) to re-read its
+   * derived state with the updated disabled set.
+   *
+   * Returns when every listener has either resolved or hit its 30s
+   * timeout, matching the disk-change path's semantics.
+   */
+  async notifyConfigChanged(): Promise<void> {
+    await this.notifyChangeListeners();
+  }
+
+  /**
+   * Tell the next `notifyChangeListeners()` (typically via
+   * `notifyConfigChanged`) that callers which would otherwise reload the
+   * slash-command surface as a side effect should skip it — the caller has
+   * already done that work explicitly. One-shot: consumed by the next
+   * `consumeSlashReloadSuppression()` and reset to `false`.
+   *
+   * Used by the `/skills` dialog: it calls `reloadCommands()` BEFORE
+   * `notifyConfigChanged()` to enforce the provider-registration ordering
+   * that `SkillTool.refreshSkills` depends on. Without this signal, the
+   * `slashCommandProcessor` change-listener would trigger a second
+   * `reloadCommands()` (one awaited by the dialog, one orphaned by the
+   * fire-and-forget listener), doubling CommandService rebuild cost per
+   * save. Listeners that DON'T reload commands are unaffected — they
+   * still fire normally.
+   */
+  suppressNextSlashReload(): void {
+    this.slashReloadSuppressed = true;
+  }
+
+  /**
+   * Read-and-clear: returns `true` exactly once if the suppression flag
+   * was set, then resets it. Listeners that opt into respecting the
+   * signal call this in their handler.
+   */
+  consumeSlashReloadSuppression(): boolean {
+    if (this.slashReloadSuppressed) {
+      this.slashReloadSuppressed = false;
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Notifies all registered change listeners and awaits any returned
    * promises. Sync listeners resolve immediately; async listeners (e.g.
    * `SkillTool.refreshSkills`) hold the activation pipeline until their
-   * downstream tool descriptions are refreshed, eliminating the race where
-   * a system-reminder announces a skill before the model can actually see
-   * it in `<available_skills>`.
+   * downstream validation state is refreshed, so by the time the inline
+   * activation reminder is appended the runtime already accepts the newly
+   * activated skill.
    *
    * Listeners run in parallel via `Promise.allSettled`. They're
    * independent reads (each rebuilds its own derived state from the
@@ -130,8 +188,8 @@ export class SkillManager {
    */
   private async notifyChangeListeners(): Promise<void> {
     // Cap each listener at 30s. Without this, a hung listener (e.g.
-    // `SkillTool.refreshSkills` → `setTools()` blocked on a network
-    // call inside the gemini client) would permanently stall
+    // `SkillTool.refreshSkills` blocked on a slow skill reload) would
+    // permanently stall
     // `matchAndActivateByPaths` and `refreshCache`. The activation
     // registry itself has already been mutated synchronously in the
     // caller, so dropping a slow listener after the timeout is the
@@ -452,9 +510,9 @@ export class SkillManager {
    * Returns the names of skills newly activated by this call. When at least
    * one skill activates, change listeners are notified and awaited — so by
    * the time this method resolves, downstream consumers (notably
-   * `SkillTool.refreshSkills` updating the model-facing tool description)
-   * have applied the new state. Callers can therefore announce the
-   * activation in the same turn without racing against a stale tool list.
+   * `SkillTool.refreshSkills` updating validation state) have applied the
+   * new state. Callers can therefore announce the activation in the same
+   * turn without racing against stale validation data.
    *
    * The activation registry reference is captured at call entry; if a
    * concurrent `refreshCache` rebuilds the registry mid-call, this
@@ -471,8 +529,7 @@ export class SkillManager {
    * an array of file paths and fire change listeners exactly once across
    * all of them. Used by `coreToolScheduler` so a single tool call that
    * names N paths (e.g. ripGrep with multiple `paths:` entries) does not
-   * trigger N successive `SkillTool.refreshSkills` /
-   * `geminiClient.setTools()` round-trips.
+   * trigger N successive `SkillTool.refreshSkills` listener round-trips.
    */
   async matchAndActivateByPaths(
     filePaths: readonly string[],
@@ -631,34 +688,18 @@ export class SkillManager {
       const description = String(descriptionRaw);
 
       // Extract optional fields
-      const allowedToolsRaw = frontmatter['allowedTools'] as
-        | unknown[]
-        | undefined;
-      let allowedTools: string[] | undefined;
-
-      if (allowedToolsRaw !== undefined) {
-        if (Array.isArray(allowedToolsRaw)) {
-          allowedTools = allowedToolsRaw.map(String);
-        } else {
-          throw new Error('"allowedTools" must be an array');
-        }
-      }
+      const allowedTools = parseAllowedToolsField(frontmatter);
 
       // Extract hooks configuration
-      // Use full YAML parser for hooks as they have nested structures
       let hooks: SkillHooksSettings | undefined;
-      if (frontmatterYaml.includes('hooks:')) {
-        // Re-parse with full YAML parser to get nested hooks structure
-        const fullFrontmatter = yaml.parse(frontmatterYaml) as Record<
-          string,
-          unknown
-        >;
-        const hooksRaw = fullFrontmatter['hooks'] as
-          | Record<string, unknown>
-          | undefined;
-        if (hooksRaw !== undefined) {
-          hooks = this.parseHooksConfig(hooksRaw);
-        }
+      const hooksRaw = frontmatter['hooks'];
+      if (
+        hooksRaw !== undefined &&
+        typeof hooksRaw === 'object' &&
+        hooksRaw !== null &&
+        !Array.isArray(hooksRaw)
+      ) {
+        hooks = this.parseHooksConfig(hooksRaw as Record<string, unknown>);
       }
 
       // Set skillRoot to the directory containing SKILL.md
@@ -666,7 +707,8 @@ export class SkillManager {
       // Extract optional model field
       const model = parseModelField(frontmatter);
 
-      // Extract argument-hint, when_to_use, and disable-model-invocation
+      // Extract argument-hint, when_to_use, disable-model-invocation, and
+      // user-invocable
       const argumentHint =
         typeof frontmatter['argument-hint'] === 'string'
           ? frontmatter['argument-hint']
@@ -681,6 +723,7 @@ export class SkillManager {
         disableModelInvocationRaw === 'true'
           ? true
           : undefined;
+      const userInvocable = parseUserInvocableField(frontmatter);
 
       // Optional `paths` frontmatter: glob patterns that gate when this skill
       // is offered to the model (conditional skill).
@@ -707,6 +750,7 @@ export class SkillManager {
         body: body.trim(),
         whenToUse,
         disableModelInvocation,
+        userInvocable,
         paths,
         priority,
       };

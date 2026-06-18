@@ -171,12 +171,36 @@ export enum CompressionStatus {
 
   /** The compression was not necessary and no action was taken */
   NOOP,
+
+  /**
+   * The compression call produced a summary, but the output hit
+   * COMPACT_MAX_OUTPUT_TOKENS, indicating likely truncation. The summary
+   * is dropped (newHistory=null) and the attempt is treated as a failure:
+   * `isCompressionFailureStatus` returns true so it counts toward the
+   * per-chat circuit breaker. Kept distinct from
+   * `COMPRESSION_FAILED_EMPTY_SUMMARY` so telemetry can separate
+   * prompt-quality failures (empty / nonsensical summary) from capacity
+   * failures (output cap hit, may need a higher cap or finer-grained
+   * splitter). (R5.2)
+   */
+  COMPRESSION_FAILED_OUTPUT_TRUNCATED,
 }
+
+/**
+ * Why an auto-compaction fired. Drives the user-facing notice so a
+ * screenshot-overflow trigger isn't mislabeled as "approached the token
+ * limit". Undefined on NOOP / failure paths and for callers that don't set it.
+ */
+export type CompactionTriggerReason =
+  | 'token_limit'
+  | 'image_overflow'
+  | 'manual';
 
 export interface ChatCompressionInfo {
   originalTokenCount: number;
   newTokenCount: number;
   compressionStatus: CompressionStatus;
+  triggerReason?: CompactionTriggerReason;
 }
 
 export type ServerGeminiChatCompressedEvent = {
@@ -264,7 +288,6 @@ export type ServerGeminiStreamEvent =
 // A turn manages the agentic loop turn within the server context.
 export class Turn {
   readonly pendingToolCalls: ToolCallRequestInfo[] = [];
-  private debugResponses: GenerateContentResponse[] = [];
   private pendingCitations = new Set<string>();
   finishReason: FinishReason | undefined = undefined;
   private currentResponseId?: string;
@@ -304,7 +327,6 @@ export class Turn {
         if (streamEvent.type === 'retry') {
           this.pendingToolCalls.length = 0;
           this.pendingCitations.clear();
-          this.debugResponses = [];
           this.finishReason = undefined;
           yield {
             type: GeminiEventType.Retry,
@@ -330,8 +352,6 @@ export class Turn {
         // Assuming other events are chunks with a `value` property
         const resp = streamEvent.value as GenerateContentResponse;
         if (!resp) continue; // Skip if there's no response body
-
-        this.debugResponses.push(resp);
 
         // Track the current response ID for tool call correlation
         if (resp.responseId) {
@@ -453,10 +473,6 @@ export class Turn {
 
     // Yield a request for the tool call, not the pending/confirming status
     return { type: GeminiEventType.ToolCallRequest, value: toolCallRequest };
-  }
-
-  getDebugResponses(): GenerateContentResponse[] {
-    return this.debugResponses;
   }
 }
 

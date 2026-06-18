@@ -183,6 +183,14 @@ describe('modelCommand', () => {
       'model.name',
       'qwen-max',
     );
+    // `/model <id>` is an id-only switch, so any baseUrl disambiguator left by
+    // a previous model-picker selection must be cleared (empty-string tombstone)
+    // to avoid resolving to a different provider on next launch.
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.baseUrl',
+      '',
+    );
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',

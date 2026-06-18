@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import process from 'node:process';
 import { useCallback, useContext, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
@@ -94,9 +95,16 @@ function maskApiKey(apiKey: string | undefined): string {
 function persistModelSelection(
   settings: ReturnType<typeof useSettings>,
   modelId: string,
+  baseUrl?: string,
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'model.name', modelId);
+  // Persist the paired baseUrl so the correct provider is restored on next
+  // launch when multiple providers share the same model id. When the selection
+  // has no baseUrl, write an empty-string tombstone (not undefined): undefined
+  // is dropped from JSON, so it would not override a stale model.baseUrl left
+  // in a lower-priority scope, whereas '' is a present value that does.
+  settings.setValue(scope, 'model.baseUrl', baseUrl ?? '');
 }
 
 function persistAuthTypeSelection(
@@ -107,12 +115,31 @@ function persistAuthTypeSelection(
   settings.setValue(scope, 'security.auth.selectedType', authType);
 }
 
+function hydrateApiKeyEnvFromSettings(
+  settings: ReturnType<typeof useSettings>,
+  envKey: string | undefined,
+): void {
+  if (!envKey || process.env[envKey]) {
+    return;
+  }
+  const settingsEnvValue = (
+    settings?.merged?.env as Record<string, unknown> | undefined
+  )?.[envKey];
+  if (
+    typeof settingsEnvValue === 'string' &&
+    settingsEnvValue.trim().length > 0
+  ) {
+    process.env[envKey] = settingsEnvValue;
+  }
+}
+
 interface HandleModelSwitchSuccessParams {
   settings: ReturnType<typeof useSettings>;
   uiState: UIState | null;
   after: ContentGeneratorConfig | undefined;
   effectiveAuthType: AuthType | undefined;
   effectiveModelId: string;
+  effectiveBaseUrl: string | undefined;
   isRuntime: boolean;
 }
 
@@ -122,9 +149,10 @@ function handleModelSwitchSuccess({
   after,
   effectiveAuthType,
   effectiveModelId,
+  effectiveBaseUrl,
   isRuntime,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(settings, effectiveModelId);
+  persistModelSelection(settings, effectiveModelId, effectiveBaseUrl);
   if (effectiveAuthType) {
     persistAuthTypeSelection(settings, effectiveAuthType);
   }
@@ -190,7 +218,12 @@ export function ModelDialog({
 
     // Separate runtime models from registry models
     const runtimeModels = allModels.filter((m) => m.isRuntimeModel);
-    const registryModels = allModels.filter((m) => !m.isRuntimeModel);
+    const registryModels = allModels.filter(
+      (m) =>
+        !m.isRuntimeModel &&
+        (m.authType !== AuthType.QWEN_OAUTH ||
+          authType === AuthType.QWEN_OAUTH),
+    );
 
     // Group registry models by authType
     const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
@@ -243,7 +276,7 @@ export function ModelDialog({
     }
 
     return result;
-  }, [config]);
+  }, [authType, config]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
@@ -271,6 +304,12 @@ export function ModelDialog({
                 [{t2}]
               </Text>
               <Text>{` ${model.label}`}</Text>
+              {model.id !== model.label && (
+                <Text color={theme.text.secondary} italic>
+                  {' '}
+                  ({model.id})
+                </Text>
+              )}
               {isRuntime && (
                 <Text color={theme.status.warning}> (Runtime)</Text>
               )}
@@ -390,6 +429,16 @@ export function ModelDialog({
   const handleSelect = useCallback(
     async (selected: string) => {
       setErrorMessage(null);
+      const selectedEntry = availableModelEntries.find(
+        ({ authType: t2, model, isRuntime, snapshotId }) => {
+          const value =
+            isRuntime && snapshotId
+              ? snapshotId
+              : buildModelSelectionKey(t2, model.id, model.baseUrl);
+          return value === selected;
+        },
+      );
+      hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
 
       // Fast model mode: save authType:modelId so duplicate model ids across
       // providers remain unambiguous. baseUrl is intentionally discarded.
@@ -495,9 +544,14 @@ export function ModelDialog({
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
         const baseErrorMessage = e instanceof Error ? e.message : String(e);
+        // Use parsed modelId for display to avoid showing raw selection key
+        // (which contains invisible \0 separator between modelId and baseUrl)
+        const displayModelId = isRuntime
+          ? effectiveModelId
+          : parseModelSelectionKey(selected).modelId;
         const errorPrefix = isRuntime
           ? 'Failed to switch to runtime model.'
-          : `Failed to switch model to '${effectiveModelId ?? selected}'.`;
+          : `Failed to switch model to '${displayModelId}'.`;
         setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
         return;
       }
@@ -508,6 +562,15 @@ export function ModelDialog({
         after,
         effectiveAuthType,
         effectiveModelId,
+        // Persist the selected provider's baseUrl so the right provider is
+        // restored next launch when several share the same id. Pair it with the
+        // same resolved config that effectiveModelId comes from (`after`) so the
+        // persisted (model.name, model.baseUrl) stays consistent even if
+        // switchModel transforms the id; fall back to the picker entry's
+        // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
+        effectiveBaseUrl: isRuntime
+          ? undefined
+          : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
         isRuntime,
       });
       onClose();
@@ -520,6 +583,7 @@ export function ModelDialog({
       uiState,
       setErrorMessage,
       isFastModelMode,
+      availableModelEntries,
     ],
   );
 

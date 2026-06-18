@@ -34,7 +34,11 @@ import {
   ToolDisplayNames,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
-import { useBackgroundTaskViewState } from '../../contexts/BackgroundTaskViewContext.js';
+import { localizeToolDisplayName } from '../../../i18n/index.js';
+import {
+  useBackgroundTaskViewActions,
+  useBackgroundTaskViewState,
+} from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -43,6 +47,7 @@ import type {
   AgentDialogEntry,
   DialogEntry,
 } from '../../hooks/useBackgroundTaskView.js';
+import { isLiveAgentPanelVisibleEntry } from './liveAgentPanelVisibility.js';
 
 interface LiveAgentPanelProps {
   /**
@@ -59,14 +64,7 @@ interface LiveAgentPanelProps {
   width?: number;
 }
 
-const DEFAULT_MAX_ROWS = 5;
-// Keep terminal entries on the panel briefly so the user gets visual
-// feedback ("✓ done · 12s") when a subagent finishes, then they fall off
-// and the user goes to BackgroundTasksDialog for a deeper look. Mirrors
-// Claude Code's `RECENT_COMPLETED_TTL_MS = 30_000` knob, scaled down
-// because the panel is denser and we have the dialog as the long-term
-// review surface.
-const TERMINAL_VISIBLE_MS = 8000;
+const DEFAULT_MAX_ROWS = 12;
 // Re-export under a panel-local alias so the source of truth stays
 // in `subagents/builtin-agents.ts` (a backend rename of the default
 // type would otherwise silently re-introduce the redundant
@@ -140,7 +138,9 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
 function activityLabel(entry: AgentDialogEntry): string {
   const last = entry.recentActivities?.at(-1);
   if (!last) return '';
-  const display = TOOL_DISPLAY_BY_NAME[last.name] ?? last.name;
+  const display = localizeToolDisplayName(
+    TOOL_DISPLAY_BY_NAME[last.name] ?? last.name,
+  );
   const desc = last.description?.replace(/\s*\n\s*/g, ' ').trim();
   return desc ? `${display} ${desc}` : display;
 }
@@ -179,7 +179,9 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   maxRows = DEFAULT_MAX_ROWS,
   width,
 }) => {
-  const { entries, dialogOpen } = useBackgroundTaskViewState();
+  const { entries, dialogOpen, livePanelFocused, livePanelSelectedIndex } =
+    useBackgroundTaskViewState();
+  const { setLivePanelFocused } = useBackgroundTaskViewActions();
   // Reach for Config via the raw context (NOT useConfig) so the panel
   // can degrade to snapshot-only when no provider is mounted — e.g.
   // unit tests that render the component in isolation. useConfig
@@ -205,12 +207,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   useEffect(() => {
     if (dialogOpen) return;
     const needsTick = (whenMs: number) =>
-      entries.some((e) => {
-        if (!isAgentEntry(e)) return false;
-        if (e.status === 'running' || e.status === 'paused') return true;
-        if (e.endTime === undefined) return false;
-        return whenMs - e.endTime <= TERMINAL_VISIBLE_MS;
-      });
+      entries.some((e) => isLiveAgentPanelVisibleEntry(e, whenMs));
     if (!needsTick(Date.now())) return;
     const id = setInterval(() => {
       const wallNow = Date.now();
@@ -350,6 +347,16 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
     return next;
   }, [entries, config, now]);
 
+  const hasVisibleAgent = liveAgentSnapshots.some((entry) =>
+    isLiveAgentPanelVisibleEntry(entry, now),
+  );
+
+  useEffect(() => {
+    if (livePanelFocused && !hasVisibleAgent) {
+      setLivePanelFocused(false);
+    }
+  }, [hasVisibleAgent, livePanelFocused, setLivePanelFocused]);
+
   // Defense in depth: don't compete with the dialog. Under
   // DefaultAppLayout this branch is unreachable because the layout
   // already gates the panel on `!uiState.dialogsVisible` (which folds
@@ -369,6 +376,8 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
       now={now}
       maxRows={maxRows}
       width={width}
+      focused={livePanelFocused}
+      selectedIndex={livePanelSelectedIndex}
     />
   );
 };
@@ -378,84 +387,67 @@ const LiveAgentPanelBody: React.FC<{
   now: number;
   maxRows: number;
   width: number | undefined;
-}> = ({ snapshots, now, maxRows, width }) => {
+  focused: boolean;
+  selectedIndex: number;
+}> = ({ snapshots, now, maxRows, width, focused, selectedIndex }) => {
   const visibleAgents: LivePanelEntry[] = snapshots
     .map((entry) => ({
       ...entry,
-      expired:
-        entry.status !== 'running' &&
-        entry.status !== 'paused' &&
-        entry.endTime !== undefined &&
-        now - entry.endTime > TERMINAL_VISIBLE_MS,
+      expired: !isLiveAgentPanelVisibleEntry(entry, now),
     }))
     .filter((entry) => !entry.expired);
 
   if (visibleAgents.length === 0) return null;
 
-  // useBackgroundTaskView now hands entries back newest-first so the
-  // dialog opens with the cursor on the most recently launched task.
-  // The panel sits ABOVE the composer and reads top-to-bottom in
-  // launch order — newest at the bottom, right above the prompt
-  // input — so reverse here back to ASC for rendering. Doing the
-  // reverse before the slice means the tail-window math (drop the
-  // OLDEST when the list overflows) stays unchanged.
   const visibleAgentsAsc = [...visibleAgents].reverse();
   const overflow = Math.max(0, visibleAgentsAsc.length - maxRows);
   const visible =
     overflow > 0 ? visibleAgentsAsc.slice(-maxRows) : visibleAgentsAsc;
 
-  // Include paused entries in the "active" tally — they appear in
-  // the panel as active rows (same warning color, ⏸ glyph) and the
-  // header read "Active agents (0/1)" with one paused agent visible
-  // is misleading. The tally now matches what the user sees: the
-  // numerator counts every row that's NOT in a terminal/synthesized
-  // resting state.
-  const activeCount = visibleAgents.filter(
-    (e) => e.status === 'running' || e.status === 'paused',
-  ).length;
+  const totalItems = 1 + visible.length;
+  const clampedIndex = Math.min(selectedIndex, totalItems - 1);
 
-  // Borderless layout, mirroring Claude Code's CoordinatorTaskPanel
-  // ("Renders below the prompt input footer whenever local_agent tasks
-  // exist" — plain rows under a single marginTop). The bordered look
-  // belongs to BackgroundTasksDialog (a real overlay); the always-on
-  // roster is a glance surface that should sit lightly above the
-  // composer rather than fight it for vertical space + border cells.
   return (
     <Box flexDirection="column" marginTop={1} width={width} paddingX={2}>
       <Box>
-        <Text bold color={theme.text.accent}>
-          Active agents
+        <Text color={focused ? theme.text.accent : theme.text.secondary}>
+          {focused && clampedIndex === 0 ? '▸ ' : '  '}
         </Text>
-        <Text
-          color={theme.text.secondary}
-        >{` (${activeCount}/${visibleAgents.length})`}</Text>
+        <Text bold color={theme.text.accent}>
+          main
+        </Text>
       </Box>
       {overflow > 0 && (
         <Box>
-          {/*
-            The panel is read-only (no keyboard focus — that would
-            steal input from the composer), so when the roster
-            overflows the row budget we point users at the dialog
-            that DOES support selection / scroll / cancel / resume.
-            Same keystroke the footer pill uses, kept in sync so
-            users only have to learn one thing.
-          */}
           <Text
             color={theme.text.secondary}
-          >{`  ^ ${overflow} more above (↓ to view all)`}</Text>
+          >{`    ^ ${overflow} more above (↓ to view all)`}</Text>
         </Box>
       )}
-      {visible.map((entry) => (
-        <AgentRow key={entry.agentId} entry={entry} now={now} />
+      {visible.map((entry, idx) => (
+        <AgentRow
+          key={entry.agentId}
+          entry={entry}
+          now={now}
+          selected={focused && clampedIndex === idx + 1}
+        />
       ))}
+      {focused && (
+        <Box>
+          <Text color={theme.text.secondary}>
+            {'  ↑↓ navigate · Enter detail · Esc back'}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };
 
-const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
-  entry,
-  now,
-}) => {
+const AgentRow: React.FC<{
+  entry: AgentDialogEntry;
+  now: number;
+  selected?: boolean;
+}> = ({ entry, now, selected = false }) => {
   const { glyph, color } = statusIcon(entry);
   // ANSI sanitize every user-controlled string before it reaches Ink.
   // `subagentType` comes from subagent config (user-authored or model-
@@ -504,8 +496,14 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
   //   falls off the row tail rather than opening a visual gap
   //   between the description and the right-pinned elapsed.
   const tail = ` ▶ ${elapsed}${tokenSuffix}`;
+  const prefix = selected ? '▸ ' : '  ';
   return (
     <Box flexDirection="row">
+      <Box flexShrink={0}>
+        <Text color={selected ? theme.text.accent : theme.text.secondary}>
+          {prefix}
+        </Text>
+      </Box>
       <Box flexShrink={1}>
         <Text wrap="truncate-end">
           <Text color={color}>{`${glyph} `}</Text>

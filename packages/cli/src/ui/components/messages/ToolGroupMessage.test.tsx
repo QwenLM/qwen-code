@@ -155,6 +155,26 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
+    it('renders expanded tool entries without blank separator rows', () => {
+      const toolCalls = [
+        createToolCall({ callId: 'tool-1', name: 'first-tool' }),
+        createToolCall({ callId: 'tool-2', name: 'second-tool' }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={100}
+          toolCalls={toolCalls}
+        />,
+      );
+      const lines = (lastFrame() ?? '').split('\n');
+      const firstLine = lines.findIndex((line) => line.includes('tool-1'));
+      const secondLine = lines.findIndex((line) => line.includes('tool-2'));
+
+      expect(firstLine).toBeGreaterThanOrEqual(0);
+      expect(secondLine).toBe(firstLine + 1);
+    });
+
     it('renders tool call awaiting confirmation', () => {
       const toolCalls = [
         createToolCall({
@@ -359,6 +379,9 @@ describe('<ToolGroupMessage />', () => {
     });
 
     it('gives focus to only the first running subagent when multiple are running', () => {
+      // A non-agent sibling prevents isPureParallelAgentGroup from
+      // routing the group to InlineParallelAgentsDisplay, so the
+      // expanded path (and its focus routing) is exercised.
       const { lastFrame } = renderWithProviders(
         <ToolGroupMessage
           {...baseProps}
@@ -374,6 +397,12 @@ describe('<ToolGroupMessage />', () => {
               name: 'agent',
               status: ToolCallStatus.Executing,
               resultDisplay: createRunningSubagentDisplay('second'),
+            }),
+            createToolCall({
+              callId: 'read-sibling',
+              name: 'read_file',
+              description: 'read helper.ts',
+              status: ToolCallStatus.Success,
             }),
           ]}
         />,
@@ -585,7 +614,7 @@ describe('<ToolGroupMessage />', () => {
     const renderCompact = (component: React.ReactElement, compactMode = true) =>
       render(
         <ConfigContext.Provider value={mockConfig}>
-          <CompactModeProvider value={{ compactMode }}>
+          <CompactModeProvider value={{ compactMode, compactInline: false }}>
             {component}
           </CompactModeProvider>
         </ConfigContext.Provider>,

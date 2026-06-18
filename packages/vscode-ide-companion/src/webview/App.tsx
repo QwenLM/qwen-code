@@ -663,6 +663,20 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (!messageHandling.isStreaming && !messageHandling.isWaitingForResponse) {
+      const inputElement = inputFieldRef.current;
+      if (inputElement) {
+        const text = stripZeroWidthSpaces(inputElement.textContent ?? '');
+        setInputText(text);
+        inputElement.setAttribute(
+          'data-empty',
+          text.trim().length === 0 ? 'true' : 'false',
+        );
+        inputElement.blur();
+      }
+      return;
+    }
+
     if (messageHandling.isStreaming || messageHandling.isWaitingForResponse) {
       // End streaming state and add an 'Interrupted' line.
       // IMPORTANT: Do NOT clear isWaitingForResponse here — let the
@@ -688,7 +702,14 @@ export const App: React.FC = () => {
       type: 'cancelStreaming',
       data: {},
     });
-  }, [clearEditingMessage, editingMessage, messageHandling, vscode]);
+  }, [
+    clearEditingMessage,
+    editingMessage,
+    inputFieldRef,
+    messageHandling,
+    setInputText,
+    vscode,
+  ]);
 
   // Message handling
   useWebViewMessages({

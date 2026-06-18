@@ -9,7 +9,11 @@ import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { LiveAgentPanel } from './LiveAgentPanel.js';
-import { BackgroundTaskViewStateContext } from '../../contexts/BackgroundTaskViewContext.js';
+import {
+  BackgroundTaskViewActionsContext,
+  BackgroundTaskViewStateContext,
+  type BackgroundTaskViewActions,
+} from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import type {
   AgentDialogEntry,
@@ -56,6 +60,8 @@ function renderPanel(
      * about the snapshot path (panel falls back gracefully).
      */
     config?: Config;
+    livePanelFocused?: boolean;
+    actions?: Partial<BackgroundTaskViewActions>;
   } = { entries: [] },
 ) {
   const state = {
@@ -64,7 +70,25 @@ function renderPanel(
     dialogMode: options.dialogOpen ? ('list' as const) : ('closed' as const),
     dialogOpen: Boolean(options.dialogOpen),
     pillFocused: false,
+    livePanelFocused: Boolean(options.livePanelFocused),
+    livePanelSelectedIndex: 0,
   };
+  const actions = {
+    moveSelectionUp: () => false,
+    moveSelectionDown: () => false,
+    openDialog: vi.fn(),
+    closeDialog: vi.fn(),
+    enterDetail: vi.fn(),
+    exitDetail: vi.fn(),
+    cancelSelected: vi.fn(),
+    resumeSelected: async () => {},
+    enterDetailFromPanel: vi.fn(),
+    setPillFocused: vi.fn(),
+    setLivePanelFocused: vi.fn(),
+    setLivePanelSelectedIndex: vi.fn(),
+    setSelectedIndex: vi.fn(),
+    ...options.actions,
+  } as BackgroundTaskViewActions;
   // Wrap render() in act() so the panel's mount-time effect (the
   // 1s wall-clock interval) is flushed inside React's scheduler boundary
   // — silences the "update inside a test was not wrapped in act"
@@ -73,9 +97,11 @@ function renderPanel(
   act(() => {
     result = render(
       <ConfigContext.Provider value={options.config}>
-        <BackgroundTaskViewStateContext.Provider value={state}>
-          <LiveAgentPanel width={options.width} maxRows={options.maxRows} />
-        </BackgroundTaskViewStateContext.Provider>
+        <BackgroundTaskViewActionsContext.Provider value={actions}>
+          <BackgroundTaskViewStateContext.Provider value={state}>
+            <LiveAgentPanel width={options.width} maxRows={options.maxRows} />
+          </BackgroundTaskViewStateContext.Provider>
+        </BackgroundTaskViewActionsContext.Provider>
       </ConfigContext.Provider>,
     );
   });
@@ -146,9 +172,7 @@ describe('<LiveAgentPanel />', () => {
       ],
     });
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('Active agents');
-    // Running and total tally both 1.
-    expect(frame).toContain('(1/1)');
+    expect(frame).toContain('main');
     expect(frame).toContain('researcher');
     expect(frame).toContain('scan repo for TODO markers');
     // Latest activity is rendered next to the row, with elapsed time.
@@ -277,12 +301,7 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('2.4k tokens');
   });
 
-  it('counts paused agents as active in the header tally', () => {
-    // The header read "Active agents (running/total)" but the
-    // panel ALSO renders paused agents as active rows (warning
-    // color, ⏸ glyph). With only paused entries the tally would
-    // read "(0/1)" — visually contradicting the row that's clearly
-    // present. Numerator now includes paused.
+  it('renders paused agents with the paused glyph', () => {
     const { lastFrame } = renderPanel({
       entries: [
         agentEntry({
@@ -294,7 +313,7 @@ describe('<LiveAgentPanel />', () => {
       ],
     });
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('(1/1)');
+    expect(frame).toContain('main');
     expect(frame).toContain('⏸');
   });
 
@@ -404,9 +423,8 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('fresh-agent');
     // Oldest row falls outside the window.
     expect(frame).not.toContain('old-agent');
-    // Total tally still reflects every agent — windowing is a render
-    // concern, not a counting one.
-    expect(frame).toContain('(3/3)');
+    // "main" header is always present.
+    expect(frame).toContain('main');
   });
 
   it('re-pulls recentActivities from the live registry on each tick', () => {
@@ -463,7 +481,6 @@ describe('<LiveAgentPanel />', () => {
     // Within the visibility window the row is still on screen but the
     // running tally drops to 0/1.
     expect(lastFrame() ?? '').toContain('finisher');
-    expect(lastFrame() ?? '').toContain('(0/1)');
 
     act(() => {
       vi.advanceTimersByTime(9000);
@@ -504,7 +521,6 @@ describe('<LiveAgentPanel />', () => {
     // The synthesis sets status='completed' for the visibility-window
     // logic but flags `synthesized: true` so the row renders the
     // neutral `·` glyph instead of the success `✔`.
-    expect(frame).toContain('(0/1)');
     expect(frame).not.toContain('✔');
     expect(frame).toContain('·');
     // After the visibility window the row evicts and the panel hides.
@@ -594,6 +610,26 @@ describe('<LiveAgentPanel />', () => {
     });
     frame = lastFrame() ?? '';
     expect(frame).toBe('');
+  });
+
+  it('releases focus when the selected terminal row has aged out (#5067)', () => {
+    const setLivePanelFocused = vi.fn();
+    const expired = agentEntry({
+      agentId: 'expired-focus-1',
+      subagentType: 'researcher',
+      description: 'researcher: already gone',
+      status: 'completed',
+      startTime: -10_000,
+      endTime: -9_000,
+    });
+
+    renderPanel({
+      entries: [expired],
+      livePanelFocused: true,
+      actions: { setLivePanelFocused },
+    });
+
+    expect(setLivePanelFocused).toHaveBeenCalledWith(false);
   });
 
   it('drops rows where the snapshot is terminal AND has no endTime', () => {

@@ -1,0 +1,11 @@
+# Build artifacts for DMG packaging
+vendor/
+packages/
+release/
+node_modules/@anthropic-ai/
+
+# Platform-specific uv binaries (downloaded during build)
+resources/bin/darwin-arm64/
+resources/bin/darwin-x64/
+resources/bin/win32-x64/
+resources/bin/linux-x64/

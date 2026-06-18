@@ -27,7 +27,7 @@ import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { isSubpaths } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
-import { isAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -120,10 +120,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     if (
       workspaceContext.isPathWithinWorkspace(filePath) ||
       isSubpaths(allowedRoots, filePath) ||
-      // isAutoMemPath uses the narrower managed auto-memory root for this
-      // project — not the broad getMemoryBaseDir() — to avoid exposing
-      // sensitive ~/.qwen files such as settings.json or OAuth credentials.
-      isAutoMemPath(filePath, this.config.getTargetDir())
+      // isAnyAutoMemPath narrows to the managed auto-memory roots
+      // (per-project + user-level under ~/.qwen/memories/) — never the
+      // broad getMemoryBaseDir() — to avoid exposing sensitive ~/.qwen
+      // files such as settings.json or OAuth credentials.
+      isAnyAutoMemPath(filePath, this.config.getTargetDir())
     ) {
       return 'allow';
     }
@@ -140,7 +141,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // file_unchanged placeholder would skip that prepend, silently
     // dropping the staleness warning for the rest of the session.
     // These files are small; re-emit them on every read.
-    const isAutoMem = isAutoMemPath(absPath, projectRoot);
+    const isAutoMem = isAnyAutoMemPath(absPath, projectRoot);
     // The cache can be disabled at the Config level (escape hatch for
     // sessions where the "model has already seen the prior tool result"
     // assumption breaks down — e.g. after context compaction or
@@ -379,11 +380,19 @@ export class ReadFileTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.READ_FILE;
 
+  // Self-managed: ReadFile controls its own size via line-based paging
+  // (offset/limit, default 2000 lines), so it is exempt from the scheduler's
+  // char-based truncation. Oversized reads are bounded by the per-message
+  // batch budget instead.
+  override get maxOutputChars(): number {
+    return Number.POSITIVE_INFINITY;
+  }
+
   constructor(private config: Config) {
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
+      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {

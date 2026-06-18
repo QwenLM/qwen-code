@@ -186,7 +186,11 @@ export const ToolConfirmationMessage: React.FC<
         key: 'Yes, allow always',
       });
     }
-    if ((!config.getIdeMode() || !isDiffingEnabled) && preferredEditor) {
+    if (
+      !confirmationDetails.hideModify &&
+      (!config.getIdeMode() || !isDiffingEnabled) &&
+      preferredEditor
+    ) {
       options.push({
         label: t('Modify with external editor'),
         value: ToolConfirmationOutcome.ModifyWithEditor,
@@ -250,6 +254,32 @@ export const ToolConfirmationMessage: React.FC<
       key: 'No, suggest changes (esc)',
     });
 
+    // Warnings render as a sibling Box *below* the MaxSizedBox-capped
+    // command body, with marginTop={1}. They sit outside the MaxSizedBox
+    // cap, so we have to reserve their footprint up-front; otherwise the
+    // overall exec block can exceed availableTerminalHeight /
+    // COMPACT_BODY_MAX_LINES on small terminals and push the options
+    // list off-screen.
+    //
+    // Each warning may wrap across multiple visual rows on a narrow
+    // terminal. Account for that by computing `ceil(rendered_len /
+    // contentWidth)` per warning (rendered length includes the leading
+    // `⚠ ` glyph + space, so add 2). Falling back to a 1-row estimate
+    // when contentWidth is non-positive keeps the math defined for
+    // pathological inputs.
+    const warningPrefixLen = 2; // "⚠ "
+    const safeWidth = Math.max(contentWidth, 1);
+    const warnings = executionProps.warnings ?? [];
+    const warningsCount = warnings.length;
+    const wrappedWarningRows = warnings.reduce(
+      (sum, w) =>
+        sum + Math.max(Math.ceil((w.length + warningPrefixLen) / safeWidth), 1),
+      0,
+    );
+    // wrapped rows + 1 line for the marginTop separator (only when at
+    // least one warning is present).
+    const warningsHeight = warningsCount > 0 ? wrappedWarningRows + 1 : 0;
+
     let bodyContentHeight = availableBodyContentHeight();
     if (bodyContentHeight !== undefined) {
       bodyContentHeight -= 2; // Account for padding;
@@ -259,6 +289,12 @@ export const ToolConfirmationMessage: React.FC<
         bodyContentHeight ?? COMPACT_BODY_MAX_LINES,
         COMPACT_BODY_MAX_LINES,
       );
+    }
+    // Subtract the warnings footprint last so it applies in both the
+    // normal-height and compact-cap paths. Floor at 1 so a long warning
+    // list never zeroes out the command body.
+    if (bodyContentHeight !== undefined && warningsHeight > 0) {
+      bodyContentHeight = Math.max(bodyContentHeight - warningsHeight, 1);
     }
     bodyContent = (
       <Box flexDirection="column">
@@ -273,6 +309,15 @@ export const ToolConfirmationMessage: React.FC<
             </Box>
           </MaxSizedBox>
         </Box>
+        {warningsCount > 0 ? (
+          <Box flexDirection="column" paddingX={1} marginLeft={1} marginTop={1}>
+            {warnings.map((warning, idx) => (
+              <Text key={idx} color={theme.status.warning}>
+                ⚠ {warning}
+              </Text>
+            ))}
+          </Box>
+        ) : null}
       </Box>
     );
   } else if (confirmationDetails.type === 'plan') {
@@ -467,11 +512,15 @@ export const ToolConfirmationMessage: React.FC<
             label: t('Yes, allow once'),
             value: ToolConfirmationOutcome.ProceedOnce,
           },
-          {
-            key: 'proceed-always',
-            label: t('Allow always'),
-            value: ToolConfirmationOutcome.ProceedAlways,
-          },
+          ...(!confirmationDetails.hideAlwaysAllow
+            ? [
+                {
+                  key: 'proceed-always',
+                  label: t('Allow always'),
+                  value: ToolConfirmationOutcome.ProceedAlways,
+                },
+              ]
+            : []),
           {
             key: 'cancel',
             label: t('No'),

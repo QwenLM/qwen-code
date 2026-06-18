@@ -33,16 +33,25 @@ describe('BundledSkillLoader', () => {
   let mockSkillManager: {
     listSkills: ReturnType<typeof vi.fn>;
   };
+  let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
+    mockAddSessionAllowRule = vi.fn();
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue(undefined),
+      getPermissionManager: vi
+        .fn()
+        .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
+      // BundledSkillLoader filters via this. Default empty so existing
+      // assertions about bundled skills surfacing stay true; per-test
+      // cases override.
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
     } as unknown as Config;
   });
 
@@ -85,6 +94,27 @@ describe('BundledSkillLoader', () => {
     const commands = await loader.loadCommands(signal);
 
     expect(commands[0]?.argumentHint).toBe('[topic]');
+  });
+
+  it('should default bundled skills to user-invocable slash commands', async () => {
+    const skill = makeSkill();
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(true);
+  });
+
+  it('should propagate userInvocable from bundled skills to slash commands', async () => {
+    const skill = makeSkill({ userInvocable: false });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(false);
+    expect(commands[0]?.modelInvocable).toBe(true);
   });
 
   it('should load bundled skills as slash commands', async () => {
@@ -155,6 +185,38 @@ describe('BundledSkillLoader', () => {
     });
   });
 
+  describe('allowedTools grant', () => {
+    it('grants allowedTools as session allow rules when the command runs', async () => {
+      const skill = makeSkill({ allowedTools: ['Bash(git *)', 'Edit'] });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+    });
+
+    it('does not grant when the bundled skill declares no allowedTools', async () => {
+      const skill = makeSkill(); // no allowedTools
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+  });
+
   it('should return empty array when listSkills throws', async () => {
     mockSkillManager.listSkills.mockRejectedValue(new Error('load failed'));
 
@@ -176,6 +238,26 @@ describe('BundledSkillLoader', () => {
 
     expect(commands).toHaveLength(2);
     expect(commands.map((c) => c.name)).toEqual(['review', 'deploy']);
+  });
+
+  it('should load simplify bundled skill like other slash commands', async () => {
+    const skills = [
+      makeSkill({
+        name: 'simplify',
+        description: 'Simplify recent changes',
+        filePath: '/bundled/simplify/SKILL.md',
+        body: 'Simplify body',
+      }),
+    ];
+    mockSkillManager.listSkills.mockResolvedValue(skills);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('simplify');
+    expect(commands[0].description).toBe('Simplify recent changes');
+    expect(commands[0].kind).toBe(CommandKind.SKILL);
   });
 
   it('should resolve {{model}} template variable in skill body', async () => {
@@ -308,5 +390,46 @@ describe('BundledSkillLoader', () => {
 
     expect(commands).toHaveLength(1);
     expect(commands[0].name).toBe('review');
+  });
+
+  describe('skills.disabled filter', () => {
+    it('omits disabled bundled skills (case-insensitive)', async () => {
+      mockSkillManager.listSkills.mockResolvedValue([
+        makeSkill({ name: 'review' }),
+        makeSkill({ name: 'batch' }),
+      ]);
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['REVIEW'.toLowerCase()]));
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands.map((c) => c.name)).toEqual(['batch']);
+    });
+
+    it('reflects provider mutations on each load (live read)', async () => {
+      mockSkillManager.listSkills.mockResolvedValue([
+        makeSkill({ name: 'review' }),
+      ]);
+      let disabled = new Set<string>();
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockImplementation(() => disabled);
+
+      const loader = new BundledSkillLoader(mockConfig);
+
+      expect((await loader.loadCommands(signal)).map((c) => c.name)).toEqual([
+        'review',
+      ]);
+
+      disabled = new Set(['review']);
+      expect(await loader.loadCommands(signal)).toEqual([]);
+
+      disabled = new Set<string>();
+      expect((await loader.loadCommands(signal)).map((c) => c.name)).toEqual([
+        'review',
+      ]);
+    });
   });
 });

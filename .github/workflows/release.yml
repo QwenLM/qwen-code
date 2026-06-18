@@ -386,63 +386,6 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
 
-      - name: 'Verify Installation Release Assets'
-        run: 'npm run verify:installation-release -- --dir dist/standalone'
-
-      - name: 'Package Hosted Installation Assets'
-        env:
-          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
-        run: 'npm run package:hosted-installation -- --out-dir dist/installation --version "${RELEASE_VERSION}"'
-
-      - name: 'Install ossutil'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
-        env:
-          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
-          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
-        run: |-
-          set -euo pipefail
-
-          tmp_dir="$(mktemp -d)"
-          curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}" -o "${tmp_dir}/ossutil.zip"
-          echo "${OSSUTIL_SHA256}  ${tmp_dir}/ossutil.zip" | sha256sum -c -
-          unzip -q "${tmp_dir}/ossutil.zip" -d "${tmp_dir}"
-
-          ossutil_path="$(find "${tmp_dir}" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
-          if [[ -z "${ossutil_path}" ]]; then
-            echo "::error::ossutil binary not found in downloaded archive"
-            exit 1
-          fi
-
-          chmod +x "${ossutil_path}"
-          mkdir -p "${HOME}/.local/bin"
-          install -m 0755 "${ossutil_path}" "${HOME}/.local/bin/ossutil"
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-          rm -rf "${tmp_dir}"
-          "${HOME}/.local/bin/ossutil" >/dev/null
-
-      - name: 'Configure Aliyun OSS Credentials'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
-        env:
-          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
-          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
-          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
-        run: |-
-          set -euo pipefail
-
-          if [[ -z "${ALIYUN_OSS_ACCESS_KEY_ID}" || -z "${ALIYUN_OSS_ACCESS_KEY_SECRET}" ]]; then
-            echo "::error::Missing Aliyun OSS credentials. Set ALIYUN_OSS_ACCESS_KEY_ID and ALIYUN_OSS_ACCESS_KEY_SECRET in the production-release environment secrets."
-            exit 1
-          fi
-
-          ossutil config \
-            -e "${ALIYUN_OSS_ENDPOINT}" \
-            -i "${ALIYUN_OSS_ACCESS_KEY_ID}" \
-            -k "${ALIYUN_OSS_ACCESS_KEY_SECRET}" \
-            -L EN \
-            -c "${RUNNER_TEMP}/.ossutilconfig"
-
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-
@@ -457,149 +400,66 @@ jobs:
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
 
+      - name: 'Verify Standalone Archives'
+        run: |-
+          npm run verify:installation-release -- --dir dist/standalone
+
       - name: 'Create GitHub Release and Tag'
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          # CI_BOT_PAT required: GITHUB_TOKEN events cannot trigger downstream workflows (sync-release-to-oss.yml).
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
           PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
           IS_NIGHTLY: '${{ needs.prepare.outputs.is_nightly }}'
           IS_PREVIEW: '${{ needs.prepare.outputs.is_preview }}'
         run: |-
-          set -euo pipefail
-
           PRERELEASE_FLAG=""
           if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths)
-
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
-            "${release_assets[@]}" \
+            dist/standalone/qwen-code-* \
+            dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
             --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
             --generate-notes \
             ${PRERELEASE_FLAG}
 
-      - name: 'Sync Release Assets to Aliyun OSS'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
-        env:
-          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          set -euo pipefail
-
-          mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths)
-          node scripts/upload-aliyun-oss-assets.js \
-            --bucket "${ALIYUN_OSS_BUCKET}" \
-            --config "${RUNNER_TEMP}/.ossutilconfig" \
-            --prefix "releases/qwen-code/${RELEASE_TAG}" \
-            "${release_assets[@]}"
-
-      - name: 'Verify Aliyun OSS Release Assets'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
-        env:
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          set -euo pipefail
-
-          npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"
-
-      - name: 'Sync Hosted Installation Assets to Aliyun OSS'
+      - name: 'Regenerate CHANGELOG.md'
+        # Stable releases only: nightly/preview ship daily and would drown out
+        # the changelog. The just-created GitHub Release is already queryable,
+        # so the generator picks it up. The release branch was already pushed
+        # above, so push this follow-up commit too — otherwise the PR opened
+        # below (whose head is the remote branch) would not include it.
+        #
+        # Non-blocking by design: the only realistic failures are transient
+        # (the gh API read or the git push). The changelog is rebuilt from the
+        # full release history on every run, so a skipped update self-heals on
+        # the next stable release — never worth blocking the version-bump PR to
+        # main that follows.
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        continue-on-error: true
         env:
-          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
         run: |-
           set -euo pipefail
-
-          hosted_assets=(
-            dist/installation/install-qwen-standalone.sh
-            dist/installation/install-qwen-standalone.ps1
-            dist/installation/install-qwen-standalone.bat
-            dist/installation/uninstall-qwen-standalone.sh
-            dist/installation/uninstall-qwen-standalone.ps1
-            dist/installation/SHA256SUMS
-          )
-          node scripts/upload-aliyun-oss-assets.js \
-            --bucket "${ALIYUN_OSS_BUCKET}" \
-            --config "${RUNNER_TEMP}/.ossutilconfig" \
-            --prefix "installation/${RELEASE_TAG}" \
-            "${hosted_assets[@]}"
-          node scripts/upload-aliyun-oss-assets.js \
-            --bucket "${ALIYUN_OSS_BUCKET}" \
-            --config "${RUNNER_TEMP}/.ossutilconfig" \
-            --prefix "installation" \
-            "${hosted_assets[@]}"
-
-      - name: 'Verify Aliyun OSS Hosted Installation Assets'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        env:
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          set -euo pipefail
-
-          hosted_tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "${hosted_tmp_dir}"' EXIT
-          mkdir -p "${hosted_tmp_dir}/versioned" "${hosted_tmp_dir}/global"
-          for asset in install-qwen-standalone.sh install-qwen-standalone.ps1 install-qwen-standalone.bat uninstall-qwen-standalone.sh uninstall-qwen-standalone.ps1 SHA256SUMS; do
-            url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${RELEASE_TAG}/${asset}"
-            global_url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${asset}"
-            curl -fsSL --connect-timeout 15 --max-time 300 "${url}" -o "${hosted_tmp_dir}/versioned/${asset}"
-            curl -fsSL --connect-timeout 15 --max-time 300 "${global_url}" -o "${hosted_tmp_dir}/global/${asset}"
-          done
-          cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/versioned/SHA256SUMS" || {
-            echo "::error::Hosted installation SHA256SUMS does not match local dist/installation/SHA256SUMS"
-            diff -u "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/versioned/SHA256SUMS" || true
-            exit 1
-          }
-          cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/global/SHA256SUMS" || {
-            echo "::error::Global hosted installation SHA256SUMS does not match local dist/installation/SHA256SUMS"
-            diff -u "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/global/SHA256SUMS" || true
-            exit 1
-          }
-          (cd "${hosted_tmp_dir}/versioned" && sha256sum -c SHA256SUMS)
-          (cd "${hosted_tmp_dir}/global" && sha256sum -c SHA256SUMS)
-
-      - name: 'Publish Aliyun OSS Latest VERSION'
-        # Run last so the `latest/VERSION` pointer only flips after every
-        # release asset and hosted installer object has been uploaded and
-        # verified. If any earlier step fails, the pointer keeps referring
-        # to the previously-good release.
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        env:
-          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          set -euo pipefail
-
-          printf '%s\n' "${RELEASE_TAG}" > "${RUNNER_TEMP}/qwen-code-latest-version"
-          ossutil cp "${RUNNER_TEMP}/qwen-code-latest-version" "oss://${ALIYUN_OSS_BUCKET}/releases/qwen-code/latest/VERSION" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
-
-          latest_version="$(curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d '[:space:]')"
-          if [[ "${latest_version}" != "${RELEASE_TAG}" ]]; then
-            echo "::error::Aliyun latest VERSION points to ${latest_version}, expected ${RELEASE_TAG}"
-            exit 1
+          node scripts/generate-changelog.js
+          git add CHANGELOG.md
+          if git diff --cached --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG.md already up to date."
+          else
+            git commit -m "docs(changelog): sync for ${RELEASE_TAG}"
+            git push origin "${BRANCH_NAME}"
           fi
-
-      - name: 'Cleanup Aliyun OSS Credentials'
-        if: |-
-          ${{ always() && needs.prepare.outputs.is_dry_run == 'false' }}
-        run: |-
-          rm -f "${RUNNER_TEMP}/.ossutilconfig"
 
       - name: 'Create PR to merge release branch into main'
         if: |-
@@ -618,10 +478,22 @@ jobs:
               --base main \
               --head "${RELEASE_BRANCH}" \
               --title "chore(release): ${RELEASE_TAG}" \
-              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions on main.")"
+              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions and CHANGELOG.md on main.")"
           fi
 
           echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Approve release PR'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        env:
+          # Separate bot account from the PR author (CI_BOT_PAT) so GitHub
+          # allows the approval; covers one of the two required reviews.
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
+        run: |-
+          set -euo pipefail
+          gh pr review "${PR_URL}" --approve --body "Automated approval for the release version bump."
 
       - name: 'Enable auto-merge for release PR'
         if: |-

@@ -68,6 +68,10 @@ describe('BackgroundAgentResumeService', () => {
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
       stop: vi.fn().mockResolvedValue(undefined),
+      warmAll: vi.fn().mockResolvedValue(undefined),
+      getDeferredToolSummary: vi.fn().mockReturnValue([]),
+      isDeferredToolRevealed: vi.fn().mockReturnValue(false),
+      getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
     };
     const monitorRegistry = {
       setAgentNotificationCallback: vi.fn(),
@@ -84,10 +88,17 @@ describe('BackgroundAgentResumeService', () => {
       getHookSystem: () => hookSystem,
       getStopHookBlockingCap: () => options.stopHookBlockingCap ?? 8,
       getApprovalMode: () => 'default',
+      getModel: () => 'parent-model',
+      getBareMode: () => false,
+      getSandbox: () => undefined,
+      getScreenReader: () => false,
+      getMaxSessionTurns: () => -1,
+      getMaxToolCalls: () => -1,
       isTrustedFolder: () => true,
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
       getGeminiClient: () => undefined,
+      getSkillManager: () => undefined,
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),
       getToolRegistry: () => stubToolRegistry,
@@ -426,7 +437,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager, hookSystem } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
     hookSystem.fireSubagentStartEvent.mockResolvedValue({
       getAdditionalContext: () => 'resume-context',
     });
@@ -453,6 +467,147 @@ describe('BackgroundAgentResumeService', () => {
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
+  });
+
+  it('can resume into the final background concurrency slot', async () => {
+    registry = new BackgroundTaskRegistry({
+      maxConcurrentBackgroundAgents: 1,
+    });
+    const sessionId = 'session-resume-cap';
+    const agentId = 'agent-resume-cap';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume at cap',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume at cap' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume at cap',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume at cap',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(subagent.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a paused agent paused when resume cannot claim a background slot', async () => {
+    registry = new BackgroundTaskRegistry({
+      maxConcurrentBackgroundAgents: 1,
+    });
+    const sessionId = 'session-resume-full';
+    const agentId = 'agent-resume-full';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    registry.register({
+      agentId: 'already-running',
+      description: 'Already running',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: path.join(tempDir, 'already-running.jsonl'),
+    });
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume while full',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume while full' }] },
+      }) + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Resume while full',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume while full',
+      outputFile,
+      metaPath,
+    });
+
+    const { service, subagentManager } = createService();
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeUndefined();
+    expect(registry.get(agentId)?.status).toBe('paused');
+    expect(registry.get(agentId)?.error).toContain(
+      'maximum concurrent background agents (1) reached',
+    );
+    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
   });
 
   it('passes the sidechain transcript path to SubagentStop hooks on resume', async () => {
@@ -511,7 +666,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager, hookSystem } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
@@ -592,7 +750,10 @@ describe('BackgroundAgentResumeService', () => {
     const { service, subagentManager, hookSystem } = createService({
       stopHookBlockingCap: 2,
     });
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
     hookSystem.fireSubagentStopEvent.mockResolvedValue(stopOutput);
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
@@ -659,15 +820,18 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     const createAgentHeadless = vi.fn().mockResolvedValue({
-      execute: vi.fn(async () => undefined),
-      setExternalMessageProvider: vi.fn(),
-      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({
-        totalTokens: 0,
-        totalDurationMs: 0,
-      }),
-      getTerminateMode: () => AgentTerminateMode.GOAL,
-      getFinalText: () => 'done',
+      subagent: {
+        execute: vi.fn(async () => undefined),
+        setExternalMessageProvider: vi.fn(),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'done',
+      },
+      dispose: vi.fn().mockResolvedValue(undefined),
     });
 
     const { service, subagentManager } = createService();
@@ -683,6 +847,93 @@ describe('BackgroundAgentResumeService', () => {
     expect(createAgentHeadless).toHaveBeenCalledTimes(1);
     const [, overriddenConfig] = createAgentHeadless.mock.calls[0]!;
     expect(overriddenConfig.getApprovalMode()).toBe('default');
+  }, 20000);
+
+  it('restores persisted launch flags while resuming an agent', async () => {
+    const sessionId = 'session-cli-flags';
+    const agentId = 'agent-cli-flags';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume with launch flags',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+      persistedCliFlags: {
+        approvalMode: 'auto-edit',
+        bare: true,
+        sandbox: { command: 'docker', image: 'qwen-code-sandbox' },
+        screenReader: true,
+        model: 'agent-model',
+        maxSessionTurns: 7,
+        maxToolCalls: 11,
+      },
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume with flags' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume with launch flags',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume with launch flags',
+      outputFile,
+      metaPath,
+      isBackgrounded: true,
+    });
+
+    const createAgentHeadless = vi.fn().mockResolvedValue({
+      subagent: {
+        execute: vi.fn(async () => undefined),
+        setExternalMessageProvider: vi.fn(),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'done',
+      },
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless = createAgentHeadless;
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(createAgentHeadless).toHaveBeenCalledTimes(1);
+    const [, overriddenConfig] = createAgentHeadless.mock.calls[0]!;
+    expect(overriddenConfig.getApprovalMode()).toBe('auto-edit');
+    expect(overriddenConfig.getBareMode()).toBe(true);
+    expect(overriddenConfig.getSandbox()).toEqual({
+      command: 'docker',
+      image: 'qwen-code-sandbox',
+    });
+    expect(overriddenConfig.getScreenReader()).toBe(true);
+    expect(overriddenConfig.getModel()).toBe('agent-model');
+    expect(overriddenConfig.getMaxSessionTurns()).toBe(7);
+    expect(overriddenConfig.getMaxToolCalls()).toBe(11);
   }, 20000);
 
   it('coalesces concurrent resume calls into a single running agent', async () => {
@@ -748,7 +999,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const first = service.resumeBackgroundAgent(agentId, 'first message');
     const second = service.resumeBackgroundAgent(agentId, 'second message');
@@ -829,7 +1083,10 @@ describe('BackgroundAgentResumeService', () => {
       getFinalText: () => 'done',
     };
     const { service, subagentManager, monitorRegistry } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const resume = service.resumeBackgroundAgent(agentId, 'continue');
     await vi.waitFor(() => {
@@ -938,7 +1195,10 @@ describe('BackgroundAgentResumeService', () => {
       getFinalText: () => 'done',
     };
     const { service, subagentManager, monitorRegistry } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     await expect(
       service.resumeBackgroundAgent(agentId, 'continue'),
@@ -1342,7 +1602,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
     expect(resumed).toBeDefined();
@@ -1417,7 +1680,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
     expect(resumed).toBeDefined();
@@ -1512,7 +1778,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     await service.resumeBackgroundAgent(agentId, 'continue work');
 
