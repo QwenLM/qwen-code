@@ -36,7 +36,6 @@ export const idealabProvider: ProviderConfig = {
       id: 'bailian/kimi-k2.6',
       contextWindowSize: 262144,
       enableThinking: true,
-      modalities: { image: true, video: true },
     },
   ],
   modelsEditable: true,
