@@ -350,13 +350,20 @@ export function createProductionDispatch(
         // deliver its answer via user message instead of the script's read.
         { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
       );
-      await subagent.execute(ctx, signal);
-      // P5 R1 (Critical #3): report tokens BEFORE the terminate-mode check.
-      // CANCELLED / TIMEOUT / MAX_TURNS / ERROR runs already burned tokens
-      // before failing; the original "only on GOAL" gate undercounted the
-      // budget by every failed dispatch's spend. Stats are valid as soon
-      // as `subagent.execute()` returns, regardless of mode.
-      reportTokens(subagent, opts, onTokens);
+      // P5 R3 (wenshao #6): wrap `execute()` in try/finally so tokens
+      // are reported even when `subagent.execute()` THROWS. R1 #3 moved
+      // `reportTokens` before the terminate-mode check but kept it on
+      // the line AFTER `await subagent.execute(...)` — so the production
+      // ERROR path (AgentHeadless's catch arm re-throws after setting
+      // terminateMode=ERROR, see agent-headless.ts:287-294) skipped
+      // recording, leaking the dispatch's tokens. `getExecutionSummary()`
+      // is valid inside the throw path because AgentHeadless's own
+      // outer `finally` finalizes stats before propagating the error.
+      try {
+        await subagent.execute(ctx, signal);
+      } finally {
+        reportTokens(subagent, opts, onTokens);
+      }
       // T10 (PR #4732 R1): runReasoningLoop does NOT throw on abort / turn /
       // time limit — it returns with terminateMode = CANCELLED|MAX_TURNS|
       // TIMEOUT|ERROR and getFinalText() = '' or partial. Without this check,
@@ -633,15 +640,21 @@ async function runOverridePath(
     );
 
     try {
-      await subagent.execute(ctx, dispatchSignal);
-      // P5 R1 (Critical #1 + #3): report tokens for EVERY execute outcome
-      // before branching on schema-mode / terminate-mode. Schema-mode
-      // success used to return early without ever recording its tokens
-      // (Critical #1); CANCELLED / TIMEOUT / MAX_TURNS / ERROR runs used
-      // to throw without ever recording theirs (Critical #3). One call
-      // here covers all five terminate modes × both schema and non-
-      // schema branches.
-      reportTokens(subagent, opts, onTokens);
+      // P5 R1 + R3 (Critical #1 + #3 + wenshao #6): wrap `execute()` in
+      // its own try/finally so tokens are reported for every outcome —
+      // schema-mode success that returns early (Critical #1), schema-
+      // mode / non-schema terminate-mode throws (Critical #3), AND the
+      // production ERROR path where AgentHeadless.execute() itself
+      // throws (wenshao #6, agent-headless.ts:287-294). Without the
+      // inner finally the throw path leaks the dispatch's tokens.
+      // `getExecutionSummary()` is valid inside the throw path because
+      // AgentHeadless's own outer `finally` finalizes stats before
+      // propagating.
+      try {
+        await subagent.execute(ctx, dispatchSignal);
+      } finally {
+        reportTokens(subagent, opts, onTokens);
+      }
 
       if (schemaState) {
         if (schemaState.result !== null) {
@@ -1189,14 +1202,16 @@ export class WorkflowOrchestrator {
     const emitter = req.emitter;
     const budget = req.budget;
     const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
-      agentCount += 1;
-      if (agentCount > maxAgents) {
-        return Promise.reject(
-          new Error(
-            `Workflow exceeded the maximum of ${maxAgents} agent() calls per run.`,
-          ),
-        );
-      }
+      // P5 R3 (wenshao #7): budget gate runs BEFORE `agentCount += 1`
+      // so budget-rejected dispatches don't consume agent-cap slots.
+      // Previously the order was reversed: budget exhaustion incremented
+      // `agentCount` on every subsequent call, eventually tripping the
+      // agent-count cap and surfacing the WRONG terminal error
+      // (`Workflow exceeded the maximum of N agent() calls per run`)
+      // when the real cause was budget exhaustion. Reordering also keeps
+      // `agentCount` and `agentsDispatched` (registry counter, fired
+      // below) counting the same set of calls.
+      //
       // P5: budget gate (entry check). When a per-run token cap is set
       // (QWEN_CODE_MAX_TOKENS_PER_WORKFLOW), fail-fast at fire time if the
       // cap is already busted. Token recording happens inside the production
@@ -1220,6 +1235,16 @@ export class WorkflowOrchestrator {
         );
         return Promise.reject(
           new WorkflowBudgetExceededError(runId, budget.total, budget.spent()),
+        );
+      }
+      // P5 R3 (wenshao #7): agent-count cap runs AFTER the budget gate.
+      // See the reordering rationale at the top of countedDispatch.
+      agentCount += 1;
+      if (agentCount > maxAgents) {
+        return Promise.reject(
+          new Error(
+            `Workflow exceeded the maximum of ${maxAgents} agent() calls per run.`,
+          ),
         );
       }
       // P4b: emit dispatch-start outside the limiter so the registry
@@ -1283,6 +1308,24 @@ export class WorkflowOrchestrator {
               emitter?.agentCompleted?.(label, msg);
             } catch (e) {
               debugLogger.warn('emitter.agentCompleted threw:', e);
+            }
+            // P5 R3 (bot #1): the dispatch's reportTokens runs in a
+            // `finally` (R3 #6), so `budget.spent()` advances even when
+            // the dispatch throws. Mirror that mutation to the registry
+            // via `budgetUpdated` here, otherwise:
+            //  (a) `entry.tokensSpent` (UI) and `budget.spent()` (host)
+            //      diverge — a failed dispatch's burn is invisible in
+            //      the dialog, and
+            //  (b) after R2 #12 dropped `safeEmitUpdate` from
+            //      `agentCompleted`, the error arm produces ZERO UI
+            //      re-renders, freezing the agent counter until the
+            //      next success.
+            if (budget) {
+              try {
+                emitter?.budgetUpdated?.(budget.spent(), budget.total);
+              } catch (e) {
+                debugLogger.warn('emitter.budgetUpdated threw:', e);
+              }
             }
             throw err;
           },

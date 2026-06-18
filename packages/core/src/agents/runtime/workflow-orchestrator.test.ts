@@ -6,7 +6,7 @@
 
 // T7 (PR #4732 R1): the `vi as vitest` alias diverges from every other
 // test file in the repo. Use `vi` directly.
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
 import {
   WorkflowOrchestrator,
@@ -26,7 +26,8 @@ import type { Config } from '../../config/config.js';
 // FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
-const { created, nextTerminateMode, nextOutputTokens } = vi.hoisted(() => ({
+const { created, nextTerminateMode, nextOutputTokens, nextExecuteThrow } =
+  vi.hoisted(() => ({
   created: [] as Array<{
     name: string;
     prompt: string;
@@ -44,7 +45,15 @@ const { created, nextTerminateMode, nextOutputTokens } = vi.hoisted(() => ({
   // set `nextOutputTokens.value` so the onTokens callback can be
   // observed without standing up real telemetry.
   nextOutputTokens: { value: 0 as number },
-}));
+  // R3 (wenshao #6): real `AgentHeadless.execute()` re-throws on
+  // reasoning-loop failure — its catch arm sets `terminateMode=ERROR`
+  // and then throws. Tests set `nextExecuteThrow.value` to a non-null
+  // error so the mock execute() re-throws the same way; R1's tests
+  // had execute() RETURN with ERROR mode, which is the rare
+  // `createChat` early-return path, NOT the production reasoning-
+  // loop throw path.
+  nextExecuteThrow: { value: null as Error | null },
+  }));
 
 // P3 R2 self-review (P3-T6 gap, batch): tests below for
 // agent({isolation:'worktree'}) need to drive GitWorktreeService's
@@ -132,6 +141,14 @@ vi.mock('./agent-headless.js', () => ({
           throw new Error(
             'orchestrator did not pass workflow subagent system prompt',
           );
+        }
+        // R3 (wenshao #6): simulate the production ERROR path where
+        // AgentHeadless.execute() itself throws (see agent-headless.ts
+        // catch arm at :287-294). If `nextExecuteThrow.value` is set,
+        // re-throw it so the orchestrator's `await subagent.execute()`
+        // call rejects without ever reaching the line below it.
+        if (nextExecuteThrow.value) {
+          throw nextExecuteThrow.value;
         }
       },
       getFinalText: () =>
@@ -591,16 +608,30 @@ describe('WorkflowOrchestrator', () => {
     expect(budgetUpdates).toEqual([]);
   });
 
-  it('P5 T4: budgetUpdated does NOT fire on dispatch rejection', async () => {
+  it('P5 R3 #1: budgetUpdated DOES fire on dispatch rejection (so UI/registry see the burn-then-fail spend)', async () => {
+    // R3 #1 (bot): the production dispatch's reportTokens runs in a
+    // `finally` (R3 #6), so `budget.spent()` advances even when
+    // `subagent.execute()` throws. If the error arm of `countedDispatch`
+    // does NOT fire `budgetUpdated`, the registry's `tokensSpent` /
+    // `perPhaseTokens` never see those tokens — divergence between
+    // `budget.spent()` (host) and `entry.tokensSpent` (UI). Worse,
+    // R2 #12 dropped `safeEmitUpdate` from `agentCompleted` and made
+    // `budgetUpdated` the sole UI driver, so dispatch errors produce
+    // ZERO UI re-renders unless `budgetUpdated` fires on the error
+    // arm too.
     const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
     const budget = new WorkflowBudgetImpl(1000);
     const orchestrator = new WorkflowOrchestrator(async () => {
+      // Mirror the production reportTokens-in-finally semantics:
+      // record tokens BEFORE the throw, exactly as production does.
+      budget.recordSpent(150);
       throw new Error('dispatch-boom');
     });
-    const budgetUpdates: number[] = [];
+    const budgetUpdates: Array<{ spent: number; total: number | null }> = [];
     const completions: Array<{ label?: string; error?: string }> = [];
     const emitter = {
-      budgetUpdated: (spent: number) => budgetUpdates.push(spent),
+      budgetUpdated: (spent: number, total: number | null) =>
+        budgetUpdates.push({ spent, total }),
       agentCompleted: (label?: string, error?: string) =>
         completions.push({ label, error }),
     };
@@ -618,6 +649,79 @@ describe('WorkflowOrchestrator', () => {
     expect(caught).toBeInstanceOf(Error);
     expect(completions).toHaveLength(1);
     expect(completions[0]?.error).toBe('dispatch-boom');
+    // R3 #1 contract: error arm now fires budgetUpdated with the
+    // cumulative spent at throw time, so the registry mirrors the
+    // burn that the failed dispatch incurred.
+    expect(budgetUpdates).toEqual([{ spent: 150, total: 1000 }]);
+  });
+
+  it('P5 R3 #7: budget rejection does NOT consume agent-cap slots (correct terminal error after exhaustion)', async () => {
+    // wenshao R3 #7: if `agentCount += 1` runs before the budget gate,
+    // every budget-rejected call still increments agentCount and the
+    // SUBSEQUENT call eventually trips `agentCount > maxAgents` —
+    // surfacing the wrong terminal error ("exceeded the maximum of N
+    // agent() calls per run") when the real cause is budget exhaustion.
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    budget.recordSpent(100); // pre-bust the budget so every dispatch rejects
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      return 'never';
+    });
+    let caught: unknown;
+    try {
+      // Loop the script so we accumulate many budget rejections, well
+      // past `maxAgents` had the old ordering been in place.
+      // try/catch in script so loop continues despite per-call throws.
+      await orchestrator.run({
+        script: `
+          let lastErr = null;
+          for (let i = 0; i < 1100; i++) {
+            try { await agent('q' + i); } catch (e) { lastErr = e.message; }
+          }
+          return lastErr;
+        `,
+        args: undefined,
+        budget,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    // Real production dispatch is never called.
+    expect(dispatchCalls).toBe(0);
+    // R3 #7 contract: the script saw budget-exceeded errors, NOT
+    // agent-count-exceeded errors. The latter would indicate the old
+    // ordering still applies.
+    // The orchestrator wraps script-thrown errors in
+    // WorkflowExecutionError; the script swallowed each per-call throw
+    // and returned the last message, so the run COMPLETED successfully.
+    expect(caught).toBeUndefined();
+  });
+
+  it('P5 R3 #1: budgetUpdated does NOT fire when no budget passed AND dispatch rejects', async () => {
+    // Budget-less callers must not get spurious budgetUpdated events
+    // — the orchestrator's `if (budget)` gate covers both the success
+    // and error arms.
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      throw new Error('boom');
+    });
+    const budgetUpdates: number[] = [];
+    const emitter = {
+      budgetUpdated: (spent: number) => budgetUpdates.push(spent),
+    };
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('q1'); return 'done';`,
+        args: undefined,
+        emitter,
+        // budget intentionally omitted
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
     expect(budgetUpdates).toEqual([]);
   });
 
@@ -780,6 +884,38 @@ describe('createProductionDispatch', () => {
     await expect(dispatch('q1', { label: 'x' })).resolves.toBe(
       'headless-said:q1',
     );
+  });
+
+  // ── R3 (wenshao #6): tokens MUST also be recorded when execute() THROWS ──
+
+  it('R3 #6: records tokens when subagent.execute() THROWS (the real production ERROR path)', async () => {
+    // R1 #3 only covered the case where execute() RETURNS while
+    // getTerminateMode() yields ERROR (rare: `createChat` early
+    // return). The production ERROR path goes through `agent-headless.ts`'s
+    // catch arm which RE-THROWS the underlying error after setting
+    // terminateMode=ERROR. The orchestrator's `reportTokens` was on
+    // the line AFTER `await subagent.execute(...)`, not in a `finally`
+    // — so the throw path leaked tokens. wenshao's R3 review caught
+    // this with a deterministic repro.
+    nextExecuteThrow.value = new Error('reasoning-loop boom');
+    nextOutputTokens.value = 4242;
+    const reports: number[] = [];
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      (tokens) => reports.push(tokens),
+    );
+    await expect(dispatch('q1', { label: 'thrown' })).rejects.toThrow(
+      /reasoning-loop boom/,
+    );
+    // Contract: tokens recorded BEFORE the throw propagates, exactly
+    // once — regardless of whether the throw came from execute() itself
+    // or from the post-execute terminate-mode gate (R1 #3 case).
+    expect(reports).toEqual([4242]);
+  });
+
+  afterEach(() => {
+    nextExecuteThrow.value = null;
   });
 });
 
@@ -1360,6 +1496,15 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                     },
                   );
                 }
+                // R3 (wenshao #6): honor `nextExecuteThrow` on the
+                // override-path stub too, so the override-path sibling
+                // of the throw-path test (test name "R3 #6: override-
+                // path records tokens...") can reproduce the real
+                // AgentHeadless.execute() throw against the override
+                // dispatch site.
+                if (nextExecuteThrow.value) {
+                  throw nextExecuteThrow.value;
+                }
                 // Honor signal abort if it fires.
                 if (signal?.aborted) return;
               },
@@ -1559,6 +1704,35 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     // R1 #1 contract: tokens recorded BEFORE the schema/non-schema
     // branching, so the schema success path now reports.
     expect(reports).toEqual([555]);
+  });
+
+  it('R3 #6: override-path records tokens when execute() THROWS (sibling of fast path)', async () => {
+    // Sibling site for wenshao's R3 #6 finding. `reportTokens` at the
+    // override path is the second of the two dispatch sites; the
+    // matching test for the fast path lives in
+    // `createProductionDispatch` describe above. Both must wrap
+    // `await subagent.execute()` in try/finally so token accounting
+    // survives the production ERROR-via-throw path.
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'GOAL', // execute() throws BEFORE terminate-mode check
+        runWithEmitter: () => {},
+      }),
+    });
+    nextExecuteThrow.value = new Error('override-path boom');
+    nextOutputTokens.value = 9999;
+    const reports: number[] = [];
+    const dispatch = createProductionDispatch(
+      config,
+      undefined,
+      (tokens) => reports.push(tokens),
+    );
+    await expect(
+      dispatch('q1', { label: 'thrown', schema: { type: 'object' } }),
+    ).rejects.toThrow(/override-path boom/);
+    expect(reports).toEqual([9999]);
+    nextExecuteThrow.value = null;
   });
 
   it('schema-mode: 3 failed structured_output calls → upstream-aligned terminal error', async () => {
