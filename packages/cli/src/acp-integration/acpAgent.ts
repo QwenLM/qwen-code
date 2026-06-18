@@ -1757,10 +1757,17 @@ function normalizeStringRecord(
 
 function normalizeOptionalNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
-  const numberValue =
-    typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (!Number.isFinite(numberValue) || numberValue <= 0) {
-    throw RequestError.invalidParams(undefined, 'Expected a positive number');
+  let numberValue: number;
+  if (typeof value === 'number') {
+    numberValue = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    numberValue = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  } else {
+    numberValue = Number.NaN;
+  }
+  if (!Number.isInteger(numberValue) || numberValue <= 0) {
+    throw RequestError.invalidParams(undefined, 'Expected a positive integer');
   }
   return numberValue;
 }
