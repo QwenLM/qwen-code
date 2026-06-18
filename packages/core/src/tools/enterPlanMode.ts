@@ -96,6 +96,38 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
       };
     }
 
+    // Reveal the exit_plan_mode deferred tool so the model can call it
+    // directly without needing to search for it first. This mirrors the
+    // pattern in ToolSearch's select: path (reveal + setTools sync).
+    try {
+      const registry = this.config.getToolRegistry();
+      const exitPlanModeName = ToolNames.EXIT_PLAN_MODE;
+      const revealedBefore = registry.isDeferredToolRevealed(exitPlanModeName);
+      if (!revealedBefore) {
+        registry.revealDeferredTool(exitPlanModeName);
+        const geminiClient = this.config.getGeminiClient();
+        if (geminiClient) {
+          try {
+            await geminiClient.setTools();
+          } catch (setErr) {
+            // Rollback the reveal on setTools failure so the registry
+            // stays consistent with the chat's declaration list.
+            registry.unrevealDeferredTool(exitPlanModeName);
+            debugLogger.error(
+              `[EnterPlanModeTool] Failed to sync exit_plan_mode tool declaration: ${setErr instanceof Error ? setErr.message : String(setErr)}`,
+            );
+          }
+        }
+      }
+    } catch (error) {
+      // Non-fatal: log the failure but still return success for
+      // entering plan mode. The model can use ToolSearch to find
+      // exit_plan_mode if the reveal failed.
+      debugLogger.warn(
+        `[EnterPlanModeTool] Failed to reveal exit_plan_mode: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     return {
       llmContent:
         'Plan mode is now active. Continue with read-only investigation, ask the user when needed, and use exit_plan_mode when the plan is ready.',
