@@ -39,6 +39,10 @@ export interface QQChannelConfig {
   appID?: string;
   appSecret?: string;
   sandbox?: boolean;
+  /** Enable Ark template card messages (msg_type=3). Default: false. */
+  enableArk?: boolean;
+  /** Enable rich media messages — images/video/voice/file (msg_type=7). Default: false. */
+  enableMedia?: boolean;
 }
 
 // ── Ark message ──────────────────────────────────────────────────
