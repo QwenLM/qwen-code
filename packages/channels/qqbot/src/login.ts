@@ -17,6 +17,10 @@ export interface QQCredentials {
  * Returns the obtained appId and appSecret.
  */
 export async function qrCodeLogin(): Promise<QQCredentials> {
-  const [creds] = await qrConnect();
+  const results = await qrConnect();
+  const creds = results[0];
+  if (!creds?.appId || !creds?.appSecret) {
+    throw new Error('QR login failed: no credentials returned');
+  }
   return { appId: creds.appId, appSecret: creds.appSecret };
 }
