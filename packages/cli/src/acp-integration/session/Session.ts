@@ -874,7 +874,6 @@ export class Session implements SessionContext {
     try {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
-      void this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -882,6 +881,12 @@ export class Session implements SessionContext {
       return result;
     } finally {
       this.pendingPrompt = null;
+      // Start the scheduler in finally, not the success path: a turn can arm
+      // a wakeup via LoopWakeup and then throw on a later step. Gated on
+      // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
+      // cron job) is actually pending — otherwise the loop dies silently on
+      // any post-arm error.
+      void this.#startCronSchedulerIfNeeded();
       resolveCompletion();
       this.pendingPromptCompletion = null;
     }
