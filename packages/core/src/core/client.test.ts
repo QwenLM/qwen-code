@@ -4316,11 +4316,19 @@ hello
         LoopType.TURN_TOOL_CALL_CAP,
       );
 
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: 'content', value: 'looping' };
-        })(),
-      );
+      // `run` is invoked as `turn.run(...)`, so `this` is the live Turn —
+      // populate pendingToolCalls the way the real Turn.run does as it streams
+      // ToolCallRequest chunks, so the halt's clear runs against a non-empty
+      // array (not a trivially-empty one).
+      mockTurnRunFn.mockImplementation(async function* (this: {
+        pendingToolCalls: unknown[];
+      }) {
+        this.pendingToolCalls.push(
+          { name: 'read_file', args: { path: 'a.ts' } },
+          { name: 'read_file', args: { path: 'b.ts' } },
+        );
+        yield { type: 'content', value: 'looping' };
+      });
 
       const stream = client.sendMessageStream(
         [{ text: 'trigger the cap' }],
@@ -4345,8 +4353,9 @@ hello
         (e) => e.type === GeminiEventType.LoopDetected,
       );
       expect(loopEvent?.value?.loopType).toBe(LoopType.TURN_TOOL_CALL_CAP);
-      // Pending tool calls are dropped so the halt doesn't spawn a continuation
-      // that re-trips the cap and double-prints the message.
+      // The two pending calls collected before the cap tripped are dropped, so
+      // the halt doesn't spawn a continuation that re-trips the cap and
+      // double-prints the message.
       expect(returnedTurn?.pendingToolCalls).toHaveLength(0);
       // The mid-stream memory prefetch is cancelled.
       expect(abortHandlerInvoked).toBe(true);

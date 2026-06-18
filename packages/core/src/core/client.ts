@@ -2133,9 +2133,10 @@ export class GeminiClient {
           // executing them, spawning a continuation, and re-tripping the cap
           // (which would double-print the halt message and waste a request).
           turn.pendingToolCalls.length = 0;
+          const loopType = this.loopDetector.getLastLoopType();
           yield {
             type: GeminiEventType.LoopDetected,
-            value: { loopType: this.loopDetector.getLastLoopType()! },
+            ...(loopType && { value: { loopType } }),
           };
           if (arenaAgentClient) {
             await arenaAgentClient.reportError('Loop detected');

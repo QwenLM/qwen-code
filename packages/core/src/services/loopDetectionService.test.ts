@@ -1203,6 +1203,11 @@ describe('LoopDetectionService', () => {
           loop_type: 'global_tool_call_duplicate',
         }),
       );
+      // getLastLoopType() is the getter the client uses to populate the
+      // bubbled LoopDetected event, so assert it too — not just the logged one.
+      expect(service.getLastLoopType()).toBe(
+        LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      );
     });
 
     it('should not fire for different (tool, args) pairs', () => {
@@ -1238,6 +1243,23 @@ describe('LoopDetectionService', () => {
         }),
       );
     });
+
+    it('does not count a retried replay toward the global-duplicate threshold', () => {
+      service.reset('');
+      const stuck = createToolCallRequestEvent('stuck_tool', { param: 'same' });
+      const retry = { type: GeminiEventType.Retry } as ServerGeminiStreamEvent;
+      // Failed attempt streams (threshold - 3) identical calls, then retries.
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 3; i++) {
+        expect(service.addAndCheckHeuristicLoops(stuck)).toBe(false);
+      }
+      service.addAndCheckHeuristicLoops(retry);
+      // The replay streams the same calls again. Without the Retry reset the
+      // pre- and post-retry counts would sum to the threshold and false-fire.
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 3; i++) {
+        expect(service.addAndCheckHeuristicLoops(stuck)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
   });
 
   describe('Alternating Tool Call Pattern Detection', () => {
@@ -1263,6 +1285,9 @@ describe('LoopDetectionService', () => {
         expect.objectContaining({
           loop_type: 'alternating_tool_call_pattern',
         }),
+      );
+      expect(service.getLastLoopType()).toBe(
+        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
       );
     });
 

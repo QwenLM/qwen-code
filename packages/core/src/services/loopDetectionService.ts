@@ -197,6 +197,18 @@ export class LoopDetectionService {
           globalDup || alternating || readFileLoop || actionStagnation;
         break;
       }
+      case GeminiEventType.Retry: {
+        // A retry replays the failed attempt's tool calls (Turn clears
+        // pendingToolCalls on retry), so drop the counters this PR added to
+        // avoid the heuristic detectors firing on a duplicated replay — e.g.
+        // 3 identical calls + Retry + 3 more would otherwise hit the
+        // global-duplicate threshold of 6. Mirrors the deterministic path's
+        // resetToolCallCount() on Retry; the always-on cap keeps its own
+        // counter accurate via commit/rollback instead.
+        this.globalToolCallCounts.clear();
+        this.recentToolCallKeys = [];
+        break;
+      }
       case GeminiEventType.Content: {
         this.loopDetected = this.checkContentLoop(event.value);
         break;
