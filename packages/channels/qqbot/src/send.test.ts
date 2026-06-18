@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { isValidChatId, hasMarkdownSyntax, splitText } from './QQChannel.js';
 
-const { mockSendQQMessage } = vi.hoisted(() => ({
+const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
   mockSendQQMessage: vi.fn(),
+  mockFetchAccessToken: vi.fn(),
 }));
 
 vi.mock('node:fs', () => ({
@@ -15,7 +16,7 @@ vi.mock('node:fs', () => ({
 vi.mock('./api.js', () => ({
   sendQQMessage: mockSendQQMessage,
   getApiBase: () => 'https://api.sgroup.qq.com',
-  fetchAccessToken: vi.fn(),
+  fetchAccessToken: mockFetchAccessToken,
   fetchGatewayUrl: vi.fn(),
 }));
 
@@ -260,6 +261,10 @@ describe('sendMessage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'refreshed-token',
+      expiresIn: 7200,
+    });
   });
 
   it('sends plain text to C2C chat with msg_type=0', async () => {
@@ -344,21 +349,46 @@ describe('sendMessage', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
-  it('returns early when chatId is not in chatTypeMap', async () => {
-    const ch = makeChannel(); // no chatType set
+  it('defaults to C2C path for unknown chatId', async () => {
+    const ch = makeChannel(); // no chatType set → not group → C2C path
     await ch.sendMessage('unknown-chat', 'hello');
 
-    // resolveRoute checks chatTypeMap — but actually, resolveRoute only checks
-    // chatTypeMap for the path; the chatId validation happens first. Let's see:
-    // if (!this.accessToken || !isValidChatId(chatId)) return null;
-    // path = chatTypeMap.get(chatId) === 'group' ? groupPath : c2cPath;
-    // So unknown chatId gets C2C path by default.
     expect(mockSendQQMessage).toHaveBeenCalledWith(
       'https://api.sgroup.qq.com',
       '/v2/users/unknown-chat/messages',
       'test-token',
       { content: 'hello', msg_type: 0 },
     );
+  });
+
+  it('returns early when chatId fails SSRF validation', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    await ch.sendMessage('../traversal', 'hello');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('returns early when token expired and refresh fails', async () => {
+    const ch = makeChannel({
+      chatType: 'c2c',
+      tokenExpiresAt: Date.now() - 1000,
+    });
+    mockFetchAccessToken.mockRejectedValue(new Error('auth failed'));
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(mockFetchAccessToken).toHaveBeenCalled();
+  });
+
+  it('catches thrown sendQQMessage errors and stops sending', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    mockSendQQMessage.mockRejectedValue(new Error('network down'));
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    // No crash, and the catch+break prevents further attempts
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
 
   it('includes msg_id and msg_seq when replyMsgId is set', async () => {
