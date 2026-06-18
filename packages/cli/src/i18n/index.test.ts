@@ -166,9 +166,13 @@ describe('localizeToolDisplayName', () => {
     await setLanguageAsync('zh');
 
     // The namespaced `toolDisplayName.*` key translates the badge...
-    expect(localizeToolDisplayName('Shell')).toBe('终端');
+    expect(localizeToolDisplayName('Shell')).toBe('运行命令');
     expect(localizeToolDisplayName('TodoWrite')).toBe('任务清单');
-    expect(localizeToolDisplayName('Lsp')).toBe('语言服务');
+    // Proper tool names / acronyms are intentionally kept in English.
+    expect(localizeToolDisplayName('Agent')).toBe('Agent');
+    expect(localizeToolDisplayName('Grep')).toBe('Grep');
+    expect(localizeToolDisplayName('Glob')).toBe('Glob');
+    expect(localizeToolDisplayName('Lsp')).toBe('LSP');
     // ...while a same-spelled standalone UI string keeps its own value.
     expect(t('Shell')).toBe('Shell');
   });
@@ -193,11 +197,14 @@ describe('localizeToolDisplayName', () => {
     await setLanguageAsync('zh');
 
     // Guards against a new tool landing without a `toolDisplayName.*` entry:
-    // every English display name must resolve to a different (translated) zh
-    // string. check-i18n can't catch this because the keys are built
-    // dynamically, never as `t('toolDisplayName.X')` string literals.
+    // every English display name (except the intentionally-English ones below)
+    // must resolve to a different (translated) zh string. check-i18n can't catch
+    // this because the keys are built dynamically, never as
+    // `t('toolDisplayName.X')` string literals.
+    const KEEP_ENGLISH = new Set(['Agent', 'Grep', 'Glob']);
     const untranslated = Object.values(ToolDisplayNames).filter(
-      (name) => localizeToolDisplayName(name) === name,
+      (name) =>
+        !KEEP_ENGLISH.has(name) && localizeToolDisplayName(name) === name,
     );
     expect(untranslated).toEqual([]);
   });

@@ -13,26 +13,27 @@ export default {
   // Keyed by `toolDisplayName.<English display name>` (from core
   // `ToolDisplayNames`). The namespace prevents collisions with same-spelled
   // generic UI strings (e.g. a standalone "Shell"). A missing key falls back to
-  // the English display name via `localizeToolDisplayName`. A product name is
-  // kept verbatim inside an otherwise-translated label (e.g. `Notebook`).
+  // the English display name via `localizeToolDisplayName`. Proper tool names /
+  // acronyms are kept in English (Agent, Grep, Glob, LSP), as is a product name
+  // inside an otherwise-translated label (e.g. `Notebook`).
   // ============================================================================
   'toolDisplayName.Edit': '编辑',
   'toolDisplayName.WriteFile': '写入文件',
   'toolDisplayName.ReadFile': '读取文件',
-  'toolDisplayName.Grep': '搜索',
-  'toolDisplayName.Glob': '匹配文件',
-  'toolDisplayName.Shell': '终端',
-  'toolDisplayName.Shell Command': '终端命令',
+  'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.Glob': 'Glob',
+  'toolDisplayName.Shell': '运行命令',
+  'toolDisplayName.Shell Command': 'Shell 命令',
   'toolDisplayName.TodoWrite': '任务清单',
   'toolDisplayName.SaveMemory': '保存记忆',
-  'toolDisplayName.Agent': '智能体',
+  'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '进入计划模式',
   'toolDisplayName.ExitPlanMode': '退出计划模式',
   'toolDisplayName.WebFetch': '网络抓取',
   'toolDisplayName.WebSearch': '网络搜索',
   'toolDisplayName.ListFiles': '列出文件',
-  'toolDisplayName.Lsp': '语言服务',
+  'toolDisplayName.Lsp': 'LSP',
   'toolDisplayName.AskUserQuestion': '询问用户',
   'toolDisplayName.CronCreate': '创建定时任务',
   'toolDisplayName.CronList': '定时任务列表',
@@ -48,8 +49,8 @@ export default {
   'toolDisplayName.Monitor': '监控',
   'toolDisplayName.NotebookEdit': '编辑 Notebook',
   'toolDisplayName.ToolSearch': '工具搜索',
-  'toolDisplayName.EnterWorktree': '进入工作树',
-  'toolDisplayName.ExitWorktree': '退出工作树',
+  'toolDisplayName.EnterWorktree': '进入 Worktree',
+  'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
   // ============================================================================
   // Help / UI Components
