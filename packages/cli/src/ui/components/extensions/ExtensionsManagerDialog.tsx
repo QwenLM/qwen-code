@@ -159,10 +159,7 @@ export function ExtensionsManagerDialog({
       // Show success message
       setSuccessMessage(
         t('Extension "{{name}}" updated successfully.', {
-          name: getExtensionDisplayName(
-            selectedExtension,
-            getCurrentLanguage(),
-          ),
+          name: getExtensionDisplayName(selectedExtension, getCurrentLanguage()),
         }),
       );
 
@@ -249,10 +246,7 @@ export function ExtensionsManagerDialog({
         const actionKey = newState ? 'enabled' : 'disabled';
         setSuccessMessage(
           t(`Extension "{{name}}" ${actionKey} successfully.`, {
-            name: getExtensionDisplayName(
-              selectedExtension,
-              getCurrentLanguage(),
-            ),
+            name: getExtensionDisplayName(selectedExtension, getCurrentLanguage()),
           }),
         );
         setErrorMessage(null);
@@ -267,10 +261,7 @@ export function ExtensionsManagerDialog({
         setErrorMessage(
           t('Failed to {{action}} extension "{{name}}": {{error}}', {
             action: newState ? 'enable' : 'disable',
-            name: getExtensionDisplayName(
-              selectedExtension,
-              getCurrentLanguage(),
-            ),
+            name: getExtensionDisplayName(selectedExtension, getCurrentLanguage()),
             error: getErrorMessage(error),
           }),
         );
@@ -349,9 +340,7 @@ export function ExtensionsManagerDialog({
         case MANAGEMENT_STEPS.EXTENSION_LIST:
           return t('Manage Extensions');
         case MANAGEMENT_STEPS.ACTION_SELECTION:
-          return selectedExtension
-            ? getExtensionDisplayName(selectedExtension, getCurrentLanguage())
-            : t('Choose Action');
+          return selectedExtension ? getExtensionDisplayName(selectedExtension, getCurrentLanguage()) : t('Choose Action');
         case MANAGEMENT_STEPS.EXTENSION_DETAIL:
           return t('Extension Details');
         case MANAGEMENT_STEPS.DISABLE_SCOPE_SELECT:
@@ -488,12 +477,7 @@ export function ExtensionsManagerDialog({
             <Text>
               {updateInProgress
                 ? t('Updating {{name}}...', {
-                    name: selectedExtension
-                      ? getExtensionDisplayName(
-                          selectedExtension,
-                          getCurrentLanguage(),
-                        )
-                      : '',
+                    name: selectedExtension ? getExtensionDisplayName(selectedExtension, getCurrentLanguage()) : '',
                   })
                 : t('Update complete!')}
             </Text>

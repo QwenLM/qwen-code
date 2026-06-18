@@ -235,7 +235,9 @@ describe('workflowsCommand', () => {
       perPhaseTokens: perPhase,
       endTime: 1_700_000_010_000,
     });
-    getMock.mockImplementation((id) => (id === 'wf_pre' ? detail : undefined));
+    getMock.mockImplementation((id) =>
+      id === 'wf_pre' ? detail : undefined,
+    );
     const result = await workflowsCommand.action!(context, 'wf_pre');
     if (!result || result.type !== 'message') throw new Error('no result');
     expect(result.content).toContain('· Plan · 200t');
