@@ -209,9 +209,14 @@ export class QQChannel extends ChannelBase {
 
         let resp = await sendQQMessage(base, path, this.accessToken, body);
 
-        // Markdown fallback: QQ Bot markdown capability must be explicitly
-        // granted per-bot. On C2C especially, raw markdown (msg_type=2) is
-        // often rejected. Retry the same chunk as plain text (msg_type=0).
+        // Markdown is a fully available, zero-permission message type on the QQ
+        // Bot Open Platform — bot.q.qq.com API docs list msg_type=2 alongside
+        // text/ark/embed with no application gate. (q.qq.com/wiki/FAQ/robot
+        // mentions a markdown permission application, but that FAQ targets a
+        // different platform — likely older 群机器人 or mini-program bots —
+        // not the Open Platform API we use here.) We retry as plaintext as
+        // defense-in-depth against edge cases where a bot's markdown capability
+        // might be restricted server-side.
         if (!resp.ok && useMarkdown) {
           const errBody = await resp.text().catch(() => '');
           process.stderr.write(
