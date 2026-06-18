@@ -26,13 +26,11 @@ export const idealabProvider: ProviderConfig = {
       id: 'bailian/deepseek-v4-pro',
       contextWindowSize: 1000000,
       enableThinking: true,
-      modalities: { image: true, video: true },
     },
     {
       id: 'bailian/deepseek-v4-flash',
       contextWindowSize: 1000000,
       enableThinking: true,
-      modalities: { image: true, video: true },
     },
     {
       id: 'bailian/kimi-k2.6',

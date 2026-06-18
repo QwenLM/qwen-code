@@ -51,11 +51,11 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## Suggestions
 
-| Shortcut        | Description                            |
-| --------------- | -------------------------------------- |
-| `Down Arrow`    | Navigate down through the suggestions. |
-| `Tab` / `Enter` | Accept the selected suggestion.        |
-| `Up Arrow`      | Navigate up through the suggestions.   |
+| Shortcut                | Description                            |
+| ----------------------- | -------------------------------------- |
+| `Down Arrow` / `Ctrl+N` | Navigate down through the suggestions. |
+| `Tab` / `Enter`         | Accept the selected suggestion.        |
+| `Up Arrow` / `Ctrl+P`   | Navigate up through the suggestions.   |
 
 ## Radio Button Select
 

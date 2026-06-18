@@ -166,9 +166,15 @@ export const defaultKeyBindings: KeyBindingConfig = {
 
   // Auto-completion
   [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
-  // Completion navigation uses only arrow keys
-  [Command.COMPLETION_UP]: [{ key: 'up', shift: false }],
-  [Command.COMPLETION_DOWN]: [{ key: 'down', shift: false }],
+  // Completion navigation: arrows + readline/Vim-style Ctrl+P/Ctrl+N
+  [Command.COMPLETION_UP]: [
+    { key: 'up', shift: false },
+    { key: 'p', ctrl: true },
+  ],
+  [Command.COMPLETION_DOWN]: [
+    { key: 'down', shift: false },
+    { key: 'n', ctrl: true },
+  ],
 
   // Text input
   // Must also exclude shift to allow shift+enter for newline

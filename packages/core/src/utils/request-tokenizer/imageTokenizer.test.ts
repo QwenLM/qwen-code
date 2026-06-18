@@ -102,6 +102,31 @@ describe('ImageTokenizer', () => {
     });
   });
 
+  describe('WebP dimension extraction', () => {
+    it('should extract canvas dimensions from VP8X', async () => {
+      const width = 100;
+      const height = 80;
+
+      const buf = Buffer.alloc(30);
+      buf.write('RIFF', 0, 'ascii');
+      buf.writeUInt32LE(22, 4);
+      buf.write('WEBP', 8, 'ascii');
+      buf.write('VP8X', 12, 'ascii');
+      buf.writeUInt32LE(10, 16); // VP8X chunk size
+      buf.writeUInt8(0, 20); // flags
+      buf.writeUIntLE(width - 1, 24, 3); // canvas width minus one (24-bit LE)
+      buf.writeUIntLE(height - 1, 27, 3); // canvas height minus one (24-bit LE)
+
+      const metadata = await tokenizer.extractImageMetadata(
+        buf.toString('base64'),
+        'image/webp',
+      );
+
+      expect(metadata.width).toBe(width);
+      expect(metadata.height).toBe(height);
+    });
+  });
+
   describe('batch processing', () => {
     it('should process multiple images serially', async () => {
       const pngBase64 =
@@ -199,6 +224,35 @@ describe('ImageTokenizer', () => {
       const metadata = await tokenizer.extractImageMetadata(tiff, 'image/tiff');
       expect(metadata.width).toBe(1024);
       expect(metadata.height).toBe(768);
+    });
+  });
+
+  describe('BMP dimension extraction', () => {
+    function buildBmp(width: number, height: number): string {
+      // A negative height encodes a top-down BMP per the BITMAPINFOHEADER spec.
+      const buf = Buffer.alloc(26);
+      buf.write('BM', 0, 'ascii');
+      buf.writeUInt32LE(26, 2); // file size
+      buf.writeUInt32LE(0, 6); // reserved
+      buf.writeUInt32LE(26, 10); // pixel data offset
+      buf.writeUInt32LE(40, 14); // BITMAPINFOHEADER size
+      buf.writeInt32LE(width, 18);
+      buf.writeInt32LE(height, 22);
+      return buf.toString('base64');
+    }
+
+    it('reads a bottom-up (positive height) BMP', async () => {
+      const bmp = buildBmp(120, 80);
+      const metadata = await tokenizer.extractImageMetadata(bmp, 'image/bmp');
+      expect(metadata.width).toBe(120);
+      expect(metadata.height).toBe(80);
+    });
+
+    it('reads a top-down (negative height) BMP as its absolute height', async () => {
+      const bmp = buildBmp(100, -50);
+      const metadata = await tokenizer.extractImageMetadata(bmp, 'image/bmp');
+      expect(metadata.width).toBe(100);
+      expect(metadata.height).toBe(50);
     });
   });
 });

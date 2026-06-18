@@ -273,6 +273,19 @@ export function t(key: string, params?: Record<string, string>): string {
 }
 
 /**
+ * Locale-aware tool display name for chat-stream badges. Looks up the
+ * `toolDisplayName.<English display name>` key so tool labels never collide
+ * with same-spelled generic UI strings (e.g. a standalone "Shell" label that
+ * intentionally stays English). Falls back to the English display name when the
+ * active locale has no entry, so English and untranslated tools are unaffected.
+ */
+export function localizeToolDisplayName(displayName: string): string {
+  const key = `toolDisplayName.${displayName}`;
+  const translated = t(key);
+  return translated === key ? displayName : translated;
+}
+
+/**
  * Get a translation that is an array of strings.
  * @param key The translation key
  * @returns The array of strings, or an empty array if not found or not an array
