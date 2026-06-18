@@ -424,6 +424,12 @@ export enum LoopType {
   REPETITIVE_THOUGHTS = 'repetitive_thoughts',
   READ_FILE_LOOP = 'read_file_loop',
   ACTION_STAGNATION = 'action_stagnation',
+  /** Same (tool, args) pair appears N times across the entire turn, not necessarily consecutively. */
+  GLOBAL_TOOL_CALL_DUPLICATE = 'global_tool_call_duplicate',
+  /** Two tools alternating in a fixed pattern (A B A B A B ...). */
+  ALTERNATING_TOOL_CALL_PATTERN = 'alternating_tool_call_pattern',
+  /** Total tool calls in a single turn exceeded the always-on hard cap, regardless of pattern. */
+  TURN_TOOL_CALL_CAP = 'turn_tool_call_cap',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {
@@ -786,6 +792,31 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
   }
 }
 
+export class ToolResultPersistedEvent implements BaseTelemetryEvent {
+  readonly eventName = 'tool_result_persisted';
+  readonly 'event.timestamp' = new Date().toISOString();
+  'event.name': string;
+  tool_name: string;
+  bytes_written: number;
+  output_file: string;
+  prompt_id: string;
+
+  constructor(
+    prompt_id: string,
+    details: {
+      toolName: string;
+      bytesWritten: number;
+      outputFile: string;
+    },
+  ) {
+    this['event.name'] = this.eventName;
+    this.prompt_id = prompt_id;
+    this.tool_name = details.toolName;
+    this.bytes_written = details.bytesWritten;
+    this.output_file = details.outputFile;
+  }
+}
+
 export class ExtensionUninstallEvent implements BaseTelemetryEvent {
   'event.name': 'extension_uninstall';
   'event.timestamp': string;
@@ -1032,6 +1063,7 @@ export type TelemetryEvent =
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
+  | ToolResultPersistedEvent
   | ModelSlashCommandEvent
   | AuthEvent
   | HookCallEvent

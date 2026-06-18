@@ -234,6 +234,27 @@ export abstract class DeclarativeTool<
   }
 
   /**
+   * Max model-facing characters for this tool's output before the scheduler
+   * spills it to disk (mirrors Claude Code's per-tool `maxResultSizeChars`).
+   *   - `undefined` → use the global truncation threshold.
+   *   - `Infinity`  → self-managed (the tool does its own size control, e.g.
+   *     ReadFile's line-based paging), exempt from scheduler char truncation.
+   * Override in subclasses to opt into a per-tool budget.
+   */
+  get maxOutputChars(): number | undefined {
+    return undefined;
+  }
+
+  /**
+   * Direction kept when this tool's oversized output is truncated: `'head'`
+   * (beginning, e.g. shell), `'tail'` (end, e.g. background agents), or
+   * `'both'` (first + last, the default).
+   */
+  get truncateKeep(): 'head' | 'tail' | 'both' {
+    return 'both';
+  }
+
+  /**
    * Projects tool params for the AUTO approval mode classifier.
    *
    * Tools with security-relevant parameters (file paths, shell commands,
@@ -682,6 +703,8 @@ export interface ToolEditConfirmationDetails {
   originalContent: string | null;
   newContent: string;
   isModifying?: boolean;
+  /** Hide UI affordances that let the user edit the proposed content. */
+  hideModify?: boolean;
 }
 
 export interface ToolConfirmationPayload {
@@ -835,6 +858,7 @@ export enum Kind {
   Execute = 'execute',
   Think = 'think',
   Fetch = 'fetch',
+  Agent = 'agent',
   Other = 'other',
 }
 

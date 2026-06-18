@@ -163,6 +163,21 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('MockMarkdown:Test result');
   });
 
+  it('renders tool results directly below the header row', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} contentWidth={100} />,
+      StreamingState.Idle,
+    );
+    const lines = (lastFrame() ?? '').split('\n');
+    const headerLine = lines.findIndex((line) => line.includes('test-tool'));
+    const resultLine = lines.findIndex((line) =>
+      line.includes('MockMarkdown:Test result'),
+    );
+
+    expect(headerLine).toBeGreaterThanOrEqual(0);
+    expect(resultLine).toBe(headerLine + 1);
+  });
+
   it('hides result output in compact mode (compactMode=true)', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,
@@ -913,5 +928,46 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('MockMarkdown:# My Plan');
     expect(output).toContain('- Step 1');
     expect(output).toContain('- Step 2');
+  });
+});
+
+describe('<ToolMessage /> localized badge', () => {
+  const localizedProps: ToolMessageProps = {
+    callId: 'tool-i18n',
+    name: 'ReadFile',
+    description: '',
+    resultDisplay: '',
+    status: ToolCallStatus.Success,
+    contentWidth: 80,
+    confirmationDetails: undefined,
+    emphasis: 'medium',
+    config: {} as Config,
+  };
+
+  afterEach(async () => {
+    const { setLanguageAsync } = await import('../../../i18n/index.js');
+    await setLanguageAsync('en');
+  });
+
+  it('shows the localized display name under the zh locale', async () => {
+    const { setLanguageAsync } = await import('../../../i18n/index.js');
+    await setLanguageAsync('zh');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...localizedProps} />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('读取文件');
+    expect(output).not.toContain('ReadFile');
+  });
+
+  it('keeps the English display name under the en locale', async () => {
+    const { setLanguageAsync } = await import('../../../i18n/index.js');
+    await setLanguageAsync('en');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...localizedProps} />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame() ?? '').toContain('ReadFile');
   });
 });

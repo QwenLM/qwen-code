@@ -342,4 +342,124 @@ describe('QwenOAuthDeviceFlowProvider.poll() — stderr audit branches', () => {
     expect(line).toContain('FORGED LOG ENTRY');
     expect(line).toContain('RED');
   });
+
+  it('sanitizes control characters in attacker-controlled err.name on the non-OAuth path (round-4 #4)', async () => {
+    // PR #4291 follow-up review (qwen-latest, round-4 #4):
+    // `Error.name` is a freely assignable string property. A hostile
+    // provider or fetch wrapper could set `e.name` to inject newlines
+    // or ANSI sequences into stderr through the same vector we
+    // already closed for `oauthError`. Pin the equivalent
+    // sanitization on the non-OAuth path.
+    const err = new Error('upstream HTTP 500');
+    err.name = 'Hostile\n[serve] FORGED LINE 2026-01-01\x1b[31mRED\x1b[0m';
+    const provider = new QwenOAuthDeviceFlowProvider(
+      fakeClient({
+        pollDeviceToken: async () => {
+          throw err;
+        },
+      }),
+    );
+    const result = await provider.poll(makeState(), {
+      signal: new AbortController().signal,
+    });
+    expect(result.kind).toBe('error');
+    expect(stderrLines).toHaveLength(1);
+    const line = stderrLines[0];
+    // Single content line — no forged second log entry.
+    expect(line.split('\n').length).toBe(2);
+    // Hostile bytes from name are gone.
+    expect(line).not.toContain('\x1b[31m');
+    expect(line).not.toContain('\x1b[0m');
+    expect(line).not.toMatch(/\n\[serve\] FORGED/);
+    // Substantive parts of the name are still preserved (length-
+    // preserving sanitizer replaces controls with `?`).
+    expect(line).toContain('Hostile');
+    expect(line).toContain('FORGED LINE');
+    expect(line).toContain('RED');
+    // Length field is the message length, not name length.
+    expect(line).toContain(`message ${err.message.length} bytes`);
+  });
+
+  it('sanitizes Unicode lookalike controls (U+2028 LINE SEPARATOR, bidi, ZWNBSP) in oauthError (round-5 #4)', async () => {
+    // PR #4291 follow-up review (deepseek-v4-pro, round-5 #4): the
+    // round-3 sanitizer only stripped ASCII C0/C1 + DEL; a hostile
+    // IdP could bypass with U+2028 (LINE SEPARATOR — rendered as a
+    // newline in many Unicode-aware terminals) or zero-width / bidi
+    // controls. Pin the extended coverage with a payload that mixes
+    // U+2028 (LINE SEPARATOR), U+200E (LRM), and U+FEFF (BOM).
+    //
+    // PR #4291 follow-up review (gpt-5.5, round-6 #1): the original
+    // shape embedded the invisible Unicode controls as literal
+    // characters in the source ('\u2028' between `slow_down` and
+    // `[serve]`, `\u200e` before `RTL`, `\ufeff` at the end). That
+    // makes the test source unreviewable in GitHub diffs / many
+    // editors and the negative assertions look like checks for empty
+    // / whitespace strings. Switched to explicit `\uXXXX` escapes in
+    // both the payload and `not.toContain(...)` assertions.
+    const U_2028_LINE_SEP = '\u2028';
+    const U_200E_LRM = '\u200e';
+    const U_FEFF_BOM = '\ufeff';
+    const malicious = `slow_down${U_2028_LINE_SEP}[serve] FAKE LOG ${U_200E_LRM}RTL${U_FEFF_BOM}`;
+    const provider = new QwenOAuthDeviceFlowProvider(
+      fakeClient({
+        pollDeviceToken: async () => {
+          throw new QwenOAuthPollError({
+            oauthError: malicious,
+            description: 'attacker-supplied unicode',
+            status: 400,
+          });
+        },
+      }),
+    );
+    const result = await provider.poll(makeState(), {
+      signal: new AbortController().signal,
+    });
+    expect(result.kind).toBe('error');
+    expect(stderrLines).toHaveLength(1);
+    const line = stderrLines[0];
+    // None of the Unicode lookalikes survive into stderr.
+    expect(line).not.toContain(U_2028_LINE_SEP);
+    expect(line).not.toContain(U_200E_LRM);
+    expect(line).not.toContain(U_FEFF_BOM);
+    // The forged log line text MUST NOT lead an actual newline.
+    expect(line.split('\n').length).toBe(2); // single content + trailing
+    // Substantive parts preserved (`?`-replaced, length-preserving).
+    expect(line).toContain('FAKE LOG');
+    expect(line).toContain('RTL');
+  });
+
+  it('sanitizes Unicode bidi ISOLATE controls U+2066–U+2069 (CVE-2021-42574 Trojan Source) (round-6 #5)', async () => {
+    // Round-6 review (qwen-latest, #5): the round-5 regex covered
+    // U+202A–U+202E (embedding/override) but missed U+2066–U+2069
+    // (LRI/RLI/FSI/PDI). These bidi ISOLATE controls are the primary
+    // CVE-2021-42574 attack vectors — a hostile IdP swapping
+    // \u2066 (LRI) for \u202d (LRO) achieves the same visual reordering
+    // and would have bypassed the round-5 filter entirely.
+    const U_2066_LRI = '\u2066';
+    const U_2068_FSI = '\u2068';
+    const U_2069_PDI = '\u2069';
+    const provider = new QwenOAuthDeviceFlowProvider(
+      fakeClient({
+        pollDeviceToken: async () => {
+          throw new QwenOAuthPollError({
+            oauthError: `access_denied${U_2066_LRI}HIDDEN${U_2069_PDI}${U_2068_FSI}`,
+            description: 'trojan source',
+            status: 400,
+          });
+        },
+      }),
+    );
+    const result = await provider.poll(makeState(), {
+      signal: new AbortController().signal,
+    });
+    expect(result.kind).toBe('error');
+    expect(stderrLines).toHaveLength(1);
+    const line = stderrLines[0];
+    expect(line).not.toContain(U_2066_LRI);
+    expect(line).not.toContain(U_2068_FSI);
+    expect(line).not.toContain(U_2069_PDI);
+    // Substantive parts still visible.
+    expect(line).toContain('access_denied');
+    expect(line).toContain('HIDDEN');
+  });
 });

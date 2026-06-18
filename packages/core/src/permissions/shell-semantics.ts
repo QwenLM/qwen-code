@@ -217,6 +217,15 @@ interface RedirectResult {
 }
 
 /**
+ * A bash /dev/tcp/<host>/<port> or /dev/udp/... redirect target opens a
+ * network socket, not a file. Such targets must not be reported as file
+ * reads/writes.
+ */
+function isNetworkPseudoDevice(target: string): boolean {
+  return /^\/dev\/(tcp|udp)\//.test(target);
+}
+
+/**
  * Extract I/O redirections from a token array.
  *
  * Modifies `tokens` in-place to remove redirect operators and their targets.
@@ -225,7 +234,7 @@ interface RedirectResult {
  * Handles:
  *   `> file`   `>> file`  `< file`   (with or without space)
  *   `2> file`  `2>> file` `&> file`  `&>> file`
- *   Combined forms: `>file`, `>>file`, `2>/dev/null`
+ *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`
  */
 function extractRedirects(tokens: string[], cwd: string): RedirectResult {
   const readFiles: string[] = [];
@@ -239,7 +248,9 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     if (tok === '>' || tok === '1>') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
-        writeFiles.push(resolvePath(target, cwd));
+        if (!isNetworkPseudoDevice(target)) {
+          writeFiles.push(resolvePath(target, cwd));
+        }
         toRemove.add(i);
         toRemove.add(i + 1);
         i++;
@@ -247,7 +258,9 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     } else if (tok === '>>' || tok === '1>>') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
-        writeFiles.push(resolvePath(target, cwd));
+        if (!isNetworkPseudoDevice(target)) {
+          writeFiles.push(resolvePath(target, cwd));
+        }
         toRemove.add(i);
         toRemove.add(i + 1);
         i++;
@@ -261,7 +274,9 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     } else if (tok === '<') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
-        readFiles.push(resolvePath(target, cwd));
+        if (!isNetworkPseudoDevice(target)) {
+          readFiles.push(resolvePath(target, cwd));
+        }
         toRemove.add(i);
         toRemove.add(i + 1);
         i++;
@@ -270,7 +285,11 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
       if (target) {
-        if (target !== '/dev/null' && looksLikePath(target)) {
+        if (
+          target !== '/dev/null' &&
+          looksLikePath(target) &&
+          !isNetworkPseudoDevice(target)
+        ) {
           writeFiles.push(resolvePath(target, cwd));
         }
         toRemove.add(i);
@@ -280,7 +299,7 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(<<-?|>>|>|2>>|2>|&>>|&>|<)(.+)$/);
+      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)(.+)$/);
       if (m) {
         const op = m[1]!;
         const target = m[2]!;
@@ -288,7 +307,11 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
           toRemove.add(i);
           continue;
         }
-        if (target !== '/dev/null' && looksLikePath(target)) {
+        if (
+          target !== '/dev/null' &&
+          looksLikePath(target) &&
+          !isNetworkPseudoDevice(target)
+        ) {
           if (op === '<') {
             readFiles.push(resolvePath(target, cwd));
           } else {
@@ -2296,7 +2319,9 @@ function hasAbsolutePathTokenForOperation(
   filePath: string,
 ): boolean {
   for (const token of tokenize(command)) {
-    const redirectTarget = token.match(/^(?:>>|>|2>>|2>|&>>|&>|<)(.+)$/)?.[1];
+    const redirectTarget = token.match(
+      /^(?:1>>|1>|>>|>|2>>|2>|&>>|&>|<)(.+)$/,
+    )?.[1];
     const candidate = redirectTarget ?? token;
     if (
       looksLikePath(candidate) &&

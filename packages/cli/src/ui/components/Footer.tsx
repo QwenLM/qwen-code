@@ -15,7 +15,7 @@ import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';
 import { MCPHealthPill } from './mcp/MCPHealthPill.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
-import { useStatusLine } from '../hooks/useStatusLine.js';
+import { MAX_STATUS_LINES, useStatusLine } from '../hooks/useStatusLine.js';
 import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -153,26 +153,36 @@ export const Footer: React.FC = () => {
       gap={isNarrow ? 0 : 1}
     >
       {/* Left column — status line on top, hints/mode on bottom */}
-      <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1}>
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        flexShrink={isNarrow ? 0 : 1}
+        minWidth={0}
+      >
         {statusLineLines.length > 0 &&
           !uiState.ctrlCPressedOnce &&
-          !uiState.ctrlDPressedOnce &&
-          statusLineLines.map((line, i) => (
-            <Text
-              key={`status-line-${i}`}
-              color={
-                respectUserColors
-                  ? undefined
-                  : useThemeColors
-                    ? theme.text.accent
-                    : undefined
-              }
-              dimColor={respectUserColors ? false : !useThemeColors}
-              wrap="truncate"
+          !uiState.ctrlDPressedOnce && (
+            <Box
+              flexDirection="column"
+              maxHeight={MAX_STATUS_LINES}
+              overflow="hidden"
+              width="100%"
             >
-              {line}
-            </Text>
-          ))}
+              <Text
+                color={
+                  respectUserColors
+                    ? undefined
+                    : useThemeColors
+                      ? theme.text.accent
+                      : undefined
+                }
+                dimColor={respectUserColors ? false : !useThemeColors}
+                wrap="wrap"
+              >
+                {statusLineLines.join('\n')}
+              </Text>
+            </Box>
+          )}
         {/* Built-in worktree indicator. Shown by default whenever a
             worktree is active so the user always has a UI affordance,
             even when a custom statusline is configured — their script

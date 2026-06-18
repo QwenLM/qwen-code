@@ -15,7 +15,6 @@ import {
 } from '@opentelemetry/api';
 import { SERVICE_NAME } from './constants.js';
 import { deriveTraceId, randomSpanId } from './trace-id-utils.js';
-import { getSessionContext } from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const tracer = trace.getTracer(SERVICE_NAME);
@@ -75,15 +74,9 @@ function safeEndSpan(span: Span): void {
 }
 
 // SYNC: keep parent-resolution logic in step with resolveParentContext()
-// in telemetry/session-tracing.ts. Both helpers must use the same
-// active-span-then-session-root precedence or trace trees become
-// inconsistent between withSpan() spans and ALS-driven spans (#4302 review).
+// in telemetry/session-tracing.ts.
 function getParentContext(): Context {
-  const active = context.active();
-  if (trace.getSpan(active)) {
-    return active;
-  }
-  return getSessionContext() ?? active;
+  return context.active();
 }
 
 /**
@@ -128,8 +121,9 @@ export interface WithSpanOptions {
 
 /**
  * Run an async function within a new OTel span.
- * The span inherits the session root traceId when no parent span is active.
- * When the OTel SDK is not initialized, the tracer is a noop.
+ * When no parent span is active, the span becomes a trace root with a
+ * fresh SDK-generated traceId. When the OTel SDK is not initialized,
+ * the tracer is a noop.
  *
  * If the callback sets a status explicitly (e.g. ERROR on a handled failure),
  * withSpan will not overwrite it. Only when no status has been set and the
@@ -253,9 +247,9 @@ function shouldForceSampled(): boolean {
 }
 
 /**
- * Create a root context with a deterministic traceId derived from sessionId.
- * All spans created within this context will share the same traceId,
- * consistent with LogToSpanProcessor.
+ * @deprecated No longer used for span parenting — each interaction is now a
+ * trace root with its own traceId. Retained for backward compatibility
+ * and existing tests.
  */
 export function createSessionRootContext(sessionId: string): Context {
   const traceId = deriveTraceId(sessionId);

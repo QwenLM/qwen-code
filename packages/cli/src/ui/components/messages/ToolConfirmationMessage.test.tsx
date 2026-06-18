@@ -356,6 +356,29 @@ describe('ToolConfirmationMessage', () => {
 
       expect(lastFrame()).not.toContain('Modify with external editor');
     });
+
+    it('should NOT show "Modify with external editor" when hideModify is true', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{ ...editConfirmationDetails, hideModify: true }}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        {
+          settings: {
+            merged: { general: { preferredEditor: 'vscode' } },
+          } as unknown as LoadedSettings,
+        },
+      );
+
+      expect(lastFrame()).not.toContain('Modify with external editor');
+    });
   });
 
   describe('compactMode', () => {
@@ -390,6 +413,32 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).not.toContain('Allow execution of:');
       expect(frame).not.toContain('Always allow in this project');
       expect(frame).not.toContain('Always allow for this user');
+    });
+
+    it('honors hideAlwaysAllow', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'rm -f /tmp/foo.txt',
+        rootCommand: 'rm',
+        hideAlwaysAllow: true,
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).not.toContain('Allow always');
+      expect(frame).toContain('No');
     });
 
     it('renders MCP server and tool name for mcp confirmations', () => {

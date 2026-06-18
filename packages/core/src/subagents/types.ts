@@ -19,6 +19,16 @@ import type {
 } from '../agents/runtime/agent-types.js';
 
 /**
+ * Subagent-only permission mode. NOT a member of the global `ApprovalMode`
+ * enum (adding it there would surface it in the session model/approval
+ * pickers, where it has no meaning). Valid only on a subagent definition's
+ * {@link SubagentConfig.approvalMode}: it resolves to `'default'` run behavior
+ * (tool calls require confirmation) and, for an interactive background run,
+ * surfaces those confirmations to the parent session instead of auto-denying.
+ */
+export const BUBBLE_APPROVAL_MODE = 'bubble';
+
+/**
  * Represents the storage level for a subagent configuration.
  * - 'session': Session-level agents provided at runtime, read-only (highest priority)
  * - 'project': Stored in `.qwen/agents/` within the project directory
@@ -62,9 +72,16 @@ export interface SubagentConfig {
   /**
    * Optional permission mode for this subagent.
    * Controls how tool calls are approved during execution.
-   * Valid values: 'default', 'plan', 'auto-edit', 'yolo'.
+   * Valid values: 'default', 'plan', 'auto-edit', 'yolo', 'bubble'.
    * If omitted, the resolved mode depends on the parent's mode
    * (permissive parent modes win; otherwise defaults to 'auto-edit').
+   *
+   * `'bubble'` is a subagent-only mode (not a session-level ApprovalMode):
+   * it runs like 'default' (tool calls require confirmation), but when the
+   * agent runs in the background in an interactive session, a confirmation
+   * it needs is surfaced ("bubbled") to the parent session's UI as a queued
+   * approval prompt instead of being auto-denied. Non-interactive sessions
+   * (and foreground runs, which prompt inline) treat it as plain 'default'.
    */
   approvalMode?: string;
 
@@ -125,6 +142,25 @@ export interface SubagentConfig {
    * are set, top-level `maxTurns` wins.
    */
   maxTurns?: number;
+
+  /**
+   * Optional per-agent MCP server overrides. CC 2.1.168 declarative-agent
+   * field `mcpServers` (`gS8`); carried verbatim so `.claude/agents/*.md`
+   * round-trips. Validated shallowly at parse time (record-of-records shape,
+   * see `parseAgentMcpServers`); the per-spec union (`stdio` / `sse` / `http`
+   * / ...) is enforced by the runtime MCP loader when the subagent spawns.
+   */
+  mcpServers?: Record<string, unknown>;
+
+  /**
+   * Optional per-agent hook overrides. CC 2.1.168 declarative-agent field
+   * `hooks` (`TKO`); carried verbatim so `.claude/agents/*.md` round-trips.
+   * Validated shallowly at parse time (record-of-arrays shape, see
+   * `parseAgentHooks`); the per-matcher discriminated union is enforced by
+   * `SessionHooksManager` when the subagent spawns. Keys are
+   * `HookEventName` literals (`PreToolUse`, `PostToolUse`, ...).
+   */
+  hooks?: Record<string, unknown>;
 
   /**
    * Indicates whether this is a built-in agent.

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.17.1",
+  "version": "0.18.3",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -61,7 +61,6 @@
     "marked": "^15.0.12",
     "mime": "4.0.7",
     "mnemonist": "^0.40.3",
-    "open": "^10.1.2",
     "openai": "5.11.0",
     "picomatch": "^4.0.1",
     "prompts": "^2.4.2",

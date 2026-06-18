@@ -87,6 +87,38 @@ interface HistoryItemDisplayProps {
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
+function getHistoryItemMarginTop(item: HistoryItem): number {
+  switch (item.type) {
+    case 'gemini':
+      return 1;
+    case 'gemini_content':
+    case 'gemini_thought':
+    case 'gemini_thought_content':
+    case 'info':
+    case 'success':
+    case 'warning':
+    case 'error':
+    case 'retry_countdown':
+    case 'memory_saved':
+    case 'tool_group':
+    case 'tool_use_summary':
+    case 'notification':
+    case 'compression':
+    case 'summary':
+    case 'insight_progress':
+    case 'btw':
+    case 'away_recap':
+    case 'user':
+    case 'user_prompt_submit_blocked':
+    case 'stop_hook_loop':
+    case 'stop_hook_system_message':
+    case 'goal_status':
+      return 0;
+    default:
+      return 1;
+  }
+}
+
 const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   item,
   availableTerminalHeight,
@@ -102,24 +134,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   summaryAbsorbed = false,
   sourceCopyIndexOffsets,
 }) => {
+  const marginTop = getHistoryItemMarginTop(item);
+
   const { compactMode } = useCompactMode();
-
-  const isHiddenInCompact =
-    compactMode &&
-    (item.type === 'gemini_thought' ||
-      item.type === 'gemini_thought_content' ||
-      (item.type === 'tool_use_summary' && summaryAbsorbed));
-
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
-
-  if (isHiddenInCompact) return null;
-
-  const marginTop =
-    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
-      ? 0
-      : 1;
 
   return (
     <Box
@@ -131,7 +151,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     >
       {/* Render standard message types */}
       {itemForDisplay.type === 'user' && (
-        <UserMessage text={itemForDisplay.text} />
+        <UserMessage text={itemForDisplay.text} width={contentWidth} />
       )}
       {itemForDisplay.type === 'notification' && (
         <InfoMessage text={itemForDisplay.text} />
@@ -161,20 +181,23 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought' && (
+      {itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
-          text={itemForDisplay.text}
+          text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
+          expanded={!compactMode}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
+          durationMs={itemForDisplay.durationMs}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
+      {itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
-          text={itemForDisplay.text}
+          text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
+          expanded={!compactMode}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }

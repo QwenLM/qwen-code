@@ -57,6 +57,7 @@ concurrency:
 env:
   BUN_VERSION: '1.3.9'
   CRAFT_BRAND: 'qwen-code'
+  DESKTOP_UPDATE_FEED_TAG: 'desktop-latest'
 
 jobs:
   release_metadata:
@@ -66,24 +67,26 @@ jobs:
     permissions:
       contents: 'write'
     outputs:
+      qwen_code_ref: '${{ steps.qwen-code-ref.outputs.ref }}'
+      qwen_code_sha: '${{ steps.qwen-code-ref.outputs.sha }}'
       release_branch: '${{ steps.release-branch.outputs.branch }}'
       release_ref: '${{ steps.release-branch.outputs.ref }}'
-      tag: '${{ steps.release-version.outputs.tag }}'
+      tag: '${{ steps.release-tag.outputs.tag }}'
       version: '${{ steps.release-version.outputs.version }}'
 
     steps:
       - name: 'Check out source'
-        uses: 'actions/checkout@v4'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           fetch-depth: 0
 
       - name: 'Set up Node'
-        uses: 'actions/setup-node@v6'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
 
       - name: 'Set up Bun'
-        uses: 'oven-sh/setup-bun@v2'
+        uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2
         with:
           bun-version: '${{ env.BUN_VERSION }}'
 
@@ -108,6 +111,52 @@ jobs:
             exit 1
           fi
 
+      - name: 'Resolve Qwen Code source ref'
+        id: 'qwen-code-ref'
+        shell: 'bash'
+        env:
+          IS_DRY_RUN: '${{ inputs.dry_run }}'
+          QWEN_CODE_REF_INPUT: '${{ inputs.qwen_code_ref }}'
+          QWEN_CODE_SOURCE_INPUT: '${{ inputs.qwen_code_source }}'
+        run: |
+          set -euo pipefail
+
+          if [ "$QWEN_CODE_SOURCE_INPUT" != "source_branch" ]; then
+            echo "ref=" >> "$GITHUB_OUTPUT"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$QWEN_CODE_REF_INPUT" ]; then
+            echo "::error::qwen_code_ref is required when qwen_code_source is source_branch."
+            exit 1
+          fi
+
+          if [ "$IS_DRY_RUN" = "false" ] && [[ "$QWEN_CODE_REF_INPUT" == refs/pull/* ]]; then
+            echo "::error::Published desktop releases cannot vendor refs/pull/*."
+            exit 1
+          fi
+
+          if ! git fetch origin "$QWEN_CODE_REF_INPUT"; then
+            if ! git fetch origin "refs/heads/$QWEN_CODE_REF_INPUT"; then
+              git fetch origin "refs/tags/$QWEN_CODE_REF_INPUT"
+            fi
+          fi
+
+          sha="$(git rev-parse FETCH_HEAD)"
+
+          if [ "$IS_DRY_RUN" = "false" ]; then
+            git fetch origin main:refs/remotes/origin/main
+            if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+              echo "::error::Published desktop releases can only vendor commits reachable from main."
+              exit 1
+            fi
+          fi
+
+          echo "ref=$QWEN_CODE_REF_INPUT" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Resolved Qwen Code ref $QWEN_CODE_REF_INPUT to $sha"
+
       - name: 'Bump desktop version'
         working-directory: 'packages/desktop'
         env:
@@ -121,16 +170,22 @@ jobs:
           INPUT_VERSION: '${{ inputs.version }}'
         run: 'bun run check-release-version --version "$INPUT_VERSION"'
 
+      - name: 'Prepare desktop release tag'
+        id: 'release-tag'
+        env:
+          RELEASE_TAG: '${{ steps.release-version.outputs.tag }}'
+        run: 'echo "tag=desktop-${RELEASE_TAG}" >> "$GITHUB_OUTPUT"'
+
       - name: 'Create release branch'
         working-directory: 'packages/desktop'
         id: 'release-branch'
         env:
           IS_DRY_RUN: '${{ inputs.dry_run }}'
-          RELEASE_TAG: '${{ steps.release-version.outputs.tag }}'
+          RELEASE_TAG: '${{ steps.release-tag.outputs.tag }}'
         run: |
           set -euo pipefail
 
-          branch="release/desktop-${RELEASE_TAG}"
+          branch="release/${RELEASE_TAG}"
           git switch -C "$branch"
           git add package.json apps/electron/package.json packages/shared/package.json
 
@@ -179,12 +234,12 @@ jobs:
 
     steps:
       - name: 'Check out source'
-        uses: 'actions/checkout@v4'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ needs.release_metadata.outputs.release_ref }}'
 
       - name: 'Set up Node'
-        uses: 'actions/setup-node@v6'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
 
@@ -192,13 +247,14 @@ jobs:
         if: "${{ inputs.qwen_code_source == 'source_branch' }}"
         shell: 'bash'
         env:
-          QWEN_CODE_REF_INPUT: '${{ inputs.qwen_code_ref }}'
+          QWEN_CODE_REF_INPUT: '${{ needs.release_metadata.outputs.qwen_code_ref }}'
+          QWEN_CODE_SHA: '${{ needs.release_metadata.outputs.qwen_code_sha }}'
           QWEN_CODE_SOURCE_ROOT: '${{ runner.temp }}/qwen-code-source'
         run: |
           set -euo pipefail
 
-          if [ -z "$QWEN_CODE_REF_INPUT" ]; then
-            echo "::error::qwen_code_ref is required when qwen_code_source is source_branch."
+          if [ -z "$QWEN_CODE_SHA" ]; then
+            echo "::error::Resolved Qwen Code source SHA is missing."
             exit 1
           fi
 
@@ -206,17 +262,25 @@ jobs:
           git init "$QWEN_CODE_SOURCE_ROOT"
           git -C "$QWEN_CODE_SOURCE_ROOT" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
 
-          if ! git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "$QWEN_CODE_REF_INPUT"; then
-            if ! git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "refs/heads/$QWEN_CODE_REF_INPUT"; then
-              git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "refs/tags/$QWEN_CODE_REF_INPUT"
+          if ! git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "$QWEN_CODE_SHA"; then
+            if ! git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "$QWEN_CODE_REF_INPUT"; then
+              if ! git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "refs/heads/$QWEN_CODE_REF_INPUT"; then
+                git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "refs/tags/$QWEN_CODE_REF_INPUT"
+              fi
             fi
           fi
 
-          git -C "$QWEN_CODE_SOURCE_ROOT" checkout --detach FETCH_HEAD
+          actual_sha="$(git -C "$QWEN_CODE_SOURCE_ROOT" rev-parse FETCH_HEAD)"
+          if [ "$actual_sha" != "$QWEN_CODE_SHA" ]; then
+            echo "::error::Qwen Code ref $QWEN_CODE_REF_INPUT resolved to $actual_sha, expected $QWEN_CODE_SHA."
+            exit 1
+          fi
+
+          git -C "$QWEN_CODE_SOURCE_ROOT" checkout --detach "$QWEN_CODE_SHA"
           git config --global --add safe.directory "$QWEN_CODE_SOURCE_ROOT"
 
       - name: 'Set up Bun'
-        uses: 'oven-sh/setup-bun@v2'
+        uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2
         with:
           bun-version: '${{ env.BUN_VERSION }}'
 
@@ -246,7 +310,8 @@ jobs:
       - name: 'Configure Qwen Code runtime source'
         shell: 'bash'
         env:
-          QWEN_CODE_REF_INPUT: '${{ inputs.qwen_code_ref }}'
+          QWEN_CODE_REF_INPUT: '${{ needs.release_metadata.outputs.qwen_code_ref }}'
+          QWEN_CODE_SHA: '${{ needs.release_metadata.outputs.qwen_code_sha }}'
           QWEN_CODE_SOURCE_INPUT: '${{ inputs.qwen_code_source }}'
           QWEN_CODE_SOURCE_ROOT: '${{ runner.temp }}/qwen-code-source'
         run: |
@@ -263,7 +328,7 @@ jobs:
                 exit 1
               fi
               echo "QWEN_CODE_ROOT=$QWEN_CODE_SOURCE_ROOT" >> "$GITHUB_ENV"
-              echo "Using Qwen Code runtime from ${GITHUB_REPOSITORY} ref: $QWEN_CODE_REF_INPUT"
+              echo "Using Qwen Code runtime from ${GITHUB_REPOSITORY} ref: $QWEN_CODE_REF_INPUT ($QWEN_CODE_SHA)"
               ;;
             *)
               echo "::error::Unknown qwen_code_source: $QWEN_CODE_SOURCE_INPUT"
@@ -275,13 +340,13 @@ jobs:
         working-directory: 'packages/desktop'
         shell: 'bash'
         env:
-          EXPECTED_REPOSITORY: '${{ github.repository }}'
+          EXPECTED_UPDATE_URL: 'https://github.com/${{ github.repository }}/releases/download/${{ env.DESKTOP_UPDATE_FEED_TAG }}'
         run: |
           set -euo pipefail
 
           bun run electron:builder-config
 
-          actual_repository="$(node <<'NODE'
+          actual_update_url="$(node <<'NODE'
           const fs = require('node:fs');
           const yaml = require('js-yaml');
 
@@ -289,34 +354,43 @@ jobs:
             fs.readFileSync('apps/electron/electron-builder.generated.yml', 'utf8'),
           );
           const publish = config?.publish;
-          if (
-            !publish ||
-            publish.provider !== 'github' ||
-            !publish.owner ||
-            !publish.repo
-          ) {
+          if (!publish || typeof publish.provider !== 'string') {
             process.exit(1);
           }
 
-          console.log(`${publish.owner}/${publish.repo}`);
+          if (publish.provider === 'github') {
+            if (!publish.owner || !publish.repo) process.exit(1);
+            console.log(`https://github.com/${publish.owner}/${publish.repo}/releases`);
+          } else if (publish.provider === 'generic') {
+            if (!publish.url) process.exit(1);
+            console.log(publish.url);
+          } else {
+            process.exit(1);
+          }
           NODE
           )"
 
-          if [ "$actual_repository" != "$EXPECTED_REPOSITORY" ]; then
-            echo "::error::Desktop update feed points to $actual_repository, expected $EXPECTED_REPOSITORY."
+          if [ "$actual_update_url" != "$EXPECTED_UPDATE_URL" ]; then
+            echo "::error::Desktop update feed points to $actual_update_url, expected $EXPECTED_UPDATE_URL."
             exit 1
           fi
 
-          echo "Desktop update feed: https://github.com/${actual_repository}/releases"
+          echo "Desktop update feed: ${actual_update_url}"
 
       - name: 'Configure optional signing secrets'
         shell: 'bash'
         env:
-          APPLE_APP_SPECIFIC_PASSWORD_SECRET: '${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
-          APPLE_ID_SECRET: '${{ secrets.APPLE_ID }}'
+          IS_DRY_RUN: '${{ inputs.dry_run }}'
+          APPLE_NOTARY_API_KEY_P8_BASE64_SECRET: '${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}'
+          APPLE_NOTARY_KEY_ID_SECRET: '${{ secrets.APPLE_NOTARY_KEY_ID }}'
+          APPLE_NOTARY_ISSUER_ID_SECRET: '${{ secrets.APPLE_NOTARY_ISSUER_ID }}'
           APPLE_TEAM_ID_SECRET: '${{ secrets.APPLE_TEAM_ID }}'
+          MAC_CSC_KEY_PASSWORD_SECRET: '${{ secrets.MAC_CSC_KEY_PASSWORD }}'
+          MAC_CSC_LINK_SECRET: '${{ secrets.MAC_CSC_LINK }}'
           CSC_KEY_PASSWORD_SECRET: '${{ secrets.CSC_KEY_PASSWORD }}'
           CSC_LINK_SECRET: '${{ secrets.CSC_LINK }}'
+          WIN_CSC_KEY_PASSWORD_SECRET: '${{ secrets.WIN_CSC_KEY_PASSWORD }}'
+          WIN_CSC_LINK_SECRET: '${{ secrets.WIN_CSC_LINK }}'
           SENTRY_ELECTRON_INGEST_URL_SECRET: '${{ secrets.SENTRY_ELECTRON_INGEST_URL }}'
         run: |
           set -euo pipefail
@@ -336,15 +410,74 @@ jobs:
             } >> "$GITHUB_ENV"
           }
 
-          if [ -n "$CSC_LINK_SECRET" ]; then
-            append_env "CSC_LINK" "$CSC_LINK_SECRET"
-            append_env "CSC_KEY_PASSWORD" "$CSC_KEY_PASSWORD_SECRET"
-            append_env "APPLE_ID" "$APPLE_ID_SECRET"
-            append_env "APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_APP_SPECIFIC_PASSWORD_SECRET"
-            append_env "APPLE_TEAM_ID" "$APPLE_TEAM_ID_SECRET"
-            echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
+          mac_csc_link="${MAC_CSC_LINK_SECRET:-$CSC_LINK_SECRET}"
+          mac_csc_key_password="${MAC_CSC_KEY_PASSWORD_SECRET:-$CSC_KEY_PASSWORD_SECRET}"
+
+          allow_unsigned_artifacts() {
+            if [ "$IS_DRY_RUN" = "true" ]; then
+              return 0
+            fi
+
+            return 1
+          }
+
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            if [ -n "$mac_csc_link" ]; then
+              if [ -z "$mac_csc_key_password" ]; then
+                echo "::error::MAC_CSC_LINK/CSC_LINK is configured, but MAC_CSC_KEY_PASSWORD/CSC_KEY_PASSWORD is missing."
+                exit 1
+              fi
+
+              if [ "$IS_DRY_RUN" = "false" ]; then
+                if [ -z "$APPLE_NOTARY_API_KEY_P8_BASE64_SECRET" ] || [ -z "$APPLE_NOTARY_KEY_ID_SECRET" ] || [ -z "$APPLE_NOTARY_ISSUER_ID_SECRET" ] || [ -z "$APPLE_TEAM_ID_SECRET" ]; then
+                  echo "::error::Published macOS desktop releases require APPLE_NOTARY_API_KEY_P8_BASE64, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID, and APPLE_TEAM_ID for notarization."
+                  exit 1
+                fi
+              fi
+
+              # Materialize the App Store Connect API key (.p8) so electron-builder
+              # (>=24) notarizes via notarytool. It reads APPLE_API_KEY (a path to
+              # the .p8 file), APPLE_API_KEY_ID, and APPLE_API_ISSUER from the env.
+              if [ -n "$APPLE_NOTARY_API_KEY_P8_BASE64_SECRET" ] && [ -n "$APPLE_NOTARY_KEY_ID_SECRET" ] && [ -n "$APPLE_NOTARY_ISSUER_ID_SECRET" ]; then
+                api_key_path="${RUNNER_TEMP}/apple-notary-key.p8"
+                printf '%s' "$APPLE_NOTARY_API_KEY_P8_BASE64_SECRET" | base64 --decode > "$api_key_path"
+                append_env "APPLE_API_KEY" "$api_key_path"
+                append_env "APPLE_API_KEY_ID" "$APPLE_NOTARY_KEY_ID_SECRET"
+                append_env "APPLE_API_ISSUER" "$APPLE_NOTARY_ISSUER_ID_SECRET"
+              fi
+
+              append_env "CSC_LINK" "$mac_csc_link"
+              append_env "CSC_KEY_PASSWORD" "$mac_csc_key_password"
+              append_env "APPLE_TEAM_ID" "$APPLE_TEAM_ID_SECRET"
+              echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
+            else
+              if ! allow_unsigned_artifacts; then
+                echo "::error::Published macOS desktop releases require MAC_CSC_LINK/CSC_LINK and MAC_CSC_KEY_PASSWORD/CSC_KEY_PASSWORD so auto-update signature validation can pass."
+                exit 1
+              fi
+
+              echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            fi
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            if [ -n "$WIN_CSC_LINK_SECRET" ]; then
+              if [ -z "$WIN_CSC_KEY_PASSWORD_SECRET" ]; then
+                echo "::error::WIN_CSC_LINK is configured, but WIN_CSC_KEY_PASSWORD is missing."
+                exit 1
+              fi
+
+              append_env "WIN_CSC_LINK" "$WIN_CSC_LINK_SECRET"
+              append_env "WIN_CSC_KEY_PASSWORD" "$WIN_CSC_KEY_PASSWORD_SECRET"
+            else
+              if [ "$IS_DRY_RUN" = "true" ]; then
+                echo "Windows signing certificate is not configured; Windows dry-run artifacts will be unsigned."
+              else
+                echo "::warning::Windows signing certificate is not configured; published Windows desktop releases will be unsigned."
+              fi
+            fi
           else
-            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            if [ "$RUNNER_OS" != "Linux" ] && [ -n "$CSC_LINK_SECRET" ]; then
+              echo "::warning::CSC_LINK is configured but not used on $RUNNER_OS."
+            fi
           fi
 
           append_env "SENTRY_ELECTRON_INGEST_URL" "$SENTRY_ELECTRON_INGEST_URL_SECRET"
@@ -357,7 +490,7 @@ jobs:
         run: '${{ matrix.command }}'
 
       - name: 'Upload installer artifacts'
-        uses: 'actions/upload-artifact@v4'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'desktop-${{ matrix.name }}'
           if-no-files-found: 'error'
@@ -386,7 +519,7 @@ jobs:
 
     steps:
       - name: 'Download installer artifacts'
-        uses: 'actions/download-artifact@v4'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           path: 'release-assets'
           merge-multiple: true
@@ -399,9 +532,15 @@ jobs:
           RELEASE_NAME: '${{ inputs.release_name }}'
           RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
           RELEASE_TARGET: '${{ needs.release_metadata.outputs.release_ref }}'
+          UPDATE_FEED_TAG: '${{ env.DESKTOP_UPDATE_FEED_TAG }}'
           UPLOAD_CLOBBER: '${{ inputs.clobber }}'
         run: |
           set -euo pipefail
+
+          if [[ "$RELEASE_TAG" != desktop-v* ]]; then
+            echo "::error::Desktop releases must use a desktop-v* tag. Got: $RELEASE_TAG"
+            exit 1
+          fi
 
           assets=()
           while IFS= read -r -d '' file; do
@@ -425,6 +564,17 @@ jobs:
             fi
             gh release upload "${upload_args[@]}"
           else
+            previous_tag="$(
+              gh release list \
+                --repo "$GH_REPO" \
+                --limit 100 \
+                --json tagName,isDraft,isPrerelease \
+                --jq '.[] | select(.isDraft == false and .isPrerelease == false and (.tagName | startswith("desktop-v"))) | .tagName' \
+                | grep -vxF "$RELEASE_TAG" \
+                | head -n 1 \
+                || true
+            )"
+
             create_args=(
               "$RELEASE_TAG"
               "${assets[@]}"
@@ -432,13 +582,44 @@ jobs:
               --target "$RELEASE_TARGET"
               --title "$title"
             )
+            if [ -n "$previous_tag" ]; then
+              echo "Using $previous_tag as the release notes start tag."
+              create_args+=(--notes-start-tag "$previous_tag")
+            else
+              echo "No previous published stable release found for release notes."
+            fi
             if [ "$RELEASE_DRAFT" = "true" ]; then
               create_args+=(--draft)
             fi
             if [ "$RELEASE_PRERELEASE" = "true" ]; then
               create_args+=(--prerelease)
             fi
+            create_args+=(--latest=false)
             gh release create "${create_args[@]}"
+          fi
+
+          if [ "$RELEASE_DRAFT" = "true" ] || [ "$RELEASE_PRERELEASE" = "true" ]; then
+            echo "Skipping $UPDATE_FEED_TAG update for draft or prerelease desktop release."
+          else
+            feed_title="Qwen Code Desktop latest"
+            feed_notes="Auto-update feed for ${RELEASE_TAG}. See https://github.com/${GH_REPO}/releases/tag/${RELEASE_TAG}."
+            feed_upload_args=("$UPDATE_FEED_TAG" "${assets[@]}" --clobber)
+            if gh release view "$UPDATE_FEED_TAG" >/dev/null 2>&1; then
+              gh release edit "$UPDATE_FEED_TAG" \
+                --draft=false \
+                --prerelease=false \
+                --latest=false \
+                --target "$RELEASE_TARGET" \
+                --title "$feed_title" \
+                --notes "$feed_notes"
+              gh release upload "${feed_upload_args[@]}"
+            else
+              gh release create "$UPDATE_FEED_TAG" "${assets[@]}" \
+                --latest=false \
+                --target "$RELEASE_TARGET" \
+                --title "$feed_title" \
+                --notes "$feed_notes"
+            fi
           fi
 
   sync-version:
@@ -448,16 +629,27 @@ jobs:
     needs:
       - 'publish'
       - 'release_metadata'
-    if: '${{ inputs.dry_run == false && inputs.draft == false }}'
+    if: '${{ inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false }}'
     permissions:
       contents: 'write'
       pull-requests: 'write'
 
     steps:
+      - name: 'Require CI bot token'
+        env:
+          CI_BOT_PAT_SECRET: '${{ secrets.CI_BOT_PAT }}'
+        run: |
+          set -euo pipefail
+
+          if [ -z "$CI_BOT_PAT_SECRET" ]; then
+            echo "::error::CI_BOT_PAT is required because GITHUB_TOKEN-created PRs do not trigger pull_request workflows."
+            exit 1
+          fi
+
       - name: 'Create version sync PR'
         id: 'version-pr'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           RELEASE_BRANCH: '${{ needs.release_metadata.outputs.release_branch }}'
           RELEASE_TAG: '${{ needs.release_metadata.outputs.tag }}'
         run: |
@@ -483,7 +675,7 @@ jobs:
 
       - name: 'Enable auto-merge'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_URL: '${{ steps.version-pr.outputs.url }}'
           RELEASE_TAG: '${{ needs.release_metadata.outputs.tag }}'
         run: |
@@ -509,7 +701,7 @@ jobs:
 
     steps:
       - name: 'Download installer artifacts'
-        uses: 'actions/download-artifact@v4'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           path: 'release-assets'
           merge-multiple: true

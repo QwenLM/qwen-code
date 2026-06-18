@@ -24,6 +24,7 @@ import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
 import { formatDuration } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
+// Keep in sync with GOAL_CLEAR_KEYWORDS in packages/web-shell/client/App.tsx
 const CLEAR_KEYWORDS = new Set([
   'clear',
   'stop',
@@ -207,6 +208,7 @@ export const goalCommand: SlashCommand = {
       type: MessageType.GOAL_STATUS,
       kind: 'set',
       condition: registered.condition,
+      setAt: registered.setAt,
     };
     context.ui.addItem(setItem, Date.now());
 

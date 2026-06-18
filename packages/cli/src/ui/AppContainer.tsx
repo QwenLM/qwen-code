@@ -65,6 +65,7 @@ import {
   restoreWorktreeContext,
   GitWorktreeService,
   readWorktreeSessionMarker,
+  isSessionRuntimeActive,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
@@ -103,6 +104,7 @@ const MCP_BATCH_FLUSH_MS = 16;
 const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
+import { useResizeSettleRepaint } from './hooks/useResizeSettleRepaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -132,7 +134,10 @@ import { useStdin, useStdout } from 'ink';
 import ansiEscapes from 'ansi-escapes';
 import * as fs from 'node:fs';
 import { basename } from 'node:path';
-import { computeWindowTitle } from '../utils/windowTitle.js';
+import {
+  formatSessionWindowTitle,
+  writeTerminalTitle,
+} from '../utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
@@ -153,6 +158,7 @@ import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
+import { useMcpApproval } from './hooks/useMcpApproval.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
@@ -278,6 +284,13 @@ export function dedupeNewestFirst(messages: readonly string[]): string[] {
     }
   }
   return result;
+}
+
+export function mergeStartupWarnings(
+  currentWarnings: readonly string[],
+  nextWarnings: readonly string[],
+): string[] {
+  return [...new Set([...currentWarnings, ...nextWarnings])];
 }
 
 interface AppContainerProps {
@@ -441,7 +454,11 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   // Additional hooks moved from App.tsx
-  const { stats: sessionStats, startNewSession } = useSessionStats();
+  const {
+    stats: sessionStats,
+    startNewSession,
+    seedPromptCount,
+  } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
@@ -474,10 +491,10 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
-  const originalTitleRef = useRef(
-    computeWindowTitle(basename(config.getTargetDir())),
-  );
   const lastTitleRef = useRef<string | null>(null);
+  const [startupWarnings, setStartupWarnings] = useState(
+    () => props.startupWarnings || [],
+  );
   const staticExtraHeight = 3;
 
   // Prefetch the lowlight chunk on mount so the dynamic import is already
@@ -514,6 +531,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
+      setStartupWarnings((currentWarnings) =>
+        mergeStartupWarnings(currentWarnings, config.getWarnings()),
+      );
       profileCheckpoint('config_initialize_end');
       setConfigInitialized(true);
       profileCheckpoint('input_enabled');
@@ -548,6 +568,15 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        // Seed the prompt counter from the resumed conversation so new
+        // promptIds don't collide with restored file history snapshots.
+        const userTurnCount = resumedSessionData.conversation.messages.filter(
+          (m) => m.type === 'user' && m.subtype !== 'mid_turn_user_message',
+        ).length;
+        if (userTurnCount > 0) {
+          seedPromptCount(userTurnCount);
+        }
 
         // Re-arm any `/goal` that was active when the prior session ended.
         try {
@@ -867,26 +896,6 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
-  // Targeted repaint for resize events: move cursor to top-left and erase
-  // downward instead of a full clearTerminal, avoiding the full-screen
-  // flash. Ink's <Static> region is append-only, so when terminal width
-  // changes (tmux split, fullscreen toggle, font size change) we must
-  // explicitly re-emit the static history at the new width — otherwise
-  // header content stays at the old width and visibly tears.
-  // VP mode handles resize via ink's reflow + its own overflow clipping, so
-  // the physical write is unnecessary there too.
-  const repaintStaticViewport = useCallback(() => {
-    if (!useTerminalBuffer) {
-      stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
-    }
-    remountStaticHistory();
-  }, [useTerminalBuffer, remountStaticHistory, stdout]);
-
-  // Track previous terminal width across renders so we only repaint when
-  // the width actually changes. Initialized to the current width to avoid
-  // a spurious repaint on first mount.
-  const previousTerminalWidthRef = useRef(terminalWidth);
-
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
@@ -1027,6 +1036,23 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Session name state (set via /rename, restored on /resume)
   const [sessionName, setSessionName] = useState<string | null>(null);
+
+  useEffect(() => {
+    const chatRecordingService = config.getChatRecordingService();
+    if (!chatRecordingService?.setTitleRecordedCallback) return;
+
+    // Chain with existing callback (e.g., Session's ACP notification)
+    const existingCallback = chatRecordingService.getTitleRecordedCallback();
+    chatRecordingService.setTitleRecordedCallback((customTitle, source) => {
+      existingCallback?.(customTitle, source);
+      setSessionName(customTitle);
+    });
+
+    return () => {
+      // Restore original callback on unmount
+      chatRecordingService.setTitleRecordedCallback(existingCallback);
+    };
+  }, [config]);
 
   const {
     isResumeDialogOpen,
@@ -1248,18 +1274,31 @@ export const AppContainer = (props: AppContainerProps) => {
           const owner = await readWorktreeSessionMarker(activeWorktree.path);
           const currentSessionId = config.getSessionId();
           if (owner !== null && owner !== currentSessionId) {
-            historyManager.addItem(
-              {
-                type: MessageType.ERROR,
-                text:
-                  `Refusing to remove worktree "${activeWorktree.slug}" — ` +
-                  `it was created by a different session (owner=${owner}). ` +
-                  `Resume the owning session to drop it, or remove it ` +
-                  `manually with \`git worktree remove ${activeWorktree.path}\`.`,
-              },
-              Date.now(),
-            );
-            return;
+            const ownerActive = await isSessionRuntimeActive(owner, [
+              activeWorktree.originalCwd,
+              activeWorktree.path,
+            ]).catch((error) => {
+              config
+                .getDebugLogger()
+                .warn(
+                  `Worktree owner runtime check failed for ${owner}: ${error}`,
+                );
+              return true;
+            });
+            if (ownerActive) {
+              historyManager.addItem(
+                {
+                  type: MessageType.ERROR,
+                  text:
+                    `Refusing to remove worktree "${activeWorktree.slug}" — ` +
+                    `it was created by a different session (owner=${owner}). ` +
+                    `Resume the owning session to drop it, or remove it ` +
+                    `manually with \`git worktree remove ${activeWorktree.path}\`.`,
+                },
+                Date.now(),
+              );
+              return;
+            }
           }
           // The user just clicked Remove on a dialog that already showed
           // the dirty-state and unmerged-commit counts ("discards N
@@ -2297,6 +2336,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
   const {
+    isMcpApprovalDialogOpen,
+    currentMcpApproval,
+    pendingMcpApprovals,
+    mcpApprovalRemaining,
+    handleMcpApprovalSelect,
+  } = useMcpApproval(config);
+  const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener();
@@ -2318,6 +2364,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shouldShowIdePrompt ||
     shouldShowCommandMigrationNudge ||
     isFolderTrustDialogOpen ||
+    isMcpApprovalDialogOpen ||
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
@@ -2425,18 +2472,8 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
-  // Repaint static header on terminal resize. Without this, tmux pane
-  // resizes and fullscreen toggles leave the static region rendered at the
-  // old width — header content visibly tears until the next refreshStatic
-  // (e.g. /model). Cheap repaint (cursor-to + erase-down) rather than a
-  // full clearTerminal to avoid the full-screen flash.
-  useEffect(() => {
-    if (previousTerminalWidthRef.current === terminalWidth) {
-      return;
-    }
-    previousTerminalWidthRef.current = terminalWidth;
-    repaintStaticViewport();
-  }, [terminalWidth, repaintStaticViewport]);
+  // Repaint static history on the trailing edge of a resize burst (#4891).
+  useResizeSettleRepaint(terminalWidth, refreshStatic);
 
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -2622,9 +2659,16 @@ export const AppContainer = (props: AppContainerProps) => {
             Date.now(),
           );
 
-          config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-            truncatedCount: originalLength - truncatedUi.length,
-          });
+          config.getChatRecordingService()?.rewindRecording(
+            targetTurnIndex,
+            { truncatedCount: originalLength - truncatedUi.length },
+            !hasRestoreFailure
+              ? config
+                  .getFileHistoryService()
+                  .getSnapshots()
+                  .slice(0, targetTurnIndex + 1)
+              : undefined,
+          );
         }
 
         // Show file restore result after conversation truncation so the
@@ -3186,40 +3230,44 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useKeypress(handleGlobalKeypress, { isActive: true });
 
-  // Update terminal title with Qwen Code status and thoughts
+  // Update terminal title with the session name, or a fallback derived
+  // from CLI_TITLE, the project folder, or the app default.
+  // showStatusInTitle gates whether dynamic title updates happen at all;
+  // it is kept for backward compatibility and future status-flag support.
   useEffect(() => {
-    // Respect both showStatusInTitle and hideWindowTitle settings
-    if (
-      !settings.merged.ui?.showStatusInTitle ||
-      settings.merged.ui?.hideWindowTitle
-    )
+    if (settings.merged.ui?.hideWindowTitle) {
       return;
-
-    let title;
-    if (streamingState === StreamingState.Idle) {
-      title = originalTitleRef.current;
-    } else {
-      const statusText = thought?.subject
-        ?.replace(/[\r\n]+/g, ' ')
-        .substring(0, 80);
-      title = statusText || originalTitleRef.current;
     }
 
-    // Pad the title to a fixed width to prevent taskbar icon resizing.
-    const paddedTitle = title.padEnd(80, ' ');
+    if (settings.merged.ui?.showStatusInTitle === false) {
+      if (lastTitleRef.current !== null) {
+        lastTitleRef.current = null;
+        const folderName = basename(config.getTargetDir());
+        writeTerminalTitle(
+          (value) => process.stdout.write(value),
+          formatSessionWindowTitle(null, folderName),
+        );
+      }
+      return;
+    }
+
+    const folderName = basename(config.getTargetDir());
+    const title = formatSessionWindowTitle(sessionName, folderName);
 
     // Only update the title if it's different from the last value we set
-    if (lastTitleRef.current !== paddedTitle) {
-      lastTitleRef.current = paddedTitle;
-      stdout.write(`\x1b]2;${paddedTitle}\x07`);
+    if (lastTitleRef.current !== title) {
+      lastTitleRef.current = title;
+      // Use process.stdout.write directly rather than Ink's proxied stdout
+      // to avoid corruption of OSC escape sequences (see writeRaw comment at
+      // line ~448 — Ink v6.2.3 proxies can mangle binary escape sequences).
+      writeTerminalTitle((value) => process.stdout.write(value), title);
     }
-    // Note: We don't need to reset the window title on exit because Qwen Code is already doing that elsewhere
+    // Exit cleanup is handled by setWindowTitle() in gemini.tsx → process.on('exit')
   }, [
-    streamingState,
-    thought,
-    settings.merged.ui?.showStatusInTitle,
+    sessionName,
     settings.merged.ui?.hideWindowTitle,
-    stdout,
+    settings.merged.ui?.showStatusInTitle,
+    config,
   ]);
 
   // Drain queued messages when idle. `queueDrainNonce` re-fires the effect
@@ -3311,6 +3359,10 @@ export const AppContainer = (props: AppContainerProps) => {
       shouldShowCommandMigrationNudge,
       commandMigrationTomlFiles,
       isFolderTrustDialogOpen: isFolderTrustDialogOpen ?? false,
+      isMcpApprovalDialogOpen,
+      currentMcpApproval,
+      pendingMcpApprovals,
+      mcpApprovalRemaining,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -3439,6 +3491,10 @@ export const AppContainer = (props: AppContainerProps) => {
       shouldShowCommandMigrationNudge,
       commandMigrationTomlFiles,
       isFolderTrustDialogOpen,
+      isMcpApprovalDialogOpen,
+      currentMcpApproval,
+      pendingMcpApprovals,
+      mcpApprovalRemaining,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -3547,6 +3603,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
+      handleMcpApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
       onTabConsumerChange: setHasTabConsumer,
@@ -3632,6 +3689,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
+      handleMcpApprovalSelect,
       setConstrainHeight,
       handleEscapePromptChange,
       refreshStatic,
@@ -3705,7 +3763,7 @@ export const AppContainer = (props: AppContainerProps) => {
           <AppContext.Provider
             value={{
               version: props.version,
-              startupWarnings: props.startupWarnings || [],
+              startupWarnings,
             }}
           >
             <CompactModeProvider value={compactModeValue}>

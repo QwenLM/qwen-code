@@ -37,6 +37,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import {
@@ -60,6 +61,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
+import { sessionsCommand } from '../commands/sessions.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -75,14 +77,25 @@ export function isValidSessionId(value: string): boolean {
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { assembleMcpServers } from './mcpServers.js';
+import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
+import { detectSystemLanguage } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('CONFIG');
+
+function resolveLocaleForExtensions(settings: Settings): string {
+  const envLang = process.env['QWEN_CODE_LANG'];
+  if (envLang) return envLang;
+  const settingsLang = settings.general?.language as string | undefined;
+  if (settingsLang && settingsLang !== 'auto') return settingsLang;
+  return detectSystemLanguage();
+}
 
 const VALID_APPROVAL_MODE_VALUES = [
   'plan',
@@ -1031,8 +1044,10 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
-    // Register `qwen serve` (Stage 1 daemon — see issue #3803)
-    .command(serveCommand);
+    // Register `qwen serve` (Stage 1 daemon)
+    .command(serveCommand)
+    // Register sessions subcommands
+    .command(sessionsCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -1056,7 +1071,8 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'auth' ||
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
-      result._[0] === 'review')
+      result._[0] === 'review' ||
+      result._[0] === 'sessions')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
@@ -1205,11 +1221,14 @@ function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
+  if (argv.debug) return true;
+  const debugVal = process.env['DEBUG'];
+  const debugModeVal = process.env['DEBUG_MODE'];
   return (
-    argv.debug ||
-    [process.env['DEBUG'], process.env['DEBUG_MODE']].some(
-      (v) => v === 'true' || v === '1',
-    )
+    debugVal === 'true' ||
+    debugVal === '1' ||
+    debugModeVal === 'true' ||
+    debugModeVal === '1'
   );
 }
 
@@ -1358,6 +1377,15 @@ export async function loadCliConfig(
    * correctly.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>,
+  /**
+   * MCP servers injected by the embedding session (e.g. ACP / IDE clients).
+   * Treated as a session-level source at the TOP of the precedence stack — above
+   * settings and `.mcp.json`, below `--mcp-config` — and never approval-gated:
+   * they are explicit, per-session, and not checked into the repo. Routing them
+   * here (rather than merging into `settings.mcpServers`) keeps them from being
+   * demoted below a project `.mcp.json` by `assembleMcpServers`. See issue #4615.
+   */
+  sessionMcpServers?: Record<string, MCPServerConfig>,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
@@ -1564,19 +1592,10 @@ export async function loadCliConfig(
     addDisabled(name);
   }
 
-  // Resolve the per-workspace tool denylist (#4175 Wave 4 PR 17). De-duplicate
-  // while preserving original casing; downstream lookups go through
-  // `Config.getDisabledTools()` which materializes a Set, so the order here
-  // is only meaningful for diagnostic output.
-  const disabledTools: string[] = [];
-  const seenDisabledTools = new Set<string>();
-  for (const raw of settings.tools?.disabled ?? []) {
-    if (typeof raw !== 'string') continue;
-    const trimmed = raw.trim();
-    if (!trimmed || seenDisabledTools.has(trimmed)) continue;
-    seenDisabledTools.add(trimmed);
-    disabledTools.push(trimmed);
-  }
+  // Resolve the per-workspace tool denylist. De-duplicate while preserving
+  // original casing; shared helper since the MCP restart refresh path
+  // must agree byte-for-byte with this.
+  const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1781,6 +1800,26 @@ export async function loadCliConfig(
 
   const modelProvidersConfig = settings.modelProviders;
 
+  // Assemble MCP servers across all sources in precedence order (user/default
+  // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
+  // and compute which gated (project/workspace) servers are still pending
+  // approval (#4615), so the discovery layer can skip them with no connection
+  // side effect. Loading `.mcp.json` is a pure read.
+  // Top tier = session-injected (ACP/IDE) servers plus `--mcp-config`; CLI wins
+  // over the session source on a name clash. Both sit above settings/`.mcp.json`
+  // and are never gated (#4615).
+  const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+  const topTierMcpServers =
+    sessionMcpServers || cliMcpServers
+      ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
+      : undefined;
+  const mcpServers = bareMode
+    ? {}
+    : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+  const pendingMcpServers = bareMode
+    ? undefined
+    : getPendingGatedMcpServers(mcpServers, cwd);
+
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
@@ -1834,13 +1873,8 @@ export async function loadCliConfig(
       : settings.tools?.discoveryCommand,
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
-    mcpServers: bareMode
-      ? {}
-      : (() => {
-          const base = settings.mcpServers || {};
-          const cliMcpServers = parseMcpConfig(argv.mcpConfig);
-          return cliMcpServers ? { ...base, ...cliMcpServers } : base;
-        })(),
+    mcpServers,
+    pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -1879,8 +1913,11 @@ export async function loadCliConfig(
     cronEnabled: settings.experimental?.cron ?? true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
+    computerUseMaxImageDimension:
+      settings.tools?.computerUse?.maxImageDimension,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
+    locale: resolveLocaleForExtensions(settings),
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
     authType: selectedAuthType,
@@ -1906,10 +1943,13 @@ export async function loadCliConfig(
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
+    skipWorkflowUsageWarning:
+      settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
+    toolOutputBatchBudget: settings.tools?.toolOutputBatchBudget,
     eventEmitter: appEvents,
     gitCoAuthor: settings.general?.gitCoAuthor,
     output: {

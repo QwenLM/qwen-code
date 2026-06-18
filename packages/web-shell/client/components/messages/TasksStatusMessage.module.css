@@ -1,0 +1,144 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 10px 14px;
+  background: var(--bg-primary);
+  margin: 0 14px;
+}
+
+.title {
+  font-weight: 700;
+  color: var(--accent-color);
+}
+
+.sectionTitle {
+  font-weight: 700;
+}
+
+.overflowHint {
+  color: var(--text-dimmed);
+  padding-left: 2ch;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.secondary {
+  color: var(--text-dimmed);
+}
+
+.row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-height: 18px;
+  cursor: pointer;
+}
+
+.selected {
+  color: var(--accent-color);
+}
+
+.pointer {
+  display: inline-block;
+  width: 2ch;
+  color: var(--accent-color);
+}
+
+.nameCell {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.separator {
+  color: var(--text-dimmed);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.success {
+  color: var(--success-color);
+}
+
+.warning {
+  color: var(--warning-color);
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(520px, 50vh);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.detailField {
+  display: grid;
+  grid-template-columns: 18ch minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.detailFieldLabel {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.shortcuts {
+  color: var(--text-dimmed);
+  border-top: 1px solid var(--border-color);
+  padding-top: 8px;
+}
+
+.confirmHint {
+  color: var(--warning-color);
+}
+
+.statusBadge {
+  display: inline-flex;
+  gap: 4px;
+  align-items: baseline;
+}
+
+.activityCurrent {
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activityPast {
+  color: var(--text-dimmed);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.promptContent {
+  color: var(--text-secondary);
+  font-size: 0.9em;
+}

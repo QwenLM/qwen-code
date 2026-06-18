@@ -18,6 +18,7 @@ import { loadCliConfig, parseArguments, type CliArgs } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -884,11 +885,13 @@ describe('loadCliConfig', () => {
     mockSessionServiceInstance.sessionExists.mockResolvedValue(false);
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    resetMcpApprovalsForTesting();
   });
 
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
 
@@ -969,6 +972,89 @@ describe('loadCliConfig', () => {
     );
 
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
+  });
+
+  it('places session-injected (ACP/IDE) MCP servers at the top precedence tier', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: {
+        shared: { command: 'settings-cmd' },
+        'settings-only': { command: 'settings-only-cmd' },
+      },
+    };
+    const sessionMcpServers = {
+      shared: new ServerConfig.MCPServerConfig('session-cmd'),
+      'ide-only': new ServerConfig.MCPServerConfig('ide-cmd'),
+    };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      sessionMcpServers,
+    );
+
+    const servers = config.getMcpServers() ?? {};
+    // Session source wins a name clash with settings.
+    expect(servers['shared'].command).toBe('session-cmd');
+    // Both session-only and settings-only servers survive.
+    expect(servers['ide-only'].command).toBe('ide-cmd');
+    expect(servers['settings-only'].command).toBe('settings-only-cmd');
+    // Session servers are never approval-gated.
+    expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
+  });
+
+  it('gates unapproved workspace MCP servers in non-interactive runs', async () => {
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        mcpServers: {
+          'workspace-server': {
+            command: 'workspace-cmd',
+            scope: 'workspace',
+          },
+          'user-server': {
+            command: 'user-cmd',
+          },
+        },
+      },
+      argv,
+    );
+
+    expect(config.isInteractive()).toBe(false);
+    expect(config.isMcpServerPendingApproval('workspace-server')).toBe(true);
+    expect(config.isMcpServerPendingApproval('user-server')).toBe(false);
+  });
+
+  it('keeps session-injected MCP servers ungated in non-interactive runs', async () => {
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        mcpServers: {
+          'workspace-server': {
+            command: 'workspace-cmd',
+            scope: 'workspace',
+          },
+        },
+      },
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      {
+        'ide-only': new ServerConfig.MCPServerConfig('ide-cmd'),
+      },
+    );
+
+    expect(config.isMcpServerPendingApproval('workspace-server')).toBe(true);
+    expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
   });
 
   it('should fork and load a new session when --resume is combined with --fork-session', async () => {
@@ -2114,7 +2200,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    const mcpServers = config.getMcpServers()!;
+    const mcpServers = config.getMcpServers() ?? {};
     expect(mcpServers['cli-server']).toEqual({
       command: 'node',
       args: ['server.js'],
@@ -2133,7 +2219,8 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    expect(config.getMcpServers()!['direct-server']).toEqual({
+    const mcpServers = config.getMcpServers() ?? {};
+    expect(mcpServers['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
   });
@@ -2147,7 +2234,8 @@ describe('loadCliConfig with --mcp-config', () => {
     const config = await loadCliConfig(baseSettings, argv);
 
     // CLI config should override settings
-    expect(config.getMcpServers()!['settings-server']).toEqual({
+    const mcpServers = config.getMcpServers() ?? {};
+    expect(mcpServers['settings-server']).toEqual({
       url: 'http://localhost:8888',
     });
   });
@@ -2187,7 +2275,36 @@ describe('loadCliConfig with --mcp-config', () => {
 });
 
 describe('loadCliConfig model selection', () => {
-  it.skip('selects a model from settings.json if provided', async () => {
+  const originalArgv = process.argv;
+  const authEnvKeys = [
+    'QWEN_OAUTH',
+    'OPENAI_API_KEY',
+    'OPENAI_MODEL',
+    'OPENAI_BASE_URL',
+    'QWEN_MODEL',
+    'GEMINI_API_KEY',
+    'GEMINI_MODEL',
+    'GOOGLE_API_KEY',
+    'GOOGLE_MODEL',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_BASE_URL',
+  ] as const;
+
+  beforeEach(() => {
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    for (const key of authEnvKeys) {
+      vi.stubEnv(key, undefined);
+    }
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('selects a model from settings.json if provided', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig(
@@ -2204,7 +2321,7 @@ describe('loadCliConfig model selection', () => {
     expect(config.getModel()).toBe('qwen3-coder-plus');
   });
 
-  it.skip('uses the default gemini model if nothing is set', async () => {
+  it('uses the default Qwen model if nothing is set', async () => {
     process.argv = ['node', 'script.js']; // No model set.
     const argv = await parseArguments();
     const config = await loadCliConfig(
@@ -2501,13 +2618,13 @@ describe('loadCliConfig chatCompression', () => {
     const settings: Settings = {
       model: {
         chatCompression: {
-          contextPercentageThreshold: 0.5,
+          imageTokenEstimate: 1234,
         },
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getChatCompression()).toEqual({
-      contextPercentageThreshold: 0.5,
+      imageTokenEstimate: 1234,
     });
   });
 

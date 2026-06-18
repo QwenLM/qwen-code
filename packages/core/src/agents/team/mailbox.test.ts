@@ -17,6 +17,7 @@ import {
   clearInbox,
   clearAllInboxes,
   sendStructuredMessage,
+  disposeInboxLocks,
 } from './mailbox.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
@@ -105,6 +106,39 @@ describe('mailbox', () => {
     expect(messages[1]!.text).toBe('second');
   });
 
+  it('compacts aged read messages but keeps recent and unread ones', async () => {
+    // Bounds the leader inbox once consumption marks messages read:
+    // read entries past the retention window are dropped on the next
+    // write, while recent read entries and all unread entries survive.
+    const old = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const recent = new Date(Date.now() - 60 * 1000).toISOString();
+
+    await writeMessage(
+      'team',
+      'leader',
+      makeMessage({ text: 'aged-read', read: true, timestamp: old }),
+    );
+    await writeMessage(
+      'team',
+      'leader',
+      makeMessage({ text: 'recent-read', read: true, timestamp: recent }),
+    );
+    await writeMessage(
+      'team',
+      'leader',
+      makeMessage({ text: 'aged-unread', read: false, timestamp: old }),
+    );
+
+    // A subsequent write runs the retention compaction.
+    await writeMessage('team', 'leader', makeMessage({ text: 'fresh' }));
+
+    const texts = (await readInbox('team', 'leader')).map((m) => m.text);
+    expect(texts).not.toContain('aged-read'); // read + aged → dropped
+    expect(texts).toContain('recent-read'); // read but within window → kept
+    expect(texts).toContain('aged-unread'); // unread → never dropped
+    expect(texts).toContain('fresh');
+  });
+
   // ─── consumeUnread ─────────────────────────────────────────
 
   it('returns unread messages and marks them read', async () => {
@@ -185,6 +219,32 @@ describe('mailbox', () => {
 
     expect(await readInbox('team', 'w1')).toEqual([]);
     expect(await readInbox('team', 'w2')).toEqual([]);
+  });
+
+  // ─── disposeInboxLocks ─────────────────────────────────────
+
+  it('evicts inbox locks for one team and reports the count', async () => {
+    // writeMessage creates a per-inbox lock under the team's inboxes dir.
+    await writeMessage('alpha', 'w1', makeMessage());
+    await writeMessage('alpha', 'w2', makeMessage());
+    await writeMessage('beta', 'w1', makeMessage());
+
+    // Evicts only alpha's two locks.
+    expect(disposeInboxLocks('alpha')).toBe(2);
+    // Idempotent: nothing left for alpha.
+    expect(disposeInboxLocks('alpha')).toBe(0);
+    // Team isolation: beta's lock survived alpha's eviction.
+    expect(disposeInboxLocks('beta')).toBe(1);
+  });
+
+  it('clearAllInboxes evicts the team inbox locks too', async () => {
+    await writeMessage('gamma', 'w1', makeMessage());
+    await writeMessage('gamma', 'w2', makeMessage());
+
+    await clearAllInboxes('gamma');
+
+    // Already evicted by clearAllInboxes.
+    expect(disposeInboxLocks('gamma')).toBe(0);
   });
 
   // ─── sendStructuredMessage ─────────────────────────────────
