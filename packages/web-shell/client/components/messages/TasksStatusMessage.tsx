@@ -8,7 +8,7 @@ import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
-import { formatToolDisplayName } from './toolFormatting';
+import { localizeToolDisplayName } from './toolFormatting';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
@@ -147,8 +147,12 @@ function windowTasks(
   };
 }
 
-function formatActivityLabel(name: string, description: string | undefined) {
-  const display = formatToolDisplayName(name);
+function formatActivityLabel(
+  name: string,
+  description: string | undefined,
+  t: ReturnType<typeof useI18n>['t'],
+) {
+  const display = localizeToolDisplayName(name, t);
   const singleLineDescription = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
@@ -634,7 +638,7 @@ function TaskDetail({
             </div>
             {task.recentActivities.slice(-5).map((a, i, arr) => {
               const isLast = i === arr.length - 1;
-              const desc = formatActivityLabel(a.name, a.description);
+              const desc = formatActivityLabel(a.name, a.description, t);
               return (
                 <div
                   key={`${a.at}-${i}`}

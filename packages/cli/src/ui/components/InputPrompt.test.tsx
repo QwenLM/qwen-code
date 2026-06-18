@@ -763,13 +763,14 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
     expect(mockCommandCompletion.navigateDown).not.toHaveBeenCalled();
 
-    // Ctrl+P should navigate history, not completion
-    // Two-step edge: pre-position cursor at col 0 so Ctrl+P directly triggers history
+    // Ctrl+P should navigate completion while suggestions are visible.
+    // Two-step edge: pre-position cursor at col 0 so a fallthrough would
+    // directly trigger history.
     mockBuffer.visualCursor = [0, 0];
     stdin.write('\u0010'); // Ctrl+P
     await wait();
-    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
-    expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(2);
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -794,13 +795,14 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
     expect(mockCommandCompletion.navigateUp).not.toHaveBeenCalled();
 
-    // Ctrl+N should navigate history, not completion
-    // Two-step edge: pre-position cursor at end so Ctrl+N directly triggers history
+    // Ctrl+N should navigate completion while suggestions are visible.
+    // Two-step edge: pre-position cursor at end so a fallthrough would
+    // directly trigger history.
     mockBuffer.visualCursor = [0, '/mem'.length];
     stdin.write('\u000E'); // Ctrl+N
     await wait();
-    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
-    expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(2);
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -1226,6 +1228,39 @@ describe('InputPrompt', () => {
     expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
     expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json');
     expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should keep cycling export formats with Ctrl+P/N after arrow navigation fills input', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[B');
+    await wait();
+    stdin.write('\u000E');
+    await wait();
+    stdin.write('\u0010');
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(4, '/export md');
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
     unmount();
   });
 

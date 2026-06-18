@@ -217,6 +217,7 @@ describe('qwen serve — capabilities envelope', () => {
     // always wires `persistSetting` and the workspace service).
     expect(caps.features).toEqual([
       'health',
+      'daemon_status',
       'capabilities',
       'session_create',
       'session_scope_override',

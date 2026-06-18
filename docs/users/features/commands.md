@@ -94,6 +94,7 @@ Commands for managing AI tools and models.
 | `/arena`         | Manage Arena sessions                         | `/arena start`, `/arena status`               |
 | `/goal`          | Set a goal — keep working until condition met | `/goal <condition>`, `/goal clear`            |
 | `/tasks`         | List background tasks                         | `/tasks`                                      |
+| `/workflows`     | Inspect workflow runs                         | `/workflows`, `/workflows <runId>`            |
 | `/lsp`           | Show LSP server status                        | `/lsp`                                        |
 | `/trust`         | Manage folder trust settings                  | `/trust`                                      |
 
@@ -526,3 +527,51 @@ Requirements:
 | Shell Escaping         | Prevent command injection  | Automatic processing   |
 | Execution Confirmation | Avoid accidental execution | Dialog confirmation    |
 | Error Reporting        | Help diagnose issues       | View error information |
+
+## 5. CLI Subcommands
+
+These commands are run from the shell as `qwen <subcommand>` before starting an interactive session.
+
+### Session Management
+
+| Command              | Description                       | Usage Examples                                               |
+| -------------------- | --------------------------------- | ------------------------------------------------------------ |
+| `qwen sessions list` | List recent conversation sessions | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+
+#### `qwen sessions list`
+
+Lists your recent Qwen Code sessions with metadata.
+
+**Flags:**
+
+| Flag      | Type    | Default | Description                                     |
+| --------- | ------- | ------- | ----------------------------------------------- |
+| `--json`  | boolean | `false` | Output as JSON Lines (one JSON object per line) |
+| `--limit` | number  | `20`    | Maximum number of sessions to show              |
+
+**Human-readable output (default):**
+
+A table with columns: SESSION ID, STARTED (UTC timestamp), TITLE, BRANCH, PROMPT.
+
+**JSON output (`--json`):**
+
+Outputs JSON Lines on stdout. Each line is a JSON object with fields:
+
+```
+sessionId, startTime, mtime, prompt, gitBranch, customTitle, titleSource, filePath, cwd
+```
+
+The "has more sessions" hint is emitted via stderr so piping to `jq` remains safe.
+
+**Examples:**
+
+```bash
+# Show last 20 sessions (default)
+qwen sessions list
+
+# Show last 50 sessions
+qwen sessions list --limit 50
+
+# Output as JSON for scripting
+qwen sessions list --json | jq .
+```

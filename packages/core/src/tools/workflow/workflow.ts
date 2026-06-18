@@ -30,8 +30,15 @@ import {
   WorkflowExecutionError,
   createProductionDispatch,
   type WorkflowAgentDispatch,
+  type WorkflowOrchestratorEmitter,
 } from '../../agents/runtime/workflow-orchestrator.js';
+import {
+  WorkflowBudgetImpl,
+  MAX_TOKENS_PER_WORKFLOW_ENV,
+} from '../../agents/runtime/workflow-budget.js';
 import { createChildAbortController } from '../../utils/abortController.js';
+import { randomBytes } from 'node:crypto';
+import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
 
 export interface WorkflowParams {
   /** Inline JavaScript source for the workflow. Required in P1. */
@@ -133,22 +140,113 @@ class WorkflowToolInvocation extends BaseToolInvocation<
 
   override async execute(
     signal: AbortSignal,
-    _updateOutput?: (output: ToolResultDisplay) => void,
+    updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
     // T40 (PR #4732 R4): child controller so dispatch sees caller aborts
     // AND sandbox.ts wall-clock aborts (see setTimeout handler).
     const dispatchController = createChildAbortController(signal);
+    // P5: per-run token tracker. Reads `QWEN_CODE_MAX_TOKENS_PER_WORKFLOW`
+    // from the environment via the impl's `fromEnv` factory. When the env
+    // is unset (`budget.total === null`), the orchestrator's gate is a
+    // no-op and `budgetUpdated` events still fire so the registry can
+    // surface cumulative usage even on uncapped runs.
+    const budget = WorkflowBudgetImpl.fromEnv();
     const dispatch =
       this.toolOptions.dispatch ??
-      createProductionDispatch(this.config, dispatchController.signal);
+      createProductionDispatch(
+        this.config,
+        dispatchController.signal,
+        // P5 T3: production-dispatch onTokens callback. Test-injected
+        // dispatches (`toolOptions.dispatch`) handle their own
+        // recording — they don't surface stats the same way.
+        (outputTokens) => budget.recordSpent(outputTokens),
+      );
     const orchestrator = new WorkflowOrchestrator(dispatch);
+
+    // P4b: pre-generate the runId so the registry record exists before
+    // the first sandbox event fires. Without this, `agentDispatched` /
+    // `phaseStarted` callbacks would have no entry to update.
+    const runId = `wf_${randomBytes(8).toString('hex')}`;
+    const registry = this.config.getWorkflowRunRegistry?.();
+    const registryEntry = registry?.register({
+      runId,
+      meta: null, // populated after meta parses; safe default until then
+      status: 'running',
+      startTime: Date.now(),
+      outputFile: '', // P4b reserves the field but doesn't materialize
+      abortController: dispatchController,
+      // P5: seed the cap so the dialog can render the `M / N` form
+      // immediately, before the first `budgetUpdated` fires. Stays
+      // `null` when no env override.
+      tokenBudgetTotal: budget.total,
+    });
+    // The emitter forwards sandbox + dispatch events into the registry
+    // AND fires `updateOutput` so the tool's renderDisplay block (a
+    // phase-tree-shaped JSON) refreshes live in the TUI. Each method
+    // is fail-safe: registry mutation errors are swallowed by the
+    // registry itself; updateOutput errors are caught here.
+    const emitter: WorkflowOrchestratorEmitter = {
+      phaseStarted: (title) => {
+        registry?.onPhaseStarted(runId, title);
+        safeEmitUpdate(updateOutput, registryEntry);
+      },
+      agentDispatched: () => {
+        registry?.onAgentDispatched(runId);
+        safeEmitUpdate(updateOutput, registryEntry);
+      },
+      agentCompleted: () => {
+        registry?.onAgentCompleted(runId);
+        // P5 R2 (#12): defer the UI re-render to the `budgetUpdated`
+        // callback that the orchestrator fires immediately after this
+        // one. Without this skip, every dispatch completion produces
+        // TWO `safeEmitUpdate` calls (one here + one in budgetUpdated)
+        // — over a 1000-agent workflow that's 2000 TUI redraws when
+        // 1000 suffices. The budget snapshot lands AFTER the agent
+        // counter increment, so the deferred render shows both updates
+        // atomically. Production callers always wire a budget
+        // (`WorkflowBudgetImpl.fromEnv()` in `execute()` above), so the
+        // deferral is unconditional; test paths that omit budget go
+        // through the injected dispatch shape and don't exercise this
+        // emitter wiring.
+      },
+      logAppended: () => {
+        // P4b: skip per-line emit; the tool snapshots logs at terminal
+        // via `registry.setRecentLogs` so the registry record reflects
+        // the final tail without per-line churn driving rerenders.
+      },
+      budgetUpdated: (spent, total) => {
+        registry?.onBudgetUpdated(runId, spent, total);
+        safeEmitUpdate(updateOutput, registryEntry);
+      },
+    };
+
     try {
       const outcome = await orchestrator.run({
         script: this.params.script,
         args: this.params.args,
         abortOnTimeout: dispatchController,
+        runId,
+        emitter,
+        budget,
       });
+
+      // P4b: snapshot meta + logs onto the registry record so the dialog
+      // detail body reflects the final state once the run terminates.
+      if (registryEntry) {
+        registryEntry.meta = outcome.meta;
+        if (outcome.meta?.name && registryEntry.description === runId) {
+          registryEntry.description = outcome.meta.name;
+        }
+      }
+      registry?.setRecentLogs(runId, outcome.logs);
+      registry?.complete(runId, outcome.result, Date.now());
+
+      const usageBanner = resolveUsageBanner(
+        this.config,
+        registry,
+        budget.total,
+      );
 
       // FIX-7 (UP-C2): unwrap the script result so the LLM receives the
       // script's return value verbatim. The full metadata (runId, phases,
@@ -163,16 +261,36 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // try/catch with a clear placeholder so a serialization issue
       // degrades gracefully instead of masquerading as a run failure.
       const llmText = safeStringifyResult(outcome.result);
+      // P4: surface the extracted `export const meta` declaration in the
+      // display payload so the user (and future /workflows listing) can
+      // see the workflow's name / description / phases without re-reading
+      // the script. Omitted when the script had no meta declaration to
+      // keep the payload shape minimal.
       const displayJson = safeStringifyDisplayPayload({
         runId: outcome.runId,
+        ...(outcome.meta ? { meta: outcome.meta } : {}),
         phases: outcome.phases,
         logs: outcome.logs,
         result: outcome.result,
+        // P5: surface the per-run token total in the terminal display so
+        // the user sees actual usage even without opening the dialog.
+        // P5 R1 (#11): align with `buildLivePhaseTreeDisplay` — include
+        // tokens whenever ANY usage is reported OR a cap is set, not
+        // only when spend > 0. A capped-but-zero-spend run still wants
+        // the cap visible so the user sees the gate engaged.
+        ...(budget.spent() > 0 || budget.total !== null
+          ? {
+              tokens: {
+                spent: budget.spent(),
+                total: budget.total,
+              },
+            }
+          : {}),
       });
 
       return {
         llmContent: [{ text: llmText }],
-        returnDisplay: '```json\n' + displayJson + '\n```',
+        returnDisplay: usageBanner + '```json\n' + displayJson + '\n```',
       };
     } catch (err) {
       // FIX-H (Round 5 SEC Minor): surface only the message — never the
@@ -189,9 +307,39 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       const phases =
         err instanceof WorkflowExecutionError ? err.phases : undefined;
       const logs = err instanceof WorkflowExecutionError ? err.logs : undefined;
+      // P4: also surface the extracted meta on the failure path. The script
+      // body may have thrown long after the meta declaration parsed
+      // cleanly; keeping name/description/phases visible on failure helps
+      // the user identify which workflow ran.
+      const meta = err instanceof WorkflowExecutionError ? err.meta : undefined;
+      // P4b: surface the failure / abort to the registry. A caller-aborted
+      // run (`signal.aborted === true`) becomes `cancelled` rather than
+      // `failed` so the dialog distinguishes user intent from script bugs.
+      if (registryEntry) {
+        if (meta && !registryEntry.meta) registryEntry.meta = meta;
+      }
+      if (logs) registry?.setRecentLogs(runId, logs);
+      if (signal.aborted) {
+        registry?.cancel(runId, Date.now());
+      } else {
+        registry?.fail(runId, message, Date.now());
+      }
+      // P5 T7: banner is intentionally OMITTED on the failure path.
+      // The scheduler's `createErrorResponse` (coreToolScheduler.ts:801)
+      // hard-codes `resultDisplay: error.message` whenever a tool
+      // returns `error` — overriding any returnDisplay we set. Firing
+      // the banner here would (a) be invisible to TUI users since the
+      // scheduler drops it, AND (b) consume the registry's one-shot
+      // latch, so the NEXT successful run would silently skip the
+      // banner too. The trade-off: a brand-new user whose FIRST
+      // workflow throws will not see the banner until a later
+      // successful run. Mitigation: WorkflowTool's failure message
+      // already names the error; the banner is meta-documentation
+      // about a separate env knob, not run-specific guidance.
       const display =
-        phases || logs
+        phases || logs || meta
           ? `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload({
+              ...(meta ? { meta } : {}),
               phases: phases ?? [],
               logs: logs ?? [],
             })}`
@@ -208,6 +356,126 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // T40: cancel any straggler subagent on natural completion.
       dispatchController.abort();
     }
+  }
+}
+
+/**
+ * P4b: render an in-flight workflow as a compact JSON block for
+ * `_updateOutput`. Same shape as the terminal `returnDisplay` so the
+ * TUI does not need a separate live renderer. Logs are omitted from
+ * the live snapshot — they would churn at >10Hz and the per-line
+ * channel adds little value while a workflow is still running.
+ */
+function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
+  const payload: Record<string, unknown> = {
+    runId: entry.runId,
+    ...(entry.meta ? { meta: entry.meta } : {}),
+    status: entry.status,
+    currentPhase: entry.currentPhase,
+    phases: entry.phases,
+    agentsDispatched: entry.agentsDispatched,
+    agentsCompleted: entry.agentsCompleted,
+  };
+  // P5: include budget info when there's any usage to report OR a cap
+  // is set. Both `tokensSpent > 0` and `tokenBudgetTotal !== null` are
+  // independently meaningful: an uncapped run that's spent tokens
+  // wants the spent total; a capped run with 0 spent still wants the
+  // cap visible so the user sees the gate. Keeps the JSON minimal in
+  // the common case (no cap, nothing spent yet).
+  if (entry.tokensSpent > 0 || entry.tokenBudgetTotal !== null) {
+    payload['tokens'] = {
+      spent: entry.tokensSpent,
+      total: entry.tokenBudgetTotal,
+    };
+  }
+  try {
+    return '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
+  } catch {
+    return `Workflow ${entry.runId} — ${entry.status} — ${entry.phases.length} phase(s)`;
+  }
+}
+
+/**
+ * P5 T7: one-time usage-banner gate. Three filters: settings-level
+ * suppression (`skipWorkflowUsageWarning`), the per-session registry
+ * latch (`shouldShowUsageWarning`), and the presence of a registry.
+ * Returns the banner string when all three pass, empty string otherwise.
+ *
+ * Called from the SUCCESS path only — see the failure-path comment in
+ * `execute()` for why: `coreToolScheduler.createErrorResponse` hard-codes
+ * `resultDisplay = error.message` whenever `result.error` is set, so a
+ * failure-path banner would be invisible to TUI users AND would silently
+ * flip the registry latch, robbing the next successful run of its banner.
+ *
+ * The banner is prepended to `returnDisplay` only — `llmContent` stays
+ * clean so the banner doesn't bias model behavior in agentic loops that
+ * read tool results back.
+ *
+ * Skipped when (a) settings suppress, (b) the registry is absent (test
+ * paths that omit the wired Config), or (c) the latch already fired
+ * this session.
+ */
+function resolveUsageBanner(
+  config: Config,
+  registry:
+    | { shouldShowUsageWarning(): boolean }
+    | undefined,
+  budgetTotal: number | null,
+): string {
+  if (!registry) return '';
+  if (config.getSkipWorkflowUsageWarning?.()) return '';
+  if (!registry.shouldShowUsageWarning()) return '';
+  return buildUsageBanner(budgetTotal);
+}
+
+/**
+ * P5 T7: build the one-time usage-warning banner. Two shapes:
+ * (a) `total === null` — explain the uncapped state and the env knob;
+ * (b) `total !== null` — confirm the cap is in effect.
+ *
+ * Both shapes mention `skipWorkflowUsageWarning` so the user knows how
+ * to suppress further banners. The banner ends with two newlines so it
+ * separates cleanly from the fenced JSON code block that follows in
+ * `returnDisplay`.
+ */
+function buildUsageBanner(total: number | null): string {
+  // Banner says "soft cap" rather than "hard ceiling" because the gate
+  // is checked at dispatch ENTRY — concurrent fan-out can overshoot by
+  // up to (concurrency_window - 1) × per_dispatch_tokens before the
+  // first overshoot is caught. See workflow-budget.ts threat-model
+  // doc for the precise overshoot bound.
+  if (total === null) {
+    return (
+      `> Workflows have no per-run token cap. Set ` +
+      `\`${MAX_TOKENS_PER_WORKFLOW_ENV}=<n>\` (env) for a soft cap. ` +
+      `Suppress this notice with \`skipWorkflowUsageWarning: true\` ` +
+      `in settings.\n\n`
+    );
+  }
+  return (
+    `> Workflow token cap is ${total} (per ` +
+    `\`${MAX_TOKENS_PER_WORKFLOW_ENV}\`). ` +
+    `Suppress this notice with \`skipWorkflowUsageWarning: true\` ` +
+    `in settings.\n\n`
+  );
+}
+
+/**
+ * Defensive bridge from the emitter's host-realm callbacks to
+ * `updateOutput`. The TUI's renderer wraps the callback in its own
+ * try/catch but we add another layer here because an outer throw
+ * inside `phaseStarted` would propagate up through the vm-realm
+ * `bridge.pushPhase` call and corrupt the script's `phase()` global.
+ */
+function safeEmitUpdate(
+  updateOutput: ((output: ToolResultDisplay) => void) | undefined,
+  entry: WorkflowTask | undefined,
+): void {
+  if (!updateOutput || !entry) return;
+  try {
+    updateOutput(buildLivePhaseTreeDisplay(entry));
+  } catch {
+    // Renderer errors must not interrupt orchestration.
   }
 }
 
@@ -299,7 +567,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
       Kind.Other,
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,
-      /* canUpdateOutput */ false,
+      /* canUpdateOutput */ true,
     );
   }
 

@@ -71,13 +71,24 @@ class LoopWakeupInvocation extends BaseToolInvocation<
     }
 
     try {
-      const { id, scheduledFor, clampedDelaySeconds, wasClamped } = this.config
-        .getCronScheduler()
-        .scheduleWakeup(this.params.delaySeconds, prompt);
+      const scheduler = this.config.getCronScheduler();
+      if (scheduler.disabled) {
+        const message =
+          'Loop wakeups are disabled for the rest of this session ' +
+          '(token limit reached). Restart the session to re-enable.';
+        return {
+          llmContent: message,
+          returnDisplay: message,
+          error: { message },
+        };
+      }
+      const { id, scheduledFor, clampedDelaySeconds, wasClamped, replacedId } =
+        scheduler.scheduleWakeup(this.params.delaySeconds, prompt);
       const reason = this.params.reason?.trim();
 
       const llmContent = [
         `Scheduled loop wakeup ${id}.`,
+        replacedId ? `Replaced pending wakeup ${replacedId}.` : null,
         `Scheduled for: ${scheduledFor} (in ${clampedDelaySeconds}s).`,
         wasClamped
           ? `Requested ${formatRequested(this.params.delaySeconds)} was clamped to the [${WAKEUP_MIN_SECONDS}, ${WAKEUP_MAX_SECONDS}] s range.`
@@ -114,7 +125,7 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
     super(
       LoopWakeupTool.Name,
       ToolDisplayNames.LOOP_WAKEUP,
-      'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. Session-only and one-shot — it does not persist or recur.',
+      'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. Session-only and one-shot — it does not persist or recur. A self-paced wakeup chain may run for at most 24h.',
       Kind.Other,
       {
         type: 'object',
@@ -125,8 +136,9 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
           },
           prompt: {
             type: 'string',
+            maxLength: 10000,
             description:
-              'Continuation prompt to enqueue when the wakeup fires. Pass the prompt to re-run when the loop resumes — typically the same input that started this self-paced loop, verbatim — so the next firing continues it.',
+              'Continuation prompt to enqueue when the wakeup fires. Prefix with `/loop` so the next firing re-invokes the loop skill, e.g. `/loop check the deploy`.',
           },
           reason: {
             type: 'string',

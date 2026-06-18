@@ -1,5 +1,5 @@
 /**
- * cron_list tool — lists active cron jobs and loop wakeups.
+ * cron_list tool — lists all active cron jobs (in-session and durable).
  */
 
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -14,6 +14,26 @@ import {
 } from '../services/cronTasksFile.js';
 
 export type CronListParams = Record<string, never>;
+
+interface ListedJob {
+  id: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  durable: boolean;
+  fireAtMs?: number;
+}
+
+function truncatePrompt(prompt: string): string {
+  return prompt.length > 60 ? prompt.slice(0, 57) + '...' : prompt;
+}
+
+function displaySchedule(cron: string, fireAtMs?: number): string {
+  if (cron === '@wakeup' && fireAtMs !== undefined) {
+    return `wakeup at ${new Date(fireAtMs).toISOString()}`;
+  }
+  return humanReadableCron(cron);
+}
 
 class CronListInvocation extends BaseToolInvocation<
   CronListParams,
@@ -50,7 +70,7 @@ class CronListInvocation extends BaseToolInvocation<
         error: { message },
       };
     }
-    const jobs = [
+    const jobs: ListedJob[] = [
       ...fileTasks.map((task) => ({
         id: task.id,
         cron: task.cron,
@@ -67,6 +87,7 @@ class CronListInvocation extends BaseToolInvocation<
           prompt: job.prompt,
           recurring: job.recurring,
           durable: false,
+          fireAtMs: job.fireAtMs,
         })),
     ];
 
@@ -78,13 +99,19 @@ class CronListInvocation extends BaseToolInvocation<
     const llmLines = jobs.map((job) => {
       const type = job.recurring ? 'recurring' : 'one-shot';
       const durability = job.durable ? 'durable' : 'session-only';
-      return `${job.id} — ${job.cron} (${type}) [${durability}]: ${job.prompt}`;
+      const schedule =
+        job.cron === '@wakeup'
+          ? displaySchedule(job.cron, job.fireAtMs)
+          : job.cron;
+      const prompt =
+        job.cron === '@wakeup' ? truncatePrompt(job.prompt) : job.prompt;
+      return `${job.id} — ${schedule} (${type}) [${durability}]: ${prompt}`;
     });
     const llmContent = llmLines.join('\n');
 
     const displayLines = jobs.map(
       (job) =>
-        `${job.id} ${humanReadableCron(job.cron)} [${job.durable ? 'durable' : 'session-only'}]`,
+        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}]`,
     );
     const returnDisplay = displayLines.join('\n');
 
@@ -102,7 +129,9 @@ export class CronListTool extends BaseDeclarativeTool<
     super(
       CronListTool.Name,
       ToolDisplayNames.CRON_LIST,
-      `List all cron jobs scheduled via CronCreate and loop wakeups scheduled via LoopWakeup, including session-only jobs and durable jobs in ${CRON_TASKS_DISPLAY_PATH}.`,
+      'List all cron jobs scheduled via CronCreate (session-only, or ' +
+        `durable under ${CRON_TASKS_DISPLAY_PATH}) and pending loop wakeups ` +
+        'scheduled via LoopWakeup (always session-only).',
       Kind.Other,
       {
         type: 'object',

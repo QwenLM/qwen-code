@@ -108,9 +108,8 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
 /**
  * Token usage the agent reports for one model round, carried on the daemon's
  * `agent_message_chunk._meta.usage`. A turn issues one of these per model call,
- * so a turn's total is the sum of its rounds. Counts are top-level only —
- * sub-agent (delegated) usage arrives with a `parentToolCallId` and is excluded
- * so a delegated call's tokens are not attributed to the parent turn.
+ * so a turn's total is the sum of its rounds. Sub-agent (delegated) usage is
+ * included in the spawning turn because it is part of that turn's real cost.
  */
 export interface DaemonTurnUsage {
   inputTokens: number;
@@ -131,7 +130,7 @@ export interface DaemonTurnUsage {
 export interface DaemonUiAssistantUsageEvent extends DaemonUiEventBase {
   type: 'assistant.usage';
   usage: DaemonTurnUsage;
-  /** Set when the usage belongs to a sub-agent round; excluded from turn totals. */
+  /** Set when the usage belongs to a sub-agent round; folded into the parent turn total. */
   parentToolCallId?: string;
 }
 

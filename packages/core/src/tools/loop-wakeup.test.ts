@@ -33,9 +33,11 @@ describe('LoopWakeupTool', () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loop-wakeup-test-'));
     Storage.setRuntimeBaseDir(tmpDir);
     tool = new LoopWakeupTool(makeConfig());
+    scheduler.start(() => {});
   });
 
   afterEach(async () => {
+    scheduler.destroy();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
@@ -69,9 +71,9 @@ describe('LoopWakeupTool', () => {
     expect(invocation.getDescription()).toBe('300s: continue loop');
   });
 
-  it('does not show a requested suffix when rounding lands in range', () => {
+  it('does not show rounded in-range delays as requested values', () => {
     const invocation = tool.build({
-      delaySeconds: 59.6,
+      delaySeconds: 60.4,
       prompt: 'continue loop',
     });
 
@@ -90,12 +92,47 @@ describe('LoopWakeupTool', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Session-only one-shot');
     expect(result.llmContent).toContain('Scheduled for:');
-    // Registered as a visible wakeup and holds the session open.
+    // Registered as a wakeup: it holds the session open and is manageable
+    // through CronList/CronDelete, but does not count against cron capacity.
     expect(scheduler.sessionSize).toBe(1);
     expect(scheduler.list()[0]).toMatchObject({
       cronExpr: '@wakeup',
       prompt: 'continue loop',
     });
+    expect(scheduler.size).toBe(0);
+  });
+
+  it('rejects scheduling when the scheduler is disabled', async () => {
+    scheduler.disable();
+    const invocation = tool.build({
+      delaySeconds: 300,
+      prompt: 'continue loop',
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.message).toBe(
+      'Loop wakeups are disabled for the rest of this session ' +
+        '(token limit reached). Restart the session to re-enable.',
+    );
+    expect(scheduler.sessionSize).toBe(0);
+  });
+
+  it('schedules even when the scheduler is stopped but not disabled', async () => {
+    // The first self-paced /loop in a session with no cron jobs arms a
+    // wakeup before the scheduler has started — the post-prompt hook starts
+    // the tick afterwards. A merely-stopped scheduler must not reject.
+    scheduler.stop();
+    const invocation = tool.build({
+      delaySeconds: 300,
+      prompt: 'continue loop',
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('Scheduled loop wakeup');
+    expect(scheduler.sessionSize).toBe(1);
   });
 
   it('tells the model to re-arm to keep the loop alive', async () => {
@@ -117,6 +154,20 @@ describe('LoopWakeupTool', () => {
     expect(result.llmContent).toContain(
       'Requested 5s was clamped to the [60, 3600] s range.',
     );
+  });
+
+  it('reports when a wakeup replaces an earlier pending wakeup', async () => {
+    const first = await tool
+      .build({ delaySeconds: 300, prompt: 'first' })
+      .execute(new AbortController().signal);
+    const firstId = String(first.llmContent).match(/wakeup ([a-z0-9]+)\./)?.[1];
+
+    const second = await tool
+      .build({ delaySeconds: 300, prompt: 'second' })
+      .execute(new AbortController().signal);
+
+    expect(firstId).toBeDefined();
+    expect(second.llmContent).toContain(`Replaced pending wakeup ${firstId}.`);
   });
 
   it('does not report a clamp when the delay is in range', async () => {
@@ -191,6 +242,7 @@ describe('LoopWakeupTool', () => {
   it('surfaces a scheduler failure as a structured tool error', async () => {
     const failingConfig = {
       getCronScheduler: () => ({
+        disabled: false,
         scheduleWakeup: () => {
           throw new Error('scheduler boom', {
             cause: new Error('clock unavailable'),

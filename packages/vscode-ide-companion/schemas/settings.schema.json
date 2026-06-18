@@ -474,6 +474,10 @@
           "description": "The model to use for conversations.",
           "type": "string"
         },
+        "baseUrl": {
+          "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
+          "type": "string"
+        },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
           "type": "number",
@@ -502,6 +506,11 @@
           "description": "Skip the next speaker check.",
           "type": "boolean",
           "default": true
+        },
+        "skipWorkflowUsageWarning": {
+          "description": "Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.",
+          "type": "boolean",
+          "default": false
         },
         "skipLoopDetection": {
           "description": "Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.",
@@ -570,9 +579,18 @@
       "type": "object",
       "properties": {
         "fileName": {
-          "description": "The name of the context file.",
-          "type": "object",
-          "additionalProperties": true
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "The name of the context file or files."
         },
         "importFormat": {
           "description": "The format to use when importing memory.",

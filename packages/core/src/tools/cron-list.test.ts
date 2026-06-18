@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CronListTool } from './cron-list.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 import { getCronFilePath, writeCronTasks } from '../services/cronTasksFile.js';
@@ -79,6 +79,32 @@ describe('CronListTool', () => {
     expect(result.returnDisplay).toContain('[session-only]');
   });
 
+  it('lists pending wakeups', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2025, 0, 15, 10, 30, 0));
+    const longPrompt = `continue ${'x'.repeat(80)}`;
+    config._scheduler.scheduleWakeup(300, longPrompt);
+
+    try {
+      const invocation = tool.build({});
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain(
+        new Date(2025, 0, 15, 10, 35, 0).toISOString(),
+      );
+      expect(result.llmContent).not.toContain('@wakeup');
+      expect(result.llmContent).toContain(
+        `[session-only]: ${longPrompt.slice(0, 57)}...`,
+      );
+      expect(result.llmContent).not.toContain(longPrompt);
+      expect(result.returnDisplay).toContain('wakeup at');
+      expect(result.returnDisplay).not.toContain('@wakeup');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('lists durable jobs from the tasks file without the scheduler loading them', async () => {
     // Headless situation: the task is on disk but this scheduler never
     // called enableDurable, so its job map is empty.
@@ -106,16 +132,18 @@ describe('CronListTool', () => {
   });
 
   it('lists pending loop wakeups', async () => {
-    config._scheduler.scheduleWakeup(300, 'continue loop');
+    const wakeup = config._scheduler.scheduleWakeup(300, 'continue loop');
 
     const invocation = tool.build({});
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain(
-      '@wakeup (one-shot) [session-only]: continue loop',
+      `wakeup at ${wakeup.scheduledFor} (one-shot) [session-only]: continue loop`,
     );
-    expect(result.returnDisplay).toContain('@wakeup [session-only]');
+    expect(result.returnDisplay).toContain(
+      `wakeup at ${wakeup.scheduledFor} [session-only]`,
+    );
   });
 
   it('does not double-list a durable job the scheduler has also loaded', async () => {
@@ -138,6 +166,8 @@ describe('CronListTool', () => {
     const invocation = tool.build({});
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error?.message).toContain('Malformed JSON');
-    expect(result.llmContent).not.toContain('No active cron jobs');
+    expect(result.llmContent).not.toContain(
+      'No active cron jobs or loop wakeups',
+    );
   });
 });

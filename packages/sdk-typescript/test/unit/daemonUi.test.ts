@@ -222,7 +222,10 @@ describe('daemon UI normalizer and transcript reducer', () => {
       createDaemonTranscriptState({ now: 1 }),
       [
         { type: 'assistant.text.delta', text: 'answer' },
-        { type: 'assistant.usage', usage: { inputTokens: 100, outputTokens: 20 } },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
         { type: 'assistant.usage', usage: { inputTokens: 5, outputTokens: 3 } },
       ],
       { now: 2 },
@@ -243,7 +246,10 @@ describe('daemon UI normalizer and transcript reducer', () => {
       [
         { type: 'assistant.text.delta', text: 'answer' },
         // The parent's own round.
-        { type: 'assistant.usage', usage: { inputTokens: 100, outputTokens: 20 } },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
         // A round from a spawned sub-agent — part of the turn's real cost.
         {
           type: 'assistant.usage',

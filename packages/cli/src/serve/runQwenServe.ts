@@ -685,6 +685,22 @@ export async function runQwenServe(
       );
     }
   }
+  // Validate here (not just in the yargs handler) so embedded callers of
+  // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
+  // bridge treats a non-finite / negative value as the "disabled"
+  // sentinel, which would silently drop the permission deadline. Mirrors
+  // `channelIdleTimeoutMs`; out-of-range values are clamped by the bridge.
+  if (opts.permissionResponseTimeoutMs !== undefined) {
+    if (
+      !Number.isFinite(opts.permissionResponseTimeoutMs) ||
+      !Number.isInteger(opts.permissionResponseTimeoutMs) ||
+      opts.permissionResponseTimeoutMs < 0
+    ) {
+      throw new TypeError(
+        `Invalid permissionResponseTimeoutMs: ${opts.permissionResponseTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = disabled / wait forever).`,
+      );
+    }
+  }
   // Per-handle env overrides: `undefined` value means "scrub this
   // var from the child env" — important when a different daemon
   // in the same process set the var globally previously. Always
@@ -876,6 +892,9 @@ export async function runQwenServe(
         : {}),
       ...(opts.sessionIdleTimeoutMs !== undefined
         ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+        : {}),
+      ...(opts.permissionResponseTimeoutMs !== undefined
+        ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
         : {}),
       boundWorkspace,
       sessionShellCommandEnabled,

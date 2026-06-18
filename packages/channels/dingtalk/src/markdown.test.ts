@@ -93,6 +93,17 @@ describe('DingTalk markdown utilities', () => {
         expect(chunks[1]!.trimStart().startsWith('```')).toBe(true);
       }
     });
+
+    it('reopens code fences without inserting a blank line', () => {
+      const longCode = '```\n' + 'x\n'.repeat(2000) + '```';
+      const chunks = splitChunks(longCode);
+      expect(chunks.length).toBeGreaterThan(1);
+      // The reopened fence must be followed by the code, not a blank line.
+      // A blank line here renders as spurious leading whitespace in the
+      // continued code block.
+      expect(chunks[1]!.startsWith('```\n\n')).toBe(false);
+      expect(chunks[1]!.startsWith('```\nx')).toBe(true);
+    });
   });
 
   describe('extractTitle', () => {

@@ -95,9 +95,16 @@ function maskApiKey(apiKey: string | undefined): string {
 function persistModelSelection(
   settings: ReturnType<typeof useSettings>,
   modelId: string,
+  baseUrl?: string,
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'model.name', modelId);
+  // Persist the paired baseUrl so the correct provider is restored on next
+  // launch when multiple providers share the same model id. When the selection
+  // has no baseUrl, write an empty-string tombstone (not undefined): undefined
+  // is dropped from JSON, so it would not override a stale model.baseUrl left
+  // in a lower-priority scope, whereas '' is a present value that does.
+  settings.setValue(scope, 'model.baseUrl', baseUrl ?? '');
 }
 
 function persistAuthTypeSelection(
@@ -132,6 +139,7 @@ interface HandleModelSwitchSuccessParams {
   after: ContentGeneratorConfig | undefined;
   effectiveAuthType: AuthType | undefined;
   effectiveModelId: string;
+  effectiveBaseUrl: string | undefined;
   isRuntime: boolean;
 }
 
@@ -141,9 +149,10 @@ function handleModelSwitchSuccess({
   after,
   effectiveAuthType,
   effectiveModelId,
+  effectiveBaseUrl,
   isRuntime,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(settings, effectiveModelId);
+  persistModelSelection(settings, effectiveModelId, effectiveBaseUrl);
   if (effectiveAuthType) {
     persistAuthTypeSelection(settings, effectiveAuthType);
   }
@@ -209,7 +218,12 @@ export function ModelDialog({
 
     // Separate runtime models from registry models
     const runtimeModels = allModels.filter((m) => m.isRuntimeModel);
-    const registryModels = allModels.filter((m) => !m.isRuntimeModel);
+    const registryModels = allModels.filter(
+      (m) =>
+        !m.isRuntimeModel &&
+        (m.authType !== AuthType.QWEN_OAUTH ||
+          authType === AuthType.QWEN_OAUTH),
+    );
 
     // Group registry models by authType
     const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
@@ -262,7 +276,7 @@ export function ModelDialog({
     }
 
     return result;
-  }, [config]);
+  }, [authType, config]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
@@ -548,6 +562,15 @@ export function ModelDialog({
         after,
         effectiveAuthType,
         effectiveModelId,
+        // Persist the selected provider's baseUrl so the right provider is
+        // restored next launch when several share the same id. Pair it with the
+        // same resolved config that effectiveModelId comes from (`after`) so the
+        // persisted (model.name, model.baseUrl) stays consistent even if
+        // switchModel transforms the id; fall back to the picker entry's
+        // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
+        effectiveBaseUrl: isRuntime
+          ? undefined
+          : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
         isRuntime,
       });
       onClose();

@@ -57,6 +57,13 @@ describe('ExitPlanModeTool', () => {
       expect(tool.kind).toBe('think');
     });
 
+    // Regression for #5210: must stay declared so the model can call it
+    // directly in plan mode.
+    it('is always declared even though categorised as deferred (#5210)', () => {
+      expect(tool.shouldDefer).toBe(true);
+      expect(tool.alwaysLoad).toBe(true);
+    });
+
     it('should have correct schema', () => {
       expect(tool.schema).toEqual({
         name: 'exit_plan_mode',
@@ -88,6 +95,25 @@ describe('ExitPlanModeTool', () => {
           $schema: 'http://json-schema.org/draft-07/schema#',
         },
       });
+    });
+  });
+
+  describe('non-empty plan constraint in descriptions', () => {
+    it('should mention non-empty constraint in plan parameter description', () => {
+      const schema = tool.schema as {
+        parametersJsonSchema: {
+          properties: { plan: { description: string } };
+        };
+      };
+      expect(schema.parametersJsonSchema.properties.plan.description).toContain(
+        'empty strings will be rejected',
+      );
+    });
+
+    it('should mention non-empty constraint in tool description', () => {
+      expect(tool.schema.description).toContain(
+        'empty strings will be rejected',
+      );
     });
   });
 

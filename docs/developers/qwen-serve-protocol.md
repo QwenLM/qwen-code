@@ -173,6 +173,9 @@ The write tag means the route contract exists; it does not mean the current
 deployment is open for anonymous mutation. Write/edit are strict mutation
 routes and require a configured bearer token even on loopback.
 
+`daemon_status` advertises `GET /daemon/status`, the consolidated read-only
+operator diagnostic snapshot documented below.
+
 **Conditional tags.** A small number of feature tags are advertised only when the matching deployment toggle is on. Tag presence = behavior is on; absence = either an older daemon predating the tag, OR a current daemon where the operator did not opt in. Currently:
 
 | Tag                        | Advertised when …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -213,6 +216,89 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
 
 **Auth:** required **only on non-loopback binds**. On loopback (`127.0.0.1`, `::1`, `[::1]`) `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the loopback exemption.
 
+### `GET /daemon/status`
+
+Read-only operator diagnostics. Unlike `/health`, this is a normal daemon API:
+it is registered after bearer auth and rate limiting, including on loopback
+binds. Query parameter:
+
+- `detail=summary` (default) reads only in-memory daemon state.
+- `detail=full` also includes live session diagnostics, ACP connection
+  diagnostics, auth device-flow counts, and workspace status sections.
+- any other `detail` returns `400 { "code": "invalid_detail" }`.
+
+`summary` intentionally does not query workspace status methods, start an ACP
+child, or spawn a session. `full` queries each workspace section independently;
+a timeout or exception marks only that section as `unavailable` and adds a
+`workspace_status_unavailable` issue.
+
+Response shape:
+
+```json
+{
+  "v": 1,
+  "detail": "summary",
+  "generatedAt": "2026-06-16T00:00:00.000Z",
+  "status": "ok",
+  "issues": [],
+  "daemon": {
+    "pid": 12345,
+    "uptimeMs": 3600000,
+    "mode": "http-bridge",
+    "workspaceCwd": "/repo",
+    "qwenCodeVersion": "0.18.1",
+    "daemonId": "serve-..."
+  },
+  "security": {
+    "tokenConfigured": true,
+    "requireAuth": false,
+    "loopbackBind": true,
+    "allowOriginConfigured": false,
+    "allowOriginMode": "none",
+    "sessionShellCommandEnabled": false
+  },
+  "limits": {
+    "maxSessions": 20,
+    "maxPendingPromptsPerSession": 5,
+    "listenerMaxConnections": 256,
+    "eventRingSize": 8000,
+    "promptDeadlineMs": null,
+    "writerIdleTimeoutMs": null,
+    "channelIdleTimeoutMs": 0,
+    "sessionIdleTimeoutMs": 1800000,
+    "acpConnectionCap": 64
+  },
+  "runtime": {
+    "sessions": { "active": 0 },
+    "permissions": { "pending": 0, "policy": "first-responder" },
+    "channel": { "live": false },
+    "transport": {
+      "restSseActive": 0,
+      "acp": {
+        "enabled": true,
+        "connections": 0,
+        "connectionStreams": 0,
+        "sessionStreams": 0,
+        "sseStreams": 0,
+        "wsStreams": 0,
+        "pendingClientRequests": 0
+      }
+    }
+  }
+}
+```
+
+`status` is `error` if any issue has error severity, `warning` if any issue has
+warning severity, otherwise `ok`. Issue codes are stable and include
+`session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
+`acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
+`mcp_budget_exhausted`, `rate_limit_hits`, and
+`workspace_status_unavailable`.
+
+Security: the response never includes bearer tokens, client ids, full ACP
+connection ids, device-flow user codes, or verification URLs. `summary` omits
+the daemon log path; `full` may include it for authenticated operators.
+
 ### `GET /capabilities`
 
 ```json
@@ -223,7 +309,7 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
     "supported": ["v1"]
   },
   "mode": "http-bridge",
-  "features": ["health", "capabilities", "..."],
+  "features": ["health", "daemon_status", "capabilities", "..."],
   "modelServices": [],
   "workspaceCwd": "/canonical/path/to/workspace"
 }
@@ -999,7 +1085,7 @@ Response:
 
 `attached: true` means the session was already live (either from a prior `session/load`/`session/resume`, or because a coalesced concurrent caller raced just ahead).
 
-**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent emits `session_update` notifications for every persisted turn. The daemon buffers them onto the session's event-bus before the route response returns, so subscribers that immediately call `GET /session/:id/events` with `Last-Event-ID: 0` see the full replay. **The replay ring is bounded** (default 4000 frames per session). Long histories with many tool-call / thought-stream turns can exceed that — the oldest frames are dropped silently. Clients that need full history should subscribe immediately after `load` returns; alternatively they can persist the SSE event ids and use `Last-Event-ID` to resume from a later turn boundary.
+**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent emits `session_update` notifications for every persisted turn. The daemon buffers them onto the session's event-bus before the route response returns, so subscribers that immediately call `GET /session/:id/events` with `Last-Event-ID: 0` see the full replay. **The replay ring is bounded** (default 8000 frames per session). Long histories with many tool-call / thought-stream turns can exceed that — the oldest frames are dropped silently. Clients that need full history should subscribe immediately after `load` returns; alternatively they can persist the SSE event ids and use `Last-Event-ID` to resume from a later turn boundary.
 
 **Errors:**
 

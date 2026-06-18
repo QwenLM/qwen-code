@@ -9,13 +9,27 @@ import {
   asKnownDaemonEvent,
   createDaemonAuthState,
   createDaemonSessionViewState,
+  DAEMON_KNOWN_EVENT_TYPE_VALUES,
   isDaemonEventType,
+  MID_TURN_MESSAGE_INJECTED_EVENT,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
+
+describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
+  it('is the wire literal and a registered known event type', () => {
+    // The same const is imported by the daemon publisher (acp-bridge) and the
+    // browser consumer (webui), so this also pins THEIR matching. Changing the
+    // wire string is a deliberate protocol change and must update this literal.
+    expect(MID_TURN_MESSAGE_INJECTED_EVENT).toBe('mid_turn_message_injected');
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
+      MID_TURN_MESSAGE_INJECTED_EVENT,
+    );
+  });
+});
 
 describe('daemon event schema', () => {
   it('narrows known daemon events by discriminator', () => {
@@ -584,6 +598,53 @@ describe('daemon event schema', () => {
         v: 1,
         type: 'session_metadata_updated',
         data: {},
+      }),
+    ).toBeUndefined();
+  });
+
+  it('validates mid_turn_message_injected events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: ['check the tests too'] },
+      }),
+    ).toBeDefined();
+
+    // Empty array is structurally valid (the guard only requires a string[]).
+    expect(
+      asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: [] },
+      }),
+    ).toBeDefined();
+
+    // Missing messages, non-string entries, and missing sessionId are rejected.
+    expect(
+      asKnownDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 4,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: ['ok', 42] },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 5,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { messages: ['x'] },
       }),
     ).toBeUndefined();
   });

@@ -45,6 +45,7 @@ const FILE_DEBOUNCE_MS = 300;
 export const WAKEUP_MIN_SECONDS = 60;
 export const WAKEUP_MAX_SECONDS = 3600;
 const WAKEUP_DEFAULT_SECONDS = 1200;
+const WAKEUP_CHAIN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface CronJob {
   id: string;
@@ -53,6 +54,7 @@ export interface CronJob {
   recurring: boolean;
   createdAt: number;
   expiresAt: number;
+  fireAtMs?: number;
   lastFiredAt?: number;
   jitterMs: number;
   /** Persisted under ~/.qwen (per-project) — survives restarts. */
@@ -66,7 +68,7 @@ export interface CronJob {
  * `/loop` (loop_wakeup). Kept separate from cron jobs: never persisted,
  * never counted against MAX_JOBS, fired at an exact ms (not minute-rounded).
  */
-export interface SessionWakeup {
+interface SessionWakeup {
   id: string;
   fireAtMs: number;
   prompt: string;
@@ -171,6 +173,7 @@ function wakeupToJob(wakeup: SessionWakeup): CronJob {
     recurring: false,
     createdAt: wakeup.createdAt,
     expiresAt: Infinity,
+    fireAtMs: wakeup.fireAtMs,
     jitterMs: 0,
   };
 }
@@ -185,6 +188,16 @@ export class CronScheduler {
   // Loop wakeups live separately: second-resolution, never durable, never
   // counted against MAX_JOBS. Delivered through the same onFire as cron.
   private wakeups = new Map<string, SessionWakeup>();
+  // Start of the self-paced wakeup chain — a session-level 24h budget that
+  // spans the whole session. Deliberately NOT reset when a wakeup fires or
+  // is cancelled: re-arm leaves at most one pending wakeup, so resetting on
+  // an empty map would restart the clock every fire and let a continuous
+  // loop escape the cap. Reset only by stop()/destroy() (a new session).
+  private wakeupChainStartedAt: number | null = null;
+  // Set once disable() runs (the session's token-limit breaker). Permanent
+  // for this scheduler's lifetime — distinct from a stopped-but-restartable
+  // timer, so LoopWakeup can reject wakeups that would never fire.
+  private _disabled = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private onFire: ((job: CronJob) => void) | null = null;
 
@@ -274,31 +287,68 @@ export class CronScheduler {
     scheduledFor: string;
     clampedDelaySeconds: number;
     wasClamped: boolean;
+    replacedId: string | null;
   } {
+    // Enforce the disabled invariant at the layer that owns it: a disabled
+    // scheduler never fires, so a wakeup scheduled here would be a silent
+    // zombie. LoopWakeup pre-checks `disabled` for a friendly message; this
+    // guards any other caller.
+    if (this._disabled) {
+      throw new Error(
+        'Cannot schedule a loop wakeup: the scheduler is disabled for this ' +
+          'session. Restart the session to re-enable.',
+      );
+    }
     const clampedDelaySeconds = clampWakeupSeconds(delaySeconds);
-    const rounded = Number.isFinite(delaySeconds)
+    const roundedDelaySeconds = Number.isFinite(delaySeconds)
       ? Math.round(delaySeconds)
       : delaySeconds;
     const wasClamped =
       !Number.isFinite(delaySeconds) ||
-      rounded < WAKEUP_MIN_SECONDS ||
-      rounded > WAKEUP_MAX_SECONDS;
+      roundedDelaySeconds < WAKEUP_MIN_SECONDS ||
+      roundedDelaySeconds > WAKEUP_MAX_SECONDS;
     const id = generateId();
     const now = Date.now();
     const fireAtMs = now + clampedDelaySeconds * 1000;
+    const replacedWakeup = this.wakeups.values().next().value ?? null;
+    const replacedId = replacedWakeup?.id ?? null;
+    if (this.wakeupChainStartedAt === null) {
+      this.wakeupChainStartedAt = now;
+    }
+    // Drop any prior pending wakeup before the budget check: a rejected
+    // re-arm must leave nothing behind, or the stale wakeup (its fireAtMs now
+    // in the past) would fire one iteration past the 24h limit it enforces.
     this.wakeups.clear();
+    if (fireAtMs > this.wakeupChainStartedAt + WAKEUP_CHAIN_MAX_AGE_MS) {
+      throw new Error(
+        'Loop wakeup chain exceeded the 24h session limit. ' +
+          'Omit LoopWakeup to end this loop, or start a new session.',
+      );
+    }
+    if (replacedId) {
+      debugLogger.debug(`Replacing pending wakeup ${replacedId}`);
+    }
     this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
+    debugLogger.debug(
+      `Wakeup ${id} scheduled for ${new Date(fireAtMs).toISOString()} ` +
+        `(delay=${clampedDelaySeconds}s)`,
+    );
     return {
       id,
       scheduledFor: new Date(fireAtMs).toISOString(),
       clampedDelaySeconds,
       wasClamped,
+      replacedId,
     };
   }
 
   /** Cancels a single pending wakeup. Returns true if it existed. */
   cancelWakeup(id: string): boolean {
-    return this.wakeups.delete(id);
+    const deleted = this.wakeups.delete(id);
+    if (deleted) {
+      debugLogger.debug(`Cancelled wakeup ${id}`);
+    }
+    return deleted;
   }
 
   /**
@@ -308,6 +358,7 @@ export class CronScheduler {
   cancelAllWakeups(): number {
     const count = this.wakeups.size;
     this.wakeups.clear();
+    if (count > 0) debugLogger.debug(`Cancelled ${count} wakeup(s)`);
     return count;
   }
 
@@ -364,7 +415,7 @@ export class CronScheduler {
   }
 
   /**
-   * Returns all active cron jobs and pending loop wakeups.
+   * Returns all active jobs.
    */
   list(): CronJob[] {
     return [
@@ -835,7 +886,8 @@ export class CronScheduler {
    * is released so another session can take over, and a later
    * `enableDurable()` re-acquires from scratch (a re-enable under a new
    * sessionId must not be blocked by this session's own old lock).
-   * Does not clear jobs — they remain queryable.
+   * Does not clear cron jobs — they remain queryable. Pending wakeups are
+   * cleared because they are session-scoped and meaningless without a timer.
    */
   stop(): void {
     if (this.timer) {
@@ -854,7 +906,11 @@ export class CronScheduler {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
-    this.wakeups.clear();
+    if (this.wakeups.size > 0) {
+      debugLogger.debug(`stop() discarding ${this.wakeups.size} wakeup(s)`);
+      this.wakeups.clear();
+    }
+    this.wakeupChainStartedAt = null;
     this.onFire = null;
 
     if (this.durableEnabled) {
@@ -912,10 +968,31 @@ export class CronScheduler {
   }
 
   /**
+   * True once disable() has run. Distinct from `!running`: a fresh scheduler
+   * is stopped but not disabled, and starts on first pending work. Used by
+   * LoopWakeup to reject wakeups that would never fire (vs. ones that will
+   * fire once the post-prompt hook starts the tick).
+   */
+  get disabled(): boolean {
+    return this._disabled;
+  }
+
+  /**
+   * Permanently disables the scheduler for this session: stops the tick and
+   * marks it disabled so LoopWakeup rejects new wakeups. Only the token-limit
+   * breaker calls this; cleared only by a new session (a fresh instance).
+   */
+  disable(): void {
+    this._disabled = true;
+    this.stop();
+  }
+
+  /**
    * Manual tick — checks all jobs against the current time and fires those
    * that are due. Exported for testing.
    */
   tick(now?: Date): void {
+    // Wakeups live in a separate map; check both or self-paced loops stop firing.
     if (this.jobs.size === 0 && this.wakeups.size === 0) return;
     const currentDate = now ?? new Date();
     const currentMs = currentDate.getTime();
@@ -958,9 +1035,10 @@ export class CronScheduler {
     // Fire due wakeups (second-resolution, one-shot). Delivered through the
     // same onFire channel as cron jobs so interactive, headless, and ACP
     // consumers handle them identically, then removed immediately.
-    for (const wakeup of [...this.wakeups.values()]) {
+    for (const wakeup of this.wakeups.values()) {
       if (wakeup.fireAtMs > currentMs) continue;
       this.wakeups.delete(wakeup.id);
+      debugLogger.debug(`Firing wakeup ${wakeup.id}`);
       if (this.onFire) this.onFire(wakeupToJob(wakeup));
     }
   }
@@ -1061,6 +1139,7 @@ export class CronScheduler {
     this.stop();
     this.jobs.clear();
     this.wakeups.clear();
+    this.wakeupChainStartedAt = null;
     this.pendingRemoval.clear();
     this.pendingAdd.clear();
   }
