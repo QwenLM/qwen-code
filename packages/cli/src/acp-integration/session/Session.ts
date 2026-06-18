@@ -406,6 +406,11 @@ interface BackgroundNotificationQueueItem {
   toolUseId?: string;
 }
 
+interface CronQueueItem {
+  prompt: string;
+  source: 'cron' | 'loop';
+}
+
 const MAX_NOTIFICATION_QUEUE = 20;
 
 export function computeInitialTurnFromHistory(
@@ -641,7 +646,7 @@ export class Session implements SessionContext {
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state
-  private cronQueue: string[] = [];
+  private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
   private cronAbortController: AbortController | null = null;
   private cronCompletion: Promise<void> | null = null;
@@ -1084,7 +1089,6 @@ export class Session implements SessionContext {
     try {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
-      void this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -1092,6 +1096,12 @@ export class Session implements SessionContext {
       return result;
     } finally {
       this.pendingPrompt = null;
+      // Start the scheduler in finally, not the success path: a turn can arm
+      // a wakeup via LoopWakeup and then throw on a later step. Gated on
+      // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
+      // cron job) is actually pending — otherwise the loop dies silently on
+      // any post-arm error.
+      void this.#startCronSchedulerIfNeeded();
       resolveCompletion();
       this.pendingPromptCompletion = null;
     }
@@ -2326,9 +2336,12 @@ export class Session implements SessionContext {
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start((job: { prompt: string }) => {
+    scheduler.start((job: { prompt: string; cronExpr?: string }) => {
       if (this.cronDisabledByTokenLimit) return;
-      this.cronQueue.push(job.prompt);
+      this.cronQueue.push({
+        prompt: job.prompt,
+        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+      });
       void this.#drainCronQueue();
     });
   }
@@ -2353,8 +2366,8 @@ export class Session implements SessionContext {
 
     try {
       while (this.cronQueue.length > 0) {
-        const prompt = this.cronQueue.shift()!;
-        await this.#executeCronPrompt(prompt);
+        const item = this.cronQueue.shift()!;
+        await this.#executeCronPrompt(item);
       }
     } finally {
       this.cronProcessing = false;
@@ -2380,14 +2393,15 @@ export class Session implements SessionContext {
    * Executes a single cron-fired prompt: echoes it as a user message with
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
    */
-  async #executeCronPrompt(prompt: string): Promise<void> {
+  async #executeCronPrompt(item: CronQueueItem): Promise<void> {
     // Same session-ID binding rationale as #executePrompt.
     return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeCronPromptInner(prompt),
+      this.#executeCronPromptInner(item),
     );
   }
 
-  async #executeCronPromptInner(prompt: string): Promise<void> {
+  async #executeCronPromptInner(item: CronQueueItem): Promise<void> {
+    const { prompt } = item;
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
@@ -2412,7 +2426,7 @@ export class Session implements SessionContext {
               await this.sendUpdate({
                 sessionUpdate: 'user_message_chunk',
                 content: { type: 'text', text: prompt },
-                _meta: { source: 'cron' },
+                _meta: { source: item.source },
               });
 
               // Prepend session-level system reminders (same rationale as the
@@ -2526,7 +2540,9 @@ export class Session implements SessionContext {
               debugLogger.error('Error processing cron prompt:', error);
               const msg =
                 error instanceof Error ? error.message : String(error);
-              await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
+              await this.messageEmitter.emitAgentMessage(
+                `[${item.source} error] ${msg}`,
+              );
             } finally {
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
@@ -2554,9 +2570,12 @@ export class Session implements SessionContext {
     this.cronDisabledByTokenLimit = true;
     this.cronQueue = [];
     if (!this.config.isCronEnabled()) return;
-    this.config.getCronScheduler().stop();
+    // disable() (not stop()): the breaker is permanent for the session, so
+    // LoopWakeup must reject re-arms that would never fire, not just halt the
+    // tick (which a later pending wakeup would otherwise silently restart).
+    this.config.getCronScheduler().disable();
     void this.#emitAgentDiagnosticMessageSafely(
-      'Cron jobs disabled for the rest of this session due to token limit. Restart the session to re-enable.',
+      'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
       'Failed to emit cron-disabled diagnostic',
     );
   }

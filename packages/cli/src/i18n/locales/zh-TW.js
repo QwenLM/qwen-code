@@ -38,6 +38,7 @@ export default {
   'toolDisplayName.CronCreate': '建立定時任務',
   'toolDisplayName.CronList': '定時任務清單',
   'toolDisplayName.CronDelete': '刪除定時任務',
+  'toolDisplayName.LoopWakeup': '循環喚醒',
   'toolDisplayName.TaskCreate': '建立任務',
   'toolDisplayName.TaskUpdate': '更新任務',
   'toolDisplayName.TaskList': '任務列表',
