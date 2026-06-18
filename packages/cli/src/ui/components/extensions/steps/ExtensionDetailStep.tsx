@@ -8,9 +8,10 @@ import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import {
   redactUrlCredentials,
+  getExtensionDisplayName,
   type Extension,
 } from '@qwen-code/qwen-code-core';
-import { t } from '../../../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 
 interface ExtensionDetailStepProps {
   selectedExtension: Extension | null;
@@ -42,7 +43,7 @@ export const ExtensionDetailStep = ({
           <Box width={LABEL_WIDTH} flexShrink={0}>
             <Text color={theme.text.primary}>{t('Name:')}</Text>
           </Box>
-          <Text>{ext.name}</Text>
+          <Text>{getExtensionDisplayName(ext, getCurrentLanguage())}</Text>
         </Box>
 
         <Box>

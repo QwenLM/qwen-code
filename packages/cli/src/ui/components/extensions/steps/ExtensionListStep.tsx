@@ -9,8 +9,11 @@ import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
-import { type Extension } from '@qwen-code/qwen-code-core';
-import { t } from '../../../../i18n/index.js';
+import {
+  type Extension,
+  getExtensionDisplayName,
+} from '@qwen-code/qwen-code-core';
+import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 import { ExtensionUpdateState } from '../../../state/extensions.js';
 
 interface ExtensionListStepProps {
@@ -32,7 +35,10 @@ export const ExtensionListStep = ({
     let maxVersion = 0;
     let maxStatus = 0;
     for (const ext of extensions) {
-      maxName = Math.max(maxName, ext.name.length);
+      maxName = Math.max(
+        maxName,
+        getExtensionDisplayName(ext, getCurrentLanguage()).length,
+      );
       maxVersion = Math.max(maxVersion, ext.version.length);
       const statusLength = ext.isActive
         ? t('active').length
@@ -145,7 +151,7 @@ export const ExtensionListStep = ({
             color={isSelected ? theme.text.accent : theme.text.primary}
             wrap="truncate"
           >
-            {extension.name}
+            {getExtensionDisplayName(extension, getCurrentLanguage())}
           </Text>
         </Box>
         <Box width={maxVersionWidth + 8} flexShrink={0}>

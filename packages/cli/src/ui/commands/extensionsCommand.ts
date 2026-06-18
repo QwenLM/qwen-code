@@ -11,13 +11,14 @@ import {
   type SlashCommand,
   CommandKind,
 } from './types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import {
   ExtensionManager,
   openBrowserSecurely,
   parseInstallSource,
   createDebugLogger,
   redactUrlCredentials,
+  getExtensionDisplayName,
 } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('EXTENSIONS_COMMAND');
@@ -169,7 +170,8 @@ async function listTextAction(context: CommandContext, _args: string) {
       );
     }
     const capsStr = caps.length > 0 ? ` [${caps.join(', ')}]` : '';
-    output += `- [${status}] **${ext.name}** v${ext.version}${source}${capsStr}\n`;
+    const displayLabel = getExtensionDisplayName(ext, getCurrentLanguage());
+    output += `- [${status}] **${displayLabel}** v${ext.version}${source}${capsStr}\n`;
   }
 
   return {

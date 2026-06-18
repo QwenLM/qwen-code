@@ -1398,7 +1398,7 @@ function ExtensionCard({
     <SettingsCard className="px-4 py-3.5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm font-medium">{extension.name}</div>
+          <div className="text-sm font-medium">{extension.displayName ?? extension.name}</div>
           <div className="text-xs text-muted-foreground mt-0.5">
             {extension.version} ·{' '}
             {extension.isActive

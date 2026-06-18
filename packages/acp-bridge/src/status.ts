@@ -876,6 +876,7 @@ export interface ServeExtensionEntry {
   kind: 'extension';
   id: string;
   name: string;
+  displayName?: string;
   version: string;
   isActive: boolean;
   path: string;
