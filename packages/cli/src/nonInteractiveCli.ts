@@ -109,6 +109,12 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the model spent too many consecutive calls reading files without making progress',
   [LoopType.ACTION_STAGNATION]:
     'the model kept calling the same tool without making progress',
+  [LoopType.GLOBAL_TOOL_CALL_DUPLICATE]:
+    'the model repeated the same tool call across the turn, even when not back-to-back',
+  [LoopType.ALTERNATING_TOOL_CALL_PATTERN]:
+    'the model alternated between the same two tool calls in a repeating pattern',
+  [LoopType.TURN_TOOL_CALL_CAP]:
+    'the model exceeded the maximum number of tool calls allowed in a single turn',
 };
 
 function emitLoopDetectedMessage(

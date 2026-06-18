@@ -428,6 +428,8 @@ export enum LoopType {
   GLOBAL_TOOL_CALL_DUPLICATE = 'global_tool_call_duplicate',
   /** Two tools alternating in a fixed pattern (A B A B A B ...). */
   ALTERNATING_TOOL_CALL_PATTERN = 'alternating_tool_call_pattern',
+  /** Total tool calls in a single turn exceeded the always-on hard cap, regardless of pattern. */
+  TURN_TOOL_CALL_CAP = 'turn_tool_call_cap',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {

@@ -14,6 +14,7 @@ import type {
 } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
+import { LoopType } from '../telemetry/types.js';
 import { LoopDetectionService } from './loopDetectionService.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
@@ -1048,6 +1049,14 @@ describe('LoopDetectionService', () => {
       );
       expect(isLoop).toBe(true);
       expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+      // The turn cap reports its own loop type, not consecutive-identical.
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'turn_tool_call_cap',
+        }),
+      );
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
     });
 
     it('should fire regardless of disabledForSession', () => {

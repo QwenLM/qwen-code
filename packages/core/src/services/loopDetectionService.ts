@@ -615,13 +615,10 @@ export class LoopDetectionService {
   private checkTurnToolCallCap(_toolCallKey: string): boolean {
     this.turnToolCallTotal++;
     if (this.turnToolCallTotal > TURN_TOOL_CALL_CAP) {
-      this.lastLoopType = LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
+      this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
       logLoopDetected(
         this.config,
-        new LoopDetectedEvent(
-          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
-          this.promptId,
-        ),
+        new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
       );
       return true;
     }
