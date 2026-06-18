@@ -25,11 +25,12 @@ import type {
 import WebSocket from 'ws';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { OpCode, Intent } from './types.js';
+import { OpCode, Intent, FileType } from './types.js';
 import type {
   QQChannelConfig,
   QQMessageEvent,
   QQGroupMessageEvent,
+  ArkKV,
 } from './types.js';
 import {
   getCredsFilePath,
@@ -42,6 +43,7 @@ import {
   fetchGatewayUrl,
   getApiBase,
   sendQQMessage,
+  uploadQQMedia,
 } from './api.js';
 
 /** Validate chatId to prevent SSRF when constructing URLs. */
@@ -250,6 +252,133 @@ export class QQChannel extends ChannelBase {
     }
     // Persist msgSeqMap once after all chunks are sent
     if (msgId) this.saveQQState();
+  }
+
+  /**
+   * Send an Ark template message (msg_type=3).
+   *
+   * Ark messages use pre-defined templates with key-value substitution.
+   * Three default templates are available:
+   *   23 — link + text list
+   *   24 — text + thumbnail
+   *   37 — large image
+   *
+   * C2C replies: 60-min window, 5 replies per message.
+   * Group replies: 5-min window, 5 replies per message.
+   */
+  async sendArk(
+    chatId: string,
+    templateId: number,
+    kv: ArkKV[],
+  ): Promise<void> {
+    if (this.disposed) return;
+    if (Date.now() >= this.tokenExpiresAt) {
+      try {
+        await this.fetchToken();
+      } catch {
+        return;
+      }
+    }
+    if (!this.accessToken || !isValidChatId(chatId)) return;
+
+    const base = getApiBase(Boolean(this.qqConfig.sandbox));
+    const isGroup = this.chatTypeMap.get(chatId) === 'group';
+    const path = isGroup
+      ? `/v2/groups/${chatId}/messages`
+      : `/v2/users/${chatId}/messages`;
+    const msgId = this.replyMsgId.get(chatId);
+
+    const body: Record<string, unknown> = {
+      msg_type: 3,
+      ark: { template_id: templateId, kv },
+    };
+    if (msgId) body['msg_id'] = msgId;
+
+    const resp = await sendQQMessage(base, path, this.accessToken, body);
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      process.stderr.write(
+        `[QQ:${this.name}] Ark send HTTP ${resp.status}: ${errBody.slice(0, 200)}\n`,
+      );
+    }
+  }
+
+  /**
+   * Upload and send a rich media message (msg_type=7).
+   *
+   * C2C and group uploads are separate — a file_info from a C2C upload
+   * cannot be sent to a group and vice versa. Uploaded files have a TTL
+   * (typically 7 days) and must be re-uploaded after expiry.
+   *
+   * @param fileType — 1=image, 2=video, 3=voice, 4=file
+   *   File type 4 (file/document) is C2C-only; group upload rejects it.
+   * @param fileUrl — publicly-accessible URL of the media file
+   * @param text — optional caption text sent alongside the media
+   */
+  async sendMedia(
+    chatId: string,
+    fileType: number,
+    fileUrl: string,
+    text?: string,
+  ): Promise<void> {
+    if (this.disposed) return;
+    if (Date.now() >= this.tokenExpiresAt) {
+      try {
+        await this.fetchToken();
+      } catch {
+        return;
+      }
+    }
+    if (!this.accessToken || !isValidChatId(chatId)) return;
+
+    const base = getApiBase(Boolean(this.qqConfig.sandbox));
+    const isGroup = this.chatTypeMap.get(chatId) === 'group';
+
+    // file_type=4 (文件) is rejected by group upload endpoint
+    if (isGroup && fileType === FileType.FILE) {
+      process.stderr.write(
+        `[QQ:${this.name}] Media send skipped: file_type=4 (文件) not supported in group chats\n`,
+      );
+      return;
+    }
+
+    // Upload path: C2C vs group are separate
+    const uploadPath = isGroup
+      ? `/v2/groups/${chatId}/files`
+      : `/v2/users/${chatId}/files`;
+    const sendPath = isGroup
+      ? `/v2/groups/${chatId}/messages`
+      : `/v2/users/${chatId}/messages`;
+
+    try {
+      const uploaded = await uploadQQMedia(
+        base,
+        uploadPath,
+        this.accessToken,
+        fileType,
+        fileUrl,
+      );
+
+      const msgId = this.replyMsgId.get(chatId);
+      const body: Record<string, unknown> = {
+        msg_type: 7,
+        media: { file_info: uploaded.file_info },
+      };
+      if (msgId) body['msg_id'] = msgId;
+      if (text) body['content'] = text;
+
+      const resp = await sendQQMessage(base, sendPath, this.accessToken, body);
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[QQ:${this.name}] Media send HTTP ${resp.status}: ${errBody.slice(0, 200)}\n`,
+        );
+      }
+    } catch (e: unknown) {
+      process.stderr.write(
+        `[QQ:${this.name}] Media send error: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
+    }
   }
 
   disconnect(): void {
