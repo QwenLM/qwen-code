@@ -164,9 +164,41 @@ describe('detectImageMime', () => {
     expect(detectImageMime(buf)).toBe('image/gif');
   });
 
-  it('detects WebP magic bytes (RIFF)', () => {
-    const buf = Buffer.from([0x52, 0x49, 0x46, 0x46]);
+  it('detects WebP magic bytes (RIFF....WEBP)', () => {
+    const buf = Buffer.from([
+      0x52,
+      0x49,
+      0x46,
+      0x46, // "RIFF"
+      0x1a,
+      0x00,
+      0x00,
+      0x00, // file size (little-endian)
+      0x57,
+      0x45,
+      0x42,
+      0x50, // "WEBP"
+    ]);
     expect(detectImageMime(buf)).toBe('image/webp');
+  });
+
+  it('does not misidentify a non-WebP RIFF container (e.g. WAV) as WebP', () => {
+    // WAV is also a RIFF container; only bytes 8-11 distinguish it from WebP.
+    const buf = Buffer.from([
+      0x52,
+      0x49,
+      0x46,
+      0x46, // "RIFF"
+      0x24,
+      0x00,
+      0x00,
+      0x00, // file size
+      0x57,
+      0x41,
+      0x56,
+      0x45, // "WAVE", not "WEBP"
+    ]);
+    expect(() => detectImageMime(buf)).toThrow('Unrecognized image format');
   });
 
   it('detects JPEG magic bytes', () => {
