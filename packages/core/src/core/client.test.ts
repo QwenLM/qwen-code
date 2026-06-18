@@ -4286,6 +4286,82 @@ hello
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
 
+    it('should halt via the always-on turn cap before the skipLoopDetection gate', async () => {
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // The always-on cap trips on the first event — it runs before (and
+      // independently of) the gated detectors.
+      const loopDetector = client['loopDetector'];
+      const alwaysOnSpy = vi
+        .spyOn(loopDetector, 'checkAlwaysOnSafeties')
+        .mockReturnValue(true);
+      const deterministicSpy = vi.spyOn(
+        loopDetector,
+        'addAndCheckDeterministicToolCallLoop',
+      );
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      // `run` is invoked as `turn.run(...)`, so `this` is the live Turn —
+      // populate pendingToolCalls the way the real Turn.run does as it streams
+      // ToolCallRequest chunks, so the halt's clear runs against a non-empty
+      // array (not a trivially-empty one).
+      mockTurnRunFn.mockImplementation(async function* (this: {
+        pendingToolCalls: unknown[];
+      }) {
+        this.pendingToolCalls.push(
+          { name: 'read_file', args: { path: 'a.ts' } },
+          { name: 'read_file', args: { path: 'b.ts' } },
+        );
+        yield { type: 'content', value: 'looping' };
+      });
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger the cap' }],
+        new AbortController().signal,
+        'prompt-id-cap',
+        { type: SendMessageType.UserQuery },
+      );
+      const events = [];
+      let result = await stream.next();
+      while (!result.done) {
+        events.push(result.value);
+        result = await stream.next();
+      }
+      const returnedTurn = result.value as
+        | { pendingToolCalls: unknown[] }
+        | undefined;
+
+      // Always-on cap fires and short-circuits before the gated detectors run.
+      expect(alwaysOnSpy).toHaveBeenCalled();
+      expect(deterministicSpy).not.toHaveBeenCalled();
+      const loopEvent = events.find(
+        (e) => e.type === GeminiEventType.LoopDetected,
+      );
+      expect(loopEvent?.value?.loopType).toBe(LoopType.TURN_TOOL_CALL_CAP);
+      // The two pending calls collected before the cap tripped are dropped, so
+      // the halt doesn't spawn a continuation that re-trips the cap and
+      // double-prints the message.
+      expect(returnedTurn?.pendingToolCalls).toHaveLength(0);
+      // The mid-stream memory prefetch is cancelled.
+      expect(abortHandlerInvoked).toBe(true);
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
     it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {
       // Self-inflicted-regression guard for the round-4 finding:
       // the bottom-of-try `normalCompletion = true` doesn't cover the
@@ -6182,6 +6258,7 @@ Other open files:
 
       // Replace loop detector with spies
       const ldMock = {
+        checkAlwaysOnSafeties: vi.fn().mockReturnValue(false),
         addAndCheckDeterministicToolCallLoop: vi.fn().mockReturnValue(false),
         addAndCheckHeuristicLoops: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -6211,7 +6288,8 @@ Other open files:
         // consume stream
       }
 
-      // Assert - neither detector path runs when skipLoopDetection is true
+      // Assert - always-on safeties still run, but opt-in detectors don't
+      expect(ldMock.checkAlwaysOnSafeties).toHaveBeenCalled();
       expect(
         ldMock.addAndCheckDeterministicToolCallLoop,
       ).not.toHaveBeenCalled();
