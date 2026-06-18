@@ -36,30 +36,52 @@ async function getHistoryFilePath(
 async function readHistoryFile(filePath: string): Promise<string[]> {
   try {
     const text = await fs.readFile(filePath, 'utf-8');
-    const result: string[] = [];
-    let cur = '';
+    const parsed = parseHistoryFile(text);
+    if (parsed) return parsed;
 
-    for (const raw of text.split(/\r?\n/)) {
-      if (!raw.trim()) continue;
-      const line = raw;
-
-      const m = cur.match(/(\\+)$/);
-      if (m && m[1].length % 2) {
-        // odd number of trailing '\'
-        cur = cur.slice(0, -1) + ' ' + line;
-      } else {
-        if (cur) result.push(cur);
-        cur = line;
-      }
-    }
-
-    if (cur) result.push(cur);
-    return result;
+    return parseLegacyHistoryFile(text);
   } catch (err) {
     if (isNodeError(err) && err.code === 'ENOENT') return [];
     debugLogger.error('Error reading history:', err);
     return [];
   }
+}
+
+function parseHistoryFile(text: string): string[] | undefined {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((entry): entry is string => typeof entry === 'string')
+    ) {
+      return parsed;
+    }
+  } catch {
+    // Fall back to the original line-based history format.
+  }
+  return undefined;
+}
+
+function parseLegacyHistoryFile(text: string): string[] {
+  const result: string[] = [];
+  let cur = '';
+
+  for (const raw of text.split(/\r?\n/)) {
+    if (!raw.trim()) continue;
+    const line = raw;
+
+    const m = cur.match(/(\\+)$/);
+    if (m && m[1].length % 2) {
+      // odd number of trailing '\'
+      cur = cur.slice(0, -1) + ' ' + line;
+    } else {
+      if (cur) result.push(cur);
+      cur = line;
+    }
+  }
+
+  if (cur) result.push(cur);
+  return result;
 }
 
 async function writeHistoryFile(
@@ -68,7 +90,7 @@ async function writeHistoryFile(
 ): Promise<void> {
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.writeFile(filePath, history.join('\n'));
+    await fs.writeFile(filePath, JSON.stringify(history));
   } catch (error) {
     debugLogger.error('Error writing shell history:', error);
   }
