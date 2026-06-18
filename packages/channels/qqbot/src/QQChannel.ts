@@ -767,6 +767,8 @@ export class QQChannel extends ChannelBase {
 
   private handleC2C(event: QQMessageEvent): void {
     if (this.isDuplicate(event.id)) return;
+    // Ignore messages with no text content (images, stickers, etc.)
+    if (!event.content?.trim()) return;
     // user_openid and author.id are scoped differently — falling back to
     // author.id may produce a different identity for the same user across
     // C2C and group contexts, creating two separate sessions. QQ Bot does
@@ -809,6 +811,9 @@ export class QQChannel extends ChannelBase {
     //   - V2:     <@D5B53C...> (hex openid, no bang)
     // Use a broad pattern to handle both, and any future format changes.
     const cleanText = (event.content || '').replace(/<@[^>]+>/g, '').trim();
+    // Ignore messages that have no meaningful text after @mention stripping
+    // (pure @mention, image, or sticker messages).
+    if (!cleanText) return;
     const isSlash = cleanText.startsWith('/');
     // Log slash commands with senderName for audit trail
     if (isSlash) {
