@@ -3224,8 +3224,18 @@ export const AppContainer = (props: AppContainerProps) => {
     if (
       settings.merged.ui?.hideWindowTitle ||
       settings.merged.ui?.showStatusInTitle === false
-    )
+    ) {
+      // When disabled at runtime, revert to the static fallback title
+      if (lastTitleRef.current !== null) {
+        lastTitleRef.current = null;
+        const folderName = basename(config.getTargetDir());
+        writeTerminalTitle(
+          (value) => process.stdout.write(value),
+          computeWindowTitle(folderName),
+        );
+      }
       return;
+    }
 
     const folderName = basename(config.getTargetDir());
     const title = formatSessionWindowTitle(sessionName, folderName);
