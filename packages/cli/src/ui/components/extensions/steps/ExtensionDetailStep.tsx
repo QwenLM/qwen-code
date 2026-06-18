@@ -9,6 +9,7 @@ import { theme } from '../../../semantic-colors.js';
 import {
   redactUrlCredentials,
   getExtensionDisplayName,
+  getExtensionDescription,
   type Extension,
 } from '@qwen-code/qwen-code-core';
 import { t, getCurrentLanguage } from '../../../../i18n/index.js';
@@ -33,6 +34,9 @@ export const ExtensionDetailStep = ({
   const activeColor = isActive ? theme.status.success : theme.text.secondary;
   const activeString = isActive ? t('active') : t('disabled');
 
+  const locale = getCurrentLanguage();
+  const description = getExtensionDescription(ext, locale);
+
   // Fixed width for labels to ensure alignment
   const LABEL_WIDTH = 12;
 
@@ -43,8 +47,17 @@ export const ExtensionDetailStep = ({
           <Box width={LABEL_WIDTH} flexShrink={0}>
             <Text color={theme.text.primary}>{t('Name:')}</Text>
           </Box>
-          <Text>{getExtensionDisplayName(ext, getCurrentLanguage())}</Text>
+          <Text>{getExtensionDisplayName(ext, locale)}</Text>
         </Box>
+
+        {description && (
+          <Box>
+            <Box width={LABEL_WIDTH} flexShrink={0}>
+              <Text color={theme.text.primary}>{t('Description:')}</Text>
+            </Box>
+            <Text color={theme.text.secondary}>{description}</Text>
+          </Box>
+        )}
 
         <Box>
           <Box width={LABEL_WIDTH} flexShrink={0}>
