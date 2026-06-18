@@ -61,12 +61,14 @@ export interface TurnCollapseHead {
   /**
    * Per-turn token usage, summed from the turn's assistant messages. Both fields
    * are present together or the pair is undefined (older sessions stamp no
-   * usage). Sub-agent tokens are excluded (see the SDK reducer).
+   * usage). Sub-agent tokens are included (see the SDK reducer).
    */
   inputTokens?: number;
   outputTokens?: number;
   /** Cached-read tokens — a subset of inputTokens, surfaced only when > 0. */
   cachedTokens?: number;
+  /** Number of tool calls shown in this turn. */
+  toolCallCount?: number;
   /**
    * Prompt wall-clock (ms) for a still-running turn. Present only while the turn
    * is active; the row ticks `now - liveStartedAt` once a second so the elapsed

@@ -291,6 +291,17 @@ describe('SettingsSchema', () => {
       ).toEqual([]);
     });
 
+    it('should define context.fileName schema override as string or string array', () => {
+      expect(
+        getSettingsSchema().context?.properties.fileName.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [
+          { type: 'string' },
+          { type: 'array', items: { type: 'string' } },
+        ],
+      });
+    });
+
     it('should have loadFromIncludeDirectories setting in schema', () => {
       expect(
         getSettingsSchema().context?.properties.loadFromIncludeDirectories,

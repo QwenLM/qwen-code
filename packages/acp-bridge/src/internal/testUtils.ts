@@ -235,6 +235,13 @@ export class FakeAgent implements Agent {
 export interface ChannelHandle {
   channel: AcpChannel;
   agent: FakeAgent;
+  /**
+   * The agent-side ACP connection. Test seam for driving the client-bound calls
+   * a real `qwen --acp` child makes — e.g. the mid-turn drain
+   * `agentConnection.extMethod('craft/drainMidTurnQueue', { sessionId })`,
+   * answered by the bridge's `BridgeClient.extMethod`.
+   */
+  agentConnection: AgentSideConnection;
   killed: boolean;
   /**
    * Resolve `channel.exited` without going through `kill()`. Optionally
@@ -277,6 +284,7 @@ export function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
   const handle: ChannelHandle = {
     channel: undefined as unknown as AcpChannel,
     agent: new FakeAgent(opts),
+    agentConnection: undefined as unknown as AgentSideConnection,
     killed: false,
     /** Test hook: simulate an unexpected child crash. */
     crash: (info?: {
@@ -284,8 +292,12 @@ export function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
       signalCode: NodeJS.Signals | null;
     }) => resolveExited!(info),
   };
-  // Spin up the fake agent on the agent side.
-  new AgentSideConnection(() => handle.agent, agentStream);
+  // Spin up the fake agent on the agent side; keep the connection so tests can
+  // drive client-bound ext-methods (e.g. the mid-turn drain).
+  handle.agentConnection = new AgentSideConnection(
+    () => handle.agent,
+    agentStream,
+  );
   handle.channel = {
     stream: clientStream,
     exited,

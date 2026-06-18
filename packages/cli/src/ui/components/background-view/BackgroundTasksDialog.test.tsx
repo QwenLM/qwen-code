@@ -37,6 +37,8 @@ vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
         return entry.shellId;
       case 'monitor':
         return entry.monitorId;
+      case 'workflow':
+        return entry.runId;
       case 'dream':
         return entry.dreamId;
       default: {

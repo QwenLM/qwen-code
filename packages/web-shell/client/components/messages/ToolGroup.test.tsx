@@ -73,10 +73,7 @@ function renderShellTool(output: string): HTMLElement {
   const container = renderTool(makeShellTool(output));
   // Completed tools collapse to a one-line summary by default; open the row so
   // the assertions below can inspect the bash-output view.
-  const chevron = [...container.querySelectorAll('span')].find(
-    (s) => s.textContent === '▸',
-  );
-  if (chevron?.parentElement) click(chevron.parentElement);
+  expandTool(container);
   return container;
 }
 
@@ -119,12 +116,16 @@ function click(el: Element): void {
   });
 }
 
-function expandTool(container: HTMLElement): void {
-  const chevron = [...container.querySelectorAll('span')].find(
-    (s) => s.textContent === '▸',
+function getToolHeader(container: HTMLElement, name = 'Shell'): HTMLElement {
+  const label = [...container.querySelectorAll('span')].find(
+    (s) => s.textContent === name,
   );
-  expect(chevron).toBeTruthy();
-  click(chevron!.parentElement!);
+  expect(label).toBeTruthy();
+  return label!.parentElement!;
+}
+
+function expandTool(container: HTMLElement, name = 'Shell'): void {
+  click(getToolHeader(container, name));
 }
 
 describe('shell tool output expand toggle', () => {
@@ -206,17 +207,27 @@ describe('tool description expand toggle', () => {
         (s) => s.textContent === command,
       );
 
-    expect(container.textContent).toContain('▸');
     expect(commandInLeafSpan()).toBe(true);
 
-    const chevron = [...container.querySelectorAll('span')].find(
-      (s) => s.textContent === '▸',
-    );
-    click(chevron!.parentElement!);
+    expandTool(container);
 
-    expect(container.textContent).toContain('▾');
     expect(commandInLeafSpan()).toBe(false);
     expect(container.textContent).toContain(command); // still present, in the block
+  });
+
+  it('shows an expand/collapse tooltip on expandable tool rows', () => {
+    const command = `npm run build -- ${'x'.repeat(80)}`;
+    const container = renderTool(makeShellCommandTool(command));
+    const header = getToolHeader(container);
+    expect(header.getAttribute('title')).toBe('Expand');
+    expect(header.getAttribute('role')).toBe('button');
+    expect(header.getAttribute('aria-label')).toBeNull();
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+
+    click(header);
+
+    expect(header.getAttribute('title')).toBe('Collapse');
+    expect(header.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('keeps the result summary when expanding a long-description tool with no detail view', () => {
@@ -230,13 +241,9 @@ describe('tool description expand toggle', () => {
       rawOutput: 'a.ts\nb.ts\nc.ts',
     });
 
-    const chevron = [...container.querySelectorAll('span')].find(
-      (s) => s.textContent === '▸',
-    );
-    expect(chevron).toBeTruthy(); // long pattern → expandable
     expect(container.textContent).toContain('matching file'); // summary, collapsed
 
-    click(chevron!.parentElement!);
+    expandTool(container, 'Glob');
 
     // Expanded: the summary must NOT be lost (no detail view replaces it), and
     // the full pattern is reflowed into the block.
@@ -250,7 +257,7 @@ describe('auto-collapse on finish', () => {
     const container = renderTool(makeShellTool('a\nb\nc\nd'));
     // The expanded bash <pre> is not rendered until the user opens the row.
     expect(container.querySelector('pre')).toBeNull();
-    expect(container.textContent).toContain('▸');
+    expect(container.textContent).toContain('4 lines of output');
   });
 
   it('keeps a running tool expanded so streaming output stays visible', () => {
@@ -373,19 +380,14 @@ describe('todo_write tool rendering', () => {
     expect(container.textContent).toContain('1/3');
     expect(container.textContent).toContain('Second task');
     expect(container.textContent).not.toContain('Third task');
-    expect(container.textContent).toContain('▸');
   });
 
   it('expands to the full list on click', () => {
     const container = renderTodoTool(makeTodoTool());
-    const chevron = [...container.querySelectorAll('span')].find(
-      (s) => s.textContent === '▸',
-    );
-    click(chevron!.parentElement!);
+    expandTool(container, 'TodoWrite');
     expect(container.textContent).toContain('First task');
     expect(container.textContent).toContain('Second task');
     expect(container.textContent).toContain('Third task');
-    expect(container.textContent).toContain('▾');
   });
 
   it('shows the snapshot diff when a timeline is present', () => {
@@ -454,18 +456,14 @@ describe('user-expanded tool persistence', () => {
       });
 
     renderStatus('in_progress');
-    const chevron = () =>
-      [...container.querySelectorAll('span')].find(
-        (s) => s.textContent === '▾' || s.textContent === '▸',
-      );
     // Toggle twice → marks the row user-controlled, ending in the expanded state.
-    click(chevron()!.parentElement!);
-    click(chevron()!.parentElement!);
-    expect(container.textContent).toContain('▾');
+    click(getToolHeader(container, 'Shell'));
+    click(getToolHeader(container, 'Shell'));
+    expect(container.querySelector('pre')).not.toBeNull();
 
     // Completion must NOT override the user's explicit expand.
     renderStatus('completed');
-    expect(container.textContent).toContain('▾');
+    expect(container.querySelector('pre')).not.toBeNull();
   });
 });
 
@@ -480,7 +478,7 @@ describe('edit raw diff rendering', () => {
         },
       }),
     );
-    expandTool(normal);
+    expandTool(normal, 'Edit');
     expect(normal.textContent).toContain('old');
     expect(normal.textContent).toContain('new');
 
@@ -519,7 +517,7 @@ describe('edit raw diff rendering', () => {
       }),
     );
 
-    expandTool(container);
+    expandTool(container, 'Edit');
     expect(container.textContent).toContain(preview);
     expect(container.textContent).not.toContain('old');
     expect(container.textContent).not.toContain('new');
@@ -539,7 +537,7 @@ describe('edit raw diff rendering', () => {
       }),
     );
 
-    expandTool(container);
+    expandTool(container, 'Edit');
     expect(container.textContent).toContain(preview);
   });
 
@@ -567,5 +565,44 @@ describe('edit raw diff rendering', () => {
     click(writeLabel!);
 
     expect(container.querySelector('pre')?.textContent).toBe(preview);
+  });
+});
+
+describe('keyboard accessibility', () => {
+  function pressKey(el: Element, key: string): void {
+    act(() => {
+      el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    });
+  }
+
+  it('expands an expandable tool row on Enter', () => {
+    const command = `echo ${'z'.repeat(80)}`;
+    const container = renderTool(makeShellCommandTool(command));
+    const header = getToolHeader(container);
+
+    expect(container.querySelector('pre')).toBeNull();
+
+    pressKey(header, 'Enter');
+    expect(container.querySelector('pre')).not.toBeNull();
+  });
+
+  it('expands an expandable tool row on Space', () => {
+    const command = `echo ${'z'.repeat(80)}`;
+    const container = renderTool(makeShellCommandTool(command));
+    const header = getToolHeader(container);
+
+    expect(container.querySelector('pre')).toBeNull();
+
+    pressKey(header, ' ');
+    expect(container.querySelector('pre')).not.toBeNull();
+  });
+
+  it('does not toggle on other keys', () => {
+    const command = `echo ${'z'.repeat(80)}`;
+    const container = renderTool(makeShellCommandTool(command));
+    const header = getToolHeader(container);
+
+    pressKey(header, 'a');
+    expect(container.querySelector('pre')).toBeNull();
   });
 });

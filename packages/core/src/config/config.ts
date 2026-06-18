@@ -90,6 +90,7 @@ import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
@@ -1126,6 +1127,7 @@ export class Config {
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  private readonly workflowRunRegistry = new WorkflowRunRegistry();
   // Field initializer runs once on the parent Config; child Configs
   // built via Object.create(parent) intentionally do NOT pick this up
   // — see getFileReadCache() for the per-instance lazy initialization
@@ -1671,6 +1673,7 @@ export class Config {
                   (input['permission_mode'] as PermissionMode | undefined) ??
                     PermissionMode.Default,
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               }
@@ -1682,6 +1685,7 @@ export class Config {
                   (input['tool_use_id'] as string) || '',
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -1693,6 +1697,7 @@ export class Config {
                   input['is_interrupt'] as boolean | undefined,
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolBatch':
@@ -1731,6 +1736,7 @@ export class Config {
                   (input['reason'] as PermissionDeniedReason) ||
                     'classifier_blocked',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'SubagentStart':
@@ -4496,6 +4502,10 @@ export class Config {
 
   getBackgroundShellRegistry(): BackgroundShellRegistry {
     return this.backgroundShellRegistry;
+  }
+
+  getWorkflowRunRegistry(): WorkflowRunRegistry {
+    return this.workflowRunRegistry;
   }
 
   /**

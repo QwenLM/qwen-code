@@ -428,8 +428,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const inputHistory = useInputHistory({
     userMessages,
     onSubmit: handleSubmitAndClear,
-    // History navigation (Ctrl+P/N) now always works since completion navigation
-    // only uses arrow keys. Only disable in shell mode.
+    // History navigation still owns Ctrl+P/N when the completion menu is not
+    // handling them. Only disable in shell mode.
     isActive: !shellModeActive,
     currentQuery: buffer.text,
     onChange: customSetTextAndResetCompletionSignal,

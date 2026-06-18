@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentEvent, Message } from '@craft-agent/core/types';
 import { QwenAgent } from '../qwen-agent.ts';
+import type { FileAttachment } from '../../utils/files.ts';
 
 type QwenAgentConfig = ConstructorParameters<typeof QwenAgent>[0];
 
@@ -39,6 +40,8 @@ type QwenHistoryInternals = {
 type QwenPromptBlock = {
   type: string;
   text?: string;
+  data?: string;
+  mimeType?: string;
   resource?: {
     uri?: string;
     mimeType?: string | null;
@@ -48,7 +51,15 @@ type QwenPromptBlock = {
 };
 
 type QwenPromptInternals = {
-  buildPromptBlocks: (message: string) => QwenPromptBlock[];
+  buildPromptBlocks: (
+    message: string,
+    attachments?: FileAttachment[],
+    options?: { includeContext?: boolean },
+  ) => QwenPromptBlock[];
+};
+
+type QwenDebugInternals = {
+  onDebug?: (message: string) => void;
 };
 
 type QwenAvailableCommandsInternals = {
@@ -211,6 +222,36 @@ describe('QwenAgent slash command history', () => {
     expect(blocks).toEqual([{ type: 'text', text: 'hello' }]);
   });
 
+  it('logs attachments skipped while building prompt blocks', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const debugMessages: string[] = [];
+    (agent as unknown as QwenDebugInternals).onDebug = (message) => {
+      debugMessages.push(message);
+    };
+
+    const attachment: FileAttachment = {
+      type: 'unknown',
+      path: '',
+      name: 'empty.bin',
+      mimeType: 'application/octet-stream',
+      size: 0,
+    };
+    const blocks = (agent as unknown as QwenPromptInternals).buildPromptBlocks(
+      'hello',
+      [attachment],
+    );
+
+    expect(blocks).toEqual([{ type: 'text', text: 'hello' }]);
+    expect(debugMessages).toContain(
+      '[QwenAgent] Skipping attachment empty.bin while building prompt blocks: no readable content',
+    );
+
+    agent.destroy();
+  });
+
   it('drains queued mid-turn messages through the ACP extension handler', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);
@@ -221,7 +262,11 @@ describe('QwenAgent slash command history', () => {
     internals.qwenSessionId = 'sdk-session-qwen';
     internals._isProcessing = true;
 
-    expect(agent.enqueueMidTurnMessage('please also inspect tests')).toBe(true);
+    expect(
+      agent.enqueueMidTurnMessage('please also inspect tests', undefined, {
+        messageId: 'queued-1',
+      }),
+    ).toBe(true);
 
     await expect(
       internals.handleExtMethod('craft/drainMidTurnQueue', {
@@ -235,11 +280,13 @@ describe('QwenAgent slash command history', () => {
     ).resolves.toEqual({
       messages: ['please also inspect tests'],
     });
-    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
-      'please also inspect tests',
-    ]);
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['queued-1']);
 
-    expect(agent.enqueueMidTurnMessage('and summarize findings')).toBe(true);
+    expect(
+      agent.enqueueMidTurnMessage('and summarize findings', undefined, {
+        messageId: 'queued-2',
+      }),
+    ).toBe(true);
     await expect(
       internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'sdk-session-qwen',
@@ -247,14 +294,353 @@ describe('QwenAgent slash command history', () => {
     ).resolves.toEqual({
       messages: ['and summarize findings'],
     });
-    expect(onMidTurnMessagesDrained).toHaveBeenLastCalledWith([
-      'and summarize findings',
-    ]);
+    expect(onMidTurnMessagesDrained).toHaveBeenLastCalledWith(['queued-2']);
     await expect(
       internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'sdk-session-qwen',
       }),
     ).resolves.toEqual({ messages: [] });
+
+    agent.destroy();
+  });
+
+  it('acknowledges drained mid-turn messages without metadata by text', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    expect(agent.enqueueMidTurnMessage('legacy queued message')).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      messages: ['legacy queued message'],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
+      'legacy queued message',
+    ]);
+
+    agent.destroy();
+  });
+
+  it('acknowledges metadata-free image-only mid-turn messages by empty text', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock((_messageIds: string[]) => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(agent.enqueueMidTurnMessage('', [attachment])).toBe(true);
+    expect(agent.enqueueMidTurnMessage('', [attachment])).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: '[User message with attachments]',
+        },
+        {
+          content: [
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: '[User message with attachments]',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['', '']);
+
+    agent.destroy();
+  });
+
+  it('rejects empty mid-turn messages without attachments', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals._isProcessing = true;
+
+    expect(agent.enqueueMidTurnMessage('')).toBe(false);
+    expect(agent.enqueueMidTurnMessage('   ')).toBe(false);
+
+    agent.destroy();
+  });
+
+  it('drains queued mid-turn image attachments as ACP content blocks', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(
+      agent.enqueueMidTurnMessage('please inspect this image', [attachment], {
+        messageId: 'queued-image',
+      }),
+    ).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            { type: 'text', text: 'please inspect this image' },
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: 'please inspect this image',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['queued-image']);
+
+    agent.destroy();
+  });
+
+  it('retries and falls back when mid-turn attachment messages fail to build', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    const promptInternals = agent as unknown as QwenPromptInternals;
+    const originalBuildPromptBlocks =
+      promptInternals.buildPromptBlocks.bind(agent);
+    promptInternals.buildPromptBlocks = (message, attachments, options) => {
+      if (message === 'bad image') {
+        throw new Error('image decode failed');
+      }
+      return originalBuildPromptBlocks(message, attachments, options);
+    };
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(
+      agent.enqueueMidTurnMessage('bad image', [attachment], {
+        messageId: 'bad-image',
+      }),
+    ).toBe(true);
+    expect(
+      agent.enqueueMidTurnMessage('good image', [attachment], {
+        messageId: 'good-image',
+      }),
+    ).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            { type: 'text', text: 'good image' },
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: 'good image',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['good-image']);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({ items: [] });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledTimes(1);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            { type: 'text', text: 'bad image' },
+            {
+              type: 'text',
+              text: '[Attachment could not be processed]',
+            },
+          ],
+          displayText: 'bad image',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenLastCalledWith(['bad-image']);
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledTimes(2);
+
+    agent.destroy();
+  });
+
+  it('acknowledges image-only mid-turn messages by optimistic id', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(
+      agent.enqueueMidTurnMessage('', [attachment], {
+        optimisticMessageId: 'optimistic-image',
+      }),
+    ).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: '[User message with attachments]',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
+      'optimistic-image',
+    ]);
+
+    agent.destroy();
+  });
+
+  it('drains mixed text and image mid-turn messages as ACP items', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    const attachment: FileAttachment = {
+      type: 'image',
+      path: join(cwd, 'screenshot.png'),
+      name: 'screenshot.png',
+      mimeType: 'image/png',
+      base64: 'iVBORw0KGgo=',
+      size: 8,
+    };
+    expect(
+      agent.enqueueMidTurnMessage('first text only', undefined, {
+        messageId: 'queued-text',
+      }),
+    ).toBe(true);
+    expect(
+      agent.enqueueMidTurnMessage('then inspect image', [attachment], {
+        messageId: 'queued-image',
+      }),
+    ).toBe(true);
+
+    await expect(
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          content: [{ type: 'text', text: 'first text only' }],
+          displayText: 'first text only',
+        },
+        {
+          content: [
+            { type: 'text', text: 'then inspect image' },
+            {
+              type: 'image',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+          displayText: 'then inspect image',
+        },
+      ],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
+      'queued-text',
+      'queued-image',
+    ]);
 
     agent.destroy();
   });

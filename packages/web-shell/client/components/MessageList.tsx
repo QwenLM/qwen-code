@@ -365,6 +365,11 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   }
 }
 
+function isExecutionWorkStep(item: DisplayItem): boolean {
+  if (item.type === 'parallel_agents') return true;
+  return item.message.role === 'tool_group' || item.message.role === 'plan';
+}
+
 /** Wall-clock stamp of a display row, whichever variant carries it. */
 function itemTimestamp(item: DisplayItem): number | undefined {
   return item.type === 'message' ? item.message.timestamp : item.timestamp;
@@ -376,14 +381,21 @@ function itemTimestamp(item: DisplayItem): number | undefined {
  * top-level assistant blocks, so summing the turn's assistant messages yields
  * its true total cost.
  */
-function itemAssistantUsage(
-  item: DisplayItem,
-):
-  | { inputTokens: number; outputTokens: number; cachedTokens?: number }
+function itemAssistantUsage(item: DisplayItem):
+  | {
+      inputTokens: number;
+      outputTokens: number;
+      cachedTokens?: number;
+    }
   | undefined {
   return item.type === 'message' && item.message.role === 'assistant'
     ? item.message.usage
     : undefined;
+}
+
+function itemToolCallCount(item: DisplayItem): number {
+  if (item.type === 'parallel_agents') return item.agents.length;
+  return item.message.role === 'tool_group' ? item.message.tools.length : 0;
 }
 
 /**
@@ -475,12 +487,16 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    // Final answer = last assistant-with-content row in (start, end]. On an
-    // active turn this is provisional (the latest streamed text), so it is not
-    // counted as a step — keeping a step-less reply step-less — but it is folded
-    // away with everything else when the live turn is collapsed (see below).
+    // Final answer = last assistant-with-content row after the turn's last
+    // non-assistant step. Assistant text that is followed by a tool/plan is
+    // narration for the execution trace, not the final answer; marking it as a
+    // step immediately keeps the trace indentation stable while a turn streams.
     let answerIdx = -1;
-    for (let i = end; i > start; i--) {
+    let lastNonAssistantStepIdx = start;
+    for (let i = start + 1; i <= end; i++) {
+      if (isExecutionWorkStep(items[i])) lastNonAssistantStepIdx = i;
+    }
+    for (let i = end; i > lastNonAssistantStepIdx; i--) {
       if (isAssistantAnswer(items[i])) {
         answerIdx = i;
         break;
@@ -492,10 +508,14 @@ export function applyTurnCollapse(
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedTokens = 0;
+    let toolCallCount = 0;
     let hasUsage = false;
     for (let i = start + 1; i <= end; i++) {
-      if (isHideableStep(items[i], i === answerIdx)) hiddenCount++;
-      const ts = itemTimestamp(items[i]);
+      const isStep = isHideableStep(items[i], i === answerIdx);
+      if (isStep) hiddenCount++;
+      toolCallCount += itemToolCallCount(items[i]);
+      const ts =
+        isStep || i === answerIdx ? itemTimestamp(items[i]) : undefined;
       if (ts !== undefined) {
         lastStepTs = lastStepTs === undefined ? ts : Math.max(lastStepTs, ts);
       }
@@ -509,13 +529,15 @@ export function applyTurnCollapse(
     }
 
     const promptTs = head.message.timestamp;
+    const liveStartedAt = isActiveTurn ? (promptTs ?? Date.now()) : undefined;
     const elapsedMs =
       promptTs !== undefined &&
       lastStepTs !== undefined &&
       lastStepTs >= promptTs
         ? lastStepTs - promptTs
         : undefined;
-    const hasMetrics = hasUsage || elapsedMs !== undefined;
+    const hasMetrics =
+      hasUsage || elapsedMs !== undefined || liveStartedAt !== undefined;
 
     if (hasPendingApproval || (hiddenCount === 0 && !hasMetrics)) {
       // Nothing to add: the inline approve/reject UI must stay reachable, or the
@@ -547,14 +569,15 @@ export function applyTurnCollapse(
         ...(elapsedMs !== undefined ? { elapsedMs } : {}),
         ...(hasUsage ? { inputTokens, outputTokens } : {}),
         ...(cachedTokens > 0 ? { cachedTokens } : {}),
-        ...(isActiveTurn && promptTs !== undefined
-          ? { liveStartedAt: promptTs }
-          : {}),
+        ...(toolCallCount > 0 ? { toolCallCount } : {}),
+        ...(liveStartedAt !== undefined ? { liveStartedAt } : {}),
       },
     });
 
     if (!collapsed) {
-      for (let i = start + 1; i <= end; i++) result.push(items[i]);
+      for (let i = start + 1; i <= end; i++) {
+        result.push(items[i]!);
+      }
       continue;
     }
 
@@ -1140,6 +1163,12 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const virtualItems = virtualizer.getVirtualItems();
     const totalVirtualSize = virtualizer.getTotalSize();
 
+    const getRowClassName = useCallback(
+      (key: string): string | undefined =>
+        flashKey === key ? styles.rowFlash : undefined,
+      [flashKey],
+    );
+
     // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
     // Fires whenever the virtualizer's total content height changes —
     // this captures every scenario: streaming tokens appending, tool
@@ -1173,11 +1202,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={
-                  flashKey === String(virtualRow.key)
-                    ? styles.rowFlash
-                    : undefined
-                }
+                className={getRowClassName(String(virtualRow.key))}
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -1197,7 +1222,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
               <div
                 key={key}
                 data-index={index}
-                className={flashKey === key ? styles.rowFlash : undefined}
+                className={getRowClassName(key)}
               >
                 {renderVirtualItem(index)}
               </div>
