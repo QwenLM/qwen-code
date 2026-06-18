@@ -64,6 +64,13 @@ describe('parseCron', () => {
   it('throws on invalid step', () => {
     expect(() => parseCron('*/0 * * * *')).toThrow('Invalid step');
   });
+
+  it('throws on malformed numeric tokens', () => {
+    expect(() => parseCron('5x * * * *')).toThrow('Invalid value');
+    expect(() => parseCron('1-5x * * * *')).toThrow('Invalid range');
+    expect(() => parseCron('1-2-3 * * * *')).toThrow('Invalid range');
+    expect(() => parseCron('*/15garbage * * * *')).toThrow('Invalid step');
+  });
 });
 
 describe('matches', () => {
