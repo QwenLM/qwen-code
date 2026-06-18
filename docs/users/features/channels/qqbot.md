@@ -4,16 +4,15 @@ This guide covers setting up a Qwen Code channel on QQ via the official QQ Bot O
 
 ## Prerequisites
 
-- A QQ account
-- A QQ Bot application registered on [QQ Bot Open Platform](https://q.qq.com/)
+- A QQ account (mobile app for scanning the QR code)
 
-## Getting Credentials
+## Setup
 
-You need an AppID and AppSecret from the QQ Bot Open Platform. There are two ways to provide them:
+The simplest way to get started is through QR code login — no developer account or manual app registration needed.
 
-### Option 1: QR Code Login (Recommended)
+### QR Code Login (Recommended)
 
-When no `appID` / `appSecret` is configured, the channel automatically launches a QR code login flow on first start. Scan the QR code with your QQ mobile app and the credentials are saved to `~/.qwen/channels/<name>-credentials.json` for future use.
+On first start, the channel automatically launches a QR code login flow. Scan the QR code with your QQ mobile app and the credentials are saved for future use.
 
 ```json
 {
@@ -25,9 +24,16 @@ When no `appID` / `appSecret` is configured, the channel automatically launches 
 }
 ```
 
-### Option 2: Manual Configuration
+```bash
+qwen channel start my-qq
+# Scan the QR code shown in the terminal with your QQ app
+```
 
-If you already have credentials from the developer portal (`https://q.qq.com/` → your app → Development → AppID / AppSecret), provide them directly:
+Credentials are persisted to `~/.qwen/channels/<name>-credentials.json` with restrictive permissions (`0o600`). You only need to scan once.
+
+### Manual Configuration
+
+If you already have credentials from the [QQ Bot Open Platform](https://q.qq.com/) developer portal, provide them directly:
 
 ```json
 {
@@ -174,7 +180,6 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 
 - The QR code is displayed in the terminal. Scan it with your QQ mobile app (Me → Scan)
 - If the QR code expires (typically after a few minutes), restart the channel to get a new one
-- As a fallback, provide `appID` and `appSecret` directly in the config
 
 ### Markdown messages appear as plain text
 
