@@ -584,9 +584,18 @@
       "type": "object",
       "properties": {
         "fileName": {
-          "description": "The name of the context file.",
-          "type": "object",
-          "additionalProperties": true
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "The name of the context file or files."
         },
         "importFormat": {
           "description": "The format to use when importing memory.",
