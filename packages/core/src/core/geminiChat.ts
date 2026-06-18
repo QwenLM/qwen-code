@@ -82,6 +82,7 @@ import {
   collectToolCallIdsFromHistory,
   normalizeModelToolCallIds,
 } from './toolCallIdUtils.js';
+import { createStreamIdleWatchdog, linkAbortSignal, type StreamIdleWatchdog, type InvalidStreamErrorType } from './streamIdleWatchdog.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -993,9 +994,9 @@ function stripThoughtPartsFromContent(content: Content): Content | null {
  * which should trigger a retry.
  */
 export class InvalidStreamError extends Error {
-  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT';
+  readonly type: InvalidStreamErrorType;
 
-  constructor(message: string, type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT') {
+  constructor(message: string, type: InvalidStreamErrorType) {
     super(message);
     this.name = 'InvalidStreamError';
     this.type = type;
@@ -2605,12 +2606,15 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const streamAbortController = new AbortController();
+    const cleanupAbortLink = linkAbortSignal(params.config?.abortSignal, streamAbortController);
+    const streamWatchdog = createStreamIdleWatchdog(model, streamAbortController);
     const apiCall = () =>
       this.config.getContentGenerator().generateContentStream(
         {
           model,
           contents: requestContents,
-          config: { ...this.generationConfig, ...params.config },
+          config: { ...this.generationConfig, ...params.config, abortSignal: streamAbortController.signal },
         },
         prompt_id,
       );
@@ -2660,7 +2664,13 @@ export class GeminiChat {
       },
     });
 
-    return this.processStreamResponse(model, streamResponse);
+    try {
+      return this.processStreamResponse(model, streamResponse, streamWatchdog, cleanupAbortLink);
+    } catch (error) {
+      streamWatchdog?.cleanup();
+      cleanupAbortLink?.();
+      throw error;
+    }
   }
 
   /**
@@ -2964,6 +2974,8 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
+    _streamWatchdog?: StreamIdleWatchdog,
+    _cleanupAbortLink?: () => void,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
