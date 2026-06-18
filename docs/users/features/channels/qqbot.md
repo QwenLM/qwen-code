@@ -116,14 +116,6 @@ If the QQ server rejects a Markdown message for any reason, the channel automati
 
 This is the opposite of the WeChat channel, which strips all Markdown. You can let the agent use full Markdown with the QQ channel.
 
-## Images and Files
-
-You can send photos and files to the bot in QQ, not just text.
-
-**Photos:** Send an image in the chat and the agent will analyze it using its vision capabilities. This requires a multimodal model — add `"model": "qwen3.5-plus"` (or another vision-capable model) to your channel config.
-
-**Files:** Send a document (PDF, code file, text file, etc.). The bot downloads it and the agent reads it with its file-reading tools. Works with any model.
-
 ## Token Management
 
 Access tokens expire after approximately 2 hours. The channel automatically refreshes them at 80% of their TTL (typically ~1.6 hours). If a refresh fails, it retries after 60 seconds.

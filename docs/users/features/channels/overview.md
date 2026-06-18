@@ -217,11 +217,11 @@ Files work with any model — no multimodal support required.
 
 ### Platform differences
 
-| Feature  | Telegram                                     | WeChat                           | QQ Bot                      | DingTalk                                      |
-| -------- | -------------------------------------------- | -------------------------------- | --------------------------- | --------------------------------------------- |
-| Images   | Direct download via Bot API                  | CDN download with AES decryption | Direct download via Bot API | downloadCode API (two-step)                   |
-| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | Direct download via Bot API | downloadCode API (two-step)                   |
-| Captions | Photo/file captions included as message text | Not applicable                   | Not applicable              | Rich text: mixed text + images in one message |
+| Feature  | Telegram                                     | WeChat                           | DingTalk                                      |
+| -------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- |
+| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   |
+| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   |
+| Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message |
 
 ## Dispatch Modes
 
