@@ -49,7 +49,15 @@ function isValidChatId(id: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
 }
 
-/** Detect whether text contains markdown syntax (for msg_type selection). */
+/**
+ * Detect whether text contains markdown syntax (for msg_type selection).
+ *
+ * The list-item patterns `^[-*+]\s` and `^\d+\.\s` trade precision for recall:
+ * text like "- temperature: 5°C" or "1. first thing" will trigger markdown
+ * mode. Sending non-markdown as msg_type=2 (markdown) is harmless — QQ renders
+ * it as plain text — so false positives are safe. False negatives (missing
+ * markdown in msg_type=0) would strip formatting, so we bias toward markdown.
+ */
 function hasMarkdownSyntax(text: string): boolean {
   return /^#{1,6}\s|`{3}|\*\*|__|~~|`[^`]+`|\[.+\]\(.+\)|^[-*+]\s|^\d+\.\s/m.test(
     text,
@@ -349,10 +357,15 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * ACP LoadSessionResponse has no sessionId field, so bridge.loadSession()
-   * returns undefined. SessionRouter.restoreSessions() stores undefined
-   * in its maps, which breaks session resolution. Fix by reading the
-   * correct sessionIds from the persisted sessions.json.
+   * Workaround for SessionRouter.restoreSessions() storing undefined sessionIds
+   * when ACP bridge.loadSession() fails to return a session_id.
+   *
+   * **Fragile**: accesses SessionRouter's private `toSession`/`toTarget`/`toCwd`
+   * maps via type coercion. If SessionRouter internals change, this breaks
+   * silently. The only signal will be cross-server conversations failing to
+   * restore after daemon restart — no crash, no log.
+   *
+   * If upstream SessionRouter adds a public fix for this, remove this method.
    */
   private fixRestoredSessions(): void {
     try {
@@ -664,6 +677,10 @@ export class QQChannel extends ChannelBase {
    * with exponential backoff. Keeps retrying until success.
    */
   private async reconnectWithRetry(): Promise<void> {
+    // Guard: if the channel was disposed (daemon shutdown) while a reconnect
+    // timeout was pending, bail out immediately to avoid an infinite loop.
+    if (this.disposed) return;
+
     const maxGwRetries = 5;
     for (let attempt = 0; attempt < maxGwRetries; attempt++) {
       try {
@@ -786,7 +803,12 @@ export class QQChannel extends ChannelBase {
     this.replyMsgId.set(chatId, event.id);
     this.saveQQState();
     const senderName = event.author.username || event.author.id || 'QQ User';
-    const cleanText = (event.content || '').replace(/<@!\d+>/g, '').trim();
+    // Strip @mention tags from message content. QQ Bot API docs state the API
+    // cleans these, but the format varies across API versions:
+    //   - Legacy: <@!12345> (numeric user ID with bang)
+    //   - V2:     <@D5B53C...> (hex openid, no bang)
+    // Use a broad pattern to handle both, and any future format changes.
+    const cleanText = (event.content || '').replace(/<@[^>]+>/g, '').trim();
     const isSlash = cleanText.startsWith('/');
     // Log slash commands with senderName for audit trail
     if (isSlash) {
@@ -805,7 +827,9 @@ export class QQChannel extends ChannelBase {
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
-      isReplyToBot: false,
+      // QQ Bot only receives group messages when explicitly @mentioned, so
+      // every group message is semantically a reply to the bot.
+      isReplyToBot: true,
     }).catch((e) =>
       process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
     );
