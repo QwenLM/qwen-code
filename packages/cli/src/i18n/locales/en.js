@@ -566,6 +566,52 @@ export default {
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
     'Show tool-specific usage statistics.',
+  'Show daily token usage statistics.': 'Show daily token usage statistics.',
+  'Show monthly token usage statistics.':
+    'Show monthly token usage statistics.',
+  'Export token usage statistics to CSV or JSON.':
+    'Export token usage statistics to CSV or JSON.',
+  'No usage data.': 'No usage data.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} requests)',
+  'Daily token usage for {{value}}': 'Daily token usage for {{value}}',
+  'Monthly token usage for {{value}}': 'Monthly token usage for {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requests: {{requests}}',
+  'Breakdown:': 'Breakdown:',
+  'Input: {{tokens}}': 'Input: {{tokens}}',
+  'Output: {{tokens}}': 'Output: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cached (included in Input): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Thoughts: {{tokens}}',
+  'By model:': 'By model:',
+  'By auth type:': 'By auth type:',
+  'By model/auth type:': 'By model/auth type:',
+  'By source:': 'By source:',
+  'Failed to load token usage stats: {{error}}':
+    'Failed to load token usage stats: {{error}}',
+  'Expected --format csv or --format json.':
+    'Expected --format csv or --format json.',
+  'Expected a file path after --output.':
+    'Expected a file path after --output.',
+  'Unexpected argument: {{argument}}': 'Unexpected argument: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Token usage export path must be within the project working directory.',
+  'Export target does not exist: {{path}}':
+    'Export target does not exist: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    'Cannot resolve export path within the working directory.',
+  'Could not create a temporary export file.':
+    'Could not create a temporary export file.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token usage exported to {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Failed to export token usage stats: {{error}}',
+  'Unclosed quote in arguments.': 'Unclosed quote in arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Note: generation timing (TTFT/TPS) belongs to generation metrics.',
   'exit the cli': 'exit the cli',
   'Manage workspace directories': 'Manage workspace directories',
   'Add directories to the workspace. Use comma to separate multiple paths':

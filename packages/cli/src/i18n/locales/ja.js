@@ -360,10 +360,53 @@ export default {
   'Auto (detect from system)': '自動(システムから検出)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
   Auto: '自動',
-  'check session stats. Usage: /stats [model|tools]':
-    'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
+  'Show daily token usage statistics.': '日次 token 使用統計を表示',
+  'Show monthly token usage statistics.': '月次 token 使用統計を表示',
+  'Export token usage statistics to CSV or JSON.':
+    'token 使用統計を CSV または JSON にエクスポート',
+  'No usage data.': '使用データはありません。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens（{{requests}} リクエスト）',
+  'Daily token usage for {{value}}': '{{value}} の日次 token 使用量',
+  'Monthly token usage for {{value}}': '{{value}} の月次 token 使用量',
+  'Total: {{tokens}} tokens': '合計: {{tokens}} tokens',
+  'Requests: {{requests}}': 'リクエスト数: {{requests}}',
+  'Breakdown:': '内訳:',
+  'Input: {{tokens}}': '入力: {{tokens}}',
+  'Output: {{tokens}}': '出力: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'キャッシュ（入力に含まれる）: {{tokens}}',
+  'Thoughts: {{tokens}}': '思考: {{tokens}}',
+  'By model:': 'モデル別:',
+  'By auth type:': '認証タイプ別:',
+  'By model/auth type:': 'モデル/認証タイプ別:',
+  'By source:': 'ソース別:',
+  'Failed to load token usage stats: {{error}}':
+    'token 使用統計の読み込みに失敗しました: {{error}}',
+  'Expected --format csv or --format json.':
+    '--format csv または --format json を指定してください。',
+  'Expected a file path after --output.':
+    '--output の後にファイルパスを指定してください。',
+  'Unexpected argument: {{argument}}': '予期しない引数: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '使い方: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'token 使用量のエクスポート先はプロジェクト作業ディレクトリ内である必要があります。',
+  'Export target does not exist: {{path}}':
+    'エクスポート先が存在しません: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    '作業ディレクトリ内でエクスポートパスを解決できません。',
+  'Could not create a temporary export file.':
+    '一時エクスポートファイルを作成できませんでした。',
+  'Token usage exported to {{format}}: {{path}}':
+    'token 使用量を {{format}} にエクスポートしました: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'token 使用統計のエクスポートに失敗しました: {{error}}',
+  'Unclosed quote in arguments.': '引数の引用符が閉じられていません。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注: 生成時間（TTFT/TPS）は生成メトリクスに属します。',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'ワークスペースにディレクトリを追加。複数パスはカンマで区切ってください',
