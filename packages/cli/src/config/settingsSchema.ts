@@ -1803,6 +1803,9 @@ const SETTINGS_SCHEMA = {
         description:
           'Sandbox execution environment (can be a boolean or a path string).',
         showInDialog: false,
+        jsonSchemaOverride: {
+          anyOf: [{ type: 'boolean' }, { type: 'string' }],
+        },
       },
       sandboxImage: {
         type: 'string',
