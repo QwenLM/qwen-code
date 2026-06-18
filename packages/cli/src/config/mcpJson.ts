@@ -26,12 +26,6 @@ export interface LoadProjectMcpServersResult {
   errors: string[];
 }
 
-const EMPTY: LoadProjectMcpServersResult = {
-  servers: {},
-  path: undefined,
-  errors: [],
-};
-
 /**
  * Load project-scoped MCP servers from `<projectRoot>/.mcp.json`.
  *
@@ -51,7 +45,7 @@ export function loadProjectMcpServers(
     raw = fs.readFileSync(filePath, 'utf-8');
   } catch {
     // Missing/unreadable file is the common case — not an error.
-    return EMPTY;
+    return { servers: {}, path: undefined, errors: [] };
   }
 
   let parsed: unknown;
