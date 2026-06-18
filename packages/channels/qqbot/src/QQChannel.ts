@@ -49,6 +49,13 @@ function isValidChatId(id: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
 }
 
+/** Detect whether text contains markdown syntax (for msg_type selection). */
+function hasMarkdownSyntax(text: string): boolean {
+  return /^#{1,6}\s|`{3}|\*\*|__|~~|`[^`]+`|\[.+\]\(.+\)|^[-*+]\s|^\d+\.\s/m.test(
+    text,
+  );
+}
+
 export class QQChannel extends ChannelBase {
   private ws: WebSocket | null = null;
   private accessToken: string = '';
@@ -174,13 +181,13 @@ export class QQChannel extends ChannelBase {
 
     // Capture msgId at send-time to avoid race on replyMsgId
     const msgId = this.replyMsgId.get(chatId);
+    const useMarkdown = hasMarkdownSyntax(text);
 
     for (const chunk of this.splitText(text)) {
       try {
-        const body: Record<string, unknown> = {
-          content: chunk,
-          msg_type: 0,
-        };
+        const body: Record<string, unknown> = useMarkdown
+          ? { msg_type: 2, markdown: { content: chunk } }
+          : { content: chunk, msg_type: 0 };
         // Multi-block streaming: set msg_id + incrementing msg_seq
         // seq incremented before send so we can track the next value
         const nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
