@@ -93,6 +93,8 @@ export class QQChannel extends ChannelBase {
   private lastHeartbeatAck: number = 0;
   /** Debounce timer for saveQQState to avoid blocking event loop. */
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Timer for reconnectWithRetry fallback (unref'd so it doesn't block exit). */
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
@@ -164,9 +166,9 @@ export class QQChannel extends ChannelBase {
     if (Date.now() >= this.tokenExpiresAt) {
       try {
         await this.fetchToken();
-      } catch {
+      } catch (e: unknown) {
         process.stderr.write(
-          `[QQ:${this.name}] Send skipped: token expired and refresh failed\n`,
+          `[QQ:${this.name}] Send skipped: token refresh failed — ${e instanceof Error ? e.message : String(e)}\n`,
         );
         return;
       }
@@ -233,6 +235,10 @@ export class QQChannel extends ChannelBase {
     if (this.seenCleanupTimer) {
       clearInterval(this.seenCleanupTimer);
       this.seenCleanupTimer = null;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
     this.flushQQState();
     this.backupGlobalSessions();
@@ -321,7 +327,10 @@ export class QQChannel extends ChannelBase {
       if (raw.replyMsgId) this.replyMsgId = new Map(raw.replyMsgId);
       if (raw.msgSeqMap) this.msgSeqMap = new Map(raw.msgSeqMap);
       return true;
-    } catch {
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] Failed to restore QQ state: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
       return false;
     }
   }
@@ -440,6 +449,7 @@ export class QQChannel extends ChannelBase {
   }
 
   private scheduleTokenRefresh(): void {
+    if (this.disposed) return;
     this.stopTokenRefresh();
     const ttl = Math.max(0, this.tokenExpiresAt - Date.now());
     // Refresh at 80% of TTL, minimum 60s before expiry
@@ -447,6 +457,7 @@ export class QQChannel extends ChannelBase {
     if (delay > 0) {
       this.tokenRefreshTimer = setTimeout(() => {
         this.fetchToken().catch((e) => {
+          if (this.disposed) return;
           process.stderr.write(
             `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
           );
@@ -454,6 +465,7 @@ export class QQChannel extends ChannelBase {
           // scheduleTokenRefresh (which would add another ~60s of
           // delay from the stale tokenExpiresAt).
           this.tokenRefreshTimer = setTimeout(() => {
+            if (this.disposed) return;
             this.fetchToken().catch(() => {
               process.stderr.write(
                 `[QQ:${this.name}] Token refresh failed again after retry\n`,
@@ -502,8 +514,10 @@ export class QQChannel extends ChannelBase {
       try {
         const msg = JSON.parse(data.toString());
         this.handleGatewayMessage(msg, resolve);
-      } catch {
-        // Ignore malformed messages
+      } catch (e) {
+        process.stderr.write(
+          `[QQ:${this.name}] Malformed gateway message: ${e instanceof Error ? e.message : String(e)}\n`,
+        );
       }
     });
 
@@ -576,10 +590,12 @@ export class QQChannel extends ChannelBase {
 
     switch (op) {
       case OpCode.HELLO: {
-        this.heartbeatInterval =
+        this.heartbeatInterval = Math.max(
           ((msg['d'] as Record<string, unknown> | undefined)?.[
             'heartbeat_interval'
-          ] as number) || 45000;
+          ] as number) || 45000,
+          5000,
+        );
         this.sendIdentify();
         break;
       }
@@ -626,22 +642,14 @@ export class QQChannel extends ChannelBase {
         } else if (t === 'GROUP_AT_MESSAGE_CREATE') {
           this.handleGroup(msg['d'] as unknown as QQGroupMessageEvent);
         } else if (t === 'RESUMED') {
-          // RESUME success — d is empty string, sessionId already stored from READY
+          // RESUME success — the process did NOT restart, all in-memory
+          // session state, QQ routing state, and global sessions.json are
+          // still intact. Calling restoreSessions() would drop and re-attach
+          // every session, aborting in-flight LLM prompts.
           this.reconnectAttempts = 0;
           this.connectReject = null;
           this.startHeartbeat();
-          // Defensive: restore state in case the daemon restarted between
-          // the original READY and this RESUME. Normally these are no-ops
-          // (backup already restored, QQ state already in memory).
-          this.restoreGlobalSessions();
-          this.restoreQQState();
-          this.router
-            .restoreSessions()
-            .then(() => {
-              this.fixRestoredSessions();
-              onReady();
-            })
-            .catch(() => onReady());
+          onReady();
         }
         break;
       }
@@ -653,7 +661,10 @@ export class QQChannel extends ChannelBase {
         this.ws?.close(4000);
         break;
       case OpCode.INVALID_SESSION:
-        this.tryResume = false; // RESUME failed, fall back to IDENTIFY
+        process.stderr.write(
+          `[QQ:${this.name}] Server sent INVALID_SESSION, falling back to IDENTIFY\n`,
+        );
+        this.tryResume = false;
         this.sendIdentify();
         break;
       default:
@@ -702,6 +713,13 @@ export class QQChannel extends ChannelBase {
     // timeout was pending, bail out immediately to avoid an infinite loop.
     if (this.disposed) return;
 
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      process.stderr.write(
+        `[QQ:${this.name}] RC: reconnect attempts exhausted, giving up\n`,
+      );
+      return;
+    }
+
     const maxGwRetries = 5;
     for (let attempt = 0; attempt < maxGwRetries; attempt++) {
       try {
@@ -731,7 +749,8 @@ export class QQChannel extends ChannelBase {
     );
     this.tryResume = false; // fall back to full IDENTIFY next time
     // Schedule another attempt with longer delay
-    setTimeout(() => this.reconnectWithRetry(), 60000);
+    this.reconnectTimer = setTimeout(() => this.reconnectWithRetry(), 60000);
+    this.reconnectTimer.unref();
   }
 
   private sleep(ms: number): Promise<void> {
