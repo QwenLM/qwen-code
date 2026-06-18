@@ -23,7 +23,6 @@ import type {
   AcpBridge,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
-import { qrConnect } from '@tencent-connect/qqbot-connector';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
@@ -32,6 +31,18 @@ import type {
   QQMessageEvent,
   QQGroupMessageEvent,
 } from './types.js';
+import {
+  getCredsFilePath,
+  loadCredentials,
+  saveCredentials,
+} from './accounts.js';
+import { qrCodeLogin } from './login.js';
+import {
+  fetchAccessToken,
+  fetchGatewayUrl,
+  getApiBase,
+  sendQQMessage,
+} from './api.js';
 
 /** Validate chatId to prevent SSRF when constructing URLs. */
 function isValidChatId(id: string): boolean {
@@ -154,9 +165,7 @@ export class QQChannel extends ChannelBase {
       return;
     }
 
-    const base = this.qqConfig.sandbox
-      ? 'https://sandbox.api.sgroup.qq.com'
-      : 'https://api.sgroup.qq.com';
+    const base = getApiBase(Boolean(this.qqConfig.sandbox));
 
     const isGroup = this.chatTypeMap.get(chatId) === 'group';
     const path = isGroup
@@ -180,15 +189,7 @@ export class QQChannel extends ChannelBase {
           body['msg_seq'] = nextSeq;
         }
 
-        const resp = await fetch(`${base}${path}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `QQBot ${this.accessToken}`,
-          },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(15_000),
-        });
+        const resp = await sendQQMessage(base, path, this.accessToken, body);
 
         if (!resp.ok) {
           // Drain response body to avoid socket leak
@@ -382,72 +383,38 @@ export class QQChannel extends ChannelBase {
 
   private async fetchToken(): Promise<void> {
     const safeName = this.name.replace(/[^A-Za-z0-9_-]/g, '_');
-    const credsFile = join(
-      getGlobalQwenDir(),
-      'channels',
-      `${safeName}-credentials.json`,
-    );
+    const credsFile = getCredsFilePath(safeName);
+
+    // Try load persisted credentials first, then fall back to config
     let appID = this.qqConfig.appID;
     let appSecret = this.qqConfig.appSecret;
 
-    // Try load from persisted credentials file first
-    if ((!appID || !appSecret) && existsSync(credsFile)) {
-      try {
-        const saved = JSON.parse(readFileSync(credsFile, 'utf-8'));
+    if (!appID || !appSecret) {
+      const saved = loadCredentials(credsFile);
+      if (saved) {
         appID = saved.appId;
         appSecret = saved.appSecret;
         this.qqConfig.appID = appID;
         this.qqConfig.appSecret = appSecret;
-      } catch {
-        /* corrupt file, fall through */
       }
     }
 
-    // If no credentials, launch QR code login
+    // If still no credentials, launch QR code login
     if (!appID || !appSecret) {
       process.stderr.write(
         `[QQ:${this.name}] No credentials, scan QR code with QQ...\n`,
       );
-      const [creds] = await qrConnect();
+      const creds = await qrCodeLogin();
       appID = creds.appId;
       appSecret = creds.appSecret;
       this.qqConfig.appID = appID;
       this.qqConfig.appSecret = appSecret;
-      // Persist to disk with restrictive permissions (mode: 0o600 avoids TOCTOU)
-      try {
-        const dir = join(getGlobalQwenDir(), 'channels');
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(credsFile, JSON.stringify({ appId: appID, appSecret }), {
-          mode: 0o600,
-        });
-      } catch {
-        /* non-fatal */
-      }
+      saveCredentials(credsFile, appID, appSecret);
     }
 
-    const resp = await fetch('https://bots.qq.com/app/getAppAccessToken', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId: appID, clientSecret: appSecret }),
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => '');
-      throw new Error(
-        `QQ Bot token request failed (HTTP ${resp.status}): ${body}`,
-      );
-    }
-
-    const data = (await resp.json()) as {
-      access_token?: string;
-      expires_in?: number;
-    };
-    if (!data.access_token) {
-      throw new Error('QQ Bot token response missing access_token');
-    }
-    this.accessToken = data.access_token;
-    this.tokenExpiresAt = Date.now() + (data.expires_in ?? 7200) * 1000;
+    const token = await fetchAccessToken(appID, appSecret);
+    this.accessToken = token.accessToken;
+    this.tokenExpiresAt = Date.now() + token.expiresIn * 1000;
     this.scheduleTokenRefresh();
   }
 
@@ -482,27 +449,14 @@ export class QQChannel extends ChannelBase {
 
   private async connectGateway(): Promise<void> {
     if (this.disposed) throw new Error('Channel disposed');
-    const gw = this.qqConfig.sandbox
-      ? 'https://sandbox.api.sgroup.qq.com/gateway'
-      : 'https://api.sgroup.qq.com/gateway';
-
-    const resp = await fetch(gw, {
-      headers: { Authorization: `QQBot ${this.accessToken}` },
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    if (!resp.ok) {
-      throw new Error(`QQ Bot gateway request failed (HTTP ${resp.status})`);
-    }
-
-    const data = (await resp.json()) as { url?: string };
-    if (!data['url']) {
-      throw new Error('QQ Bot gateway response missing WebSocket URL');
-    }
+    const url = await fetchGatewayUrl(
+      this.accessToken,
+      Boolean(this.qqConfig.sandbox),
+    );
 
     return new Promise<void>((resolve, reject) => {
       this.connectReject = reject;
-      this.dialGateway(data['url']!, resolve, reject);
+      this.dialGateway(url, resolve, reject);
     });
   }
 
