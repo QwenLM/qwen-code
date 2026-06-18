@@ -6,20 +6,23 @@ let builtinsPromise: Promise<void> | null = null;
 function ensureBuiltins(): Promise<void> {
   if (!builtinsPromise) {
     builtinsPromise = (async () => {
-      const results = await Promise.allSettled([
-        import('@qwen-code/channel-telegram'),
-        import('@qwen-code/channel-weixin'),
-        import('@qwen-code/channel-dingtalk'),
-        import('@qwen-code/channel-feishu'),
-        import('@qwen-code/channel-qqbot'),
-      ]);
+      const labelled = [
+        { name: 'telegram', promise: import('@qwen-code/channel-telegram') },
+        { name: 'weixin', promise: import('@qwen-code/channel-weixin') },
+        { name: 'dingtalk', promise: import('@qwen-code/channel-dingtalk') },
+        { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
+        { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
+      ];
 
-      for (const result of results) {
+      const results = await Promise.allSettled(labelled.map((l) => l.promise));
+
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i]!;
         if (result.status === 'fulfilled') {
           registry.set(result.value.plugin.channelType, result.value.plugin);
         } else {
           process.stderr.write(
-            `[channel-registry] Failed to load a built-in channel: ${result.reason}\n`,
+            `[channel-registry] Failed to load "${labelled[i]!.name}" channel: ${result.reason}\n`,
           );
         }
       }
