@@ -63,6 +63,20 @@ describe('idealabProvider', () => {
     });
   });
 
+  it('does not mark kimi-k2.6 as multimodal', () => {
+    const plan = buildInstallPlan(idealabProvider, {
+      baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+      apiKey: 'sk-idealab',
+      modelIds: ['bailian/kimi-k2.6'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models?.[0]?.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 262144,
+    });
+  });
+
   it('falls back gracefully for unknown model IDs', () => {
     const plan = buildInstallPlan(idealabProvider, {
       baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
