@@ -47,7 +47,10 @@ import {
   type InitializationResult,
 } from './core/initializer.js';
 import { handleList as handleListExtensions } from './commands/extensions/list.js';
-import { initializeI18n, type SupportedLanguage } from './i18n/index.js';
+import {
+  initializeI18n,
+  resolveLanguageSetting,
+} from './i18n/index.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import {
   setupStartupWorktree,
@@ -475,11 +478,9 @@ export async function main() {
   }
 
   if (argv.listExtensions) {
-    const langSetting =
-      process.env['QWEN_CODE_LANG'] ||
-      (settings.merged.general?.language as string) ||
-      'auto';
-    await initializeI18n(langSetting as SupportedLanguage | 'auto');
+    await initializeI18n(
+      resolveLanguageSetting(settings.merged.general?.language as string),
+    );
     await handleListExtensions();
     process.exit(0);
   }

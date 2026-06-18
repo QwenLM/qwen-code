@@ -140,32 +140,6 @@
       "env": {
         "GEMINI_SANDBOX": "false"
       }
-    },
-    {
-      "type": "node",
-      "request": "launch",
-      "name": "Dev Extensions List (zh)",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "extensions", "list"],
-      "skipFiles": ["<node_internals>/**"],
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "env": {
-        "QWEN_CODE_LANG": "zh"
-      }
-    },
-    {
-      "type": "node",
-      "request": "launch",
-      "name": "Dev Extensions List (en)",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "extensions", "list"],
-      "skipFiles": ["<node_internals>/**"],
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "env": {
-        "QWEN_CODE_LANG": "en"
-      }
     }
   ],
   "inputs": [
