@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
   formatToolDisplayName,
+  getAgentCurrentToolHint,
   getToolDescription,
   getToolResultSummary,
   localizeToolDisplayName,
+  TOOL_DISPLAY_NAMES,
 } from './toolFormatting';
 import { getTranslator } from '../../i18n';
 
@@ -211,6 +213,31 @@ describe('toolFormatting', () => {
       expect(
         localizeToolDisplayName('mystery_tool', getTranslator('zh-CN')),
       ).toBe('mystery_tool');
+    });
+
+    it('has a zh translation for every tool in the display-name map', () => {
+      const tZh = getTranslator('zh-CN');
+      const untranslated = Object.keys(TOOL_DISPLAY_NAMES).filter(
+        (wire) =>
+          localizeToolDisplayName(wire, tZh) === formatToolDisplayName(wire),
+      );
+      expect(untranslated).toEqual([]);
+    });
+
+    it('localizes the tool name in the agent activity hint', () => {
+      const agent = tool({
+        toolName: 'agent',
+        status: 'in_progress',
+        subTools: [
+          tool({ toolName: 'run_shell_command', status: 'in_progress' }),
+        ],
+      });
+      expect(getAgentCurrentToolHint(agent, getTranslator('zh-CN'))).toContain(
+        '终端',
+      );
+      expect(getAgentCurrentToolHint(agent, getTranslator('en'))).toContain(
+        'Shell',
+      );
     });
   });
 });

@@ -1,6 +1,6 @@
 import type { ACPToolCall } from '../../adapters/types';
 
-const TOOL_DISPLAY_NAMES: Record<string, string> = {
+export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
