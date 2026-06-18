@@ -95,6 +95,8 @@ export class QQChannel extends ChannelBase {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   /** Timer for reconnectWithRetry fallback (unref'd so it doesn't block exit). */
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Guard against parallel reconnectWithRetry chains from stale close events. */
+  private isReconnecting: boolean = false;
 
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
@@ -327,6 +329,7 @@ export class QQChannel extends ChannelBase {
             replyMsgId: Array.from(this.replyMsgId.entries()),
             msgSeqMap: Array.from(this.msgSeqMap.entries()),
           }),
+          { mode: 0o600 },
         );
       } catch {
         /* best-effort */
@@ -384,7 +387,8 @@ export class QQChannel extends ChannelBase {
     try {
       if (existsSync(this.globalSessionsPath)) {
         const data = readFileSync(this.globalSessionsPath, 'utf-8');
-        if (data.trim()) writeFileSync(this.sessionsBackupPath, data);
+        if (data.trim())
+          writeFileSync(this.sessionsBackupPath, data, { mode: 0o600 });
       }
     } catch {
       /* best-effort */
@@ -400,6 +404,7 @@ export class QQChannel extends ChannelBase {
         writeFileSync(
           this.globalSessionsPath,
           readFileSync(this.sessionsBackupPath, 'utf-8'),
+          { mode: 0o600 },
         );
       }
     } catch {
@@ -546,6 +551,7 @@ export class QQChannel extends ChannelBase {
     reject: (err: Error) => void,
   ): void {
     this.ws = new WebSocket(url);
+    const dialed = this.ws; // capture for stale-close guard
 
     this.ws.on('open', () => {
       process.stderr.write(`[QQ:${this.name}] WebSocket connected\n`);
@@ -563,6 +569,10 @@ export class QQChannel extends ChannelBase {
     });
 
     this.ws.on('close', (code: number) => {
+      // Stale-close guard: if a new dialGateway() call has since
+      // replaced this.ws, this close event belongs to a dead socket
+      // and must not nuke the live connection.
+      if (this.ws !== dialed) return;
       process.stderr.write(
         `[QQ:${this.name}] WebSocket closed (code=${code})\n`,
       );
@@ -590,7 +600,9 @@ export class QQChannel extends ChannelBase {
         process.stderr.write(
           `[QQ:${this.name}] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})\n`,
         );
-        setTimeout(() => this.reconnectWithRetry(), delay);
+        if (!this.isReconnecting) {
+          setTimeout(() => this.reconnectWithRetry(), delay);
+        }
       } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
         process.stderr.write(
           `[QQ:${this.name}] FATAL: reconnect exhausted after ${this.maxReconnectAttempts} attempts. Bot is offline until daemon restart.\n`,
@@ -647,6 +659,7 @@ export class QQChannel extends ChannelBase {
 
         if (t === 'READY') {
           this.reconnectAttempts = 0;
+          this.isReconnecting = false;
           this.sessionId =
             ((msg['d'] as Record<string, unknown> | undefined)?.[
               'session_id'
@@ -688,6 +701,7 @@ export class QQChannel extends ChannelBase {
           // still intact. Calling restoreSessions() would drop and re-attach
           // every session, aborting in-flight LLM prompts.
           this.reconnectAttempts = 0;
+          this.isReconnecting = false;
           this.connectReject = null;
           this.startHeartbeat();
           onReady();
@@ -753,11 +767,16 @@ export class QQChannel extends ChannelBase {
     // Guard: if the channel was disposed (daemon shutdown) while a reconnect
     // timeout was pending, bail out immediately to avoid an infinite loop.
     if (this.disposed) return;
+    // Guard: prevent parallel reconnection chains when multiple close events
+    // fire in rapid succession, each scheduling reconnectWithRetry.
+    if (this.isReconnecting) return;
+    this.isReconnecting = true;
 
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       process.stderr.write(
         `[QQ:${this.name}] RC: reconnect attempts exhausted, giving up\n`,
       );
+      this.isReconnecting = false;
       return;
     }
 
@@ -789,6 +808,7 @@ export class QQChannel extends ChannelBase {
       `[QQ:${this.name}] RC: exhausted ${maxGwRetries} gateway retries, will retry in 60s\n`,
     );
     this.tryResume = false; // fall back to full IDENTIFY next time
+    this.isReconnecting = false; // release guard for future retries
     // Schedule another attempt with longer delay
     this.reconnectTimer = setTimeout(() => this.reconnectWithRetry(), 60000);
     this.reconnectTimer.unref();
