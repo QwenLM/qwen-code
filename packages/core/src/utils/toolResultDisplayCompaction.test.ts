@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
+  FileDiff,
   McpToolProgressData,
   PlanResultDisplay,
   TaskListResultDisplay,
@@ -21,8 +22,26 @@ import {
   compactToolResultDisplayForRecording,
   MAX_RETAINED_AGENT_FIELD_CHARS,
   MAX_RETAINED_ANSI_OUTPUT_LINES,
+  MAX_RETAINED_FILE_CONTENT_CHARS,
+  MAX_RETAINED_FILE_DIFF_CHARS,
   MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
 } from './toolResultDisplayCompaction.js';
+
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        return true;
+      }
+      index++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
 
 describe('toolResultDisplayCompaction', () => {
   it('keeps short strings unchanged', () => {
@@ -69,6 +88,20 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted).not.toContain('\uFFFD');
   });
 
+  it('does not split surrogate pairs at compaction boundaries', () => {
+    const limit = 80;
+    const emoji = '😀';
+    // With this length and limit, the raw head/tail cuts land inside each emoji.
+    const value = `${'h'.repeat(8)}${emoji}${'m'.repeat(
+      183,
+    )}${emoji}${'t'.repeat(5)}`;
+
+    const compacted = compactStringForHistory(value, limit);
+
+    expect(compacted.length).toBeLessThanOrEqual(limit);
+    expect(hasUnpairedSurrogate(compacted)).toBe(false);
+  });
+
   it('drops subagent display fields that are not rendered in CLI history', () => {
     const nestedDisplay = `nested-${'x'.repeat(
       MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
@@ -108,6 +141,76 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted.toolCalls?.[1].resultDisplay).toContain('nested-');
     expect(compacted.toolCalls?.[1].resultDisplay).toContain('-done');
     expect(compacted.toolCalls?.[1].resultDisplay).toContain('truncated from');
+  });
+
+  it('compacts file diffs through the history display path', () => {
+    const display: FileDiff = {
+      fileName: 'large.txt',
+      fileDiff: `diff-${'d'.repeat(MAX_RETAINED_FILE_DIFF_CHARS)}-done`,
+      originalContent: `old-${'o'.repeat(
+        MAX_RETAINED_FILE_CONTENT_CHARS,
+      )}-done`,
+      newContent: `new-${'n'.repeat(MAX_RETAINED_FILE_CONTENT_CHARS)}-done`,
+      diffStat: {
+        model_added_lines: 1,
+        model_removed_lines: 1,
+        model_added_chars: 1,
+        model_removed_chars: 1,
+        user_added_lines: 0,
+        user_removed_lines: 0,
+        user_added_chars: 0,
+        user_removed_chars: 0,
+      },
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted).not.toBe(display);
+    expect(compacted.fileDiff.length).toBeLessThanOrEqual(
+      MAX_RETAINED_FILE_DIFF_CHARS,
+    );
+    expect(compacted.originalContent?.length).toBeLessThanOrEqual(
+      MAX_RETAINED_FILE_CONTENT_CHARS,
+    );
+    expect(compacted.newContent.length).toBeLessThanOrEqual(
+      MAX_RETAINED_FILE_CONTENT_CHARS,
+    );
+    expect(compacted.truncatedForSession).toBe(true);
+    expect(compacted.fileDiffLength).toBe(display.fileDiff.length);
+    expect(compacted.originalContentLength).toBe(
+      display.originalContent?.length,
+    );
+    expect(compacted.newContentLength).toBe(display.newContent.length);
+    expect(compacted.fileDiffTruncated).toBe(true);
+    expect(compacted.originalContentTruncated).toBe(true);
+    expect(compacted.newContentTruncated).toBe(true);
+    expect(display.truncatedForSession).toBeUndefined();
+  });
+
+  it('preserves null original content when compacting file diffs', () => {
+    const display: FileDiff = {
+      fileName: 'new.txt',
+      fileDiff: 'new file',
+      originalContent: null,
+      newContent: `new-${'n'.repeat(MAX_RETAINED_FILE_CONTENT_CHARS)}-done`,
+      diffStat: {
+        model_added_lines: 1,
+        model_removed_lines: 0,
+        model_added_chars: 1,
+        model_removed_chars: 0,
+        user_added_lines: 0,
+        user_removed_lines: 0,
+        user_added_chars: 0,
+        user_removed_chars: 0,
+      },
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted.originalContent).toBeNull();
+    expect(compacted.originalContentLength).toBe(0);
+    expect(compacted.originalContentTruncated).toBe(false);
+    expect(compacted.newContentTruncated).toBe(true);
   });
 
   it('compacts ansi output tokens under the retained line limit', () => {

@@ -29,6 +29,31 @@ function copyString(value: string): string {
   return value.split('').join('');
 }
 
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+function splitSurrogatePairAt(value: string, index: number): boolean {
+  return (
+    index > 0 &&
+    index < value.length &&
+    isHighSurrogate(value.charCodeAt(index - 1)) &&
+    isLowSurrogate(value.charCodeAt(index))
+  );
+}
+
+function safeHeadEnd(value: string, index: number): number {
+  return splitSurrogatePairAt(value, index) ? index - 1 : index;
+}
+
+function safeTailStart(value: string, index: number): number {
+  return splitSurrogatePairAt(value, index) ? index + 1 : index;
+}
+
 function buildStringCompactionMarker(
   value: string,
   purpose: CompactionPurpose,
@@ -62,9 +87,10 @@ function compactString(
   const contentBudget = Math.max(0, limit - marker.length);
   const headLength = Math.ceil(contentBudget * 0.6);
   const tailLength = contentBudget - headLength;
-  const head = copyString(value.slice(0, headLength));
-  const tail =
-    tailLength > 0 ? copyString(value.slice(value.length - tailLength)) : '';
+  const headEnd = safeHeadEnd(value, headLength);
+  const tailStart = safeTailStart(value, value.length - tailLength);
+  const head = copyString(value.slice(0, headEnd));
+  const tail = tailLength > 0 ? copyString(value.slice(tailStart)) : '';
 
   return head + marker + tail;
 }

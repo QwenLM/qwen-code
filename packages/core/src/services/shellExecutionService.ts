@@ -1594,43 +1594,51 @@ export class ShellExecutionService {
             abortSignal.removeEventListener('abort', abortHandler);
 
             const finalize = async () => {
-              render(true);
               const finalBuffer = Buffer.concat(outputChunks);
               let fullOutput = '';
 
               try {
-                if (isStreamingRawContent) {
-                  // Re-decode the captured buffer with proper encoding detection.
-                  // The streaming decoder used the first-chunk heuristic which
-                  // can misdetect when early output is ASCII-only but later
-                  // output is in a different encoding (e.g. GBK).
-                  const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
-                  const decodedOutput = new TextDecoder(finalEncoding).decode(
-                    finalBuffer,
-                  );
-                  fullOutput = await replayTerminalOutput(
-                    decodedOutput,
-                    cols,
-                    rows,
-                  );
-                } else {
-                  fullOutput = serializeTerminalToText(headlessTerminal);
-                }
-              } catch {
                 try {
-                  fullOutput = decodeBufferedOutput(finalBuffer);
-                } catch {
-                  // Ignore fallback rendering errors and resolve with empty text.
+                  render(true);
+                } catch (e) {
+                  debugLogger.warn(
+                    `Final PTY render threw during cleanup: ${e instanceof Error ? e.message : String(e)}`,
+                  );
                 }
-              }
-              fullOutput = appendOutputCaptureLimitNotice(
-                fullOutput,
-                outputCaptureLimitExceeded,
-                totalBytesReceived,
-                maxBufferedOutputBytes,
-              );
 
-              try {
+                try {
+                  if (isStreamingRawContent) {
+                    // Re-decode the captured buffer with proper encoding detection.
+                    // The streaming decoder used the first-chunk heuristic which
+                    // can misdetect when early output is ASCII-only but later
+                    // output is in a different encoding (e.g. GBK).
+                    const finalEncoding =
+                      getCachedEncodingForBuffer(finalBuffer);
+                    const decodedOutput = new TextDecoder(finalEncoding).decode(
+                      finalBuffer,
+                    );
+                    fullOutput = await replayTerminalOutput(
+                      decodedOutput,
+                      cols,
+                      rows,
+                    );
+                  } else {
+                    fullOutput = serializeTerminalToText(headlessTerminal);
+                  }
+                } catch {
+                  try {
+                    fullOutput = decodeBufferedOutput(finalBuffer);
+                  } catch {
+                    // Ignore fallback rendering errors and resolve with empty text.
+                  }
+                }
+                fullOutput = appendOutputCaptureLimitNotice(
+                  fullOutput,
+                  outputCaptureLimitExceeded,
+                  totalBytesReceived,
+                  maxBufferedOutputBytes,
+                );
+
                 resolve({
                   rawOutput: finalBuffer,
                   output: fullOutput,
