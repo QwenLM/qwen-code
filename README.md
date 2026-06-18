@@ -26,7 +26,7 @@
 - **Beyond the terminal** — IDE plugins, Desktop app, daemon mode, SDKs, and IM bots (Telegram / DingTalk / WeChat / Feishu).
 
 > [!TIP]
-> Qwen Code is actively iterating on itself — using its own agent and models to file issues, submit PRs, review code, run tests, and approve merges. It has already become the **#2 contributor** to this repository. Powered by the community, driven by AI.
+> Qwen Code is actively iterating on itself — using its own agent and models to file issues, submit PRs, review code, and run tests. Powered by the community, driven by AI.
 
 ## Installation
 
@@ -69,6 +69,8 @@ qwen          # Launch interactive terminal UI
 /auth         # Configure your provider and API key
 ```
 
+See the [Authentication Guide](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/) and [Settings Reference](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/) for detailed setup.
+
 ![Qwen Code](https://img.alicdn.com/imgextra/i2/O1CN01K0nwj41RM1Il8kB0t_!!6000000002096-2-tps-1544-1060.png)
 
 ## How to Use Qwen Code
@@ -79,7 +81,7 @@ qwen          # Launch interactive terminal UI
 | **Headless**    | `qwen -p "..."` | Scripts, CI/CD, batch processing — no UI                                                                                                                                                                                                        |
 | **IDE**         | —               | [VS Code](https://qwenlm.github.io/qwen-code-docs/en/users/integration-vscode/), [Zed](https://qwenlm.github.io/qwen-code-docs/en/users/integration-zed/), [JetBrains](https://qwenlm.github.io/qwen-code-docs/en/users/integration-jetbrains/) |
 | **Desktop**     | —               | [Qwen Code Desktop](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) — GUI for macOS, Windows, Linux                                                                                                                            |
-| **Daemon**      | `qwen serve`    | Shared agent session over HTTP+SSE (ACP). Multiple clients, one agent. [Docs](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve)                                                                                                      |
+| **Daemon**      | `qwen serve`    | Shared agent session over HTTP+SSE (ACP). Multiple clients, one agent. _(experimental)_ [Docs](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve)                                                                                     |
 | **SDK**         | —               | [TypeScript](./packages/sdk-typescript/README.md), [Python](./packages/sdk-python/README.md), [Java](./packages/sdk-java/qwencode/README.md)                                                                                                    |
 | **IM Bot**      | `qwen channel`  | Connect to Telegram, DingTalk, WeChat, or Feishu                                                                                                                                                                                                |
 
@@ -119,12 +121,12 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 | ------------------------------------------------------------------ | :-------: | :---------: |
 | SubAgents, Agent Teams, Dynamic Workflows                          |     ✓     |      ✓      |
 | Auto-Memory, Auto-Skills, Hooks                                    |     ✓     |      ✓      |
-| Built-in Skills (/review, /batch, /loop, /debug…)                  |     ✓     |      ✓      |
+| Built-in Skills (/review, /batch, /loop, /bugfix…)                 |     ✓     |      ✓      |
 | MCP, Plan Mode, LSP Integration                                    |     ✓     |      ✓      |
 | Auto Mode, Sandbox, Git Worktrees                                  |     ✓     |      ✓      |
 | Computer Use (desktop automation)                                  |     ✓     |      ✓      |
 | IDE Plugins (VS Code / JetBrains / Zed)                            |     ✓     |      ✓      |
-| SDK (TypeScript / Python / Java)                                   |     ✓     |      ✓      |
+| SDK                                                                |     ✓     |      ✓      |
 | Headless Mode, Session Management                                  |     ✓     |      ✓      |
 | Open-source — model and framework                                  |     ✓     |      —      |
 | Multi-protocol (OpenAI / Anthropic / Gemini / Qwen + any provider) |     ✓     |      —      |
@@ -152,4 +154,4 @@ Contributions are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelin
 
 ## Acknowledgments
 
-This project was originally based on [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) v0.8. We gratefully acknowledge the Gemini CLI team's excellent work. Starting from Qwen Code v0.1, we stopped syncing with upstream and began independent development as a multi-protocol, multi-platform agent framework with deep integrations for Qwen models and beyond.
+This project was originally based on [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) v0.8.2. We gratefully acknowledge the Gemini CLI team's excellent work. Starting from Qwen Code v0.1, we stopped syncing with upstream and began independent development as a multi-protocol, multi-platform agent framework with deep integrations for Qwen models and beyond.
