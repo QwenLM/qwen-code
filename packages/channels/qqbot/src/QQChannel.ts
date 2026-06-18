@@ -35,7 +35,7 @@ import type {
 
 /** Validate chatId to prevent SSRF when constructing URLs. */
 function isValidChatId(id: string): boolean {
-  return /^[A-Za-z0-9_\-./]+$/.test(id) && id.length <= 128;
+  return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
 }
 
 export class QQChannel extends ChannelBase {
@@ -113,6 +113,7 @@ export class QQChannel extends ChannelBase {
   // ── ChannelBase interface ──────────────────────────────────────
 
   async connect(): Promise<void> {
+    this.disposed = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.fetchToken();
@@ -133,6 +134,16 @@ export class QQChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    if (Date.now() >= this.tokenExpiresAt) {
+      try {
+        await this.fetchToken();
+      } catch {
+        process.stderr.write(
+          `[QQ:${this.name}] Send skipped: token expired and refresh failed\n`,
+        );
+        return;
+      }
+    }
     if (!this.accessToken) {
       process.stderr.write(`[QQ:${this.name}] Send skipped: no access token\n`);
       return;
@@ -221,6 +232,23 @@ export class QQChannel extends ChannelBase {
     this.msgSeqMap.clear();
   }
 
+  /**
+   * QQ Bot API V2 does not provide a typing indicator endpoint.
+   * ChannelBase calls these hooks to signal prompt start/end;
+   * they are intentionally no-ops for this channel.
+   */
+  protected override onPromptStart(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
+  protected override onPromptEnd(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
   // ── State Persistence (cross-server context continuation) ──────
 
   /** Debounced state persistence to avoid blocking event loop. */
@@ -262,6 +290,12 @@ export class QQChannel extends ChannelBase {
     }
   }
 
+  /**
+   * Restore QQ routing state from disk.
+   * Trusts persisted JSON — if the file is corrupt, new Map() may create
+   * entries with undefined values, causing get()===undefined to fall through
+   * to default routing (C2C). This is acceptable for a rare edge case.
+   */
   private restoreQQState(): boolean {
     try {
       if (!existsSync(this.qqStatePath)) return false;
@@ -601,6 +635,18 @@ export class QQChannel extends ChannelBase {
           this.handleC2C(msg['d'] as unknown as QQMessageEvent);
         } else if (t === 'GROUP_AT_MESSAGE_CREATE') {
           this.handleGroup(msg['d'] as unknown as QQGroupMessageEvent);
+        } else if (t === 'RESUMED') {
+          // RESUME success — d is empty string, sessionId already stored from READY
+          this.reconnectAttempts = 0;
+          this.connectReject = null;
+          this.startHeartbeat();
+          this.router
+            .restoreSessions()
+            .then(() => {
+              this.fixRestoredSessions();
+              onReady();
+            })
+            .catch(() => onReady());
         }
         break;
       }
@@ -743,6 +789,10 @@ export class QQChannel extends ChannelBase {
 
   private handleC2C(event: QQMessageEvent): void {
     if (this.isDuplicate(event.id)) return;
+    // user_openid and author.id are scoped differently — falling back to
+    // author.id may produce a different identity for the same user across
+    // C2C and group contexts, creating two separate sessions. QQ Bot does
+    // not expose a unified user identity, so this is unavoidable.
     const chatId = event.author.user_openid || event.author.id;
     this.chatTypeMap.set(chatId, 'c2c');
     this.replyMsgId.set(chatId, event.id);
@@ -802,7 +852,14 @@ export class QQChannel extends ChannelBase {
 
   // ── Helpers ────────────────────────────────────────────────────
 
-  /** Split long text into QQ-compatible chunks (max 2000 chars each). */
+  /**
+   * Split long text into QQ-compatible chunks (max 2000 chars each).
+   *
+   * Uses UTF-16 code-unit length — in the extremely rare case that the
+   * 2000-unit boundary falls in the middle of a surrogate pair (emoji),
+   * that character will be garbled. QQ chat messages rarely approach
+   * this limit at a boundary that aligns with a high-codepoint character.
+   */
   private splitText(text: string): string[] {
     const MAX = 2000;
     if (text.length <= MAX) return [text];
