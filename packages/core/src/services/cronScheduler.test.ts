@@ -593,7 +593,7 @@ describe('CronScheduler', () => {
       expect(scheduler.sessionSize).toBe(0);
     });
 
-    it('lists wakeups without counting them against the cron job limit', () => {
+    it('lists wakeups as active scheduler work', () => {
       scheduler.scheduleWakeup(300, 'p');
       expect(scheduler.list()).toMatchObject([
         {
@@ -604,7 +604,7 @@ describe('CronScheduler', () => {
           jitterMs: 0,
         },
       ]);
-      expect(scheduler.size).toBe(0);
+      expect(scheduler.size).toBe(1);
     });
 
     it('does not count wakeups against the cron job limit', () => {
@@ -613,7 +613,7 @@ describe('CronScheduler', () => {
       }
 
       expect(() => scheduler.scheduleWakeup(300, 'wake up')).not.toThrow();
-      expect(scheduler.size).toBe(50);
+      expect(scheduler.size).toBe(51);
       expect(scheduler.sessionSize).toBe(51);
     });
 
