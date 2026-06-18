@@ -4,11 +4,8 @@
  * Encapsulates all REST calls to the QQ Bot API:
  *  - Access token issuance
  *  - WebSocket Gateway URL resolution
- *  - Message sending (text / markdown / ark / media)
- *  - Rich media file upload
+ *  - Message sending (text / markdown)
  */
-
-import type { MediaUploadResponse } from './types.js';
 
 const TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken';
 const API_HOST = 'https://api.sgroup.qq.com';
@@ -107,53 +104,4 @@ export async function sendQQMessage(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
-}
-
-/**
- * Upload a rich media file to QQ's backend for later use in msg_type=7 messages.
- *
- * C2C and group uploads are separate — file_info from a C2C upload cannot be
- * sent to a group and vice versa. The returned file_info has a TTL; once it
- * expires the file must be re-uploaded.
- *
- * @param fileType — 1=image, 2=video, 3=voice, 4=file (4 is C2C-only)
- * @param url — publicly-accessible URL of the media file
- * @param srvSendMsg — if true, QQ sends the message directly and returns an id
- */
-export async function uploadQQMedia(
-  base: string,
-  path: string,
-  accessToken: string,
-  fileType: number,
-  url: string,
-  srvSendMsg = false,
-): Promise<MediaUploadResponse> {
-  const resp = await fetch(`${base}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `QQBot ${accessToken}`,
-    },
-    body: JSON.stringify({
-      file_type: fileType,
-      url,
-      srv_send_msg: srvSendMsg,
-    }),
-    signal: AbortSignal.timeout(60_000), // uploads may take longer
-  });
-
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(
-      `QQ Bot media upload failed (HTTP ${resp.status}): ${body.slice(0, 200)}`,
-    );
-  }
-
-  const data = (await resp.json()) as MediaUploadResponse;
-  if (!data.file_info || !data.file_uuid) {
-    throw new Error(
-      'QQ Bot media upload response missing file_info or file_uuid',
-    );
-  }
-  return data;
 }

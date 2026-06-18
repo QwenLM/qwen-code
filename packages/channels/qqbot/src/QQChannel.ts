@@ -25,12 +25,11 @@ import type {
 import WebSocket from 'ws';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { OpCode, Intent, FileType } from './types.js';
+import { OpCode, Intent } from './types.js';
 import type {
   QQChannelConfig,
   QQMessageEvent,
   QQGroupMessageEvent,
-  ArkKV,
 } from './types.js';
 import {
   getCredsFilePath,
@@ -43,7 +42,6 @@ import {
   fetchGatewayUrl,
   getApiBase,
   sendQQMessage,
-  uploadQQMedia,
 } from './api.js';
 
 /** Validate chatId to prevent SSRF when constructing URLs. */
@@ -64,67 +62,6 @@ function hasMarkdownSyntax(text: string): boolean {
   return /^#{1,6}\s|`{3}|\*\*|__|~~|`[^`]+`|\[.+\]\(.+\)|^[-*+]\s|^\d+\.\s/m.test(
     text,
   );
-}
-
-/**
- * Parse !ark(template_id, key=val, …) syntax from LLM text.
- * Returns null if the text doesn't start with !ark(.
- */
-function parseArkCommand(
-  text: string,
-): { templateId: number; kv: ArkKV[] } | null {
-  const m = text.match(/^!ark\((\d+),\s*(.+)\)$/s);
-  if (!m) return null;
-  const templateId = parseInt(m[1]!, 10);
-  const kv: ArkKV[] = [];
-  // Split on commas, but respect quoted values and parentheses nesting
-  const pairs = m[2]!.match(/(?:[^,"']+|"[^"]*"|'[^']*')+/g) || [];
-  for (const p of pairs) {
-    const eq = p.indexOf('=');
-    if (eq === -1) continue;
-    const key = p.slice(0, eq).trim();
-    const value = p
-      .slice(eq + 1)
-      .trim()
-      .replace(/^["']|["']$/g, '');
-    kv.push({ key, value });
-  }
-  return { templateId, kv };
-}
-
-/**
- * Parse !media(type, url, [caption]) syntax from LLM text.
- * Returns null if the text doesn't start with !media(.
- */
-function parseMediaCommand(
-  text: string,
-): { fileType: number; url: string; caption?: string } | null {
-  const m = text.match(/^!media\((\w+),\s*([^,\n]+?)(?:,\s*(.+))?\)$/s);
-  if (!m) return null;
-  const typeMap: Record<string, number> = {
-    image: 1,
-    img: 1,
-    picture: 1,
-    photo: 1,
-    图片: 1,
-    video: 2,
-    视频: 2,
-    voice: 3,
-    audio: 3,
-    语音: 3,
-    音频: 3,
-    file: 4,
-    doc: 4,
-    document: 4,
-    文件: 4,
-  };
-  const fileType = typeMap[m[1]!.toLowerCase()];
-  if (!fileType) return null;
-  return {
-    fileType,
-    url: m[2]!.trim(),
-    caption: m[3]?.trim() || undefined,
-  };
 }
 
 export class QQChannel extends ChannelBase {
@@ -206,43 +143,12 @@ export class QQChannel extends ChannelBase {
   async connect(): Promise<void> {
     this.disposed = false;
     if (!this.config.instructions) {
-      const parts = [
+      this.config.instructions = [
         '## QQ Bot Channel',
         '',
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
         '回复控制在 2000 字符以内（超长会自动分块），支持 Markdown 格式。',
-      ];
-      if (this.qqConfig.enableArk) {
-        parts.push(
-          '',
-          '### 富卡片消息（Ark 模板）',
-          '如需发送结构化内容（带图/链接的卡片），在回复中用以下语法：',
-          '  !ark(模板ID, 变量名=值, ...)',
-          '模板ID:',
-          '  23 — 链接+文本列表（适合多条目+跳转）',
-          '  24 — 文字+缩略图（适合带图摘要）',
-          '  37 — 大图（适合海报/封面）',
-          '变量名以 # 开头，例如 `#TITLE#=标题`, `#META_URL#=https://...`',
-        );
-      }
-      if (this.qqConfig.enableMedia) {
-        parts.push(
-          '',
-          '### 图片/视频/语音/文件（Media 富媒体）',
-          '如需发送图片、视频、语音或文件，在回复中用：',
-          '  !media(类型, 文件URL, [说明文字])',
-          '类型: image/picture/photo, video, voice/audio, file/doc',
-          '文件URL 必须是公网可访问的链接。file 类型仅支持私聊（群聊会拦截）。',
-        );
-      }
-      if (this.qqConfig.enableArk || this.qqConfig.enableMedia) {
-        parts.push(
-          '',
-          '### 恢复正常文本回复',
-          '不需要卡片/媒体时，直接正常回复，不要带 !ark 或 !media 前缀。',
-        );
-      }
-      this.config.instructions = parts.join('\n');
+      ].join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -264,27 +170,6 @@ export class QQChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    // ── Route !ark / !media commands from LLM text ───────────
-    if (this.qqConfig.enableArk) {
-      const arkCmd = parseArkCommand(text.trim());
-      if (arkCmd) {
-        await this.sendArk(chatId, arkCmd.templateId, arkCmd.kv);
-        return;
-      }
-    }
-    if (this.qqConfig.enableMedia) {
-      const mediaCmd = parseMediaCommand(text.trim());
-      if (mediaCmd) {
-        await this.sendMedia(
-          chatId,
-          mediaCmd.fileType,
-          mediaCmd.url,
-          mediaCmd.caption,
-        );
-        return;
-      }
-    }
-
     // ── Normal text / markdown flow ──────────────────────────
     const route = await this.resolveRoute(chatId);
     if (!route) return;
@@ -382,116 +267,6 @@ export class QQChannel extends ChannelBase {
         ? `/v2/groups/${chatId}/messages`
         : `/v2/users/${chatId}/messages`;
     return { base, path };
-  }
-
-  /**
-   * Send an Ark template message (msg_type=3).
-   *
-   * Ark messages use pre-defined templates with key-value substitution.
-   * Three default templates are available:
-   *   23 — link + text list
-   *   24 — text + thumbnail
-   *   37 — large image
-   *
-   * C2C replies: 60-min window, 5 replies per message.
-   * Group replies: 5-min window, 5 replies per message.
-   */
-  async sendArk(
-    chatId: string,
-    templateId: number,
-    kv: ArkKV[],
-  ): Promise<void> {
-    const route = await this.resolveRoute(chatId);
-    if (!route) return;
-
-    const msgId = this.replyMsgId.get(chatId);
-    const body: Record<string, unknown> = {
-      msg_type: 3,
-      ark: { template_id: templateId, kv },
-    };
-    if (msgId) body['msg_id'] = msgId;
-
-    const resp = await sendQQMessage(
-      route.base,
-      route.path,
-      this.accessToken,
-      body,
-    );
-    if (!resp.ok) {
-      const errBody = await resp.text().catch(() => '');
-      process.stderr.write(
-        `[QQ:${this.name}] Ark send HTTP ${resp.status}: ${errBody.slice(0, 200)}\n`,
-      );
-    }
-  }
-
-  /**
-   * Upload and send a rich media message (msg_type=7).
-   *
-   * C2C and group uploads are separate — a file_info from a C2C upload
-   * cannot be sent to a group and vice versa. Uploaded files have a TTL
-   * (typically 7 days) and must be re-uploaded after expiry.
-   *
-   * @param fileType — 1=image, 2=video, 3=voice, 4=file
-   *   File type 4 (file/document) is C2C-only; group upload rejects it.
-   * @param fileUrl — publicly-accessible URL of the media file
-   * @param text — optional caption text sent alongside the media
-   */
-  async sendMedia(
-    chatId: string,
-    fileType: number,
-    fileUrl: string,
-    text?: string,
-  ): Promise<void> {
-    const route = await this.resolveRoute(chatId);
-    if (!route) return;
-
-    const isGroup = this.chatTypeMap.get(chatId) === 'group';
-    if (isGroup && fileType === FileType.FILE) {
-      process.stderr.write(
-        `[QQ:${this.name}] Media send skipped: file_type=4 (文件) not supported in group chats\n`,
-      );
-      return;
-    }
-
-    const uploadPath = isGroup
-      ? `/v2/groups/${chatId}/files`
-      : `/v2/users/${chatId}/files`;
-
-    try {
-      const uploaded = await uploadQQMedia(
-        route.base,
-        uploadPath,
-        this.accessToken,
-        fileType,
-        fileUrl,
-      );
-
-      const msgId = this.replyMsgId.get(chatId);
-      const body: Record<string, unknown> = {
-        msg_type: 7,
-        media: { file_info: uploaded.file_info },
-      };
-      if (msgId) body['msg_id'] = msgId;
-      if (text) body['content'] = text;
-
-      const resp = await sendQQMessage(
-        route.base,
-        route.path,
-        this.accessToken,
-        body,
-      );
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        process.stderr.write(
-          `[QQ:${this.name}] Media send HTTP ${resp.status}: ${errBody.slice(0, 200)}\n`,
-        );
-      }
-    } catch (e: unknown) {
-      process.stderr.write(
-        `[QQ:${this.name}] Media send error: ${e instanceof Error ? e.message : String(e)}\n`,
-      );
-    }
   }
 
   disconnect(): void {
