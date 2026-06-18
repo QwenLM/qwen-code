@@ -205,6 +205,32 @@ export class QQChannel extends ChannelBase {
 
   async connect(): Promise<void> {
     this.disposed = false;
+    if (!this.config.instructions) {
+      this.config.instructions = [
+        '## QQ Bot Channel',
+        '',
+        '你是通过 QQ Bot 与用户对话的 AI 助手。',
+        '回复控制在 2000 字符以内（超长会自动分块），支持 Markdown 格式。',
+        '',
+        '### 富卡片消息（Ark 模板）',
+        '如需发送结构化内容（带图/链接的卡片），在回复中用以下语法：',
+        '  !ark(模板ID, 变量名=值, ...)',
+        '模板ID:',
+        '  23 — 链接+文本列表（适合多条目+跳转）',
+        '  24 — 文字+缩略图（适合带图摘要）',
+        '  37 — 大图（适合海报/封面）',
+        '变量名以 # 开头，例如 `#TITLE#=标题`, `#META_URL#=https://...`',
+        '',
+        '### 图片/视频/语音/文件（Media 富媒体）',
+        '如需发送图片、视频、语音或文件，在回复中用：',
+        '  !media(类型, 文件URL, [说明文字])',
+        '类型: image/picture/photo, video, voice/audio, file/doc',
+        '文件URL 必须是公网可访问的链接。file 类型仅支持私聊（群聊会拦截）。',
+        '',
+        '### 恢复正常文本回复',
+        '不需要卡片/媒体时，直接正常回复即可，不要带 !ark 或 !media 前缀。',
+      ].join('\n');
+    }
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.fetchToken();
