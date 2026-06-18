@@ -16,8 +16,8 @@ export const OpCode = {
 
 /** QQ Bot WebSocket intents. */
 export const Intent = {
-  C2C_MESSAGE: 1 << 12,        // C2C 消息
-  GROUP_AT_MESSAGE: 1 << 25,   // 群聊 @ 消息事件
+  C2C_MESSAGE: 1 << 12, // C2C 消息
+  GROUP_AT_MESSAGE: 1 << 25, // 群聊 @ 消息事件
 } as const;
 
 export interface QQMessageEvent {
@@ -39,4 +39,50 @@ export interface QQChannelConfig {
   appID?: string;
   appSecret?: string;
   sandbox?: boolean;
+}
+
+// ── Ark message ──────────────────────────────────────────────────
+
+/** Key-value pair for Ark template variable substitution. */
+export interface ArkKV {
+  key: string;
+  value?: string;
+  /** Object array for list-type template variables. */
+  obj?: Array<{ obj_kv: ArkKV[] }>;
+}
+
+/** Ark message payload (msg_type=3). */
+export interface ArkPayload {
+  template_id: number;
+  kv: ArkKV[];
+}
+
+// ── Media message ───────────────────────────────────────────────
+
+/** File type for media upload. 4 (file) is C2C-only; groups block it. */
+export const FileType = {
+  IMAGE: 1,
+  VIDEO: 2,
+  VOICE: 3,
+  FILE: 4,
+} as const;
+
+/** Media upload request body. */
+export interface MediaUploadRequest {
+  file_type: number;
+  url: string;
+  srv_send_msg: boolean;
+}
+
+/** Media upload response. */
+export interface MediaUploadResponse {
+  file_uuid: string;
+  file_info: string;
+  ttl: number;
+  id?: string;
+}
+
+/** Media message payload (msg_type=7). */
+export interface MediaPayload {
+  file_info: string;
 }
