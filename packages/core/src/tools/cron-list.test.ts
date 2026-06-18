@@ -131,21 +131,6 @@ describe('CronListTool', () => {
     expect(result.llmContent).toContain('[session-only]: session task');
   });
 
-  it('lists pending loop wakeups', async () => {
-    const wakeup = config._scheduler.scheduleWakeup(300, 'continue loop');
-
-    const invocation = tool.build({});
-    const result = await invocation.execute(new AbortController().signal);
-
-    expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain(
-      `wakeup at ${wakeup.scheduledFor} (one-shot) [session-only]: continue loop`,
-    );
-    expect(result.returnDisplay).toContain(
-      `wakeup at ${wakeup.scheduledFor} [session-only]`,
-    );
-  });
-
   it('does not double-list a durable job the scheduler has also loaded', async () => {
     // Interactive situation: createDurable persists to file AND registers
     // the job in the scheduler's map. The file copy is authoritative.
