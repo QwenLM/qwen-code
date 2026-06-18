@@ -45,7 +45,7 @@ import {
 } from './api.js';
 
 /** Validate chatId to prevent SSRF when constructing URLs. */
-function isValidChatId(id: string): boolean {
+export function isValidChatId(id: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
 }
 
@@ -58,10 +58,28 @@ function isValidChatId(id: string): boolean {
  * it as plain text — so false positives are safe. False negatives (missing
  * markdown in msg_type=0) would strip formatting, so we bias toward markdown.
  */
-function hasMarkdownSyntax(text: string): boolean {
+export function hasMarkdownSyntax(text: string): boolean {
   return /^#{1,6}\s|`{3}|\*\*|__|~~|`[^`]+`|\[.+\]\(.+\)|^[-*+]\s|^\d+\.\s/m.test(
     text,
   );
+}
+
+/**
+ * Split long text into QQ-compatible chunks (max 2000 chars each).
+ *
+ * Uses UTF-16 code-unit length — in the extremely rare case that the
+ * 2000-unit boundary falls in the middle of a surrogate pair (emoji),
+ * that character will be garbled. QQ chat messages rarely approach
+ * this limit at a boundary that aligns with a high-codepoint character.
+ */
+export function splitText(text: string): string[] {
+  const MAX = 2000;
+  if (text.length <= MAX) return [text];
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += MAX) {
+    chunks.push(text.slice(i, i + MAX));
+  }
+  return chunks;
 }
 
 export class QQChannel extends ChannelBase {
@@ -179,7 +197,7 @@ export class QQChannel extends ChannelBase {
     const msgId = this.replyMsgId.get(chatId);
     const useMarkdown = hasMarkdownSyntax(text);
 
-    for (const chunk of this.splitText(text)) {
+    for (const chunk of splitText(text)) {
       try {
         const body: Record<string, unknown> = useMarkdown
           ? { msg_type: 2, markdown: { content: chunk } }
@@ -939,25 +957,5 @@ export class QQChannel extends ChannelBase {
     }).catch((e) =>
       process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
     );
-  }
-
-  // ── Helpers ────────────────────────────────────────────────────
-
-  /**
-   * Split long text into QQ-compatible chunks (max 2000 chars each).
-   *
-   * Uses UTF-16 code-unit length — in the extremely rare case that the
-   * 2000-unit boundary falls in the middle of a surrogate pair (emoji),
-   * that character will be garbled. QQ chat messages rarely approach
-   * this limit at a boundary that aligns with a high-codepoint character.
-   */
-  private splitText(text: string): string[] {
-    const MAX = 2000;
-    if (text.length <= MAX) return [text];
-    const chunks: string[] = [];
-    for (let i = 0; i < text.length; i += MAX) {
-      chunks.push(text.slice(i, i + MAX));
-    }
-    return chunks;
   }
 }
