@@ -6697,6 +6697,78 @@ describe('Session', () => {
       expect(laterExecute).not.toHaveBeenCalled();
     });
 
+    it('cleans up Agent sub-agent listeners when permission request fails before execution', async () => {
+      const eventEmitter = new EventEmitter();
+      const execute = vi.fn();
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build: vi.fn().mockReturnValue({
+          params: { subagent_type: 'explore' },
+          eventEmitter,
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'info',
+            title: 'Agent permission',
+            prompt: 'Allow agent?',
+            onConfirm,
+          }),
+          getDescription: vi.fn().mockReturnValue('Agent'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      vi.mocked(mockClient.requestPermission).mockRejectedValueOnce(
+        new Error('client disconnected'),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-agent-permission-failed',
+        [
+          {
+            id: 'agent_call',
+            name: core.ToolNames.AGENT,
+            args: { subagent_type: 'explore' },
+          },
+        ],
+      );
+
+      eventEmitter.emit(core.AgentEventType.TOOL_RESULT, {
+        subagentId: 'subagent-1',
+        round: 1,
+        callId: 'late_tool',
+        name: core.ToolNames.SHELL,
+        success: true,
+        responseParts: [{ text: 'late result' }],
+        resultDisplay: 'late result',
+        timestamp: Date.now(),
+      });
+      await Promise.resolve();
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(execute).not.toHaveBeenCalled();
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+      );
+      const subagentUpdates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([params]) => params.update)
+        .filter(
+          (update) =>
+            update.sessionUpdate === 'tool_call_update' &&
+            update._meta?.provenance === 'subagent',
+        );
+      expect(subagentUpdates).toEqual([]);
+    });
+
     it('stops and aborts Agent tool execution after nested ask_user_question cancellation', async () => {
       const eventEmitter = new EventEmitter();
       let executeSignal: AbortSignal | undefined;
@@ -7191,6 +7263,113 @@ describe('Session', () => {
       expect(shellExecute).not.toHaveBeenCalled();
       expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
         'agent_question',
+        'agent_sibling',
+        'shell_after',
+      ]);
+      expect(result.parts[2]?.functionResponse?.response).toEqual({
+        error:
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+      });
+    });
+
+    it('skips later sequential batches after nested non-question permission cancellation', async () => {
+      const permissionEventEmitter = new EventEmitter();
+      const siblingEventEmitter = new EventEmitter();
+      let siblingSignal: AbortSignal | undefined;
+      const respond = vi.fn().mockResolvedValue(undefined);
+      const permissionExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          emitNestedInfoPermission(permissionEventEmitter, respond);
+          await vi.waitFor(() => {
+            expect(signal.aborted).toBe(true);
+          });
+          return {
+            llmContent: 'agent stopped',
+            returnDisplay: 'agent stopped',
+          };
+        });
+      const siblingExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          siblingSignal = signal;
+          await waitForAbortOrTick(signal);
+          return {
+            llmContent: 'sibling stopped',
+            returnDisplay: 'sibling stopped',
+          };
+        });
+      const shellExecute = vi.fn().mockResolvedValue({
+        llmContent: 'shell result',
+        returnDisplay: 'shell result',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) => {
+        if (name !== core.ToolNames.AGENT) {
+          return mockAllowedTool(name, shellExecute);
+        }
+        return {
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            const isPermissionAgent = args['_test_id'] === 'permission';
+            return {
+              params: { subagent_type: 'explore', ...args },
+              eventEmitter: isPermissionAgent
+                ? permissionEventEmitter
+                : siblingEventEmitter,
+              execute: isPermissionAgent ? permissionExecute : siblingExecute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Agent'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            };
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        };
+      });
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-agent-shell-cancel',
+        [
+          {
+            id: 'agent_permission',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'permission', subagent_type: 'explore' },
+          },
+          {
+            id: 'agent_sibling',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'sibling', subagent_type: 'explore' },
+          },
+          {
+            id: 'shell_after',
+            name: core.ToolNames.SHELL,
+            args: { command: 'echo should-not-run' },
+          },
+        ],
+      );
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(permissionExecute).toHaveBeenCalledOnce();
+      expect(siblingExecute).toHaveBeenCalledOnce();
+      expect(siblingSignal?.aborted).toBe(true);
+      expect(shellExecute).not.toHaveBeenCalled();
+      expect(respond).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+        {
+          answers: undefined,
+        },
+      );
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'agent_permission',
         'agent_sibling',
         'shell_after',
       ]);

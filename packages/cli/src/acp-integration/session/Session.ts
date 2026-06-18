@@ -3281,6 +3281,14 @@ export class Session implements SessionContext {
     let nestedPermissionCancelled = false;
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
+    let subAgentCleanupFunctions: Array<() => void> = [];
+
+    const cleanupAgentToolResources = () => {
+      subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+      subAgentCleanupFunctions = [];
+      removeAgentToolAbortPropagation?.();
+      removeAgentToolAbortPropagation = undefined;
+    };
 
     const errorResponse = (error: Error) => {
       const durationMs = Date.now() - startTime;
@@ -3318,7 +3326,7 @@ export class Session implements SessionContext {
       opts?: { stopAfterPermissionCancel?: boolean },
     ) => {
       spanError = error.message;
-      removeAgentToolAbortPropagation?.();
+      cleanupAgentToolResources();
       if (toolName !== ToolNames.TODO_WRITE) {
         await this.toolCallEmitter.emitError(callId, toolName, error);
       }
@@ -3394,9 +3402,6 @@ export class Session implements SessionContext {
             };
           }
         }
-
-        // Track cleanup functions for sub-agent event listeners
-        let subAgentCleanupFunctions: Array<() => void> = [];
 
         // Generate tool_use_id for hook tracking (aligned with core path)
         const toolUseId = generateToolUseId();
@@ -3940,8 +3945,7 @@ export class Session implements SessionContext {
           }
 
           // Clean up event listeners
-          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-          removeAgentToolAbortPropagation?.();
+          cleanupAgentToolResources();
 
           // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
           // approval mode inside execute() without going through the user-confirmation
@@ -4124,8 +4128,7 @@ export class Session implements SessionContext {
           };
         } catch (e) {
           // Ensure cleanup on error
-          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-          removeAgentToolAbortPropagation?.();
+          cleanupAgentToolResources();
 
           const error = e instanceof Error ? e : new Error(String(e));
           spanError = error.message;
