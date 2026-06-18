@@ -58,6 +58,11 @@ import type {
   QwenSkillSetEnabledResult,
 } from '../../protocol/dto.ts';
 
+export interface MidTurnMessageMetadata {
+  messageId?: string;
+  optimisticMessageId?: string;
+}
+
 /**
  * Provider identifier for AI backends.
  * @deprecated Use ModelProvider from config/models.ts instead
@@ -269,7 +274,7 @@ export interface CoreBackendConfig {
    * Callback when ACP has consumed queued mid-turn user messages.
    * Hosts can use this as an acknowledgement to remove replay fallbacks.
    */
-  onMidTurnMessagesDrained?: (messages: string[]) => void;
+  onMidTurnMessagesDrained?: (messageIds: string[]) => void;
 
   /** Callback when a backend reports its live model list for the session. */
   onAvailableModelsUpdate?: (
@@ -473,7 +478,11 @@ export interface AgentBackend {
    * the message was drained, so backends can accept candidates before knowing
    * whether this turn will actually produce a tool boundary.
    */
-  enqueueMidTurnMessage?(message: string): boolean;
+  enqueueMidTurnMessage?(
+    message: string,
+    attachments?: FileAttachment[],
+    metadata?: MidTurnMessageMetadata,
+  ): boolean;
 
   /**
    * Run a simple text completion using the backend's auth infrastructure.

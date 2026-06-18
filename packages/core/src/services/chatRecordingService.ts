@@ -1264,6 +1264,17 @@ export class ChatRecordingService {
   }
 
   /**
+   * Returns the currently registered title-recorded callback.
+   * Used to chain callbacks (e.g., when a UI component needs to observe
+   * title changes without replacing an existing ACP notification callback).
+   */
+  getTitleRecordedCallback():
+    | ((customTitle: string, titleSource: TitleSource) => void)
+    | undefined {
+    return this.titleRecordedCallback;
+  }
+
+  /**
    * Records a custom title for the session.
    * Appended as a system record so it persists with the session data.
    * Also caches the title in memory for re-append on shutdown.

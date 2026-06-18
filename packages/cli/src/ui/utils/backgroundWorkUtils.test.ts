@@ -15,6 +15,7 @@ function createMockConfig(overrides?: {
   hasUnfinalizedTasks?: boolean;
   runningMonitors?: unknown[];
   hasRunningEntries?: boolean;
+  hasRunningWorkflows?: boolean;
 }): Config {
   return {
     getBackgroundTaskRegistry: () => ({
@@ -27,6 +28,10 @@ function createMockConfig(overrides?: {
     }),
     getBackgroundShellRegistry: () => ({
       hasRunningEntries: () => overrides?.hasRunningEntries ?? false,
+      reset: vi.fn(),
+    }),
+    getWorkflowRunRegistry: () => ({
+      hasRunningEntries: () => overrides?.hasRunningWorkflows ?? false,
       reset: vi.fn(),
     }),
   } as unknown as Config;
@@ -56,6 +61,17 @@ describe('hasBlockingBackgroundWork', () => {
   it('returns true when shell entries are running', () => {
     expect(
       hasBlockingBackgroundWork(createMockConfig({ hasRunningEntries: true })),
+    ).toBe(true);
+  });
+
+  // R7 (wenshao): workflow registry is the 4th sibling. Without
+  // including it in the OR chain, /clear and session-resume happily
+  // ran while a workflow was mid-run, orphaning the dispatch loop.
+  it('returns true when a workflow is still running', () => {
+    expect(
+      hasBlockingBackgroundWork(
+        createMockConfig({ hasRunningWorkflows: true }),
+      ),
     ).toBe(true);
   });
 
@@ -96,15 +112,17 @@ describe('hasBlockingBackgroundWork', () => {
 });
 
 describe('resetBackgroundStateForSessionSwitch', () => {
-  it('calls reset on all three registries', () => {
+  it('calls reset on all four registries', () => {
     const resetTasks = vi.fn();
     const resetMonitors = vi.fn();
     const resetShells = vi.fn();
+    const resetWorkflows = vi.fn();
 
     const config = {
       getBackgroundTaskRegistry: () => ({ reset: resetTasks }),
       getMonitorRegistry: () => ({ reset: resetMonitors }),
       getBackgroundShellRegistry: () => ({ reset: resetShells }),
+      getWorkflowRunRegistry: () => ({ reset: resetWorkflows }),
     } as unknown as Config;
 
     resetBackgroundStateForSessionSwitch(config);
@@ -112,5 +130,6 @@ describe('resetBackgroundStateForSessionSwitch', () => {
     expect(resetTasks).toHaveBeenCalledOnce();
     expect(resetMonitors).toHaveBeenCalledOnce();
     expect(resetShells).toHaveBeenCalledOnce();
+    expect(resetWorkflows).toHaveBeenCalledOnce();
   });
 });

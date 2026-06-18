@@ -23,7 +23,9 @@ const rootDir = join(__dirname, '..');
 // Budget includes the DaemonTransport interface + DaemonTransportClosedError +
 // RestSseTransport (default transport, constructed by DaemonClient).
 // Bumped from 116KB to 118KB for the transport abstraction layer (~1.5KB).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 118 * 1024;
+// Bumped from 118KB to 119KB for the mid-turn drain surface (enqueue methods +
+// `mid_turn_message_injected` event type/guard/registration, ~150 bytes).
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 119 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });

@@ -1,36 +1,36 @@
-# 可观测性与调试
+# Observability & Debugging
 
-## 概览
+## Overview
 
-`qwen serve` 当下带 **OpenTelemetry span instrumentation**、**结构化文件日志**（`DaemonLogger`）、**per-request access-log**、debug stderr 日志、结构化 preflight cell、内存权限审计环。本文是一份针对当前 surface 的实用指南，外加排查时应当意识到的现状缺口。
+`qwen serve` currently ships with **OpenTelemetry span instrumentation**, **structured file logs** (`DaemonLogger`), **per-request access logs**, debug stderr logs, structured preflight cells, and an in-memory permission audit ring. This page is a practical guide to the current observability surface and the gaps to remember during triage.
 
-## 当下有什么
+## What exists today
 
-| Surface                                     | 位置                                            | 用途                                                                                                                                                                                                                                                 |
-| ------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QWEN_SERVE_DEBUG` stderr 日志              | `bridge.ts` 及调用点                            | env 设 `1` / `true` / `on` / `yes`（不区分大小写），stderr 出现 `qwen serve debug: ...` 行                                                                                                                                                           |
-| OpenTelemetry span instrumentation          | `server.ts` `daemonTelemetryMiddleware`         | 每个 HTTP 请求包在 `withDaemonRequestSpan` 中；属性含 route、sessionId、clientId、status code。权限路由有独立 span。prompt lifecycle 全程 tracing。配置见 `settings.json` 的 `telemetry` 段                                                          |
-| `DaemonLogger` 结构化文件日志               | `serve/daemonLogger.ts`                         | 结构化 JSON-like 日志行写入文件（启动时打印路径 `daemon log -> <path>`）；支持 `info`/`warn`/`error` 级别，上下文含 `route`、`sessionId`、`clientId`、`childPid`、`channelId` 等结构化字段                                                           |
-| per-request access-log middleware           | `server.ts`（`bearerAuth` 之前注册）            | 每请求完成时记录 `method`、`path`、`status`、`durationMs`、`sessionId`、`clientId`（跳过 `GET /health` 和 heartbeat）。4xx+ 用 `warn` 级，成功用 `info` 级                                                                                           |
-| `/health`                                   | `server.ts` 路由                                | Liveness 探针；`?deep=1` 返回扩展信息                                                                                                                                                                                                                |
-| `/capabilities`                             | `server.ts` 路由                                | pre-flight feature（见 [`11-capabilities-versioning.md`](./11-capabilities-versioning.md)）                                                                                                                                                          |
-| `/workspace/preflight`                      | 路由 → `DaemonStatusProvider`                   | 结构化 readiness cell（Node 版本、CLI 入口、ripgrep、git、npm，子进程活着后多出 ACP 级 cell）                                                                                                                                                        |
-| `/workspace/env`                            | 路由 → `DaemonStatusProvider`                   | daemon 进程 env 快照（机密 env 只报存在性、剥去 proxy URL 凭证）                                                                                                                                                                                     |
-| `/workspace/mcp`                            | 路由 → bridge extMethod                         | 池 / 预算 / 拒绝快照                                                                                                                                                                                                                                 |
-| `/workspace/skills`、`/workspace/providers` | 路由                                            | ACP 侧实时快照（无 session 时返回空 idle）                                                                                                                                                                                                           |
-| per-session SSE                             | `GET /session/:id/events`                       | 实时事件流                                                                                                                                                                                                                                           |
-| `/demo` 调试控制台                          | `GET /demo`（`packages/cli/src/serve/demo.ts`） | 浏览器可访问的单页控制台（聊天 + 事件日志 + workspace 检视 + 权限 UX）。loopback 上 `http://127.0.0.1:4170/demo` 直接开 —— 不写 SDK 就能端到端把 daemon 跑起来的最快方式。loopback-vs-auth 注册规则见 [`02-serve-runtime.md`](./02-serve-runtime.md) |
-| `PermissionAuditRing`                       | `permissionAudit.ts`                            | 内存 FIFO（512 条）权限决策                                                                                                                                                                                                                          |
-| mediator 的 `decisionReason` 审计           | `permissionMediator.ts`                         | 内部结构化「为什么这样裁决」记录                                                                                                                                                                                                                     |
+| Surface                                     | Location                                       | Purpose                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_SERVE_DEBUG` stderr logs              | `bridge.ts` and call sites                     | Env values `1` / `true` / `on` / `yes` (case-insensitive) print `qwen serve debug: ...` lines to stderr.                                                                                                                                                                                  |
+| OpenTelemetry span instrumentation          | `server.ts` `daemonTelemetryMiddleware`        | Each HTTP request is wrapped in `withDaemonRequestSpan`; attributes include route, sessionId, clientId, and status code. Permission routes have dedicated spans. Prompt lifecycle is traced end-to-end. Configuration lives in `settings.json` `telemetry`.                               |
+| `DaemonLogger` structured file logs         | `serve/daemonLogger.ts`                        | Structured JSON-like log lines are written to a file. Boot prints `daemon log -> <path>`. Supports `info` / `warn` / `error` levels, with structured fields such as `route`, `sessionId`, `clientId`, `childPid`, and `channelId`.                                                        |
+| Per-request access-log middleware           | `server.ts`, registered before `bearerAuth`    | Logs `method`, `path`, `status`, `durationMs`, `sessionId`, and `clientId` after each request. Skips `GET /health` and heartbeat. 4xx+ uses `warn`; success uses `info`.                                                                                                                  |
+| `/health`                                   | `server.ts` route                              | Liveness probe; `?deep=1` returns extended details.                                                                                                                                                                                                                                       |
+| `/capabilities`                             | `server.ts` route                              | Preflight feature discovery. See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).                                                                                                                                                                                      |
+| `/workspace/preflight`                      | Route -> `DaemonStatusProvider`                | Structured readiness cells: Node version, CLI entry, ripgrep, git, npm, plus ACP-level cells once a child is alive.                                                                                                                                                                       |
+| `/workspace/env`                            | Route -> `DaemonStatusProvider`                | Daemon process env snapshot. Secret env vars report only presence; proxy URL credentials are stripped.                                                                                                                                                                                    |
+| `/workspace/mcp`                            | Route -> bridge extMethod                      | Pool, budget, and refusal snapshot.                                                                                                                                                                                                                                                       |
+| `/workspace/skills`, `/workspace/providers` | Routes                                         | ACP-side live snapshots; return empty idle data when no session exists.                                                                                                                                                                                                                   |
+| Per-session SSE                             | `GET /session/:id/events`                      | Real-time event stream.                                                                                                                                                                                                                                                                   |
+| `/demo` debug console                       | `GET /demo` (`packages/cli/src/serve/demo.ts`) | Browser-accessible single-page console: chat, event log, workspace inspector, and permission UX. On loopback, `http://127.0.0.1:4170/demo` is the quickest end-to-end validation path without writing SDK code. Registration rules are in [`02-serve-runtime.md`](./02-serve-runtime.md). |
+| `PermissionAuditRing`                       | `permissionAudit.ts`                           | In-memory FIFO of 512 permission decisions.                                                                                                                                                                                                                                               |
+| Mediator `decisionReason` audit             | `permissionMediator.ts`                        | Internal structured record explaining why a permission request resolved the way it did.                                                                                                                                                                                                   |
 
-## 当下**没有**什么
+## What does not exist today
 
-- **没有 Prometheus / metrics 端点**。没有 `process_cpu_seconds_total`、`http_requests_total`、`event_bus_queue_depth` 等。
-- **`PermissionAuditRing` 无外部 audit sink 接线** —— 环存在，但向 SIEM / 外部存储扇出的钩子还没。
+- **No Prometheus / metrics endpoint.** There is no `process_cpu_seconds_total`, `http_requests_total`, or `event_bus_queue_depth`.
+- **No external audit sink for `PermissionAuditRing`.** The ring exists, but fan-out hooks to SIEM or external storage are not wired.
 
-## 调试套路
+## Debugging recipes
 
-### 1. daemon 还活着吗？
+### 1. Is the daemon alive?
 
 ```bash
 curl -s http://127.0.0.1:4170/health
@@ -40,25 +40,25 @@ curl -s 'http://127.0.0.1:4170/health?deep=1' | jq
 # {"status":"ok","workspaceCwd":"/path","sessions":N,...}
 ```
 
-loopback 上 401 → 看 `--require-auth` 是否开（或 `QWEN_SERVE_DEBUG=1` 看启动日志）。
+A 401 on loopback means `--require-auth` is likely enabled. Use `QWEN_SERVE_DEBUG=1` at startup to see boot logs.
 
-### 2. daemon 广播了哪些 feature？
+### 2. Which features are advertised?
 
 ```bash
 curl -s http://127.0.0.1:4170/capabilities | jq
 ```
 
-看：`mcp_workspace_pool`（F2 开？）、`require_auth`（加固？）、`permission_mediation.modes`（支持哪些策略？）、`policy.permission`（激活哪一条？）。
+Check `mcp_workspace_pool` (F2 pool on?), `require_auth` (hardened?), `permission_mediation.modes` (supported policies), and `policy.permission` (active policy).
 
-### 3. daemon-host readiness 如何？
+### 3. Is daemon-host readiness healthy?
 
 ```bash
 curl -s http://127.0.0.1:4170/workspace/preflight | jq
 ```
 
-`status: 'not_started'` 是 ACP 级；首次 session attach 后才填。`status: 'fail'` 带封闭 `errorKind`（见 [`18-error-taxonomy.md`](./18-error-taxonomy.md)），渲染结构化修复。
+`status: 'not_started'` cells are ACP-level and populate only after the first session attaches. `status: 'fail'` cells include a closed `errorKind`; render structured remediation from [`18-error-taxonomy.md`](./18-error-taxonomy.md).
 
-### 4. 终端里 tail 一个 session 的 SSE
+### 4. Tail a session SSE stream
 
 ```bash
 curl -N -H 'Accept: text/event-stream' \
@@ -68,32 +68,32 @@ curl -N -H 'Accept: text/event-stream' \
      'http://127.0.0.1:4170/session/<sid>/events'
 ```
 
-`-N` 关 curl 输出 buffer。`Last-Event-ID: 0` 请求重放 ring 内 `id > 0` 的事件。
+`-N` disables curl output buffering. `Last-Event-ID: 0` requests replay for ring events with `id > 0`.
 
-### 5. 这次权限为什么这么 resolve？
+### 5. Why did a permission request resolve this way?
 
-`PermissionAuditRing` 是内存的；今天没 HTTP surface 暴露。开 `QWEN_SERVE_DEBUG=1` 重跑；mediator 每次投票 / 裁决在 stderr 出结构化行，带 `decisionReason.type`。后续 PR 会通过 HTTP 路由暴露 ring。
+`PermissionAuditRing` is in-memory and has no HTTP surface today. Enable `QWEN_SERVE_DEBUG=1` and reproduce; the mediator prints structured lines for each vote and decision, including `decisionReason.type`. A later PR can expose the ring through HTTP.
 
-### 6. 慢消费者在哪？
+### 6. Which consumer is slow?
 
-`slow_client_warning` 每个 overflow episode 在队列 75% 满时发一次。订阅 session SSE 看合成帧；payload 带 `queueSize`、`maxQueued`、`lastEventId`。重复警告 = 一个粘住的慢消费者；查 SDK 消费方的 `for await` 循环。
+`slow_client_warning` fires once per overflow episode when the queue reaches 75%. Subscribe to the session SSE stream and look for the synthetic frame; payload includes `queueSize`, `maxQueued`, and `lastEventId`. Repeated warnings point at a stuck consumer, usually a blocked SDK `for await` loop.
 
-### 7. 为什么某 MCP server 被拒？
+### 7. Why was an MCP server refused?
 
-`/workspace/mcp` 快照的 per-cell `disabledReason: 'budget'` + `refusedServerNames` 列表 + `mcp_child_refused_batch` SSE 事件合起来告诉你这一 pass 拒了什么。对照 `/capabilities` 的 `mcp_guardrails.modes`（`enforce` 是否激活？）与 live `--mcp-client-budget`（在 `getReservedSlots()` 可见）。
+Combine `/workspace/mcp` per-cell `disabledReason: 'budget'`, the `refusedServerNames` list, and `mcp_child_refused_batch` SSE events. Compare them with `/capabilities` `mcp_guardrails.modes` (`enforce` active?) and the live `--mcp-client-budget` state visible through `getReservedSlots()`.
 
-### 8. daemon 关不掉
+### 8. The daemon will not shut down
 
-第一信号触发优雅退出（见 [`02-serve-runtime.md`](./02-serve-runtime.md)）。卡过 10s 时看：
+The first signal triggers graceful shutdown (see [`02-serve-runtime.md`](./02-serve-runtime.md)). If it hangs past 10s, check:
 
-- 卡住的 ACP 子进程不响应 graceful close。
-- 长 SSE 把 HTTP `server.close()` 挂过 `SHUTDOWN_FORCE_CLOSE_MS`（5s）。
+- ACP child process did not respond to graceful close.
+- Long SSE connections kept HTTP `server.close()` open past `SHUTDOWN_FORCE_CLOSE_MS` (5s).
 
-**第二个** SIGTERM/SIGINT 触发 `bridge.killAllSync()` + `process.exit(1)`，刻意用。
+A **second** SIGTERM/SIGINT intentionally triggers `bridge.killAllSync()` + `process.exit(1)`.
 
-## 流程
+## Flow
 
-### 典型 triage 流
+### Typical triage flow
 
 ```mermaid
 flowchart TD
@@ -108,45 +108,45 @@ flowchart TD
     E -->|no| EW["check /workspace/mcp,<br/>/workspace/env"]
 ```
 
-## 状态与生命周期
+## State and lifecycle
 
-- `QWEN_SERVE_DEBUG` 每次检查时读（`isServeDebugMode()`，从 `debugMode.ts` 导出），切换不需重启 —— 但 daemon 已启动后启动日志就没了，除非启动时就配上。
-- `PermissionAuditRing` 有界（512 条，FIFO），老记录静默丢。
-- `DaemonStatusProvider` 每请求重建 cell（无缓存），preflight 不便宜，别没必要狂轮询。
+- `QWEN_SERVE_DEBUG` is read on every check through `isServeDebugMode()` from `debugMode.ts`; toggling it does not require restart. Boot logs are not available unless the env was set at boot.
+- `PermissionAuditRing` is bounded at 512 FIFO entries; older records are silently dropped.
+- `DaemonStatusProvider` rebuilds cells per request and does not cache; avoid unnecessary high-frequency polling.
 
-## 依赖
+## Dependencies
 
-- `process.stderr.write`（debug stderr）。
-- `DaemonLogger`（结构化文件日志）。
-- OpenTelemetry SDK（`initializeTelemetry`、`createDaemonBridgeTelemetry`）。
-- `node:process` 看 env / 信号。
+- `process.stderr.write` for debug stderr.
+- `DaemonLogger` for structured file logs.
+- OpenTelemetry SDK through `initializeTelemetry` and `createDaemonBridgeTelemetry`.
+- `node:process` for env and signal inspection.
 
-## 配置
+## Configuration
 
-| 旋钮                           | 效果                                                                              |
-| ------------------------------ | --------------------------------------------------------------------------------- |
-| `QWEN_SERVE_DEBUG`             | 开 stderr 详细（见 [`17-configuration.md`](./17-configuration.md)）               |
-| `settings.json` `telemetry` 段 | 控制 OTel 行为：`enabled`、`otlpEndpoint`、`otlpProtocol`、per-signal endpoint 等 |
-| `DaemonLogger` 日志路径        | boot 时自动生成，打印到 stderr `daemon log -> <path>`                             |
-| `PermissionAuditRing` size     | 硬编码 512，当下不可配                                                            |
-| `slow_client_warning` 阈值     | `0.75` / `0.375` 硬编码在 `eventBus.ts`                                           |
+| Knob                            | Effect                                                                                       |
+| ------------------------------- | -------------------------------------------------------------------------------------------- |
+| `QWEN_SERVE_DEBUG`              | Enables verbose stderr logs. See [`17-configuration.md`](./17-configuration.md).             |
+| `settings.json` `telemetry`     | Controls OTel behavior: `enabled`, `otlpEndpoint`, `otlpProtocol`, and per-signal endpoints. |
+| `DaemonLogger` log path         | Generated at boot and printed to stderr as `daemon log -> <path>`.                           |
+| `PermissionAuditRing` size      | Hard-coded to 512 today.                                                                     |
+| `slow_client_warning` threshold | `0.75` / `0.375`, hard-coded in `eventBus.ts`.                                               |
 
-## 注意 & 已知局限
+## Caveats and known limits
 
-- **DaemonLogger 文件日志是结构化的**，可按 `route`/`sessionId`/`clientId` 过滤。`QWEN_SERVE_DEBUG` stderr 日志仍是非结构化纯文本。
-- **OpenTelemetry span 已包含 per-request 关联**。每个 HTTP 请求的 span 属性带 route、sessionId、clientId，可通过 trace backend 关联。
-- **`/workspace/preflight` 的 ACP 级 cell 需要 session 活着**。idle daemon 上 auth / MCP / skills / providers 都 `status: 'not_started'`，是预期不是失败。
-- **`/workspace/env` 对机密只报存在不报值**；响应不要扔到对不可信受众暴露存在性也敏感的位置。
-- **审计环是进程局部**，daemon 重启历史丢。
-- **没有压测套路**。性能 baseline 在 `test/perf-daemon-baseline` 分支；本文不是合适的地方。
+- **DaemonLogger file logs are structured** and can be filtered by `route`, `sessionId`, and `clientId`. `QWEN_SERVE_DEBUG` stderr logs remain unstructured text.
+- **OpenTelemetry spans include per-request correlation.** Each HTTP request span carries route, sessionId, and clientId attributes that can be joined in a tracing backend.
+- **ACP-level `/workspace/preflight` cells require a live session.** On an idle daemon, auth / MCP / skills / providers may show `status: 'not_started'`; this is expected.
+- **`/workspace/env` only reports secret presence, not values.** Do not expose the response where the mere presence of a secret is sensitive.
+- **The audit ring is process-local** and history is lost on daemon restart.
+- **No load-test recipe is documented here.** The performance baseline lives on the `test/perf-daemon-baseline` branch.
 
-## 参考
+## References
 
 - `packages/cli/src/serve/daemonStatusProvider.ts`
-- `packages/cli/src/serve/daemonLogger.ts`（`DaemonLogger`、`buildDaemonLogLine`）
-- `packages/cli/src/serve/debugMode.ts`（`isServeDebugMode`）
-- `packages/acp-bridge/src/permissionMediator.ts`（`PermissionDecisionReason`）
-- `packages/cli/src/serve/server.ts`（`daemonTelemetryMiddleware`、access-log middleware）
-- 配置：[`17-configuration.md`](./17-configuration.md)。
-- 错误分类：[`18-error-taxonomy.md`](./18-error-taxonomy.md)。
-- 用户运维指南：[`../../users/qwen-serve.md`](../../users/qwen-serve.md)。
+- `packages/cli/src/serve/daemonLogger.ts` (`DaemonLogger`, `buildDaemonLogLine`)
+- `packages/cli/src/serve/debugMode.ts` (`isServeDebugMode`)
+- `packages/acp-bridge/src/permissionMediator.ts` (`PermissionDecisionReason`)
+- `packages/cli/src/serve/server.ts` (`daemonTelemetryMiddleware`, access-log middleware)
+- Configuration: [`17-configuration.md`](./17-configuration.md)
+- Error taxonomy: [`18-error-taxonomy.md`](./18-error-taxonomy.md)
+- User operations guide: [`../../users/qwen-serve.md`](../../users/qwen-serve.md)

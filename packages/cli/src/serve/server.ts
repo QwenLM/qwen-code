@@ -54,7 +54,11 @@ import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { isLoopbackBind } from './loopbackBinds.js';
-import { mountAcpHttp } from './acpHttp/index.js';
+import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
+import {
+  buildDaemonStatusResponse,
+  parseDaemonStatusDetail,
+} from './daemonStatus.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
@@ -674,8 +678,11 @@ function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/sessions/delete') {
     return { route: 'POST /sessions/delete' };
   }
+  if (req.method === 'GET' && path === '/daemon/status') {
+    return { route: 'GET /daemon/status' };
+  }
   const sessionAction = path.match(
-    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
+    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|mid-turn-message|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
   );
   const sessionActionId = sessionAction?.[1];
   const sessionActionName = sessionAction?.[2];
@@ -882,6 +889,7 @@ function advertisedMaxPendingPromptsPerSession(
  *
  * Supported routes:
  *   - `GET  /health`
+ *   - `GET  /daemon/status`
  *   - `GET  /capabilities`
  *   - `GET  /workspace/mcp`
  *   - `GET  /workspace/skills`
@@ -967,6 +975,7 @@ export function createServeApp(
       maxSessions: opts.maxSessions,
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
+      permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1211,10 +1220,18 @@ export function createServeApp(
       return;
     }
     try {
+      const lastActivity = bridge.lastActivityAt;
+      const now = Date.now();
       res.status(200).json({
         status: 'ok',
         sessions: bridge.sessionCount,
         pendingPermissions: bridge.pendingPermissionCount,
+        activePrompts: bridge.activePromptCount,
+        connectedClients: getActiveSseCount(),
+        channelAlive: bridge.isChannelLive(),
+        lastActivityAt:
+          lastActivity !== null ? new Date(lastActivity).toISOString() : null,
+        idleSinceMs: lastActivity !== null ? now - lastActivity : null,
         ...(rateLimiter ? { rateLimitHits: rateLimiter.getHitCounts() } : {}),
       });
     } catch (err) {
@@ -1366,6 +1383,65 @@ export function createServeApp(
   }
 
   const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
+  const currentServeFeatures = () =>
+    getAdvertisedServeFeatures(undefined, {
+      requireAuth: opts.requireAuth === true,
+      mcpPoolActive: opts.mcpPoolActive !== false,
+      allowOriginActive:
+        opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
+      ...(opts.promptDeadlineMs !== undefined
+        ? { promptDeadlineMs: opts.promptDeadlineMs }
+        : {}),
+      ...(opts.writerIdleTimeoutMs !== undefined
+        ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
+        : {}),
+      persistSettingAvailable: deps.persistSetting !== undefined,
+      sessionShellCommandEnabled,
+      rateLimit: opts.rateLimit === true,
+      reloadAvailable: deps.workspace !== undefined,
+    });
+  const acpHandleRef: { current?: AcpHttpHandle } = {};
+
+  app.get('/daemon/status', async (req, res) => {
+    const detail = parseDaemonStatusDetail(req.query['detail']);
+    if (!detail.ok || !detail.detail) {
+      res.status(400).json({
+        error: 'detail must be one of: summary, full',
+        code: 'invalid_detail',
+      });
+      return;
+    }
+    try {
+      res.status(200).json(
+        await buildDaemonStatusResponse(detail.detail, {
+          opts,
+          boundWorkspace,
+          bridge,
+          workspace,
+          daemonLog,
+          qwenCodeVersion: deps.qwenCodeVersion,
+          acpHandle: acpHandleRef.current,
+          rateLimiter,
+          getRestSseActive: getActiveSseCount,
+          features: currentServeFeatures(),
+          protocolVersions: getServeProtocolVersions(),
+          supportedDeviceFlowProviders: Array.from(
+            deviceFlowProviderMap.keys(),
+          ),
+          deviceFlowRegistry,
+          sessionShellCommandEnabled,
+        }),
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /daemon/status failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({
+        error: 'Failed to build daemon status',
+        code: 'daemon_status_failed',
+      });
+    }
+  });
 
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
@@ -1375,22 +1451,7 @@ export function createServeApp(
         ? { qwenCodeVersion: deps.qwenCodeVersion }
         : {}),
       mode: opts.mode,
-      features: getAdvertisedServeFeatures(undefined, {
-        requireAuth: opts.requireAuth === true,
-        mcpPoolActive: opts.mcpPoolActive !== false,
-        allowOriginActive:
-          opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
-        ...(opts.promptDeadlineMs !== undefined
-          ? { promptDeadlineMs: opts.promptDeadlineMs }
-          : {}),
-        ...(opts.writerIdleTimeoutMs !== undefined
-          ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
-          : {}),
-        persistSettingAvailable: deps.persistSetting !== undefined,
-        sessionShellCommandEnabled,
-        rateLimit: opts.rateLimit === true,
-        reloadAvailable: deps.workspace !== undefined,
-      }),
+      features: currentServeFeatures(),
       modelServices: [],
       // Surface the bound workspace so clients can detect mismatch
       // pre-flight and omit `cwd` on `POST /session`.
@@ -2699,6 +2760,62 @@ export function createServeApp(
     }
   });
 
+  // Queue a user message typed while the session's turn is still running. The
+  // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
+  // model sees it before the turn ends, instead of waiting for the next turn.
+  // Returns `{ accepted }`: `false` when the session is idle (or the per-session
+  // queue is full), so the browser keeps the message in its own queue and sends
+  // it as a normal next-turn prompt. Synchronous — the bridge only pushes onto
+  // an in-memory queue.
+  //
+  // Per-message abuse guard. The sibling `/btw` caps its field; without this
+  // only the global 10 MB body limit applies. Not a UX limit — a rejected
+  // message stays in the browser's own queue and is sent as the (uncapped)
+  // next-turn prompt — it only bounds how much a single mid-turn push can pin in
+  // the in-memory queue (the queue DEPTH is bounded in `enqueueMidTurnMessage`).
+  const MID_TURN_MESSAGE_MAX_LENGTH = 16 * 1024;
+  app.post('/session/:id/mid-turn-message', mutate(), (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    const message = body['message'];
+    // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
+    // stores the trimmed string, so checking the raw length would reject input
+    // whose real content fits but is padded with whitespace.
+    const trimmed = typeof message === 'string' ? message.trim() : '';
+    if (trimmed.length === 0) {
+      res.status(400).json({
+        error: '`message` is required and must be a non-empty string',
+      });
+      return;
+    }
+    if (trimmed.length > MID_TURN_MESSAGE_MAX_LENGTH) {
+      res.status(400).json({
+        error: `\`message\` must be at most ${MID_TURN_MESSAGE_MAX_LENGTH} characters`,
+      });
+      return;
+    }
+    // Forward the client id so the bridge authorizes it against the session
+    // (like `/prompt` and `/btw`) — a token-holding client bound to another
+    // session must not push into this one — and records it as the message's
+    // originator for SSE echo routing. `null` = malformed id (already answered).
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = bridge.enqueueMidTurnMessage(
+        sessionId,
+        trimmed,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/mid-turn-message',
+        sessionId,
+      });
+    }
+  });
+
   app.post('/session/:id/shell', mutate({ strict: true }), async (req, res) => {
     const sessionId = req.params['id'];
     if (!sessionShellCommandEnabled) {
@@ -3675,7 +3792,7 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  const acpHandle = mountAcpHttp(app, bridge, {
+  acpHandleRef.current = mountAcpHttp(app, bridge, {
     boundWorkspace,
     workspace,
     fsFactory,
@@ -3684,8 +3801,8 @@ export function createServeApp(
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
   });
-  if (acpHandle) {
-    app.locals['acpHandle'] = acpHandle;
+  if (acpHandleRef.current) {
+    app.locals['acpHandle'] = acpHandleRef.current;
   }
 
   // Final error handler. `express.json()` throws `SyntaxError` (with

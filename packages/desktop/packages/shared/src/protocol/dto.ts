@@ -643,6 +643,7 @@ export interface QwenExtensionSettingDefinition {
 export interface QwenExtensionSettingsEntry {
   id: string
   name: string
+  displayName?: string
   version?: string
   isActive?: boolean
   path?: string

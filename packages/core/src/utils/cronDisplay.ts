@@ -2,6 +2,14 @@
  * Human-readable cron display for common recurring patterns.
  * Falls back to the raw expression for anything non-trivial.
  */
+const INTEGER_TOKEN_RE = /^\d+$/;
+
+function parsePositiveInteger(token: string): number | undefined {
+  if (!INTEGER_TOKEN_RE.test(token)) return undefined;
+  const value = parseInt(token, 10);
+  return value > 0 ? value : undefined;
+}
+
 export function humanReadableCron(cronExpr: string): string {
   const parts = cronExpr.trim().split(/\s+/);
   if (parts.length !== 5) return cronExpr;
@@ -16,8 +24,8 @@ export function humanReadableCron(cronExpr: string): string {
     mon === '*' &&
     dow === '*'
   ) {
-    const n = parseInt(min!.slice(2), 10);
-    if (!isNaN(n)) {
+    const n = parsePositiveInteger(min!.slice(2));
+    if (n !== undefined) {
       return n === 1 ? 'Every minute' : `Every ${n} minutes`;
     }
   }
@@ -30,8 +38,8 @@ export function humanReadableCron(cronExpr: string): string {
     mon === '*' &&
     dow === '*'
   ) {
-    const n = parseInt(hour!.slice(2), 10);
-    if (!isNaN(n)) {
+    const n = parsePositiveInteger(hour!.slice(2));
+    if (n !== undefined) {
       return n === 1 ? 'Every hour' : `Every ${n} hours`;
     }
   }
@@ -44,8 +52,8 @@ export function humanReadableCron(cronExpr: string): string {
     mon === '*' &&
     dow === '*'
   ) {
-    const n = parseInt(dom!.slice(2), 10);
-    if (!isNaN(n)) {
+    const n = parsePositiveInteger(dom!.slice(2));
+    if (n !== undefined) {
       return n === 1 ? 'Every day' : `Every ${n} days`;
     }
   }

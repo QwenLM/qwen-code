@@ -21,7 +21,7 @@ import { TodoEventSummary, TodoFullList } from './TodoView';
 import {
   formatDurationMs,
   formatElapsed,
-  formatToolDisplayName,
+  localizeToolDisplayName,
   StatusIcon,
   truncateText,
 } from './tools/toolDisplay';
@@ -500,20 +500,6 @@ function isDescriptionExpandable(description: string): boolean {
   );
 }
 
-function ToggleChevron({
-  expandable,
-  expanded,
-}: {
-  expandable: boolean;
-  expanded: boolean;
-}) {
-  return (
-    <span className={styles.lineToggle} aria-hidden="true">
-      {expandable ? (expanded ? '▾' : '▸') : ''}
-    </span>
-  );
-}
-
 function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
   return (
     tools.find((t) => t.status === 'in_progress') ?? tools[tools.length - 1]
@@ -536,7 +522,7 @@ function CompactToolGroup({
 }) {
   const { t } = useI18n();
   const activeTool = getActiveTool(tools);
-  const displayName = formatToolDisplayName(activeTool.toolName);
+  const displayName = localizeToolDisplayName(activeTool.toolName, t);
   const overallStatus = getCompactDisplayStatus(activeTool);
   const description = getToolDescription(activeTool, workspaceCwd);
   const elapsed =
@@ -688,7 +674,7 @@ export const ToolLine = memo(function ToolLine({
     const info = getAgentDisplayInfo(tool, now);
     const displayName = t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
-    const toolHint = getAgentCurrentToolHint(tool);
+    const toolHint = getAgentCurrentToolHint(tool, t);
     const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
     const runningMeta = [toolHint, progressLabel, info.elapsed]
       .filter(Boolean)
@@ -772,7 +758,7 @@ export const ToolLine = memo(function ToolLine({
 
   const description = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
-  const displayName = formatToolDisplayName(tool.toolName);
+  const displayName = localizeToolDisplayName(tool.toolName, t);
   const elapsed =
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''
@@ -811,6 +797,16 @@ export const ToolLine = memo(function ToolLine({
     <div className={styles.line}>
       <div
         className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
+        title={
+          expandable
+            ? expanded
+              ? t('tool.collapseHint')
+              : t('tool.expand')
+            : undefined
+        }
+        aria-expanded={expandable ? expanded : undefined}
+        role={expandable ? 'button' : undefined}
+        tabIndex={expandable ? 0 : undefined}
         onClick={
           expandable
             ? () => {
@@ -819,8 +815,17 @@ export const ToolLine = memo(function ToolLine({
               }
             : undefined
         }
+        onKeyDown={
+          expandable
+            ? (event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                userToggledRef.current = true;
+                setExpanded((value) => !value);
+              }
+            : undefined
+        }
       >
-        <ToggleChevron expandable={expandable} expanded={expanded} />
         <StatusIcon status={tool.status} />
         <span className={styles.lineName}>{displayName}</span>
         {isTodo && hasTodoList && (

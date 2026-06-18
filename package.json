@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.18.0",
+  "version": "0.18.3",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -12,6 +12,7 @@
     "packages/channels/weixin",
     "packages/channels/dingtalk",
     "packages/channels/feishu",
+    "packages/channels/qqbot",
     "packages/channels/plugin-example",
     "!packages/desktop"
   ],
@@ -20,7 +21,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.18.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.18.3"
   },
   "scripts": {
     "start": "node scripts/start.js",

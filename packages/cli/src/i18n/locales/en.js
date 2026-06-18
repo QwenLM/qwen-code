@@ -161,6 +161,51 @@ export default {
     '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.',
 
   // ============================================================================
+  // Tool display names (chat-stream badge labels)
+  // ----------------------------------------------------------------------------
+  // Namespaced `toolDisplayName.<English display name>` keys (from core
+  // `ToolDisplayNames`). Per this file's key-is-default-text convention each
+  // English entry maps to itself; `localizeToolDisplayName` detects that
+  // self-mapping and returns the bare display name. Localized values live in
+  // zh.js / zh-TW.js; other locales fall back to the English display name.
+  // ============================================================================
+  'toolDisplayName.Edit': 'toolDisplayName.Edit',
+  'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',
+  'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
+  'toolDisplayName.Grep': 'toolDisplayName.Grep',
+  'toolDisplayName.Glob': 'toolDisplayName.Glob',
+  'toolDisplayName.Shell': 'toolDisplayName.Shell',
+  'toolDisplayName.Shell Command': 'toolDisplayName.Shell Command',
+  'toolDisplayName.TodoWrite': 'toolDisplayName.TodoWrite',
+  'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
+  'toolDisplayName.Agent': 'toolDisplayName.Agent',
+  'toolDisplayName.Skill': 'toolDisplayName.Skill',
+  'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
+  'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
+  'toolDisplayName.WebFetch': 'toolDisplayName.WebFetch',
+  'toolDisplayName.WebSearch': 'toolDisplayName.WebSearch',
+  'toolDisplayName.ListFiles': 'toolDisplayName.ListFiles',
+  'toolDisplayName.Lsp': 'toolDisplayName.Lsp',
+  'toolDisplayName.AskUserQuestion': 'toolDisplayName.AskUserQuestion',
+  'toolDisplayName.CronCreate': 'toolDisplayName.CronCreate',
+  'toolDisplayName.CronList': 'toolDisplayName.CronList',
+  'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
+  'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
+  'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
+  'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
+  'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
+  'toolDisplayName.TaskStop': 'toolDisplayName.TaskStop',
+  'toolDisplayName.TeamCreate': 'toolDisplayName.TeamCreate',
+  'toolDisplayName.TeamDelete': 'toolDisplayName.TeamDelete',
+  'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
+  'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
+  'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
+  'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
+  'toolDisplayName.ToolSearch': 'toolDisplayName.ToolSearch',
+  'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
+  'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
+  'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
+  // ============================================================================
   // Help / UI Components
   // ============================================================================
   // Attachment hints

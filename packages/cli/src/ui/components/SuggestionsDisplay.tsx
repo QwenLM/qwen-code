@@ -55,6 +55,16 @@ interface SuggestionsDisplayProps {
 export const MAX_SUGGESTIONS_TO_SHOW = 8;
 export { MAX_WIDTH };
 
+/**
+ * Collapse all runs of whitespace (including newlines from multi-line
+ * SKILL.md/command descriptions) into single spaces so a description renders
+ * as a single logical line. Without this, frontmatter line breaks are
+ * preserved verbatim and a single long description can fill the whole terminal.
+ */
+export function normalizeDescription(description: string): string {
+  return description.replace(/\s+/g, ' ').trim();
+}
+
 export function SuggestionsDisplay({
   suggestions,
   activeIndex,
@@ -148,8 +158,8 @@ export function SuggestionsDisplay({
                 flexShrink={1}
                 paddingLeft={2}
               >
-                <Text color={textColor} wrap="wrap">
-                  {suggestion.description}
+                <Text color={textColor} wrap="truncate-end">
+                  {normalizeDescription(suggestion.description)}
                 </Text>
               </Box>
             )}
