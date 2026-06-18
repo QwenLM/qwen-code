@@ -3389,7 +3389,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it.skip('expands and collapses long suggestion via Right/Left arrows', async () => {
+    it('expands and collapses long suggestion via Right/Left arrows', async () => {
       props.shellModeActive = false;
       const longValue = 'l'.repeat(200);
 
@@ -3408,20 +3408,22 @@ describe('InputPrompt', () => {
       await wait();
 
       stdin.write('\x12');
-      await wait();
-
-      expect(clean(stdout.lastFrame())).toContain('→');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('→');
+      });
 
       stdin.write('\u001B[C');
-      await wait();
-      expect(clean(stdout.lastFrame())).toContain('←');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('←');
+      });
       expect(stdout.lastFrame()).toMatchSnapshot(
         'command-search-expanded-match',
       );
 
       stdin.write('\u001B[D');
-      await wait();
-      expect(clean(stdout.lastFrame())).toContain('→');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('→');
+      });
       expect(stdout.lastFrame()).toMatchSnapshot(
         'command-search-collapsed-match',
       );
