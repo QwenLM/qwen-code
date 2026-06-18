@@ -26,7 +26,10 @@ function createChild(pid: number | undefined = 4242): ChildProcess {
   return child;
 }
 
-function createHarness(platform: NodeJS.Platform = 'linux') {
+function createHarness(
+  platform: NodeJS.Platform = 'linux',
+  env: NodeJS.ProcessEnv = {},
+) {
   const children: ChildProcess[] = [];
   const spawn = vi.fn(
     (_command: string, _args: string[], _options?: SpawnOptions) => {
@@ -39,7 +42,7 @@ function createHarness(platform: NodeJS.Platform = 'linux') {
     debug: vi.fn(),
     warn: vi.fn(),
   };
-  const inhibitor = new SleepInhibitor({ platform, spawn, logger });
+  const inhibitor = new SleepInhibitor({ platform, env, spawn, logger });
   return { children, inhibitor, logger, spawn };
 }
 
@@ -79,27 +82,71 @@ describe('SleepInhibitor', () => {
     expect(inhibitor.isRunning()).toBe(false);
   });
 
-  it('forwards a curated environment instead of an empty env', () => {
+  it('skips systemd-inhibit for headless SSH sessions on Linux', () => {
+    const { inhibitor, logger, spawn } = createHarness('linux', {
+      SSH_CONNECTION: '10.0.0.1 55555 10.0.0.2 22',
+    });
+
+    const first = inhibitor.acquire('working over SSH');
+    const second = inhibitor.acquire('more SSH work');
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(inhibitor.isRunning()).toBe(false);
+    expect(inhibitor.getActiveCount()).toBe(2);
+    expect(logger.debug).toHaveBeenCalledWith(
+      'Sleep inhibition skipped for headless SSH session.',
+    );
+    expect(logger.debug).toHaveBeenCalledTimes(1);
+
+    first.release();
+    second.release();
+    expect(inhibitor.getActiveCount()).toBe(0);
+  });
+
+  it('starts systemd-inhibit for SSH sessions with a display server', () => {
+    const { inhibitor, spawn } = createHarness('linux', {
+      SSH_TTY: '/dev/pts/3',
+      DISPLAY: ':10',
+    });
+
+    const handle = inhibitor.acquire('forwarded display work');
+
+    expect(spawn).toHaveBeenCalledWith(
+      'systemd-inhibit',
+      expect.arrayContaining(['--what=sleep']),
+      expect.any(Object),
+    );
+    handle.release();
+  });
+
+  it('starts systemd-inhibit for local headless Linux sessions', () => {
     const { inhibitor, spawn } = createHarness('linux');
-    const previous = process.env['DBUS_SESSION_BUS_ADDRESS'];
-    process.env['DBUS_SESSION_BUS_ADDRESS'] = 'unix:path=/run/user/1000/bus';
-    try {
-      const handle = inhibitor.acquire();
-      const env = spawn.mock.calls[0]![2]!.env as NodeJS.ProcessEnv;
-      // D-Bus address required by systemd-inhibit must be forwarded.
-      expect(env['DBUS_SESSION_BUS_ADDRESS']).toBe(
-        'unix:path=/run/user/1000/bus',
-      );
-      // Arbitrary parent env vars must NOT be forwarded.
-      expect(env).not.toHaveProperty('SOME_UNRELATED_SECRET');
-      handle.release();
-    } finally {
-      if (previous === undefined) {
-        delete process.env['DBUS_SESSION_BUS_ADDRESS'];
-      } else {
-        process.env['DBUS_SESSION_BUS_ADDRESS'] = previous;
-      }
-    }
+
+    const handle = inhibitor.acquire('local headless work');
+
+    expect(spawn).toHaveBeenCalledWith(
+      'systemd-inhibit',
+      expect.arrayContaining(['--what=sleep']),
+      expect.any(Object),
+    );
+    handle.release();
+  });
+
+  it('forwards a curated environment instead of an empty env', () => {
+    const { inhibitor, spawn } = createHarness('linux', {
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      SOME_UNRELATED_SECRET: 'secret',
+    });
+
+    const handle = inhibitor.acquire();
+    const env = spawn.mock.calls[0]![2]!.env as NodeJS.ProcessEnv;
+    // D-Bus address required by systemd-inhibit must be forwarded.
+    expect(env['DBUS_SESSION_BUS_ADDRESS']).toBe(
+      'unix:path=/run/user/1000/bus',
+    );
+    // Arbitrary parent env vars must NOT be forwarded.
+    expect(env).not.toHaveProperty('SOME_UNRELATED_SECRET');
+    handle.release();
   });
 
   it('uses caffeinate on macOS', () => {
@@ -148,6 +195,7 @@ describe('SleepInhibitor', () => {
     const logger = { debug: vi.fn(), warn: vi.fn() };
     const inhibitor = new SleepInhibitor({
       platform: 'linux',
+      env: {},
       spawn,
       logger,
     });
@@ -238,7 +286,12 @@ describe('SleepInhibitor', () => {
       return child;
     });
     const logger = { debug: vi.fn(), warn: vi.fn() };
-    const inhibitor = new SleepInhibitor({ platform: 'linux', spawn, logger });
+    const inhibitor = new SleepInhibitor({
+      platform: 'linux',
+      env: {},
+      spawn,
+      logger,
+    });
 
     const handle = inhibitor.acquire();
     expect(() => handle.release()).not.toThrow();
@@ -266,7 +319,12 @@ describe('SleepInhibitor', () => {
       return child;
     });
     const logger = { debug: vi.fn(), warn: vi.fn() };
-    const inhibitor = new SleepInhibitor({ platform: 'linux', spawn, logger });
+    const inhibitor = new SleepInhibitor({
+      platform: 'linux',
+      env: {},
+      spawn,
+      logger,
+    });
 
     const handle = inhibitor.acquire('executing tool');
     expect(spawn).toHaveBeenCalledTimes(1);

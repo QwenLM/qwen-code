@@ -27,6 +27,19 @@ import { useCallback, useRef, useState } from 'react';
 import type { Key } from './useKeypress.js';
 
 const DELETION_KEY_NAMES = new Set(['backspace', 'delete']);
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
+
+function splitGraphemes(value: string): string[] {
+  return Array.from(graphemeSegmenter.segment(value), ({ segment }) => segment);
+}
+
+function removeLastGrapheme(value: string): string {
+  const graphemes = splitGraphemes(value);
+  graphemes.pop();
+  return graphemes.join('');
+}
 
 /**
  * Normalize deletion-key detection so Windows terminals that deliver
@@ -51,7 +64,7 @@ const isDeletionKey = (key: Key): boolean =>
  *   - any modified key (Ctrl/Meta combos handled separately);
  *   - bracketed pastes (a multi-line paste should never silently
  *     become a search query);
- *   - control characters (sequences below 0x20 like Tab/Enter/Esc);
+ *   - control characters (C0 and C1, including CSI);
  *   - DEL (0x7F) — Backspace's sequence byte, otherwise it would
  *     slip past the printable check and produce a literal DEL
  *     character in the query.
@@ -63,9 +76,11 @@ const isDeletionKey = (key: Key): boolean =>
  */
 export function isPrintableSearchChar(key: Key): boolean {
   if (key.ctrl || key.meta || key.paste) return false;
-  if (key.sequence.length !== 1) return false;
-  const code = key.sequence.charCodeAt(0);
-  return code >= 0x20 && code !== 0x7f;
+  const graphemes = splitGraphemes(key.sequence);
+  if (graphemes.length !== 1) return false;
+  const code = graphemes[0].codePointAt(0);
+  if (code === undefined) return false;
+  return code >= 0x20 && code !== 0x7f && (code < 0x80 || code > 0x9f);
 }
 
 export interface UseSessionSearchInputOptions {
@@ -170,7 +185,7 @@ export function useSessionSearchInput(
       if (isDeletionKey(key)) {
         // Pop one char. The ref-backed setter detects when the last
         // char is removed and exits to list mode immediately.
-        setSearchQuery((q) => q.slice(0, -1));
+        setSearchQuery(removeLastGrapheme);
         return;
       }
 

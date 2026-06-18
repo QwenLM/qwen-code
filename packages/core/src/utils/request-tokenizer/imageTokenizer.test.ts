@@ -102,6 +102,94 @@ describe('ImageTokenizer', () => {
     });
   });
 
+  describe('WebP dimension extraction', () => {
+    function buildWebp(format: string, totalLength: number): Buffer {
+      const buf = Buffer.alloc(totalLength);
+      buf.write('RIFF', 0, 'ascii');
+      buf.writeUInt32LE(totalLength - 8, 4);
+      buf.write('WEBP', 8, 'ascii');
+      buf.write(format, 12, 'ascii');
+      buf.writeUInt32LE(Math.max(totalLength - 20, 0), 16);
+      return buf;
+    }
+
+    function buildVp8lWebp(
+      width: number,
+      height: number,
+      signature = 0x2f,
+    ): Buffer {
+      const buf = buildWebp('VP8L', 26);
+      buf.writeUInt32LE(5, 16);
+      buf.writeUInt8(signature, 20);
+      buf.writeUInt32LE((width - 1) | ((height - 1) << 14), 21);
+      return buf;
+    }
+
+    it('should extract dimensions from a short VP8L lossless WebP', async () => {
+      const width = 17;
+      const height = 13;
+
+      const buf = buildVp8lWebp(width, height);
+
+      const metadata = await tokenizer.extractImageMetadata(
+        buf.toString('base64'),
+        'image/webp',
+      );
+
+      expect(metadata.width).toBe(width);
+      expect(metadata.height).toBe(height);
+    });
+
+    it('should fall back for VP8L with an invalid lossless signature', async () => {
+      const buf = buildVp8lWebp(17, 13, 0x00);
+
+      const metadata = await tokenizer.extractImageMetadata(
+        buf.toString('base64'),
+        'image/webp',
+      );
+
+      expect(metadata.width).toBe(512);
+      expect(metadata.height).toBe(512);
+    });
+
+    it('should still reject short VP8 and VP8X WebP files', async () => {
+      const formats = ['VP8 ', 'VP8X'];
+
+      for (const format of formats) {
+        const metadata = await tokenizer.extractImageMetadata(
+          buildWebp(format, 26).toString('base64'),
+          'image/webp',
+        );
+
+        expect(metadata.width).toBe(512);
+        expect(metadata.height).toBe(512);
+      }
+    });
+
+    it('should extract canvas dimensions from VP8X', async () => {
+      const width = 100;
+      const height = 80;
+
+      const buf = Buffer.alloc(30);
+      buf.write('RIFF', 0, 'ascii');
+      buf.writeUInt32LE(22, 4);
+      buf.write('WEBP', 8, 'ascii');
+      buf.write('VP8X', 12, 'ascii');
+      buf.writeUInt32LE(10, 16); // VP8X chunk size
+      buf.writeUInt8(0, 20); // flags
+      buf.writeUIntLE(width - 1, 24, 3); // canvas width minus one (24-bit LE)
+      buf.writeUIntLE(height - 1, 27, 3); // canvas height minus one (24-bit LE)
+
+      const metadata = await tokenizer.extractImageMetadata(
+        buf.toString('base64'),
+        'image/webp',
+      );
+
+      expect(metadata.width).toBe(width);
+      expect(metadata.height).toBe(height);
+    });
+  });
+
   describe('batch processing', () => {
     it('should process multiple images serially', async () => {
       const pngBase64 =
@@ -152,6 +240,22 @@ describe('ImageTokenizer', () => {
         expect(metadata.width).toBeGreaterThan(0);
         expect(metadata.height).toBeGreaterThan(0);
       }
+    });
+
+    it('should extract dimensions from GIF images', async () => {
+      const buf = Buffer.alloc(10);
+      buf.write('GIF89a', 0, 'ascii');
+      buf.writeUInt16LE(2, 6);
+      buf.writeUInt16LE(3, 8);
+
+      const metadata = await tokenizer.extractImageMetadata(
+        buf.toString('base64'),
+        'image/gif',
+      );
+
+      expect(metadata.width).toBe(2);
+      expect(metadata.height).toBe(3);
+      expect(metadata.mimeType).toBe('image/gif');
     });
   });
 

@@ -14,6 +14,7 @@ import type { GenerateContentResponse, Part, Content } from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
+import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
@@ -384,6 +385,93 @@ describe('Turn', () => {
         callId: 'fc3',
         name: 'undefined_tool_name',
         args: {},
+      });
+    });
+
+    it('should preserve provider tool-call ids separately from generated call ids', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [],
+            functionCalls: [
+              { id: 'fc1', name: 'tool1', args: { arg1: 'val1' } },
+              { name: 'tool2', args: { arg2: 'val2' } },
+            ],
+          },
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Test provider ids' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events.length).toBe(2);
+
+      const event1 = events[0] as ServerGeminiToolCallRequestEvent;
+      expect(event1.value).toMatchObject({
+        callId: 'fc1',
+        providerCallId: 'fc1',
+        name: 'tool1',
+        args: { arg1: 'val1' },
+      });
+
+      const event2 = events[1] as ServerGeminiToolCallRequestEvent;
+      expect(event2.value.callId).toMatch(/^tool2-/);
+      expect(event2.value.providerCallId).toBeUndefined();
+      expect(event2.value).toMatchObject({
+        name: 'tool2',
+        args: { arg2: 'val2' },
+      });
+    });
+
+    it('should preserve raw provider ids for suffixed function call ids', async () => {
+      const [normalizedPart] = normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'fc1',
+              name: 'tool1',
+              args: { arg1: 'val1' },
+            },
+          },
+        ],
+        new Set(['fc1']),
+        new Set<string>(),
+      );
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [],
+            functionCalls: [normalizedPart!.functionCall],
+          },
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Test suffixed provider id' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events.length).toBe(1);
+      const event = events[0] as ServerGeminiToolCallRequestEvent;
+      expect(event.value).toMatchObject({
+        callId: 'fc1__qwen_dup_2',
+        providerCallId: 'fc1',
+        name: 'tool1',
+        args: { arg1: 'val1' },
       });
     });
 

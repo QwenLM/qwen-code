@@ -26,6 +26,7 @@ import {
   formatTokenCount,
   getAgentType,
   getAgentDescription,
+  localizeToolDisplayName,
 } from '../toolFormatting';
 import chromeStyles from './ToolChrome.module.css';
 import styles from './SubAgentPanel.module.css';
@@ -109,12 +110,15 @@ const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
 });
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
+  const { t } = useI18n();
   const desc = tc.description || '';
   return (
     <div className={chromeStyles.line}>
       <div className={chromeStyles.lineMain}>
         <StatusIcon status={tc.status} />
-        <span className={chromeStyles.lineName}>{tc.name}</span>
+        <span className={chromeStyles.lineName}>
+          {localizeToolDisplayName(tc.name, t)}
+        </span>
         {desc && (
           <span className={chromeStyles.lineArg}>{truncateText(desc, 70)}</span>
         )}

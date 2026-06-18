@@ -56,6 +56,7 @@ export {
 export {
   asKnownDaemonEvent,
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
+  MID_TURN_MESSAGE_INJECTED_EVENT,
   createDaemonAuthState,
   createDaemonSessionViewState,
   isDaemonEventType,

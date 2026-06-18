@@ -56,6 +56,7 @@ import {
   activeGoalEquals,
   setActiveGoal,
   clearActiveGoal,
+  createDuplicateProviderToolCallResponse,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -72,9 +73,13 @@ import {
   isSlashCommand,
 } from '../utils/commandUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
-import { handleAtCommand } from './atCommandProcessor.js';
+import {
+  handleAtCommand,
+  resolveAtCommandQuery,
+} from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
+import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
   useReactToolScheduler,
@@ -95,6 +100,15 @@ import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
+  'Mid-turn @ command resolution timed out';
+
+interface PendingDuplicateToolResponses {
+  executableCallIds: Set<string>;
+  promptId: string | undefined;
+  responseParts: Part[];
+}
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -117,6 +131,35 @@ function extractLastAssistantText(history: HistoryItem[]): string | undefined {
 
 function stripLeadingBlankLines(text: string): string {
   return text.replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
+async function resolveWithAbort<T>(
+  signal: AbortSignal,
+  run: () => Promise<T>,
+): Promise<T> {
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new Error('Mid-turn @ command resolution aborted'),
+      );
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([run(), abortPromise]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
 }
 
 /**
@@ -359,13 +402,11 @@ export const useGeminiStream = (
   useLayoutEffect(() => {
     historyRef.current = history;
   }, [history]);
-  // In-flight tool-use-summary aborters. Each batch gets its own AbortController
-  // because the captured turn controller is replaced when submitQuery starts
-  // the next turn, and the summary call outlives the current turn (that's the
-  // whole point — it overlaps with the next turn's streaming). cancelOngoingRequest
-  // aborts all in-flight summaries so Ctrl+C during the next turn also kills
-  // this turn's stale summary work.
-  const summaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
+  // In-flight auxiliary work. Some work is batch-scoped rather than turn-scoped:
+  // summaries intentionally outlive the turn, and mid-turn @ resolution may run
+  // before submitQuery installs the next turn controller.
+  // cancelOngoingRequest aborts these controllers so Ctrl+C still cancels them.
+  const auxiliaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   // Streamed model reasoning for the current turn. Rendered (height-limited)
@@ -390,6 +431,14 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
+  const pendingDuplicateToolResponsesRef = useRef<
+    PendingDuplicateToolResponses[]
+  >([]);
+  const immediateDuplicateToolResponsesRef = useRef<{
+    promptId: string | undefined;
+    responseParts: Part[];
+  } | null>(null);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
   // Uses a ref to avoid re-renders on every text_delta.
@@ -645,12 +694,12 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
-    // Cancel any in-flight tool-use-summary generations so their Promise.then
-    // doesn't addItem a stale label after the user cancelled.
-    for (const ac of summaryAbortRefsRef.current) {
+    // Cancel any in-flight auxiliary work so its Promise.then doesn't add
+    // stale content after the user cancelled.
+    for (const ac of auxiliaryAbortRefsRef.current) {
       ac.abort();
     }
-    summaryAbortRefsRef.current.clear();
+    auxiliaryAbortRefsRef.current.clear();
 
     // Report cancellation to arena status reporter (if in arena mode).
     // This is needed because cancellation during tool execution won't
@@ -1674,7 +1723,59 @@ export const useGeminiStream = (
       }
       dualOutput?.finalizeAssistantMessage();
       if (toolCallRequests.length > 0 && !signal.aborted) {
-        scheduleToolCalls(toolCallRequests, signal);
+        const executableToolCallRequests: ToolCallRequestInfo[] = [];
+        const duplicateResponseParts: Part[] = [];
+        let duplicatePromptId: string | undefined;
+        const historyCallIdsWithResponse: Set<string> = geminiClient
+          ? geminiClient.getHistoryFunctionResponseIds()
+          : new Set<string>();
+
+        for (const request of toolCallRequests) {
+          const providerCallId = request.providerCallId;
+          if (!providerCallId) {
+            executableToolCallRequests.push(request);
+            continue;
+          }
+
+          if (
+            handledProviderToolCallIdsRef.current.has(providerCallId) ||
+            historyCallIdsWithResponse.has(providerCallId)
+          ) {
+            const response = createDuplicateProviderToolCallResponse(request);
+            debugLogger.debug(
+              `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
+            );
+            dualOutput?.emitToolResult(request, response);
+            duplicateResponseParts.push(...response.responseParts);
+            duplicatePromptId ??= request.prompt_id;
+            continue;
+          }
+
+          handledProviderToolCallIdsRef.current.add(providerCallId);
+          executableToolCallRequests.push(request);
+        }
+
+        if (duplicateResponseParts.length > 0) {
+          if (executableToolCallRequests.length > 0) {
+            pendingDuplicateToolResponsesRef.current.push({
+              executableCallIds: new Set(
+                executableToolCallRequests.map((request) => request.callId),
+              ),
+              promptId:
+                duplicatePromptId ?? executableToolCallRequests[0]?.prompt_id,
+              responseParts: duplicateResponseParts,
+            });
+          } else {
+            immediateDuplicateToolResponsesRef.current = {
+              promptId: duplicatePromptId,
+              responseParts: duplicateResponseParts,
+            };
+          }
+        }
+
+        if (executableToolCallRequests.length > 0) {
+          scheduleToolCalls(executableToolCallRequests, signal);
+        }
       }
       return StreamProcessingStatus.Completed;
     },
@@ -1684,6 +1785,7 @@ export const useGeminiStream = (
       handleUserCancelledEvent,
       handleErrorEvent,
       scheduleToolCalls,
+      geminiClient,
       handleChatCompressionEvent,
       handleFinishedEvent,
       handleMaxSessionTurnsEvent,
@@ -1755,6 +1857,9 @@ export const useGeminiStream = (
       ) {
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
+        handledProviderToolCallIdsRef.current.clear();
+        pendingDuplicateToolResponsesRef.current = [];
+        immediateDuplicateToolResponsesRef.current = null;
       }
 
       const userMessageTimestamp = Date.now();
@@ -1924,6 +2029,17 @@ export const useGeminiStream = (
           if (pendingHistoryItemRef.current) {
             addItem(pendingHistoryItemRef.current, userMessageTimestamp);
             setPendingHistoryItem(null);
+          }
+
+          const immediateDuplicateToolResponses =
+            immediateDuplicateToolResponsesRef.current;
+          if (immediateDuplicateToolResponses) {
+            immediateDuplicateToolResponsesRef.current = null;
+            await submitQuery(
+              immediateDuplicateToolResponses.responseParts,
+              SendMessageType.ToolResult,
+              immediateDuplicateToolResponses.promptId,
+            );
           }
           // Only clear auto-retry countdown errors (those with an active timer).
           // Do NOT clear static error+hint from handleErrorEvent — those should
@@ -2245,6 +2361,26 @@ export const useGeminiStream = (
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      const completedCallIds = new Set(
+        completedAndReadyToSubmitTools.map(
+          (toolCall) => toolCall.request.callId,
+        ),
+      );
+      const readyDuplicateBatches: PendingDuplicateToolResponses[] = [];
+      pendingDuplicateToolResponsesRef.current =
+        pendingDuplicateToolResponsesRef.current.filter((batch) => {
+          const isReady = [...batch.executableCallIds].some((callId) =>
+            completedCallIds.has(callId),
+          );
+          if (isReady) {
+            readyDuplicateBatches.push(batch);
+          }
+          return !isReady;
+        });
+      const pendingDuplicateResponseParts = readyDuplicateBatches.flatMap(
+        (batch) => batch.responseParts,
+      );
+      const pendingDuplicatePromptId = readyDuplicateBatches[0]?.promptId;
 
       for (const toolCall of geminiTools) {
         geminiClient?.recordCompletedToolCall(
@@ -2253,7 +2389,10 @@ export const useGeminiStream = (
         );
       }
 
-      if (geminiTools.length === 0) {
+      if (
+        geminiTools.length === 0 &&
+        pendingDuplicateResponseParts.length === 0
+      ) {
         return;
       }
 
@@ -2272,7 +2411,7 @@ export const useGeminiStream = (
         (tc) => tc.status === 'cancelled',
       );
 
-      if (allToolsCancelled) {
+      if (allToolsCancelled && pendingDuplicateResponseParts.length === 0) {
         if (geminiClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
@@ -2298,6 +2437,7 @@ export const useGeminiStream = (
       const responsesToSend: Part[] = geminiTools.flatMap(
         (toolCall) => toolCall.response.responseParts,
       );
+      responsesToSend.push(...pendingDuplicateResponseParts);
       const callIdsToMarkAsSubmitted = geminiTools.map(
         (toolCall) => toolCall.request.callId,
       );
@@ -2305,6 +2445,7 @@ export const useGeminiStream = (
       const prompt_ids = geminiTools.map(
         (toolCall) => toolCall.request.prompt_id,
       );
+      const promptId = prompt_ids[0] ?? pendingDuplicatePromptId;
 
       // Persist model override from skill tool results (last one wins).
       // Uses `in` so that undefined (from inherit/no-model skills) clears a
@@ -2357,7 +2498,7 @@ export const useGeminiStream = (
           // resolve time (which covers both Ctrl+C on the next turn and
           // mid-flight cancellation of this batch via turnCancelledRef).
           const summaryAbort = new AbortController();
-          summaryAbortRefsRef.current.add(summaryAbort);
+          auxiliaryAbortRefsRef.current.add(summaryAbort);
 
           // Capture the first callId so we can locate "our" tool_group at
           // resolve time. If a newer tool_group has been added since we
@@ -2372,7 +2513,7 @@ export const useGeminiStream = (
             lastAssistantText,
           })
             .then((summary) => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
               const cancelled =
                 turnCancelledRef.current ||
                 abortControllerRef.current?.signal.aborted ||
@@ -2409,7 +2550,7 @@ export const useGeminiStream = (
               }
             })
             .catch(() => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
             });
         }
       }
@@ -2427,19 +2568,131 @@ export const useGeminiStream = (
           ? []
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
-        for (const msg of drained) {
-          const midTurnUserMessage = {
-            text: `\n[User message received during tool execution]: ${msg}`,
-          };
-          responsesToSend.push(midTurnUserMessage);
-          config
-            .getChatRecordingService()
-            ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
-          addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+        const midTurnTimestamp = Date.now();
+        const midTurnAbort =
+          abortControllerRef.current ?? new AbortController();
+        const shouldTrackMidTurnAbort = !abortControllerRef.current;
+        if (shouldTrackMidTurnAbort) {
+          auxiliaryAbortRefsRef.current.add(midTurnAbort);
+        }
+        try {
+          for (let index = 0; index < drained.length; index += 1) {
+            if (midTurnAbort.signal.aborted) {
+              break;
+            }
+            const msg = drained[index];
+            let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
+            if (isAtCommand(msg)) {
+              const atCommandTimeout = new AbortController();
+              const atCommandSignal = AbortSignal.any([
+                midTurnAbort.signal,
+                atCommandTimeout.signal,
+              ]);
+              const atCommandTimeoutId = setTimeout(() => {
+                atCommandTimeout.abort(
+                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+                );
+              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+              try {
+                const atCommandResult = await resolveWithAbort(
+                  atCommandSignal,
+                  () =>
+                    resolveAtCommandQuery({
+                      query: msg,
+                      config,
+                      onDebugMessage,
+                      messageId: midTurnTimestamp + index,
+                      signal: atCommandSignal,
+                    }),
+                );
+                const shouldSkipMidTurnMessage =
+                  !atCommandResult.shouldProceed &&
+                  (atCommandResult.toolDisplays?.length ?? 0) > 0;
+                if (
+                  atCommandResult.shouldProceed &&
+                  atCommandResult.processedQuery !== null
+                ) {
+                  resolvedMidTurnQuery = atCommandResult.processedQuery;
+                } else if (atCommandResult.toolDisplays?.length) {
+                  addItem(
+                    { type: 'tool_group', tools: atCommandResult.toolDisplays },
+                    midTurnTimestamp + index,
+                  );
+                }
+                if (atCommandResult.recording) {
+                  config.getChatRecordingService()?.recordAtCommand?.({
+                    filesRead: atCommandResult.recording.filesRead,
+                    status: atCommandResult.recording.status,
+                    ...(atCommandResult.recording.message
+                      ? { message: atCommandResult.recording.message }
+                      : {}),
+                    userText: msg,
+                  });
+                }
+                if (shouldSkipMidTurnMessage) {
+                  continue;
+                }
+              } catch (error) {
+                const errorMessage = getErrorMessage(error);
+                onDebugMessage(
+                  `Failed to resolve mid-turn @ command: ${errorMessage}`,
+                );
+                if (!midTurnAbort.signal.aborted) {
+                  addItem(
+                    {
+                      type: MessageType.WARNING,
+                      text: `Could not attach file: ${errorMessage}`,
+                    },
+                    Date.now(),
+                  );
+                }
+                continue;
+              } finally {
+                clearTimeout(atCommandTimeoutId);
+              }
+              if (midTurnAbort.signal.aborted) {
+                break;
+              }
+            }
+
+            const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
+              resolvedMidTurnQuery,
+              msg,
+            );
+            const formatCheck = checkImageFormatsSupport(
+              midTurnUserMessageParts,
+            );
+            if (formatCheck.hasUnsupportedFormats) {
+              addItem(
+                {
+                  type: MessageType.INFO,
+                  text: getUnsupportedImageFormatWarning(),
+                },
+                Date.now(),
+              );
+            }
+            responsesToSend.push(...midTurnUserMessageParts);
+            config
+              .getChatRecordingService()
+              ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
+            addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+          }
+        } finally {
+          if (shouldTrackMidTurnAbort) {
+            auxiliaryAbortRefsRef.current.delete(midTurnAbort);
+            midTurnAbort.abort();
+          }
         }
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
+      if (
+        turnCancelledRef.current ||
+        abortControllerRef.current?.signal.aborted
+      ) {
+        return;
+      }
+
+      submitQuery(responsesToSend, SendMessageType.ToolResult, promptId);
     },
     [
       submitQuery,
@@ -2451,6 +2704,7 @@ export const useGeminiStream = (
       midTurnDrainRef,
       addItem,
       dualOutput,
+      onDebugMessage,
     ],
   );
 
@@ -2604,15 +2858,18 @@ export const useGeminiStream = (
       );
     });
 
-    scheduler.start((job: { prompt: string; missed?: boolean }) => {
-      const label = job.prompt.slice(0, 40);
-      notificationQueueRef.current.push({
-        displayText: `${job.missed ? 'Missed' : 'Cron'}: ${label}`,
-        modelText: job.prompt,
-        sendMessageType: SendMessageType.Cron,
-      });
-      setNotificationTrigger((n) => n + 1);
-    });
+    scheduler.start(
+      (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+        const label = job.prompt.slice(0, 40);
+        const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+        notificationQueueRef.current.push({
+          displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+          modelText: job.prompt,
+          sendMessageType: SendMessageType.Cron,
+        });
+        setNotificationTrigger((n) => n + 1);
+      },
+    );
     return () => {
       const summary = scheduler.getExitSummary();
       scheduler.stop();
