@@ -58,13 +58,21 @@ export function isValidChatId(id: string): boolean {
  * it as plain text — so false positives are safe. False negatives (missing
  * markdown in msg_type=0) would strip formatting, so we bias toward markdown.
  */
+export function hasLinkSyntax(text: string): boolean {
+  const open = text.indexOf('[');
+  if (open === -1) return false;
+  const mid = text.indexOf('](', open + 1);
+  if (mid === -1) return false;
+  return text.indexOf(')', mid + 2) !== -1;
+}
+
 export function hasMarkdownSyntax(text: string): boolean {
   return (
     /^#{1,6}\s/m.test(text) ||
     text.includes('```') ||
     /\*\*|__|~~/.test(text) ||
     /`[^`]+`/.test(text) ||
-    /\[[^\]]+\]\([^)]+\)/.test(text) ||
+    hasLinkSyntax(text) ||
     /^[-*+]\s/m.test(text) ||
     /^\d+\.\s/m.test(text)
   );
