@@ -6808,7 +6808,10 @@ class QwenAgent implements Agent {
       settings,
       argvForSession,
       cwd,
-      [],
+      // ACP sessions do not provide an extension override. Passing [] is a
+      // truthy override and prevents default/argv extension commands from
+      // loading, so leave it unset to preserve normal CLI behavior.
+      undefined,
       // Pass separated hooks for proper source attribution
       {
         userHooks: this.settings.getUserHooks(),
