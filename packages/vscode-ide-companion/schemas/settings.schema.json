@@ -474,6 +474,10 @@
           "description": "The model to use for conversations.",
           "type": "string"
         },
+        "baseUrl": {
+          "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
+          "type": "string"
+        },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
           "type": "number",

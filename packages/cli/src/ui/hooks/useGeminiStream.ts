@@ -72,9 +72,13 @@ import {
   isSlashCommand,
 } from '../utils/commandUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
-import { handleAtCommand } from './atCommandProcessor.js';
+import {
+  handleAtCommand,
+  resolveAtCommandQuery,
+} from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
+import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
   useReactToolScheduler,
@@ -95,6 +99,9 @@ import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
+  'Mid-turn @ command resolution timed out';
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -117,6 +124,35 @@ function extractLastAssistantText(history: HistoryItem[]): string | undefined {
 
 function stripLeadingBlankLines(text: string): string {
   return text.replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
+async function resolveWithAbort<T>(
+  signal: AbortSignal,
+  run: () => Promise<T>,
+): Promise<T> {
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new Error('Mid-turn @ command resolution aborted'),
+      );
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([run(), abortPromise]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
 }
 
 /**
@@ -359,15 +395,19 @@ export const useGeminiStream = (
   useLayoutEffect(() => {
     historyRef.current = history;
   }, [history]);
-  // In-flight tool-use-summary aborters. Each batch gets its own AbortController
-  // because the captured turn controller is replaced when submitQuery starts
-  // the next turn, and the summary call outlives the current turn (that's the
-  // whole point — it overlaps with the next turn's streaming). cancelOngoingRequest
-  // aborts all in-flight summaries so Ctrl+C during the next turn also kills
-  // this turn's stale summary work.
-  const summaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
+  // In-flight auxiliary work. Some work is batch-scoped rather than turn-scoped:
+  // summaries intentionally outlive the turn, and mid-turn @ resolution may run
+  // before submitQuery installs the next turn controller.
+  // cancelOngoingRequest aborts these controllers so Ctrl+C still cancels them.
+  const auxiliaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
+  // Streamed model reasoning for the current turn. Rendered (height-limited)
+  // above the answer while thinking, then committed to history as a
+  // collapsible `gemini_thought` block when the answer/tool/turn begins.
+  const [pendingThoughtItem, pendingThoughtItemRef, setPendingThoughtItem] =
+    useStateAndRef<HistoryItemWithoutId | null>(null);
+  const thoughtStartTimeRef = useRef<number | null>(null);
   const [
     pendingRetryErrorItem,
     pendingRetryErrorItemRef,
@@ -639,12 +679,12 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
-    // Cancel any in-flight tool-use-summary generations so their Promise.then
-    // doesn't addItem a stale label after the user cancelled.
-    for (const ac of summaryAbortRefsRef.current) {
+    // Cancel any in-flight auxiliary work so its Promise.then doesn't add
+    // stale content after the user cancelled.
+    for (const ac of auxiliaryAbortRefsRef.current) {
       ac.abort();
     }
-    summaryAbortRefsRef.current.clear();
+    auxiliaryAbortRefsRef.current.clear();
 
     // Report cancellation to arena status reporter (if in arena mode).
     // This is needed because cancellation during tool execution won't
@@ -981,93 +1021,67 @@ export const useGeminiStream = (
   );
 
   const handleThoughtEvent = useCallback(
-    (
-      eventValue: ThoughtSummary,
-      currentThoughtBuffer: string,
-      userMessageTimestamp: number,
-    ): string => {
+    (eventValue: ThoughtSummary, currentThoughtBuffer: string): string => {
       if (turnCancelledRef.current) {
         return '';
       }
 
-      // Extract the description text from the thought summary
       const thoughtText = eventValue.description ?? '';
       if (!thoughtText) {
         return currentThoughtBuffer;
       }
 
-      let newThoughtBuffer = currentThoughtBuffer + thoughtText;
-
-      if (debugLogger.isEnabled()) {
-        debugLogger.debug(
-          `[THOUGHT_BUFFER] Buffer growing: ` +
-            `current=${currentThoughtBuffer.length}, ` +
-            `incoming=${thoughtText.length}, ` +
-            `total=${newThoughtBuffer.length}`,
-        );
+      const newThoughtBuffer = currentThoughtBuffer + thoughtText;
+      if (newThoughtBuffer.trim().length === 0) {
+        return newThoughtBuffer;
       }
 
-      const pendingType = pendingHistoryItemRef.current?.type;
-      const isPendingThought =
-        pendingType === 'gemini_thought' ||
-        pendingType === 'gemini_thought_content';
-      let thoughtToMerge = eventValue;
+      const startingNewThought = currentThoughtBuffer.trim().length === 0;
+      const description = startingNewThought
+        ? stripLeadingBlankLines(newThoughtBuffer)
+        : thoughtText;
 
-      // If we're not already showing a thought, start a new one
-      if (!isPendingThought) {
-        if (newThoughtBuffer.trim().length === 0) {
-          return newThoughtBuffer;
-        }
-        // If there's a pending non-thought item, finalize it first
-        if (pendingHistoryItemRef.current) {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
-        }
-        newThoughtBuffer = stripLeadingBlankLines(newThoughtBuffer);
-        thoughtToMerge = {
-          ...eventValue,
-          description: newThoughtBuffer,
-        };
-        setPendingHistoryItem({ type: 'gemini_thought', text: '' });
+      if (startingNewThought) {
+        thoughtStartTimeRef.current = Date.now();
       }
 
-      // Split large thought messages for better rendering performance (same rationale
-      // as regular content streaming). This helps avoid terminal flicker caused by
-      // constantly re-rendering an ever-growing "pending" block.
-      const splitPoint = findLastSafeSplitPoint(newThoughtBuffer);
-      const nextPendingType: 'gemini_thought' | 'gemini_thought_content' =
-        isPendingThought && pendingType === 'gemini_thought_content'
-          ? 'gemini_thought_content'
-          : 'gemini_thought';
+      // Keep the transient `thought` (subject) in sync for the window title.
+      mergeThought({
+        ...eventValue,
+        description,
+      });
 
-      if (splitPoint === newThoughtBuffer.length) {
-        // Update the existing thought message with accumulated content
-        setPendingHistoryItem({
-          type: nextPendingType,
-          text: newThoughtBuffer,
-        });
-      } else {
-        const beforeText = newThoughtBuffer.substring(0, splitPoint);
-        const afterText = newThoughtBuffer.substring(splitPoint);
-        addItem(
-          {
-            type: nextPendingType,
-            text: beforeText,
-          },
-          userMessageTimestamp,
-        );
-        setPendingHistoryItem({
-          type: 'gemini_thought_content',
-          text: afterText,
-        });
-        newThoughtBuffer = afterText;
-      }
+      // Stream the accumulated reasoning into a pending history item so it
+      // renders height-limited above the answer and can later be committed as
+      // a collapsible block.
+      setPendingThoughtItem({
+        type: 'gemini_thought',
+        text: stripLeadingBlankLines(newThoughtBuffer),
+        durationMs: thoughtStartTimeRef.current
+          ? Date.now() - thoughtStartTimeRef.current
+          : 0,
+      });
 
-      // Also update the thought state for the loading indicator
-      mergeThought(thoughtToMerge);
-
-      return newThoughtBuffer;
+      return startingNewThought ? description : newThoughtBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, mergeThought],
+    [mergeThought, setPendingThoughtItem],
+  );
+
+  // Commit the streamed reasoning to history as a collapsible block (or drop
+  // it). Called when the answer/tool/turn begins, or on cancel/error.
+  const commitPendingThought = useCallback(
+    (userMessageTimestamp: number) => {
+      if (pendingThoughtItemRef.current) {
+        const item = { ...pendingThoughtItemRef.current };
+        if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
+          item.durationMs = Date.now() - thoughtStartTimeRef.current;
+        }
+        addItem(item, userMessageTimestamp);
+      }
+      setPendingThoughtItem(null);
+      thoughtStartTimeRef.current = null;
+    },
+    [addItem, pendingThoughtItemRef, setPendingThoughtItem],
   );
 
   const handleUserCancelledEvent = useCallback(
@@ -1077,6 +1091,8 @@ export const useGeminiStream = (
       }
 
       lastPromptErroredRef.current = false;
+      // Persist any streamed reasoning (collapsed) above the cancelled answer.
+      commitPendingThought(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         if (pendingHistoryItemRef.current.type === 'tool_group') {
           const updatedTools = pendingHistoryItemRef.current.tools.map(
@@ -1107,6 +1123,7 @@ export const useGeminiStream = (
     },
     [
       addItem,
+      commitPendingThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
       setThought,
@@ -1117,6 +1134,8 @@ export const useGeminiStream = (
   const handleErrorEvent = useCallback(
     (eventValue: GeminiErrorEventValue, userMessageTimestamp: number) => {
       lastPromptErroredRef.current = true;
+      // Persist any streamed reasoning (collapsed) above the error.
+      commitPendingThought(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -1159,6 +1178,7 @@ export const useGeminiStream = (
     },
     [
       addItem,
+      commitPendingThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
       setPendingRetryErrorItem,
@@ -1480,11 +1500,7 @@ export const useGeminiStream = (
             };
           }
 
-          thoughtBuffer = handleThoughtEvent(
-            mergedThought,
-            thoughtBuffer,
-            userMessageTimestamp,
-          );
+          thoughtBuffer = handleThoughtEvent(mergedThought, thoughtBuffer);
         }
       };
 
@@ -1519,11 +1535,31 @@ export const useGeminiStream = (
               }
               break;
             case ServerGeminiEventType.Content:
+              // Thinking is done once the answer starts streaming; reset the
+              // title status. On the thinking→answer transition, flush any
+              // buffered reasoning so the full thought is captured, then commit
+              // it to history (collapsed) above the answer. After that the
+              // condition is false, so normal content batching resumes.
+              if (
+                pendingThoughtItemRef.current ||
+                bufferedEvents.some((e) => e.kind === 'thought')
+              ) {
+                flushBufferedStreamEvents();
+                commitPendingThought(userMessageTimestamp);
+                thoughtBuffer = '';
+              }
+              setThought((prev) => (prev ? null : prev));
               bufferedEvents.push({ kind: 'content', value: event.value });
               scheduleBufferedStreamFlush();
               break;
             case ServerGeminiEventType.ToolCallRequest:
+              // Thinking is done once a tool call is issued; flush buffered
+              // reasoning then commit it to history (collapsed) above the tool
+              // output.
               flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought((prev) => (prev ? null : prev));
               toolCallRequests.push(event.value);
               // Count tool call args JSON toward token estimation.
               try {
@@ -1560,6 +1596,9 @@ export const useGeminiStream = (
               break;
             case ServerGeminiEventType.Finished:
               flushBufferedStreamEvents();
+              // A thinking-only turn (no content/tool) still commits its
+              // reasoning so it persists collapsed in history.
+              commitPendingThought(userMessageTimestamp);
               handleFinishedEvent(
                 event as ServerGeminiFinishedEvent,
                 userMessageTimestamp,
@@ -1578,6 +1617,7 @@ export const useGeminiStream = (
               }
               geminiMessageBuffer = '';
               thoughtBuffer = '';
+              setThought(null);
               break;
             case ServerGeminiEventType.Citation:
               flushBufferedStreamEvents();
@@ -1602,8 +1642,10 @@ export const useGeminiStream = (
                 if (pendingHistoryItemRef.current) {
                   setPendingHistoryItem(null);
                 }
-                geminiMessageBuffer = '';
+                commitPendingThought(userMessageTimestamp);
                 thoughtBuffer = '';
+                setThought(null);
+                geminiMessageBuffer = '';
               } else {
                 flushBufferedStreamEvents();
               }
@@ -1660,6 +1702,7 @@ export const useGeminiStream = (
         }
       } finally {
         flushBufferedStreamEvents();
+        commitPendingThought(userMessageTimestamp);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
@@ -1683,7 +1726,9 @@ export const useGeminiStream = (
       startRetryCountdown,
       clearRetryCountdown,
       setThought,
+      commitPendingThought,
       pendingHistoryItemRef,
+      pendingThoughtItemRef,
       setPendingHistoryItem,
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
@@ -1852,6 +1897,7 @@ export const useGeminiStream = (
 
           // Reset thought when starting a new prompt
           setThought(null);
+          setPendingThoughtItem(null);
         }
 
         if (submitType === SendMessageType.Retry) {
@@ -2003,6 +2049,7 @@ export const useGeminiStream = (
       pendingRetryCountdownItemRef,
       pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
+      setPendingThoughtItem,
       dualOutput,
     ],
   );
@@ -2344,7 +2391,7 @@ export const useGeminiStream = (
           // resolve time (which covers both Ctrl+C on the next turn and
           // mid-flight cancellation of this batch via turnCancelledRef).
           const summaryAbort = new AbortController();
-          summaryAbortRefsRef.current.add(summaryAbort);
+          auxiliaryAbortRefsRef.current.add(summaryAbort);
 
           // Capture the first callId so we can locate "our" tool_group at
           // resolve time. If a newer tool_group has been added since we
@@ -2359,7 +2406,7 @@ export const useGeminiStream = (
             lastAssistantText,
           })
             .then((summary) => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
               const cancelled =
                 turnCancelledRef.current ||
                 abortControllerRef.current?.signal.aborted ||
@@ -2396,7 +2443,7 @@ export const useGeminiStream = (
               }
             })
             .catch(() => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
             });
         }
       }
@@ -2414,16 +2461,128 @@ export const useGeminiStream = (
           ? []
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
-        for (const msg of drained) {
-          const midTurnUserMessage = {
-            text: `\n[User message received during tool execution]: ${msg}`,
-          };
-          responsesToSend.push(midTurnUserMessage);
-          config
-            .getChatRecordingService()
-            ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
-          addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+        const midTurnTimestamp = Date.now();
+        const midTurnAbort =
+          abortControllerRef.current ?? new AbortController();
+        const shouldTrackMidTurnAbort = !abortControllerRef.current;
+        if (shouldTrackMidTurnAbort) {
+          auxiliaryAbortRefsRef.current.add(midTurnAbort);
         }
+        try {
+          for (let index = 0; index < drained.length; index += 1) {
+            if (midTurnAbort.signal.aborted) {
+              break;
+            }
+            const msg = drained[index];
+            let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
+            if (isAtCommand(msg)) {
+              const atCommandTimeout = new AbortController();
+              const atCommandSignal = AbortSignal.any([
+                midTurnAbort.signal,
+                atCommandTimeout.signal,
+              ]);
+              const atCommandTimeoutId = setTimeout(() => {
+                atCommandTimeout.abort(
+                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+                );
+              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+              try {
+                const atCommandResult = await resolveWithAbort(
+                  atCommandSignal,
+                  () =>
+                    resolveAtCommandQuery({
+                      query: msg,
+                      config,
+                      onDebugMessage,
+                      messageId: midTurnTimestamp + index,
+                      signal: atCommandSignal,
+                    }),
+                );
+                const shouldSkipMidTurnMessage =
+                  !atCommandResult.shouldProceed &&
+                  (atCommandResult.toolDisplays?.length ?? 0) > 0;
+                if (
+                  atCommandResult.shouldProceed &&
+                  atCommandResult.processedQuery !== null
+                ) {
+                  resolvedMidTurnQuery = atCommandResult.processedQuery;
+                } else if (atCommandResult.toolDisplays?.length) {
+                  addItem(
+                    { type: 'tool_group', tools: atCommandResult.toolDisplays },
+                    midTurnTimestamp + index,
+                  );
+                }
+                if (atCommandResult.recording) {
+                  config.getChatRecordingService()?.recordAtCommand?.({
+                    filesRead: atCommandResult.recording.filesRead,
+                    status: atCommandResult.recording.status,
+                    ...(atCommandResult.recording.message
+                      ? { message: atCommandResult.recording.message }
+                      : {}),
+                    userText: msg,
+                  });
+                }
+                if (shouldSkipMidTurnMessage) {
+                  continue;
+                }
+              } catch (error) {
+                const errorMessage = getErrorMessage(error);
+                onDebugMessage(
+                  `Failed to resolve mid-turn @ command: ${errorMessage}`,
+                );
+                if (!midTurnAbort.signal.aborted) {
+                  addItem(
+                    {
+                      type: MessageType.WARNING,
+                      text: `Could not attach file: ${errorMessage}`,
+                    },
+                    Date.now(),
+                  );
+                }
+                continue;
+              } finally {
+                clearTimeout(atCommandTimeoutId);
+              }
+              if (midTurnAbort.signal.aborted) {
+                break;
+              }
+            }
+
+            const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
+              resolvedMidTurnQuery,
+              msg,
+            );
+            const formatCheck = checkImageFormatsSupport(
+              midTurnUserMessageParts,
+            );
+            if (formatCheck.hasUnsupportedFormats) {
+              addItem(
+                {
+                  type: MessageType.INFO,
+                  text: getUnsupportedImageFormatWarning(),
+                },
+                Date.now(),
+              );
+            }
+            responsesToSend.push(...midTurnUserMessageParts);
+            config
+              .getChatRecordingService()
+              ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
+            addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+          }
+        } finally {
+          if (shouldTrackMidTurnAbort) {
+            auxiliaryAbortRefsRef.current.delete(midTurnAbort);
+            midTurnAbort.abort();
+          }
+        }
+      }
+
+      if (
+        turnCancelledRef.current ||
+        abortControllerRef.current?.signal.aborted
+      ) {
+        return;
       }
 
       submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
@@ -2438,18 +2597,22 @@ export const useGeminiStream = (
       midTurnDrainRef,
       addItem,
       dualOutput,
+      onDebugMessage,
     ],
   );
 
   const pendingHistoryItems = useMemo(
     () =>
       [
+        // Reasoning renders above the streaming answer.
+        pendingThoughtItem,
         pendingHistoryItem,
         pendingRetryErrorItem,
         pendingRetryCountdownItem,
         pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
     [
+      pendingThoughtItem,
       pendingHistoryItem,
       pendingRetryErrorItem,
       pendingRetryCountdownItem,

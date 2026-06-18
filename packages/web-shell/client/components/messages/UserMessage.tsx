@@ -18,7 +18,10 @@ interface UserMessageProps {
   onToggleCollapse?: (turnId: string) => void;
 }
 
-type Translate = (key: string, vars?: Record<string, string | number>) => string;
+type Translate = (
+  key: string,
+  vars?: Record<string, string | number>,
+) => string;
 
 /** Compact turn duration: `820ms` · `12.4s` · `1m 5s`. */
 function formatDuration(ms: number): string {
@@ -51,7 +54,10 @@ function metricsText(
   if (elapsedMs !== undefined) {
     parts.push(formatDuration(elapsedMs));
   }
-  if (collapse.inputTokens !== undefined && collapse.outputTokens !== undefined) {
+  if (
+    collapse.inputTokens !== undefined &&
+    collapse.outputTokens !== undefined
+  ) {
     const cachedTokens = collapse.cachedTokens ?? 0;
     const cached =
       cachedTokens > 0 && collapse.inputTokens > 0
@@ -65,7 +71,19 @@ function metricsText(
       )}`,
     );
   }
+  if (collapse.toolCallCount !== undefined && collapse.toolCallCount > 0) {
+    parts.push(t('turn.toolCalls', { count: collapse.toolCallCount }));
+  }
   return parts.join(' · ');
+}
+
+// Must track the same non-duration fields rendered by metricsText().
+function hasNonDurationMetrics(collapse: TurnCollapseHead): boolean {
+  return (
+    (collapse.inputTokens !== undefined &&
+      collapse.outputTokens !== undefined) ||
+    (collapse.toolCallCount !== undefined && collapse.toolCallCount > 0)
+  );
 }
 
 /**
@@ -92,20 +110,27 @@ export const UserMessage = memo(function UserMessage({
 }: UserMessageProps) {
   const { t } = useI18n();
 
+  const hasToggle = !!collapse && collapse.hiddenCount > 0;
+  const liveStartedAt = collapse?.liveStartedAt;
+  const showMetadataRow =
+    !!collapse &&
+    (hasToggle ||
+      liveStartedAt !== undefined ||
+      hasNonDurationMetrics(collapse));
+
   // A live turn ticks `now - liveStartedAt`; a completed turn shows its frozen
   // elapsedMs. The ref clamps the shown value monotonically so it never steps
   // backward when a live turn settles onto its (timestamp-derived) final figure.
-  const liveStartedAt = collapse?.liveStartedAt;
-  const now = useNowTicker(liveStartedAt !== undefined);
+  const now = useNowTicker(liveStartedAt !== undefined && showMetadataRow);
   const elapsedSeenRef = useRef(0);
   let displayElapsedMs: number | undefined;
-  if (liveStartedAt !== undefined) {
+  if (liveStartedAt !== undefined && showMetadataRow) {
     elapsedSeenRef.current = Math.max(
       elapsedSeenRef.current,
       Math.max(0, now - liveStartedAt),
     );
     displayElapsedMs = elapsedSeenRef.current;
-  } else if (collapse?.elapsedMs !== undefined) {
+  } else if (showMetadataRow && collapse?.elapsedMs !== undefined) {
     elapsedSeenRef.current = Math.max(
       elapsedSeenRef.current,
       collapse.elapsedMs,
@@ -117,8 +142,8 @@ export const UserMessage = memo(function UserMessage({
 
   // The chevron and step count toggle together (one comfortably-sized target);
   // the trailing metrics are inert. A step-less turn has no toggle, just metrics.
-  const hasToggle = !!collapse && collapse.hiddenCount > 0;
   const metrics = collapse ? metricsText(collapse, displayElapsedMs, t) : '';
+  const showMetrics = !!metrics && showMetadataRow;
 
   return (
     <div
@@ -151,7 +176,7 @@ export const UserMessage = memo(function UserMessage({
           </div>
         )}
         {content}
-        {collapse && onToggleCollapse && (hasToggle || metrics) && (
+        {collapse && onToggleCollapse && (hasToggle || showMetrics) && (
           <div className={styles.collapseRow}>
             {hasToggle && (
               <button
@@ -166,12 +191,12 @@ export const UserMessage = memo(function UserMessage({
                   collapse.collapsed ? t('turn.expand') : t('turn.collapse')
                 }
               >
-                {`${collapse.collapsed ? '▸' : '▾'} ${t('turn.hiddenSteps', {
+                {`${collapse.collapsed ? '▸' : '▾'} ${t('turn.executionSteps', {
                   count: collapse.hiddenCount,
                 })}`}
               </button>
             )}
-            {metrics && (
+            {showMetrics && (
               <span className={styles.collapseMeta}>
                 {hasToggle ? ` · ${metrics}` : metrics}
               </span>

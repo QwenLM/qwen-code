@@ -354,7 +354,9 @@ export class ImageTokenizer {
     }
 
     const width = buffer.readUInt32LE(18);
-    const height = buffer.readUInt32LE(22);
+    // Height is a signed int32: a negative value means a top-down BMP. Read it
+    // signed so Math.abs recovers the real height instead of a ~4-billion value.
+    const height = buffer.readInt32LE(22);
 
     return { width, height: Math.abs(height) }; // Height can be negative for top-down BMPs
   }
@@ -420,16 +422,25 @@ export class ImageTokenizer {
         ? buffer.readUInt16LE(entryOffset + 2)
         : buffer.readUInt16BE(entryOffset + 2);
 
-      const value = isLittleEndian
-        ? buffer.readUInt32LE(entryOffset + 8)
-        : buffer.readUInt32BE(entryOffset + 8);
+      // A SHORT (type 3) value occupies only the first two bytes of the
+      // 4-byte value field. Reading it as a 32-bit int happens to work on
+      // little-endian (II) files but yields value << 16 on big-endian (MM)
+      // ones, so read it according to the field type.
+      const value =
+        type === 3
+          ? isLittleEndian
+            ? buffer.readUInt16LE(entryOffset + 8)
+            : buffer.readUInt16BE(entryOffset + 8)
+          : isLittleEndian
+            ? buffer.readUInt32LE(entryOffset + 8)
+            : buffer.readUInt32BE(entryOffset + 8);
 
       if (tag === 0x0100) {
         // ImageWidth
-        width = type === 3 ? value : value; // SHORT or LONG
+        width = value;
       } else if (tag === 0x0101) {
         // ImageLength (height)
-        height = type === 3 ? value : value; // SHORT or LONG
+        height = value;
       }
 
       if (width > 0 && height > 0) break;

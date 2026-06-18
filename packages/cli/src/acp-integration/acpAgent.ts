@@ -6335,6 +6335,13 @@ class QwenAgent implements Agent {
         );
         const scope = toSettingsScope(params['scope']);
         settings.setValue(scope, key, normalizedValue);
+        if (settingKey === 'model.name') {
+          // Selecting a model by id here can't disambiguate providers that
+          // share that id, so clear the paired baseUrl disambiguator left by a
+          // previous model-picker selection. Empty-string tombstone overrides a
+          // lower-scope value on merge (undefined would be dropped from JSON).
+          settings.setValue(scope, 'model.baseUrl', '');
+        }
         if (
           settingKey === 'general.outputLanguage' &&
           typeof normalizedValue === 'string' &&
@@ -6777,7 +6784,10 @@ class QwenAgent implements Agent {
       settings,
       argvForSession,
       cwd,
-      [],
+      // ACP sessions do not provide an extension override. Passing [] is a
+      // truthy override and prevents default/argv extension commands from
+      // loading, so leave it unset to preserve normal CLI behavior.
+      undefined,
       // Pass separated hooks for proper source attribution
       {
         userHooks: this.settings.getUserHooks(),
