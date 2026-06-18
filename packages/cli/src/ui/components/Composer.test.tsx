@@ -41,11 +41,11 @@ vi.mock('./LoadingIndicator.js', () => ({
   }: {
     currentLoadingPhrase?: string;
   }) => (
-      <Text>
-        LoadingIndicator
-        {currentLoadingPhrase ? `: ${currentLoadingPhrase}` : ''}
-      </Text>
-    ),
+    <Text>
+      LoadingIndicator
+      {currentLoadingPhrase ? `: ${currentLoadingPhrase}` : ''}
+    </Text>
+  ),
 }));
 
 vi.mock('./ContextSummaryDisplay.js', () => ({

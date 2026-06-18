@@ -1,5 +1,9 @@
 import styles from './ToolChrome.module.css';
-export { formatToolDisplayName, truncateText } from '../toolFormatting';
+export {
+  formatToolDisplayName,
+  localizeToolDisplayName,
+  truncateText,
+} from '../toolFormatting';
 
 export function StatusIcon({ status }: { status: string }) {
   switch (status) {

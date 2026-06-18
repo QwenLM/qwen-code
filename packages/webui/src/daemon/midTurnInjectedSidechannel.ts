@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MID_TURN_MESSAGE_INJECTED_EVENT } from '@qwen-code/sdk/daemon';
 import type { DaemonMidTurnMessageInjectedData } from '@qwen-code/sdk/daemon';
 
 /**
@@ -132,7 +133,7 @@ export function parseSidechannelMidTurnInjected(
 ): DaemonMidTurnMessageInjectedData | undefined {
   if (!event || typeof event !== 'object') return undefined;
   const record = event as Record<string, unknown>;
-  if (record['type'] !== 'mid_turn_message_injected') return undefined;
+  if (record['type'] !== MID_TURN_MESSAGE_INJECTED_EVENT) return undefined;
   const data = record['data'];
   if (!data || typeof data !== 'object') return undefined;
   const dataRecord = data as Record<string, unknown>;

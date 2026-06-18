@@ -719,6 +719,12 @@ describe('Session', () => {
         'model.name',
         'qwen3-coder-plus',
       );
+      // Id-only switch must clear any stale baseUrl disambiguator (tombstone).
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.baseUrl',
+        '',
+      );
       expect(mockSettings.setValue).toHaveBeenCalledWith(
         SettingScope.User,
         'security.auth.selectedType',
@@ -2543,7 +2549,7 @@ describe('Session', () => {
         mockToolRegistry.getTool.mockReturnValue(tool);
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockClient.extMethod = vi.fn().mockResolvedValue({
-          messages: ['please also check tests'],
+          messages: ['  please also check tests  '],
         });
         mockChat.sendMessageStream = vi
           .fn()
@@ -2576,14 +2582,821 @@ describe('Session', () => {
         );
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         const midTurnPart = {
-          text: '\n[User message received during tool execution]: please also check tests',
+          text: '\n[User message received during tool execution]:   please also check tests  ',
         };
         expect(secondCall?.[1].message).toEqual(
           expect.arrayContaining([midTurnPart]),
         );
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
-        ).toHaveBeenCalledWith([midTurnPart], 'please also check tests');
+        ).toHaveBeenCalledWith([midTurnPart], '  please also check tests  ');
+      });
+
+      it('injects drained structured mid-turn user messages with images', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                { type: 'text', text: 'please inspect this image' },
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'iVBORw0KGgo=',
+                },
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgAAAA==',
+                },
+                {
+                  type: 'image',
+                  mimeType: 'text/html',
+                  data: '<script>alert(1)</script>',
+                },
+                {
+                  type: 'audio',
+                  mimeType: 'text/plain',
+                  data: 'not-audio',
+                },
+                {
+                  type: 'video',
+                  mimeType: 'video/mp4',
+                  data: 'not-supported',
+                },
+              ],
+              displayText: 'please inspect this image',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        debugLoggerWarnSpy.mockClear();
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        const midTurnParts: Part[] = [
+          {
+            text: '\n[User message received during tool execution]: please inspect this image',
+          },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'iVBORw0KGgo=',
+            },
+          },
+          {
+            inlineData: {
+              mimeType: 'audio/wav',
+              data: 'UklGRgAAAA==',
+            },
+          },
+        ];
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[1].message).toEqual(
+          expect.arrayContaining(midTurnParts),
+        );
+        expect(secondCall?.[1].message).not.toEqual(
+          expect.arrayContaining([
+            {
+              inlineData: {
+                mimeType: 'text/html',
+                data: '<script>alert(1)</script>',
+              },
+            },
+          ]),
+        );
+        expect(secondCall?.[1].message).not.toEqual(
+          expect.arrayContaining([
+            {
+              inlineData: {
+                mimeType: 'text/plain',
+                data: 'not-audio',
+              },
+            },
+          ]),
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(midTurnParts, 'please inspect this image');
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          'Unknown ContentBlock type: video',
+        );
+      });
+
+      it('keeps later structured mid-turn messages when one resolution fails', async () => {
+        const clampSpy = vi
+          .spyOn(core, 'clampInlineMediaPart')
+          .mockImplementation(() => {
+            throw new Error('image decode failed');
+          });
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'iVBORw0KGgo=',
+                },
+              ],
+              displayText: 'please inspect this image',
+            },
+            {
+              content: [{ type: 'text', text: 'safe follow-up' }],
+              displayText: 'safe follow-up',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          debugLoggerWarnSpy.mockClear();
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          const fallbackPart = {
+            text: '\n[User message received during tool execution]: please inspect this image',
+          };
+          const attachmentFailurePart = {
+            text: '[Attachment could not be processed]',
+          };
+          const followUpPart = {
+            text: '\n[User message received during tool execution]: safe follow-up',
+          };
+          const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1];
+          expect(secondCall?.[1].message).toEqual(
+            expect.arrayContaining([
+              fallbackPart,
+              attachmentFailurePart,
+              followUpPart,
+            ]),
+          );
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith(
+            [fallbackPart, attachmentFailurePart],
+            'please inspect this image',
+          );
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([followUpPart], 'safe follow-up');
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'Failed to resolve mid-turn message: image decode failed',
+          );
+        } finally {
+          clampSpy.mockRestore();
+        }
+      });
+
+      it('adds a fallback marker when audio resolution fails', async () => {
+        const clampSpy = vi
+          .spyOn(core, 'clampInlineMediaPart')
+          .mockImplementation(() => {
+            throw new Error('audio decode failed');
+          });
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgAAAA==',
+                },
+              ],
+              displayText: 'please listen to this audio',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          debugLoggerWarnSpy.mockClear();
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          const fallbackPart = {
+            text: '\n[User message received during tool execution]: please listen to this audio',
+          };
+          const attachmentFailurePart = {
+            text: '[Attachment could not be processed]',
+          };
+          const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1];
+
+          expect(secondCall?.[1].message).toEqual(
+            expect.arrayContaining([fallbackPart, attachmentFailurePart]),
+          );
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith(
+            [fallbackPart, attachmentFailurePart],
+            'please listen to this audio',
+          );
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'Failed to resolve mid-turn message: audio decode failed',
+          );
+        } finally {
+          clampSpy.mockRestore();
+        }
+      });
+
+      it('caps structured mid-turn drain items', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: Array.from({ length: 12 }, (_value, index) => ({
+            content: [{ type: 'text', text: `mid-turn ${index}` }],
+            displayText: `mid-turn ${index}`,
+          })),
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        debugLoggerWarnSpy.mockClear();
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[1].message).toEqual(
+          expect.arrayContaining([
+            {
+              text: '\n[User message received during tool execution]: mid-turn 0',
+            },
+            {
+              text: '\n[User message received during tool execution]: mid-turn 9',
+            },
+          ]),
+        );
+        expect(secondCall?.[1].message).not.toEqual(
+          expect.arrayContaining([
+            {
+              text: '\n[User message received during tool execution]: mid-turn 10',
+            },
+          ]),
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledTimes(10);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          'Mid-turn drain response had 12 item(s); processing first 10',
+        );
+      });
+
+      it('stops draining mid-turn messages when structured resolution is aborted', async () => {
+        let promptSignalAborted = false;
+        const clampSpy = vi
+          .spyOn(core, 'clampInlineMediaPart')
+          .mockImplementation(() => {
+            const pendingPrompt = (
+              session as unknown as { pendingPrompt: AbortController | null }
+            ).pendingPrompt;
+            pendingPrompt?.abort();
+            promptSignalAborted = pendingPrompt?.signal.aborted ?? false;
+            const abortError = new Error('aborted');
+            abortError.name = 'AbortError';
+            throw abortError;
+          });
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [{ type: 'text', text: 'already queued' }],
+              displayText: 'already queued',
+            },
+            {
+              content: [
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'iVBORw0KGgo=',
+                },
+              ],
+              displayText: 'inspect this image',
+            },
+            {
+              content: [{ type: 'text', text: 'should not be processed' }],
+              displayText: 'should not be processed',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          const retainedMidTurnPart = {
+            text: '\n[User message received during tool execution]: already queued',
+          };
+          const abortedMidTurnPart = {
+            text: '\n[User message received during tool execution]: inspect this image',
+          };
+          const skippedMidTurnPart = {
+            text: '\n[User message received during tool execution]: should not be processed',
+          };
+          const preservedMessage = vi.mocked(mockChat.addHistory).mock
+            .calls[0]?.[0] as Content | undefined;
+
+          expect(promptSignalAborted).toBe(true);
+          expect(clampSpy).toHaveBeenCalledTimes(1);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(preservedMessage?.parts).toEqual(
+            expect.arrayContaining([retainedMidTurnPart]),
+          );
+          expect(preservedMessage?.parts).not.toEqual(
+            expect.arrayContaining([abortedMidTurnPart]),
+          );
+          expect(preservedMessage?.parts).not.toEqual(
+            expect.arrayContaining([skippedMidTurnPart]),
+          );
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([retainedMidTurnPart], 'already queued');
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).not.toHaveBeenCalledWith(
+            [skippedMidTurnPart],
+            'should not be processed',
+          );
+        } finally {
+          clampSpy.mockRestore();
+        }
+      });
+
+      it('logs unrecognized mid-turn drain response fields', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          payload: ['safe follow-up'],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        debugLoggerWarnSpy.mockClear();
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          "Mid-turn drain response had no recognized 'items' or 'messages' field; keys: payload",
+        );
+      });
+
+      it('rejects mid-turn resource links and keeps valid messages in the same batch', async () => {
+        const readManyFilesSpy = vi
+          .spyOn(core, 'readManyFiles')
+          .mockResolvedValue({
+            contentParts: 'secret file',
+            files: [],
+          });
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                { type: 'text', text: 'mixed safe follow-up' },
+                {
+                  type: 'resource_link',
+                  uri: 'file:///etc/passwd',
+                  name: 'passwd',
+                },
+              ],
+              displayText: 'mixed safe follow-up',
+            },
+            {
+              content: [
+                {
+                  type: 'resource_link',
+                  uri: 'file:///etc/passwd',
+                  name: 'passwd',
+                },
+              ],
+              displayText: 'secret file',
+            },
+            {
+              content: [{ type: 'text', text: 'safe follow-up' }],
+              displayText: 'safe follow-up',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          const mixedMidTurnPart = {
+            text: '\n[User message received during tool execution]: mixed safe follow-up',
+          };
+          const midTurnPart = {
+            text: '\n[User message received during tool execution]: safe follow-up',
+          };
+          const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1];
+          expect(secondCall?.[1].message).toEqual(
+            expect.arrayContaining([mixedMidTurnPart, midTurnPart]),
+          );
+          expect(readManyFilesSpy).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([mixedMidTurnPart], 'mixed safe follow-up');
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([midTurnPart], 'safe follow-up');
+        } finally {
+          readManyFilesSpy.mockRestore();
+        }
+      });
+
+      it('accepts valid mid-turn embedded resources and drops invalid ones', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'file:///notes.txt',
+                    text: 'note contents',
+                  },
+                },
+              ],
+              displayText: 'read embedded notes',
+            },
+            {
+              content: [
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'file:///image.png',
+                    mimeType: 'image/png',
+                    blob: 'iVBORw0KGgo=',
+                  },
+                },
+              ],
+              displayText: 'read embedded image',
+            },
+            {
+              content: [
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'file:///invalid.txt',
+                  },
+                },
+              ],
+              displayText: 'invalid resource',
+            },
+            {
+              content: [
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'file:///huge.txt',
+                    text: 'x'.repeat(100_001),
+                  },
+                },
+              ],
+              displayText: 'huge resource',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        debugLoggerWarnSpy.mockClear();
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[1].message).toEqual(
+          expect.arrayContaining([
+            {
+              text: '\n[User message received during tool execution]: @file:///notes.txt',
+            },
+            {
+              text: 'File: file:///notes.txt\nnote contents',
+            },
+            {
+              text: '\n[User message received during tool execution]: @file:///image.png',
+            },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'iVBORw0KGgo=',
+              },
+            },
+          ]),
+        );
+        expect(secondCall?.[1].message).not.toEqual(
+          expect.arrayContaining([
+            {
+              text: '\n[User message received during tool execution]: invalid resource',
+            },
+            {
+              text: '\n[User message received during tool execution]: huge resource',
+            },
+          ]),
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          'Dropped 1 invalid mid-turn content block(s): "invalid resource"',
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          'Dropped 1 invalid mid-turn content block(s): "huge resource"',
+        );
       });
 
       it('latches mid-turn drain off after a permanent (-32601) error', async () => {
@@ -2773,6 +3586,103 @@ describe('Session', () => {
           .mock.calls.filter((call) => call[0] === 'craft/drainMidTurnQueue');
         expect(drainCalls).toHaveLength(5);
       }, 30_000);
+
+      it('recovers a drain that timed out and injects it on the next batch', async () => {
+        // The daemon answers the drain (splices + SSE-publishes, so the browser
+        // already deduped) but we time out waiting. The late response must not be
+        // discarded — it is recovered and injected on the NEXT batch instead of
+        // being lost from both queues.
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+
+        // Prompt 1's drain: a promise we resolve LATE (after the timeout fires)
+        // with the messages the daemon drained. Prompt 2's drain: empty.
+        let resolveLate: (value: { messages: string[] }) => void = () => {};
+        const latePromise = new Promise<{ messages: string[] }>((res) => {
+          resolveLate = res;
+        });
+        let drainCalls = 0;
+        mockClient.extMethod = vi.fn((method: string) => {
+          if (method !== 'craft/drainMidTurnQueue') return Promise.resolve({});
+          drainCalls += 1;
+          return drainCalls === 1
+            ? latePromise
+            : Promise.resolve({ messages: [] });
+        });
+
+        const toolCallStream = () =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'c',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]);
+        const streamMock = vi.fn();
+        for (let i = 0; i < 2; i++) {
+          streamMock
+            .mockResolvedValueOnce(toolCallStream())
+            .mockResolvedValueOnce(createEmptyStream());
+        }
+        mockChat.sendMessageStream = streamMock;
+
+        const prompt = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text' as const, text: 'read file' }],
+        };
+
+        // Prompt 1: the drain times out (latePromise still pending). Nothing is
+        // injected yet.
+        await session.prompt(prompt);
+
+        // The daemon's answer finally arrives. The timeout branch's handler
+        // stashes it for recovery; flush microtasks so the push lands.
+        resolveLate({ messages: ['please also check tests'] });
+        await new Promise((r) => setTimeout(r, 0));
+
+        // Prompt 2: the drain flushes the recovered message into this batch.
+        await session.prompt(prompt);
+
+        const midTurnPart = {
+          text: '\n[User message received during tool execution]: please also check tests',
+        };
+        // Injected into prompt 2's follow-up (4th sendMessageStream call), not
+        // prompt 1's (which timed out with nothing to inject).
+        const calls = vi.mocked(mockChat.sendMessageStream).mock.calls;
+        expect(calls[1]?.[1].message).not.toEqual(
+          expect.arrayContaining([midTurnPart]),
+        );
+        expect(calls[3]?.[1].message).toEqual(
+          expect.arrayContaining([midTurnPart]),
+        );
+        // Recorded exactly once, at injection time.
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith([midTurnPart], 'please also check tests');
+      }, 20_000);
 
       it('keeps mid-turn drain enabled after a transient error', async () => {
         const tool = {
@@ -4221,6 +5131,7 @@ describe('Session', () => {
             'auto-denied-acp',
             'classifier_blocked',
             signal,
+            'auto-denied-acp',
           );
         });
 
@@ -4258,6 +5169,7 @@ describe('Session', () => {
             'auto-denied-acp',
             'classifier_unavailable',
             expect.any(AbortSignal),
+            'auto-denied-acp',
           );
         });
 

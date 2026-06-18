@@ -42,7 +42,7 @@ import {
   type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
-import { t } from '../../../i18n/index.js';
+import { localizeToolDisplayName, t } from '../../../i18n/index.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -57,7 +57,7 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
 );
 
 function formatActivityLabel(name: string, description: string | undefined) {
-  const display = TOOL_DISPLAY_BY_NAME[name] ?? name;
+  const display = localizeToolDisplayName(TOOL_DISPLAY_BY_NAME[name] ?? name);
   const singleLineDesc = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
