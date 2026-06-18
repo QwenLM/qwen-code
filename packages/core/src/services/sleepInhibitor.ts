@@ -21,6 +21,7 @@ export interface SleepInhibitorHandle {
 
 export interface SleepInhibitorConfig {
   platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
   spawn?: (
     command: string,
     args: string[],
@@ -34,6 +35,14 @@ const NOOP_HANDLE: SleepInhibitorHandle = {
 };
 
 const MAX_INHIBITOR_REASON_LENGTH = 120;
+const LINUX_DISPLAY_ENV_VARS = ['DISPLAY', 'WAYLAND_DISPLAY', 'MIR_SOCKET'];
+const SSH_ENV_VARS = ['SSH_CONNECTION', 'SSH_TTY', 'SSH_CLIENT'];
+
+function isHeadlessSshSession(env: NodeJS.ProcessEnv): boolean {
+  const hasSshSession = SSH_ENV_VARS.some((key) => Boolean(env[key]));
+  const hasDisplay = LINUX_DISPLAY_ENV_VARS.some((key) => Boolean(env[key]));
+  return hasSshSession && !hasDisplay;
+}
 
 /**
  * Sanitize the inhibitor reason before it is passed to `systemd-inhibit
@@ -56,11 +65,13 @@ export class SleepInhibitor {
   private child: ChildProcess | undefined;
   private spawnFailedForCurrentRun = false;
   private readonly platform: NodeJS.Platform;
+  private readonly env: NodeJS.ProcessEnv;
   private readonly spawn: NonNullable<SleepInhibitorConfig['spawn']>;
   private readonly logger: NonNullable<SleepInhibitorConfig['logger']>;
 
   constructor(config: SleepInhibitorConfig = {}) {
     this.platform = config.platform ?? defaultPlatform();
+    this.env = config.env ?? process.env;
     this.spawn =
       config.spawn ??
       ((command, args, options) => defaultSpawn(command, args, options ?? {}));
@@ -116,9 +127,7 @@ export class SleepInhibitor {
 
     const command = this.getCommand(reason);
     if (!command) {
-      this.logger.debug(
-        `Sleep inhibition is unsupported on platform ${this.platform}.`,
-      );
+      this.logger.debug(this.getUnavailableMessage());
       // Latch so we don't re-check and re-log the unsupported platform on
       // every subsequent acquire() within the same run.
       this.spawnFailedForCurrentRun = true;
@@ -196,7 +205,7 @@ export class SleepInhibitor {
     ];
     const env: NodeJS.ProcessEnv = {};
     for (const key of allowList) {
-      const value = process.env[key];
+      const value = this.env[key];
       if (value !== undefined) {
         env[key] = value;
       }
@@ -240,6 +249,9 @@ export class SleepInhibitor {
         // systemd-inhibit semantics on battery.
         return { command: 'caffeinate', args: ['-is'] };
       case 'linux':
+        if (isHeadlessSshSession(this.env)) {
+          return undefined;
+        }
         return {
           command: 'systemd-inhibit',
           args: [
@@ -266,6 +278,13 @@ export class SleepInhibitor {
       default:
         return undefined;
     }
+  }
+
+  private getUnavailableMessage(): string {
+    if (this.platform === 'linux' && isHeadlessSshSession(this.env)) {
+      return 'Sleep inhibition skipped for headless SSH session.';
+    }
+    return `Sleep inhibition is unsupported on platform ${this.platform}.`;
   }
 }
 

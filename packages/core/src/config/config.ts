@@ -822,11 +822,21 @@ export interface ConfigParameters {
   cronEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
+  /**
+   * P5 T7: suppress the one-time `Workflow` tool usage-warning banner.
+   * When `true`, the registry-side warning latch is bypassed and the
+   * banner is not prepended to the run's display payload. Defaults to
+   * `false`. The banner itself is per-session (registry-scoped), so
+   * even when unset it fires at most once per process.
+   */
+  skipWorkflowUsageWarning?: boolean;
   computerUseEnabled?: boolean;
   computerUseMaxImageDimension?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
+  /** Locale code for resolving localizable extension fields (e.g., 'en', 'zh'). */
+  locale?: string;
   allowedMcpServers?: string[];
   excludedMcpServers?: string[];
   /**
@@ -1256,6 +1266,7 @@ export class Config {
   private readonly cronEnabled: boolean = true;
   private readonly agentTeamEnabled: boolean = false;
   private workflowsEnabled = false;
+  private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly computerUseMaxImageDimension?: number;
   private readonly emitToolUseSummaries: boolean = true;
@@ -1456,6 +1467,7 @@ export class Config {
     this.cronEnabled = params.cronEnabled ?? true;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
@@ -1555,6 +1567,7 @@ export class Config {
       workspaceDir: this.targetDir,
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
+      locale: params.locale,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
@@ -1673,6 +1686,7 @@ export class Config {
                   (input['permission_mode'] as PermissionMode | undefined) ??
                     PermissionMode.Default,
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               }
@@ -1684,6 +1698,7 @@ export class Config {
                   (input['tool_use_id'] as string) || '',
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -1695,6 +1710,7 @@ export class Config {
                   input['is_interrupt'] as boolean | undefined,
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolBatch':
@@ -1733,6 +1749,7 @@ export class Config {
                   (input['reason'] as PermissionDeniedReason) ||
                     'classifier_blocked',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'SubagentStart':
@@ -3885,6 +3902,18 @@ export class Config {
     this.workflowsEnabled = enabled;
   }
 
+  /**
+   * P5 T7: read the `skipWorkflowUsageWarning` setting. When `true`, the
+   * `Workflow` tool suppresses the one-time banner that announces the
+   * `QWEN_CODE_MAX_TOKENS_PER_WORKFLOW` env knob. The registry-side
+   * `shouldShowUsageWarning()` latch is still session-scoped, so even
+   * when this returns `false` the banner fires at most once per
+   * process.
+   */
+  getSkipWorkflowUsageWarning(): boolean {
+    return this.skipWorkflowUsageWarning;
+  }
+
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
   }
@@ -4885,6 +4914,12 @@ export class Config {
       await registerLazy(ToolNames.CRON_DELETE, async () => {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
+      });
+      // Reuses the cron scheduler's session-only one-shot path, so it is
+      // gated on the same flag as the cron tools.
+      await registerLazy(ToolNames.LOOP_WAKEUP, async () => {
+        const { LoopWakeupTool } = await import('../tools/loop-wakeup.js');
+        return new LoopWakeupTool(this);
       });
     }
 

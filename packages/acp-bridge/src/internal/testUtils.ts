@@ -294,7 +294,10 @@ export function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
   };
   // Spin up the fake agent on the agent side; keep the connection so tests can
   // drive client-bound ext-methods (e.g. the mid-turn drain).
-  handle.agentConnection = new AgentSideConnection(() => handle.agent, agentStream);
+  handle.agentConnection = new AgentSideConnection(
+    () => handle.agent,
+    agentStream,
+  );
   handle.channel = {
     stream: clientStream,
     exited,

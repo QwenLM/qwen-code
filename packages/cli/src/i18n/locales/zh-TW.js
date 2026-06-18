@@ -9,6 +9,50 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  // ============================================================================
+  // Tool display names (chat-stream badge labels)
+  // ----------------------------------------------------------------------------
+  // Keyed by `toolDisplayName.<English display name>` (from core
+  // `ToolDisplayNames`); a missing key falls back to the English display name
+  // via `localizeToolDisplayName`. A product name (e.g. `Notebook`) is kept
+  // verbatim inside an otherwise-translated label.
+  // ============================================================================
+  'toolDisplayName.Edit': '編輯',
+  'toolDisplayName.WriteFile': '寫入檔案',
+  'toolDisplayName.ReadFile': '讀取檔案',
+  'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.Glob': 'Glob',
+  'toolDisplayName.Shell': '運行命令',
+  'toolDisplayName.Shell Command': 'Shell 命令',
+  'toolDisplayName.TodoWrite': '任務清單',
+  'toolDisplayName.SaveMemory': '儲存記憶',
+  'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Skill': '技能',
+  'toolDisplayName.EnterPlanMode': '進入計畫模式',
+  'toolDisplayName.ExitPlanMode': '退出計畫模式',
+  'toolDisplayName.WebFetch': '網路擷取',
+  'toolDisplayName.WebSearch': '網路搜尋',
+  'toolDisplayName.ListFiles': '列出檔案',
+  'toolDisplayName.Lsp': 'LSP',
+  'toolDisplayName.AskUserQuestion': '詢問使用者',
+  'toolDisplayName.CronCreate': '建立定時任務',
+  'toolDisplayName.CronList': '定時任務清單',
+  'toolDisplayName.CronDelete': '刪除定時任務',
+  'toolDisplayName.LoopWakeup': '循環喚醒',
+  'toolDisplayName.TaskCreate': '建立任務',
+  'toolDisplayName.TaskUpdate': '更新任務',
+  'toolDisplayName.TaskList': '任務列表',
+  'toolDisplayName.TaskStop': '停止任務',
+  'toolDisplayName.TeamCreate': '建立團隊',
+  'toolDisplayName.TeamDelete': '刪除團隊',
+  'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.StructuredOutput': '結構化輸出',
+  'toolDisplayName.Monitor': '監控',
+  'toolDisplayName.NotebookEdit': '編輯 Notebook',
+  'toolDisplayName.ToolSearch': '工具搜尋',
+  'toolDisplayName.EnterWorktree': '進入 Worktree',
+  'toolDisplayName.ExitWorktree': '退出 Worktree',
+  'toolDisplayName.Workflow': '工作流程',
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
   'Attachments: ': '附件：',

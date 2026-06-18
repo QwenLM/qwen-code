@@ -1645,6 +1645,16 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('edit')).toBe(false);
     });
 
+    it('coreTools allowlist gates loop_wakeup as a core scheduling tool', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('loop_wakeup')).toBe(false);
+
+      pm = new PermissionManager(makeConfig({ coreTools: ['loop_wakeup'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('loop_wakeup')).toBe(true);
+    });
+
     it('coreTools with specifier: tool-level check strips specifier', async () => {
       // "Bash(ls -l)" should register run_shell_command (specifier only affects runtime)
       pm = new PermissionManager(makeConfig({ coreTools: ['Bash(ls -l)'] }));

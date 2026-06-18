@@ -153,3 +153,59 @@ describe('supported language resolution', () => {
     expect(resolveSupportedLanguage('zh-HK')).toBe('zh');
   });
 });
+
+describe('localizeToolDisplayName', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('translates tool badges without colliding with generic UI strings', async () => {
+    const { setLanguageAsync, localizeToolDisplayName, t } = await import(
+      './index.js'
+    );
+    await setLanguageAsync('zh');
+
+    // The namespaced `toolDisplayName.*` key translates the badge...
+    expect(localizeToolDisplayName('Shell')).toBe('运行命令');
+    expect(localizeToolDisplayName('TodoWrite')).toBe('任务清单');
+    // Proper tool names / acronyms are intentionally kept in English.
+    expect(localizeToolDisplayName('Agent')).toBe('Agent');
+    expect(localizeToolDisplayName('Grep')).toBe('Grep');
+    expect(localizeToolDisplayName('Glob')).toBe('Glob');
+    expect(localizeToolDisplayName('Lsp')).toBe('LSP');
+    // ...while a same-spelled standalone UI string keeps its own value.
+    expect(t('Shell')).toBe('Shell');
+  });
+
+  it('falls back to the English display name for untranslated tools', async () => {
+    const { setLanguageAsync, localizeToolDisplayName } = await import(
+      './index.js'
+    );
+    await setLanguageAsync('en');
+
+    expect(localizeToolDisplayName('TodoWrite')).toBe('TodoWrite');
+    expect(localizeToolDisplayName('Shell')).toBe('Shell');
+    // An unknown tool name passes through unchanged.
+    expect(localizeToolDisplayName('MysteryTool')).toBe('MysteryTool');
+  });
+
+  it('has a zh translation for every core tool display name', async () => {
+    const { setLanguageAsync, localizeToolDisplayName } = await import(
+      './index.js'
+    );
+    const { ToolDisplayNames } = await import('@qwen-code/qwen-code-core');
+    await setLanguageAsync('zh');
+
+    // Guards against a new tool landing without a `toolDisplayName.*` entry:
+    // every English display name (except the intentionally-English ones below)
+    // must resolve to a different (translated) zh string. check-i18n can't catch
+    // this because the keys are built dynamically, never as
+    // `t('toolDisplayName.X')` string literals.
+    const KEEP_ENGLISH = new Set(['Agent', 'Grep', 'Glob']);
+    const untranslated = Object.values(ToolDisplayNames).filter(
+      (name) =>
+        !KEEP_ENGLISH.has(name) && localizeToolDisplayName(name) === name,
+    );
+    expect(untranslated).toEqual([]);
+  });
+});

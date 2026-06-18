@@ -19,6 +19,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { assembleMcpServers } from '../../config/mcpServers.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
+import { getCurrentLanguage } from '../../i18n/index.js';
 
 const COLOR_GREEN = '\u001b[32m';
 const COLOR_YELLOW = '\u001b[33m';
@@ -32,6 +33,7 @@ async function getMcpServersFromConfig(): Promise<
   const extensionManager = new ExtensionManager({
     isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
     telemetrySettings: settings.merged.telemetry,
+    locale: getCurrentLanguage(),
   });
   await extensionManager.refreshCache();
   const extensions = extensionManager.getLoadedExtensions();

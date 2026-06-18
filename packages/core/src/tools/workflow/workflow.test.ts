@@ -564,4 +564,120 @@ describe('WorkflowTool', () => {
       final.recentLogs.some((l) => l.includes('before agent dispatch')),
     ).toBe(true);
   });
+
+  // ── P5 T7: one-time usage warning banner ──────────────────────────────
+
+  it('P5 T7: prepends the usage banner on the first run only', async () => {
+    const { config, registry } = configWithRegistry();
+    const tool = new WorkflowTool(config, {
+      dispatch: async () => 'ok',
+    });
+
+    const first = await tool
+      .build({ script: 'return 1' })
+      .execute(new AbortController().signal);
+    expect(typeof first.returnDisplay).toBe('string');
+    expect(first.returnDisplay as string).toMatch(
+      /Workflows have no per-run token cap|Workflow token cap is/,
+    );
+    expect(first.returnDisplay as string).toMatch(
+      /skipWorkflowUsageWarning/,
+    );
+    // Second invocation: latch already flipped on the registry.
+    const second = await tool
+      .build({ script: 'return 2' })
+      .execute(new AbortController().signal);
+    expect(second.returnDisplay as string).not.toMatch(
+      /skipWorkflowUsageWarning/,
+    );
+
+    // Sanity: the registry exposes both runs.
+    expect(registry.list().length).toBe(2);
+  });
+
+  it('P5 T7: suppressed by skipWorkflowUsageWarning setting', async () => {
+    const registry = new WorkflowRunRegistry();
+    const config = {
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    const tool = new WorkflowTool(config, { dispatch: async () => 'ok' });
+    const result = await tool
+      .build({ script: 'return 1' })
+      .execute(new AbortController().signal);
+    expect(result.returnDisplay as string).not.toMatch(
+      /skipWorkflowUsageWarning/,
+    );
+    // The latch SHOULD remain unflipped — settings suppression
+    // bypasses the call so a later session that re-enables the
+    // setting still gets its banner.
+    expect(registry.shouldShowUsageWarning()).toBe(true);
+  });
+
+  // ── P5 T7 R1: failure-path latch + status='failed' contract ─────────
+
+  it('P5 T7 R1: failure path does NOT emit banner or consume the latch', async () => {
+    // Reason: coreToolScheduler overrides `returnDisplay` with
+    // `error.message` whenever `result.error` is set. Emitting the
+    // banner on the failure path would be invisible AND would
+    // silently flip the latch — the next successful run would miss
+    // the banner. The contract is: latch flips only when the banner
+    // is actually rendered to the user (success path).
+    const { config, registry } = configWithRegistry();
+    const tool = new WorkflowTool(config, { dispatch: async () => 'ok' });
+    const failed = await tool
+      .build({ script: 'throw new Error("script-boom");' })
+      .execute(new AbortController().signal);
+    expect(failed.returnDisplay as string).not.toMatch(
+      /skipWorkflowUsageWarning/,
+    );
+    expect(failed.returnDisplay as string).toMatch(/Workflow failed: /);
+    // Latch unconsumed: a later successful run still gets the banner.
+    expect(registry.shouldShowUsageWarning()).toBe(true);
+    // Registry status contract: failed → 'failed', error preserved.
+    expect(registry.list()).toHaveLength(1);
+    expect(registry.list()[0]!.status).toBe('failed');
+    expect(registry.list()[0]!.error).toMatch(/script-boom/);
+  });
+
+  it('P5 T7 R1: failed-then-succeeded → banner appears on the SUCCESS run', async () => {
+    const { config, registry } = configWithRegistry();
+    const tool = new WorkflowTool(config, { dispatch: async () => 'ok' });
+    await tool
+      .build({ script: 'throw new Error("first-fail");' })
+      .execute(new AbortController().signal);
+    const success = await tool
+      .build({ script: 'return 1' })
+      .execute(new AbortController().signal);
+    expect(success.returnDisplay as string).toMatch(
+      /skipWorkflowUsageWarning/,
+    );
+    expect(registry.list()).toHaveLength(2);
+    expect(registry.list()[0]!.status).toBe('failed');
+    expect(registry.list()[1]!.status).toBe('completed');
+  });
+
+  it('P5 R1 #10: capped banner shape (`total !== null`) — was untested', async () => {
+    const { config } = configWithRegistry();
+    const originalEnv = process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'];
+    process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'] = '50000';
+    try {
+      const tool = new WorkflowTool(config, { dispatch: async () => 'ok' });
+      const result = await tool
+        .build({ script: 'return 1' })
+        .execute(new AbortController().signal);
+      const display = result.returnDisplay as string;
+      // Capped banner has "Workflow token cap is <total>" copy.
+      expect(display).toMatch(/Workflow token cap is 50000/);
+      expect(display).toMatch(/skipWorkflowUsageWarning/);
+      // Capped banner must NOT carry the uncapped "have no per-run" copy.
+      expect(display).not.toMatch(/Workflows have no per-run token cap/);
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'];
+      } else {
+        process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'] = originalEnv;
+      }
+    }
+  });
 });

@@ -26,12 +26,15 @@ import type {
   AutoModeDecision,
   AutoModeOutcome,
   GoalTerminalEvent,
+  ToolCallRequestInfo,
+  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
   convertToFunctionResponse,
+  createDuplicateProviderToolCallResponse,
   createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
@@ -95,6 +98,7 @@ import {
   setGoalTerminalObserver,
   sessionIdContext,
   dedupeToolCallsById,
+  getProviderToolCallId,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -185,6 +189,11 @@ const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
 // means the client silently drops unknown methods; without a deadline the
 // await would wedge the prompt turn forever.
 const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
+// Secondary deadline for recovering a drain whose response arrives AFTER the
+// 2s race timeout: within this window the late answer is re-injected on the next
+// batch; beyond it (e.g. degraded transport) it is dropped rather than pushed
+// into an unrelated turn's context.
+const MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS = 30_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
 const MAX_MID_TURN_DRAIN_ITEMS = 10;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
@@ -401,6 +410,11 @@ interface BackgroundNotificationQueueItem {
   toolUseId?: string;
 }
 
+interface CronQueueItem {
+  prompt: string;
+  source: 'cron' | 'loop';
+}
+
 const MAX_NOTIFICATION_QUEUE = 20;
 
 export function computeInitialTurnFromHistory(
@@ -455,6 +469,7 @@ export async function fireSessionPermissionDeniedForAutoMode(
           callId,
           getAutoModePermissionDeniedReason(decision),
           signal,
+          callId,
         );
     } catch (hookError) {
       debugLogger.warn(
@@ -635,7 +650,7 @@ export class Session implements SessionContext {
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state
-  private cronQueue: string[] = [];
+  private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
   private cronAbortController: AbortController | null = null;
   private cronCompletion: Promise<void> | null = null;
@@ -644,6 +659,11 @@ export class Session implements SessionContext {
   private lastPromptTokenCountChat: GeminiChat | null = null;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
+  // Messages from a drain that the daemon answered but we timed out waiting for
+  // (the daemon already spliced + SSE-published them). Re-injected on the next
+  // batch so a transient stall can't silently lose them. See
+  // `#drainMidTurnUserMessages`.
+  private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -1073,7 +1093,6 @@ export class Session implements SessionContext {
     try {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
-      void this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -1081,6 +1100,12 @@ export class Session implements SessionContext {
       return result;
     } finally {
       this.pendingPrompt = null;
+      // Start the scheduler in finally, not the success path: a turn can arm
+      // a wakeup via LoopWakeup and then throw on a later step. Gated on
+      // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
+      // cron job) is actually pending — otherwise the loop dies silently on
+      // any post-arm error.
+      void this.#startCronSchedulerIfNeeded();
       resolveCompletion();
       this.pendingPromptCompletion = null;
     }
@@ -2097,7 +2122,16 @@ export class Session implements SessionContext {
   }
 
   async #drainMidTurnUserMessages(abortSignal: AbortSignal): Promise<Part[]> {
-    if (this.midTurnDrainUnavailable) return [];
+    // Flush anything recovered from a PRIOR timed-out drain first: the daemon
+    // splices + SSE-publishes synchronously, so on a timeout the browser has
+    // already deduped those messages — discarding the late response would lose
+    // them from both queues. We stash them (see the timeout branch) and
+    // re-inject them here on the next batch.
+    const recovered = this.#takeRecoveredMidTurnMessages();
+
+    if (this.midTurnDrainUnavailable) {
+      return this.#buildMidTurnParts(recovered, abortSignal);
+    }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
@@ -2118,49 +2152,10 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      const drainedMessages = parseMidTurnDrainResponse(response);
-      const drainedParts: Part[] = [];
-      for (const message of drainedMessages) {
-        const displayText =
-          message.kind === 'text' ? message.message : message.displayText;
-        let rawParts: Part[];
-        try {
-          rawParts =
-            message.kind === 'text'
-              ? [{ text: message.message }]
-              : await withTimeoutSignal(
-                  abortSignal,
-                  MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                  (signal) => this.#resolvePrompt(message.content, signal),
-                );
-        } catch (messageError) {
-          if (abortSignal.aborted) return drainedParts;
-          const errorMessage = this.#formatError(messageError);
-          debugLogger.warn(
-            `Failed to resolve mid-turn message: ${errorMessage}`,
-          );
-          rawParts = [
-            {
-              text: displayText,
-            },
-          ];
-          if (
-            message.kind === 'structured' &&
-            hasInlineMediaContentBlock(message.content)
-          ) {
-            rawParts.push({
-              text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT,
-            });
-          }
-        }
-        const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
-        this.config
-          .getChatRecordingService()
-          ?.recordMidTurnUserMessage(parts, displayText);
-        drainedParts.push(...parts);
-      }
-
-      return drainedParts;
+      return this.#buildMidTurnParts(
+        [...recovered, ...parseMidTurnDrainResponse(response)],
+        abortSignal,
+      );
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so
@@ -2180,9 +2175,14 @@ export class Session implements SessionContext {
       const isTimeout = error instanceof MidTurnDrainTimeoutError;
       if (isTimeout) {
         this.midTurnDrainTimeoutStrikes += 1;
-        // The lost race leaves the request pending; if the client settles it
-        // later, a rejection must not surface as an unhandled rejection.
-        drainPromise?.catch(() => {});
+        // The lost race leaves the drain request pending. The daemon answers it
+        // by splicing the queue + publishing the SSE echo (so the browser has
+        // already deduped), then returns the messages we just timed out waiting
+        // for. Recover that late response and inject it on the next batch instead
+        // of discarding it (which would lose the messages from both queues —
+        // silent loss). `#recoverLateDrain` bounds the wait and swallows a late
+        // rejection.
+        if (drainPromise) void this.#recoverLateDrain(drainPromise);
       }
       // Repeated timeouts are also permanent: a conforming client answers
       // (or rejects with -32601) immediately, so sustained silence means the
@@ -2203,8 +2203,108 @@ export class Session implements SessionContext {
       debugLogger.warn(
         `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
-      return [];
+      // Even on a failed/timed-out drain, still inject anything recovered from
+      // an EARLIER timeout so a transient stall never strands those messages.
+      return this.#buildMidTurnParts(recovered, abortSignal);
     }
+  }
+
+  /** Read and clear the buffer of messages recovered from a timed-out drain. */
+  #takeRecoveredMidTurnMessages(): DrainedMidTurnMessage[] {
+    if (this.midTurnRecoveredMessages.length === 0) return [];
+    const out = this.midTurnRecoveredMessages;
+    this.midTurnRecoveredMessages = [];
+    return out;
+  }
+
+  /**
+   * After a drain times out, the request is still pending; the daemon settles it
+   * shortly after (it splices + SSE-publishes synchronously, so the browser has
+   * already deduped). Recover that late response for the next batch instead of
+   * discarding it, but bound the wait with a secondary deadline so a response
+   * that only arrives long after the turn isn't pushed into an unrelated
+   * context. A late rejection is swallowed (no unhandled rejection).
+   */
+  async #recoverLateDrain(
+    pending: ReturnType<AgentSideConnection['extMethod']>,
+  ): Promise<void> {
+    // Swallow a late rejection regardless of which branch of the race wins.
+    pending.catch(() => {});
+    const expired = Symbol('mid-turn-recovery-expired');
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<typeof expired>((resolve) => {
+      timer = setTimeout(
+        () => resolve(expired),
+        MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    });
+    let late: unknown;
+    try {
+      late = await Promise.race([pending, deadline]);
+    } catch {
+      return; // late rejection — nothing to recover
+    } finally {
+      clearTimeout(timer);
+    }
+    if (late === expired) {
+      debugLogger.warn(
+        `[mid-turn] dropped a drain response that arrived after the ${MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS}ms recovery deadline [session ${this.sessionId}]`,
+      );
+      return;
+    }
+    const lateMessages = parseMidTurnDrainResponse(late);
+    if (lateMessages.length > 0) {
+      debugLogger.debug(
+        `[mid-turn] recovered ${lateMessages.length} message(s) from a timed-out drain [session ${this.sessionId}]`,
+      );
+      this.midTurnRecoveredMessages.push(...lateMessages);
+    }
+  }
+
+  /**
+   * Resolve each drained mid-turn message (text or structured content) into
+   * agent-visible `Part`s and record it once to the chat transcript. Recording
+   * happens on injection (here), so a message recovered from an earlier
+   * timed-out drain is still recorded exactly once.
+   */
+  async #buildMidTurnParts(
+    messages: DrainedMidTurnMessage[],
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    const parts: Part[] = [];
+    for (const message of messages) {
+      const displayText =
+        message.kind === 'text' ? message.message : message.displayText;
+      let rawParts: Part[];
+      try {
+        rawParts =
+          message.kind === 'text'
+            ? [{ text: message.message }]
+            : await withTimeoutSignal(
+                abortSignal,
+                MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+                (signal) => this.#resolvePrompt(message.content, signal),
+              );
+      } catch (messageError) {
+        if (abortSignal.aborted) return parts;
+        const errorMessage = this.#formatError(messageError);
+        debugLogger.warn(`Failed to resolve mid-turn message: ${errorMessage}`);
+        rawParts = [{ text: displayText }];
+        if (
+          message.kind === 'structured' &&
+          hasInlineMediaContentBlock(message.content)
+        ) {
+          rawParts.push({ text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT });
+        }
+      }
+      const built = prefixMidTurnUserMessageParts(rawParts, displayText);
+      this.config
+        .getChatRecordingService()
+        ?.recordMidTurnUserMessage(built, displayText);
+      parts.push(...built);
+    }
+    return parts;
   }
 
   /**
@@ -2240,9 +2340,12 @@ export class Session implements SessionContext {
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start((job: { prompt: string }) => {
+    scheduler.start((job: { prompt: string; cronExpr?: string }) => {
       if (this.cronDisabledByTokenLimit) return;
-      this.cronQueue.push(job.prompt);
+      this.cronQueue.push({
+        prompt: job.prompt,
+        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+      });
       void this.#drainCronQueue();
     });
   }
@@ -2267,8 +2370,8 @@ export class Session implements SessionContext {
 
     try {
       while (this.cronQueue.length > 0) {
-        const prompt = this.cronQueue.shift()!;
-        await this.#executeCronPrompt(prompt);
+        const item = this.cronQueue.shift()!;
+        await this.#executeCronPrompt(item);
       }
     } finally {
       this.cronProcessing = false;
@@ -2294,14 +2397,15 @@ export class Session implements SessionContext {
    * Executes a single cron-fired prompt: echoes it as a user message with
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
    */
-  async #executeCronPrompt(prompt: string): Promise<void> {
+  async #executeCronPrompt(item: CronQueueItem): Promise<void> {
     // Same session-ID binding rationale as #executePrompt.
     return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeCronPromptInner(prompt),
+      this.#executeCronPromptInner(item),
     );
   }
 
-  async #executeCronPromptInner(prompt: string): Promise<void> {
+  async #executeCronPromptInner(item: CronQueueItem): Promise<void> {
+    const { prompt } = item;
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
@@ -2326,7 +2430,7 @@ export class Session implements SessionContext {
               await this.sendUpdate({
                 sessionUpdate: 'user_message_chunk',
                 content: { type: 'text', text: prompt },
-                _meta: { source: 'cron' },
+                _meta: { source: item.source },
               });
 
               // Prepend session-level system reminders (same rationale as the
@@ -2440,7 +2544,9 @@ export class Session implements SessionContext {
               debugLogger.error('Error processing cron prompt:', error);
               const msg =
                 error instanceof Error ? error.message : String(error);
-              await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
+              await this.messageEmitter.emitAgentMessage(
+                `[${item.source} error] ${msg}`,
+              );
             } finally {
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
@@ -2468,9 +2574,12 @@ export class Session implements SessionContext {
     this.cronDisabledByTokenLimit = true;
     this.cronQueue = [];
     if (!this.config.isCronEnabled()) return;
-    this.config.getCronScheduler().stop();
+    // disable() (not stop()): the breaker is permanent for the session, so
+    // LoopWakeup must reject re-arms that would never fire, not just halt the
+    // tick (which a later pending wakeup would otherwise silently restart).
+    this.config.getCronScheduler().disable();
     void this.#emitAgentDiagnosticMessageSafely(
-      'Cron jobs disabled for the rest of this session due to token limit. Restart the session to re-enable.',
+      'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
       'Failed to emit cron-disabled diagnostic',
     );
   }
@@ -3084,15 +3193,101 @@ export class Session implements SessionContext {
     functionCalls: FunctionCall[],
   ): Promise<RunToolResult> {
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
-    type Batch = { concurrent: boolean; calls: FunctionCall[] };
+    type ExecutableBatch = {
+      kind: 'execute';
+      concurrent: boolean;
+      calls: FunctionCall[];
+    };
+    type DuplicateBatch = {
+      kind: 'duplicate';
+      request: ToolCallRequestInfo;
+      response: ToolCallResponseInfo;
+    };
+    type Batch = ExecutableBatch | DuplicateBatch;
     const batches: Batch[] = [];
+    const handledProviderToolCallIds = new Set(
+      this.#getCurrentChat().getHistoryFunctionResponseIds(),
+    );
+
+    const pushDuplicateBatch = (request: ToolCallRequestInfo): void => {
+      const response = createDuplicateProviderToolCallResponse(request);
+      debugLogger.debug(
+        `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +
+          `${request.providerCallId} (tool: ${request.name})`,
+      );
+      batches.push({ kind: 'duplicate', request, response });
+    };
+
+    const emitDuplicateBatch = async (batch: DuplicateBatch): Promise<void> => {
+      const { request, response } = batch;
+      if (request.name === ToolNames.TODO_WRITE) {
+        const provenance = ToolCallEmitter.resolveToolProvenance(request.name);
+        await this.sendUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: response.callId,
+          status: 'failed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: response.error?.message ?? String(response.resultDisplay),
+              },
+            },
+          ],
+          rawOutput: response.resultDisplay,
+          _meta: {
+            toolName: request.name,
+            provenance: provenance.provenance,
+            ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+          },
+        });
+      } else {
+        await this.toolCallEmitter.emitResult({
+          callId: response.callId,
+          toolName: request.name,
+          args: request.args,
+          message: response.responseParts,
+          resultDisplay: response.resultDisplay,
+          error: response.error,
+          success: false,
+        });
+      }
+      this.config
+        .getChatRecordingService()
+        ?.recordToolResult(response.responseParts, {
+          callId: response.callId,
+          status: 'error',
+          resultDisplay: response.resultDisplay,
+          error: response.error,
+          errorType: response.errorType,
+        });
+    };
+
     for (const fc of dedupedFunctionCalls) {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      if (providerCallId) {
+        if (handledProviderToolCallIds.has(providerCallId)) {
+          const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+          pushDuplicateBatch({
+            callId,
+            providerCallId,
+            name: fc.name ?? 'unknown_tool',
+            args: (fc.args ?? {}) as Record<string, unknown>,
+            isClientInitiated: false,
+            prompt_id: promptId,
+          });
+          continue;
+        }
+        handledProviderToolCallIds.add(providerCallId);
+      }
+
       const isAgent = fc.name === ToolNames.AGENT;
       const last = batches[batches.length - 1];
-      if (isAgent && last?.concurrent) {
+      if (isAgent && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
       } else {
-        batches.push({ concurrent: isAgent, calls: [fc] });
+        batches.push({ kind: 'execute', concurrent: isAgent, calls: [fc] });
       }
     }
 
@@ -3186,6 +3381,11 @@ export class Session implements SessionContext {
 
     const parts: Part[] = [];
     for (const batch of batches) {
+      if (batch.kind === 'duplicate') {
+        await emitDuplicateBatch(batch);
+        parts.push(...batch.response.responseParts);
+        continue;
+      }
       if (batch.concurrent && batch.calls.length > 1) {
         const batchAbortController = new AbortController();
         let batchStopAfterUserQuestionCancel = false;
@@ -3850,6 +4050,7 @@ export class Session implements SessionContext {
               toolUseId,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             if (!preHookResult.shouldProceed) {
@@ -3969,6 +4170,7 @@ export class Session implements SessionContext {
               toolUseId,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             // If hook indicates to stop, return an error response
@@ -4004,6 +4206,7 @@ export class Session implements SessionContext {
               isInterrupt,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             // Log additional context if provided
@@ -4111,6 +4314,7 @@ export class Session implements SessionContext {
               isInterrupt,
               String(approvalMode),
               activeToolAbortSignal,
+              callId,
             );
 
             // Log additional context if provided

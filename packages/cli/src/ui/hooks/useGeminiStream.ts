@@ -56,6 +56,7 @@ import {
   activeGoalEquals,
   setActiveGoal,
   clearActiveGoal,
+  createDuplicateProviderToolCallResponse,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -102,6 +103,12 @@ const debugLogger = createDebugLogger('GEMINI_STREAM');
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
+
+interface PendingDuplicateToolResponses {
+  executableCallIds: Set<string>;
+  promptId: string | undefined;
+  responseParts: Part[];
+}
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -282,6 +289,8 @@ const EDIT_TOOL_NAMES = new Set([
   ToolNames.NOTEBOOK_EDIT,
 ]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
+const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
+const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
 type BufferedStreamEvent =
   | { kind: 'content'; value: string }
@@ -293,6 +302,14 @@ function showCitations(settings: LoadedSettings): boolean {
     return enabled;
   }
   return true;
+}
+
+function clampLoadingThoughtDescription(description: string): string {
+  if (description.length <= LOADING_THOUGHT_DESCRIPTION_MAX_CHARS) {
+    return description;
+  }
+
+  return description.slice(0, LOADING_THOUGHT_DESCRIPTION_MAX_CHARS);
 }
 
 /**
@@ -424,6 +441,14 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
+  const pendingDuplicateToolResponsesRef = useRef<
+    PendingDuplicateToolResponses[]
+  >([]);
+  const immediateDuplicateToolResponsesRef = useRef<{
+    promptId: string | undefined;
+    responseParts: Part[];
+  } | null>(null);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
   // Uses a ref to avoid re-renders on every text_delta.
@@ -956,14 +981,19 @@ export const useGeminiStream = (
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.
-      const splitPoint = findLastSafeSplitPoint(newGeminiMessageBuffer);
-      if (splitPoint === newGeminiMessageBuffer.length) {
-        // Update the existing message with accumulated content
-        setPendingHistoryItem((item) => ({
-          type: item?.type as 'gemini' | 'gemini_content',
-          text: newGeminiMessageBuffer,
-        }));
-      } else {
+      let nextPendingType = pendingHistoryItemRef.current?.type as
+        | 'gemini'
+        | 'gemini_content';
+      while (newGeminiMessageBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
+        const splitPoint = findLastSafeSplitPoint(
+          newGeminiMessageBuffer,
+          STREAM_PENDING_ITEM_MAX_CHARS,
+        );
+        const safeSplitPoint =
+          splitPoint > 0 && splitPoint < newGeminiMessageBuffer.length
+            ? splitPoint
+            : STREAM_PENDING_ITEM_MAX_CHARS;
+
         // This indicates that we need to split up this Gemini Message.
         // Splitting a message is primarily a performance consideration. There is a
         // <Static> component at the root of App.tsx which takes care of rendering
@@ -972,20 +1002,23 @@ export const useGeminiStream = (
         // multiple times per-second (as streaming occurs). Prior to this change you'd
         // see heavy flickering of the terminal. This ensures that larger messages get
         // broken up so that there are more "statically" rendered.
-        const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
-        const afterText = newGeminiMessageBuffer.substring(splitPoint);
+        const beforeText = newGeminiMessageBuffer.substring(0, safeSplitPoint);
+        const afterText = newGeminiMessageBuffer.substring(safeSplitPoint);
         addItem(
           {
-            type: pendingHistoryItemRef.current?.type as
-              | 'gemini'
-              | 'gemini_content',
+            type: nextPendingType,
             text: beforeText,
           },
           userMessageTimestamp,
         );
-        setPendingHistoryItem({ type: 'gemini_content', text: afterText });
+        nextPendingType = 'gemini_content';
         newGeminiMessageBuffer = afterText;
       }
+      // Update the existing message with accumulated content.
+      setPendingHistoryItem({
+        type: nextPendingType,
+        text: newGeminiMessageBuffer,
+      });
       return newGeminiMessageBuffer;
     },
     [addItem, pendingHistoryItemRef, setPendingHistoryItem],
@@ -994,23 +1027,31 @@ export const useGeminiStream = (
   const mergeThought = useCallback(
     (incoming: ThoughtSummary) => {
       setThought((prev) => {
+        const incomingDescription = incoming.description
+          ? clampLoadingThoughtDescription(incoming.description)
+          : incoming.description;
         if (!prev) {
           if (debugLogger.isEnabled()) {
             debugLogger.debug(
               `[THOUGHT_MERGE] New thought: ` +
                 `subjectLength=${incoming.subject?.length ?? 0}, ` +
-                `description length=${incoming.description?.length ?? 0}`,
+                `description length=${incomingDescription?.length ?? 0}`,
             );
           }
-          return incoming;
+          return {
+            ...incoming,
+            description: incomingDescription,
+          };
         }
         const subject = incoming.subject || prev.subject;
-        const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
+        const description = clampLoadingThoughtDescription(
+          `${prev.description ?? ''}${incomingDescription ?? ''}`,
+        );
         if (debugLogger.isEnabled()) {
           debugLogger.debug(
             `[THOUGHT_MERGE] Accumulating thought: ` +
               `prev length=${prev.description?.length ?? 0}, ` +
-              `incoming length=${incoming.description?.length ?? 0}, ` +
+              `incoming length=${incomingDescription?.length ?? 0}, ` +
               `total length=${description.length}`,
           );
         }
@@ -1021,7 +1062,11 @@ export const useGeminiStream = (
   );
 
   const handleThoughtEvent = useCallback(
-    (eventValue: ThoughtSummary, currentThoughtBuffer: string): string => {
+    (
+      eventValue: ThoughtSummary,
+      currentThoughtBuffer: string,
+      userMessageTimestamp: number,
+    ): string => {
       if (turnCancelledRef.current) {
         return '';
       }
@@ -1031,7 +1076,7 @@ export const useGeminiStream = (
         return currentThoughtBuffer;
       }
 
-      const newThoughtBuffer = currentThoughtBuffer + thoughtText;
+      let newThoughtBuffer = currentThoughtBuffer + thoughtText;
       if (newThoughtBuffer.trim().length === 0) {
         return newThoughtBuffer;
       }
@@ -1043,6 +1088,7 @@ export const useGeminiStream = (
 
       if (startingNewThought) {
         thoughtStartTimeRef.current = Date.now();
+        newThoughtBuffer = description;
       }
 
       // Keep the transient `thought` (subject) in sync for the window title.
@@ -1054,17 +1100,61 @@ export const useGeminiStream = (
       // Stream the accumulated reasoning into a pending history item so it
       // renders height-limited above the answer and can later be committed as
       // a collapsible block.
-      setPendingThoughtItem({
-        type: 'gemini_thought',
-        text: stripLeadingBlankLines(newThoughtBuffer),
-        durationMs: thoughtStartTimeRef.current
+      let pendingThoughtType: 'gemini_thought' | 'gemini_thought_content' =
+        startingNewThought
+          ? 'gemini_thought'
+          : pendingThoughtItemRef.current?.type === 'gemini_thought_content'
+            ? 'gemini_thought_content'
+            : 'gemini_thought';
+      const getThoughtDurationMs = () =>
+        thoughtStartTimeRef.current
           ? Date.now() - thoughtStartTimeRef.current
-          : 0,
-      });
+          : 0;
+      const buildThoughtItem = (
+        type: 'gemini_thought' | 'gemini_thought_content',
+        text: string,
+      ): HistoryItemWithoutId =>
+        type === 'gemini_thought'
+          ? {
+              type,
+              text,
+              durationMs: getThoughtDurationMs(),
+            }
+          : {
+              type,
+              text,
+            };
 
-      return startingNewThought ? description : newThoughtBuffer;
+      let splitPoint = findLastSafeSplitPoint(
+        newThoughtBuffer,
+        STREAM_PENDING_ITEM_MAX_CHARS,
+      );
+      while (newThoughtBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
+        const safeSplitPoint =
+          splitPoint > 0 && splitPoint < newThoughtBuffer.length
+            ? splitPoint
+            : STREAM_PENDING_ITEM_MAX_CHARS;
+        const beforeText = newThoughtBuffer.substring(0, safeSplitPoint);
+        const afterText = newThoughtBuffer.substring(safeSplitPoint);
+        addItem(
+          buildThoughtItem(pendingThoughtType, beforeText),
+          userMessageTimestamp,
+        );
+        pendingThoughtType = 'gemini_thought_content';
+        newThoughtBuffer = afterText;
+        splitPoint = findLastSafeSplitPoint(
+          newThoughtBuffer,
+          STREAM_PENDING_ITEM_MAX_CHARS,
+        );
+      }
+
+      setPendingThoughtItem(
+        buildThoughtItem(pendingThoughtType, newThoughtBuffer),
+      );
+
+      return newThoughtBuffer;
     },
-    [mergeThought, setPendingThoughtItem],
+    [addItem, mergeThought, pendingThoughtItemRef, setPendingThoughtItem],
   );
 
   // Commit the streamed reasoning to history as a collapsible block (or drop
@@ -1467,40 +1557,49 @@ export const useGeminiStream = (
           const nextEvent = bufferedEvents.shift()!;
 
           if (nextEvent.kind === 'content') {
-            let mergedContent = nextEvent.value;
+            const contentParts = [nextEvent.value];
 
             while (bufferedEvents[0]?.kind === 'content') {
               const queuedContent = bufferedEvents.shift();
               if (queuedContent?.kind !== 'content') {
                 break;
               }
-              mergedContent += queuedContent.value;
+              contentParts.push(queuedContent.value);
             }
 
             geminiMessageBuffer = handleContentEvent(
-              mergedContent,
+              contentParts.join(''),
               geminiMessageBuffer,
               userMessageTimestamp,
             );
             continue;
           }
 
-          let mergedThought = nextEvent.value;
+          let subject = nextEvent.value.subject;
+          const thoughtDescriptions: string[] = [];
+          if (nextEvent.value.description) {
+            thoughtDescriptions.push(nextEvent.value.description);
+          }
 
           while (bufferedEvents[0]?.kind === 'thought') {
             const queuedThought = bufferedEvents.shift();
             if (queuedThought?.kind !== 'thought') {
               break;
             }
-            mergedThought = {
-              subject: queuedThought.value.subject || mergedThought.subject,
-              description: `${mergedThought.description ?? ''}${
-                queuedThought.value.description ?? ''
-              }`,
-            };
+            subject = queuedThought.value.subject || subject;
+            if (queuedThought.value.description) {
+              thoughtDescriptions.push(queuedThought.value.description);
+            }
           }
 
-          thoughtBuffer = handleThoughtEvent(mergedThought, thoughtBuffer);
+          thoughtBuffer = handleThoughtEvent(
+            {
+              subject,
+              description: thoughtDescriptions.join(''),
+            },
+            thoughtBuffer,
+            userMessageTimestamp,
+          );
         }
       };
 
@@ -1708,7 +1807,59 @@ export const useGeminiStream = (
       }
       dualOutput?.finalizeAssistantMessage();
       if (toolCallRequests.length > 0 && !signal.aborted) {
-        scheduleToolCalls(toolCallRequests, signal);
+        const executableToolCallRequests: ToolCallRequestInfo[] = [];
+        const duplicateResponseParts: Part[] = [];
+        let duplicatePromptId: string | undefined;
+        const historyCallIdsWithResponse: Set<string> = geminiClient
+          ? geminiClient.getHistoryFunctionResponseIds()
+          : new Set<string>();
+
+        for (const request of toolCallRequests) {
+          const providerCallId = request.providerCallId;
+          if (!providerCallId) {
+            executableToolCallRequests.push(request);
+            continue;
+          }
+
+          if (
+            handledProviderToolCallIdsRef.current.has(providerCallId) ||
+            historyCallIdsWithResponse.has(providerCallId)
+          ) {
+            const response = createDuplicateProviderToolCallResponse(request);
+            debugLogger.debug(
+              `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
+            );
+            dualOutput?.emitToolResult(request, response);
+            duplicateResponseParts.push(...response.responseParts);
+            duplicatePromptId ??= request.prompt_id;
+            continue;
+          }
+
+          handledProviderToolCallIdsRef.current.add(providerCallId);
+          executableToolCallRequests.push(request);
+        }
+
+        if (duplicateResponseParts.length > 0) {
+          if (executableToolCallRequests.length > 0) {
+            pendingDuplicateToolResponsesRef.current.push({
+              executableCallIds: new Set(
+                executableToolCallRequests.map((request) => request.callId),
+              ),
+              promptId:
+                duplicatePromptId ?? executableToolCallRequests[0]?.prompt_id,
+              responseParts: duplicateResponseParts,
+            });
+          } else {
+            immediateDuplicateToolResponsesRef.current = {
+              promptId: duplicatePromptId,
+              responseParts: duplicateResponseParts,
+            };
+          }
+        }
+
+        if (executableToolCallRequests.length > 0) {
+          scheduleToolCalls(executableToolCallRequests, signal);
+        }
       }
       return StreamProcessingStatus.Completed;
     },
@@ -1718,6 +1869,7 @@ export const useGeminiStream = (
       handleUserCancelledEvent,
       handleErrorEvent,
       scheduleToolCalls,
+      geminiClient,
       handleChatCompressionEvent,
       handleFinishedEvent,
       handleMaxSessionTurnsEvent,
@@ -1789,6 +1941,9 @@ export const useGeminiStream = (
       ) {
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
+        handledProviderToolCallIdsRef.current.clear();
+        pendingDuplicateToolResponsesRef.current = [];
+        immediateDuplicateToolResponsesRef.current = null;
       }
 
       const userMessageTimestamp = Date.now();
@@ -1958,6 +2113,17 @@ export const useGeminiStream = (
           if (pendingHistoryItemRef.current) {
             addItem(pendingHistoryItemRef.current, userMessageTimestamp);
             setPendingHistoryItem(null);
+          }
+
+          const immediateDuplicateToolResponses =
+            immediateDuplicateToolResponsesRef.current;
+          if (immediateDuplicateToolResponses) {
+            immediateDuplicateToolResponsesRef.current = null;
+            await submitQuery(
+              immediateDuplicateToolResponses.responseParts,
+              SendMessageType.ToolResult,
+              immediateDuplicateToolResponses.promptId,
+            );
           }
           // Only clear auto-retry countdown errors (those with an active timer).
           // Do NOT clear static error+hint from handleErrorEvent — those should
@@ -2279,6 +2445,26 @@ export const useGeminiStream = (
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      const completedCallIds = new Set(
+        completedAndReadyToSubmitTools.map(
+          (toolCall) => toolCall.request.callId,
+        ),
+      );
+      const readyDuplicateBatches: PendingDuplicateToolResponses[] = [];
+      pendingDuplicateToolResponsesRef.current =
+        pendingDuplicateToolResponsesRef.current.filter((batch) => {
+          const isReady = [...batch.executableCallIds].some((callId) =>
+            completedCallIds.has(callId),
+          );
+          if (isReady) {
+            readyDuplicateBatches.push(batch);
+          }
+          return !isReady;
+        });
+      const pendingDuplicateResponseParts = readyDuplicateBatches.flatMap(
+        (batch) => batch.responseParts,
+      );
+      const pendingDuplicatePromptId = readyDuplicateBatches[0]?.promptId;
 
       for (const toolCall of geminiTools) {
         geminiClient?.recordCompletedToolCall(
@@ -2287,7 +2473,10 @@ export const useGeminiStream = (
         );
       }
 
-      if (geminiTools.length === 0) {
+      if (
+        geminiTools.length === 0 &&
+        pendingDuplicateResponseParts.length === 0
+      ) {
         return;
       }
 
@@ -2306,7 +2495,7 @@ export const useGeminiStream = (
         (tc) => tc.status === 'cancelled',
       );
 
-      if (allToolsCancelled) {
+      if (allToolsCancelled && pendingDuplicateResponseParts.length === 0) {
         if (geminiClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
@@ -2332,6 +2521,7 @@ export const useGeminiStream = (
       const responsesToSend: Part[] = geminiTools.flatMap(
         (toolCall) => toolCall.response.responseParts,
       );
+      responsesToSend.push(...pendingDuplicateResponseParts);
       const callIdsToMarkAsSubmitted = geminiTools.map(
         (toolCall) => toolCall.request.callId,
       );
@@ -2339,6 +2529,7 @@ export const useGeminiStream = (
       const prompt_ids = geminiTools.map(
         (toolCall) => toolCall.request.prompt_id,
       );
+      const promptId = prompt_ids[0] ?? pendingDuplicatePromptId;
 
       // Persist model override from skill tool results (last one wins).
       // Uses `in` so that undefined (from inherit/no-model skills) clears a
@@ -2585,7 +2776,7 @@ export const useGeminiStream = (
         return;
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
+      submitQuery(responsesToSend, SendMessageType.ToolResult, promptId);
     },
     [
       submitQuery,
@@ -2751,15 +2942,18 @@ export const useGeminiStream = (
       );
     });
 
-    scheduler.start((job: { prompt: string; missed?: boolean }) => {
-      const label = job.prompt.slice(0, 40);
-      notificationQueueRef.current.push({
-        displayText: `${job.missed ? 'Missed' : 'Cron'}: ${label}`,
-        modelText: job.prompt,
-        sendMessageType: SendMessageType.Cron,
-      });
-      setNotificationTrigger((n) => n + 1);
-    });
+    scheduler.start(
+      (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+        const label = job.prompt.slice(0, 40);
+        const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+        notificationQueueRef.current.push({
+          displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+          modelText: job.prompt,
+          sendMessageType: SendMessageType.Cron,
+        });
+        setNotificationTrigger((n) => n + 1);
+      },
+    );
     return () => {
       const summary = scheduler.getExitSummary();
       scheduler.stop();

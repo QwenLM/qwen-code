@@ -210,9 +210,9 @@
           "default": false
         },
         "showStatusInTitle": {
-          "description": "Show Qwen Code status and thoughts in the terminal window title",
+          "description": "Show Qwen Code session name and status in the terminal window title",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "hideTips": {
           "description": "Hide helpful tips in the UI",
@@ -518,6 +518,11 @@
           "type": "boolean",
           "default": true
         },
+        "skipWorkflowUsageWarning": {
+          "description": "Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.",
+          "type": "boolean",
+          "default": false
+        },
         "skipLoopDetection": {
           "description": "Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.",
           "type": "boolean",
@@ -585,9 +590,18 @@
       "type": "object",
       "properties": {
         "fileName": {
-          "description": "The name of the context file.",
-          "type": "object",
-          "additionalProperties": true
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "The name of the context file or files."
         },
         "importFormat": {
           "description": "The format to use when importing memory.",
@@ -811,9 +825,15 @@
       "type": "object",
       "properties": {
         "sandbox": {
-          "description": "Sandbox execution environment (can be a boolean or a path string).",
-          "type": "object",
-          "additionalProperties": true
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Sandbox execution environment (can be a boolean or a path string)."
         },
         "sandboxImage": {
           "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",

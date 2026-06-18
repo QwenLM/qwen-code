@@ -10,6 +10,16 @@ import type {
   DaemonMcpTransport,
   PermissionOutcome,
 } from './types.js';
+// Single source of truth: the daemon publisher owns the wire literal in
+// acp-bridge's dependency-free `daemonEventTypes` module. We re-export it so the
+// validator/reducer below, and the browser consumer via `@qwen-code/sdk/daemon`,
+// share the exact same value — a rename can't silently break browser-side dedup.
+// The build-time devDep on acp-bridge inlines the value into the published bundle
+// (same lightweight mechanism as `@qwen-code/acp-bridge/mcpTimeouts`). A `const`
+// keeps its literal type, so it still narrows in `switch (event.type)` and works
+// as a `typeof`-d type argument.
+import { MID_TURN_MESSAGE_INJECTED_EVENT } from '@qwen-code/acp-bridge/daemonEventTypes';
+export { MID_TURN_MESSAGE_INJECTED_EVENT };
 
 export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
@@ -21,7 +31,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
-  'mid_turn_message_injected',
+  MID_TURN_MESSAGE_INJECTED_EVENT,
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -779,7 +789,7 @@ export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
   DaemonSessionMetadataUpdatedData
 >;
 export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
-  'mid_turn_message_injected',
+  typeof MID_TURN_MESSAGE_INJECTED_EVENT,
   DaemonMidTurnMessageInjectedData
 >;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
@@ -1360,7 +1370,7 @@ export function asKnownDaemonEvent(
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
         : undefined;
-    case 'mid_turn_message_injected':
+    case MID_TURN_MESSAGE_INJECTED_EVENT:
       return isMidTurnMessageInjectedData(event.data)
         ? (event as DaemonMidTurnMessageInjectedEvent)
         : undefined;
@@ -1850,7 +1860,7 @@ export function reduceDaemonSessionEvent(
     case 'mcp_server_added':
     case 'mcp_server_removed':
     case 'settings_reloaded':
-    case 'mid_turn_message_injected':
+    case MID_TURN_MESSAGE_INJECTED_EVENT:
       return base;
     case 'session_rewound':
       return {
