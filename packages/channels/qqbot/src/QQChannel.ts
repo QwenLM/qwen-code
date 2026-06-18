@@ -207,7 +207,26 @@ export class QQChannel extends ChannelBase {
           body['msg_seq'] = nextSeq;
         }
 
-        const resp = await sendQQMessage(base, path, this.accessToken, body);
+        let resp = await sendQQMessage(base, path, this.accessToken, body);
+
+        // Markdown fallback: QQ Bot markdown capability must be explicitly
+        // granted per-bot. On C2C especially, raw markdown (msg_type=2) is
+        // often rejected. Retry the same chunk as plain text (msg_type=0).
+        if (!resp.ok && useMarkdown) {
+          const errBody = await resp.text().catch(() => '');
+          process.stderr.write(
+            `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 100)}), retrying as plain text\n`,
+          );
+          const plainBody: Record<string, unknown> = {
+            content: chunk,
+            msg_type: 0,
+          };
+          if (msgId) {
+            plainBody['msg_id'] = msgId;
+            plainBody['msg_seq'] = nextSeq;
+          }
+          resp = await sendQQMessage(base, path, this.accessToken, plainBody);
+        }
 
         if (!resp.ok) {
           // Drain response body to avoid socket leak
