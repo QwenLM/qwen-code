@@ -23,6 +23,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
+import { parseSandboxImageName } from './sandboxImageName.js';
 
 const execAsync = promisify(exec);
 
@@ -100,14 +101,6 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
   }
 
   return false;
-}
-
-// docker does not allow container names to contain ':' or '/', so we
-// parse those out to shorten the name
-function parseImageName(image: string): string {
-  const [fullName, tag] = image.split(':');
-  const name = fullName.split('/').at(-1) ?? 'unknown-image';
-  return tag ? `${name}-${tag}` : name;
 }
 
 function ports(): string[] {
@@ -603,7 +596,7 @@ export async function start_sandbox(
   }
 
   // name container after image, plus random suffix to avoid conflicts
-  const imageName = parseImageName(image);
+  const imageName = parseSandboxImageName(image);
   const isIntegrationTest =
     process.env['QWEN_CODE_INTEGRATION_TEST'] === 'true';
   let containerName;
