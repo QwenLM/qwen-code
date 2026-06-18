@@ -289,6 +289,8 @@ const EDIT_TOOL_NAMES = new Set([
   ToolNames.NOTEBOOK_EDIT,
 ]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
+const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
+const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
 type BufferedStreamEvent =
   | { kind: 'content'; value: string }
@@ -300,6 +302,14 @@ function showCitations(settings: LoadedSettings): boolean {
     return enabled;
   }
   return true;
+}
+
+function clampLoadingThoughtDescription(description: string): string {
+  if (description.length <= LOADING_THOUGHT_DESCRIPTION_MAX_CHARS) {
+    return description;
+  }
+
+  return description.slice(0, LOADING_THOUGHT_DESCRIPTION_MAX_CHARS);
 }
 
 /**
@@ -971,14 +981,19 @@ export const useGeminiStream = (
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.
-      const splitPoint = findLastSafeSplitPoint(newGeminiMessageBuffer);
-      if (splitPoint === newGeminiMessageBuffer.length) {
-        // Update the existing message with accumulated content
-        setPendingHistoryItem((item) => ({
-          type: item?.type as 'gemini' | 'gemini_content',
-          text: newGeminiMessageBuffer,
-        }));
-      } else {
+      let nextPendingType = pendingHistoryItemRef.current?.type as
+        | 'gemini'
+        | 'gemini_content';
+      while (newGeminiMessageBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
+        const splitPoint = findLastSafeSplitPoint(
+          newGeminiMessageBuffer,
+          STREAM_PENDING_ITEM_MAX_CHARS,
+        );
+        const safeSplitPoint =
+          splitPoint > 0 && splitPoint < newGeminiMessageBuffer.length
+            ? splitPoint
+            : STREAM_PENDING_ITEM_MAX_CHARS;
+
         // This indicates that we need to split up this Gemini Message.
         // Splitting a message is primarily a performance consideration. There is a
         // <Static> component at the root of App.tsx which takes care of rendering
@@ -987,20 +1002,23 @@ export const useGeminiStream = (
         // multiple times per-second (as streaming occurs). Prior to this change you'd
         // see heavy flickering of the terminal. This ensures that larger messages get
         // broken up so that there are more "statically" rendered.
-        const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
-        const afterText = newGeminiMessageBuffer.substring(splitPoint);
+        const beforeText = newGeminiMessageBuffer.substring(0, safeSplitPoint);
+        const afterText = newGeminiMessageBuffer.substring(safeSplitPoint);
         addItem(
           {
-            type: pendingHistoryItemRef.current?.type as
-              | 'gemini'
-              | 'gemini_content',
+            type: nextPendingType,
             text: beforeText,
           },
           userMessageTimestamp,
         );
-        setPendingHistoryItem({ type: 'gemini_content', text: afterText });
+        nextPendingType = 'gemini_content';
         newGeminiMessageBuffer = afterText;
       }
+      // Update the existing message with accumulated content.
+      setPendingHistoryItem({
+        type: nextPendingType,
+        text: newGeminiMessageBuffer,
+      });
       return newGeminiMessageBuffer;
     },
     [addItem, pendingHistoryItemRef, setPendingHistoryItem],
@@ -1009,23 +1027,31 @@ export const useGeminiStream = (
   const mergeThought = useCallback(
     (incoming: ThoughtSummary) => {
       setThought((prev) => {
+        const incomingDescription = incoming.description
+          ? clampLoadingThoughtDescription(incoming.description)
+          : incoming.description;
         if (!prev) {
           if (debugLogger.isEnabled()) {
             debugLogger.debug(
               `[THOUGHT_MERGE] New thought: ` +
                 `subjectLength=${incoming.subject?.length ?? 0}, ` +
-                `description length=${incoming.description?.length ?? 0}`,
+                `description length=${incomingDescription?.length ?? 0}`,
             );
           }
-          return incoming;
+          return {
+            ...incoming,
+            description: incomingDescription,
+          };
         }
         const subject = incoming.subject || prev.subject;
-        const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
+        const description = clampLoadingThoughtDescription(
+          `${prev.description ?? ''}${incomingDescription ?? ''}`,
+        );
         if (debugLogger.isEnabled()) {
           debugLogger.debug(
             `[THOUGHT_MERGE] Accumulating thought: ` +
               `prev length=${prev.description?.length ?? 0}, ` +
-              `incoming length=${incoming.description?.length ?? 0}, ` +
+              `incoming length=${incomingDescription?.length ?? 0}, ` +
               `total length=${description.length}`,
           );
         }
@@ -1036,7 +1062,11 @@ export const useGeminiStream = (
   );
 
   const handleThoughtEvent = useCallback(
-    (eventValue: ThoughtSummary, currentThoughtBuffer: string): string => {
+    (
+      eventValue: ThoughtSummary,
+      currentThoughtBuffer: string,
+      userMessageTimestamp: number,
+    ): string => {
       if (turnCancelledRef.current) {
         return '';
       }
@@ -1046,7 +1076,7 @@ export const useGeminiStream = (
         return currentThoughtBuffer;
       }
 
-      const newThoughtBuffer = currentThoughtBuffer + thoughtText;
+      let newThoughtBuffer = currentThoughtBuffer + thoughtText;
       if (newThoughtBuffer.trim().length === 0) {
         return newThoughtBuffer;
       }
@@ -1058,6 +1088,7 @@ export const useGeminiStream = (
 
       if (startingNewThought) {
         thoughtStartTimeRef.current = Date.now();
+        newThoughtBuffer = description;
       }
 
       // Keep the transient `thought` (subject) in sync for the window title.
@@ -1069,17 +1100,61 @@ export const useGeminiStream = (
       // Stream the accumulated reasoning into a pending history item so it
       // renders height-limited above the answer and can later be committed as
       // a collapsible block.
-      setPendingThoughtItem({
-        type: 'gemini_thought',
-        text: stripLeadingBlankLines(newThoughtBuffer),
-        durationMs: thoughtStartTimeRef.current
+      let pendingThoughtType: 'gemini_thought' | 'gemini_thought_content' =
+        startingNewThought
+          ? 'gemini_thought'
+          : pendingThoughtItemRef.current?.type === 'gemini_thought_content'
+            ? 'gemini_thought_content'
+            : 'gemini_thought';
+      const getThoughtDurationMs = () =>
+        thoughtStartTimeRef.current
           ? Date.now() - thoughtStartTimeRef.current
-          : 0,
-      });
+          : 0;
+      const buildThoughtItem = (
+        type: 'gemini_thought' | 'gemini_thought_content',
+        text: string,
+      ): HistoryItemWithoutId =>
+        type === 'gemini_thought'
+          ? {
+              type,
+              text,
+              durationMs: getThoughtDurationMs(),
+            }
+          : {
+              type,
+              text,
+            };
 
-      return startingNewThought ? description : newThoughtBuffer;
+      let splitPoint = findLastSafeSplitPoint(
+        newThoughtBuffer,
+        STREAM_PENDING_ITEM_MAX_CHARS,
+      );
+      while (newThoughtBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
+        const safeSplitPoint =
+          splitPoint > 0 && splitPoint < newThoughtBuffer.length
+            ? splitPoint
+            : STREAM_PENDING_ITEM_MAX_CHARS;
+        const beforeText = newThoughtBuffer.substring(0, safeSplitPoint);
+        const afterText = newThoughtBuffer.substring(safeSplitPoint);
+        addItem(
+          buildThoughtItem(pendingThoughtType, beforeText),
+          userMessageTimestamp,
+        );
+        pendingThoughtType = 'gemini_thought_content';
+        newThoughtBuffer = afterText;
+        splitPoint = findLastSafeSplitPoint(
+          newThoughtBuffer,
+          STREAM_PENDING_ITEM_MAX_CHARS,
+        );
+      }
+
+      setPendingThoughtItem(
+        buildThoughtItem(pendingThoughtType, newThoughtBuffer),
+      );
+
+      return newThoughtBuffer;
     },
-    [mergeThought, setPendingThoughtItem],
+    [addItem, mergeThought, pendingThoughtItemRef, setPendingThoughtItem],
   );
 
   // Commit the streamed reasoning to history as a collapsible block (or drop
@@ -1482,40 +1557,49 @@ export const useGeminiStream = (
           const nextEvent = bufferedEvents.shift()!;
 
           if (nextEvent.kind === 'content') {
-            let mergedContent = nextEvent.value;
+            const contentParts = [nextEvent.value];
 
             while (bufferedEvents[0]?.kind === 'content') {
               const queuedContent = bufferedEvents.shift();
               if (queuedContent?.kind !== 'content') {
                 break;
               }
-              mergedContent += queuedContent.value;
+              contentParts.push(queuedContent.value);
             }
 
             geminiMessageBuffer = handleContentEvent(
-              mergedContent,
+              contentParts.join(''),
               geminiMessageBuffer,
               userMessageTimestamp,
             );
             continue;
           }
 
-          let mergedThought = nextEvent.value;
+          let subject = nextEvent.value.subject;
+          const thoughtDescriptions: string[] = [];
+          if (nextEvent.value.description) {
+            thoughtDescriptions.push(nextEvent.value.description);
+          }
 
           while (bufferedEvents[0]?.kind === 'thought') {
             const queuedThought = bufferedEvents.shift();
             if (queuedThought?.kind !== 'thought') {
               break;
             }
-            mergedThought = {
-              subject: queuedThought.value.subject || mergedThought.subject,
-              description: `${mergedThought.description ?? ''}${
-                queuedThought.value.description ?? ''
-              }`,
-            };
+            subject = queuedThought.value.subject || subject;
+            if (queuedThought.value.description) {
+              thoughtDescriptions.push(queuedThought.value.description);
+            }
           }
 
-          thoughtBuffer = handleThoughtEvent(mergedThought, thoughtBuffer);
+          thoughtBuffer = handleThoughtEvent(
+            {
+              subject,
+              description: thoughtDescriptions.join(''),
+            },
+            thoughtBuffer,
+            userMessageTimestamp,
+          );
         }
       };
 

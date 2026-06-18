@@ -3556,6 +3556,81 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('splits oversized streamed thoughts so the pending item stays bounded', async () => {
+      vi.useFakeTimers();
+
+      const splitLimit = 16_384;
+      const tailLength = 123;
+      const longThought = 'a'.repeat(splitLimit * 2 + tailLength);
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, max?: number) =>
+          max !== undefined && s.length > max ? max : s.length,
+      );
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      const mockStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Thought,
+          value: { description: longThought },
+        };
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      const thoughtItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) =>
+            item.type === 'gemini_thought' ||
+            item.type === 'gemini_thought_content',
+        );
+      expect(thoughtItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: 'a'.repeat(splitLimit),
+          durationMs: expect.any(Number),
+        }),
+        expect.objectContaining({
+          type: 'gemini_thought_content',
+          text: 'a'.repeat(splitLimit),
+        }),
+      ]);
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought_content',
+          text: 'a'.repeat(tailLength),
+        }),
+      ]);
+      expect(result.current.thought?.description).toHaveLength(4_096);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('does not render leading blank thought chunks as an empty thought item', async () => {
       vi.useFakeTimers();
 
