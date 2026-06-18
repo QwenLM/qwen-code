@@ -42,17 +42,18 @@ export function resolveLocalizableString(
   if (value === undefined) return undefined;
   if (typeof value === 'string') return value;
 
-  if (value[locale]) return value[locale];
-
   const baseLang = locale.split('-')[0];
-  if (baseLang !== locale && baseLang && value[baseLang]) return value[baseLang];
-
-  if (value['en']) return value['en'];
-
-  const keys = Object.keys(value);
-  if (keys.length > 0) return value[keys[0]!];
-
-  return undefined;
+  const prioritized = [
+    value[locale],
+    baseLang !== locale ? value[baseLang!] : undefined,
+    value['en'],
+  ];
+  for (const v of prioritized) {
+    if (typeof v === 'string' && v) return v;
+  }
+  return Object.values(value).find(
+    (v): v is string => typeof v === 'string' && v.length > 0,
+  );
 }
 
 /**

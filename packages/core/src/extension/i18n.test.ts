@@ -53,6 +53,16 @@ describe('resolveLocalizableString', () => {
   it('should return undefined for empty record', () => {
     expect(resolveLocalizableString({}, 'en')).toBeUndefined();
   });
+
+  it('should skip non-string values in locale map', () => {
+    const value = { en: 123, zh: '中文' } as unknown as Record<string, string>;
+    expect(resolveLocalizableString(value, 'en')).toBe('中文');
+  });
+
+  it('should return undefined when all values are non-string', () => {
+    const value = { en: 123, zh: 456 } as unknown as Record<string, string>;
+    expect(resolveLocalizableString(value, 'en')).toBeUndefined();
+  });
 });
 
 describe('resolveExtensionConfigLocale', () => {
