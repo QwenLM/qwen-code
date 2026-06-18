@@ -460,6 +460,7 @@ export async function fireSessionPermissionDeniedForAutoMode(
           callId,
           getAutoModePermissionDeniedReason(decision),
           signal,
+          callId,
         );
     } catch (hookError) {
       debugLogger.warn(
@@ -3935,6 +3936,7 @@ export class Session implements SessionContext {
               toolUseId,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             if (!preHookResult.shouldProceed) {
@@ -4054,6 +4056,7 @@ export class Session implements SessionContext {
               toolUseId,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             // If hook indicates to stop, return an error response
@@ -4089,6 +4092,7 @@ export class Session implements SessionContext {
               isInterrupt,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             // Log additional context if provided
@@ -4196,6 +4200,7 @@ export class Session implements SessionContext {
               isInterrupt,
               String(approvalMode),
               activeToolAbortSignal,
+              callId,
             );
 
             // Log additional context if provided
