@@ -264,8 +264,6 @@ export class QQChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    if (this.disposed) return;
-
     // ── Route !ark / !media commands from LLM text ───────────
     if (this.qqConfig.enableArk) {
       const arkCmd = parseArkCommand(text.trim());
@@ -286,36 +284,11 @@ export class QQChannel extends ChannelBase {
         return;
       }
     }
+
     // ── Normal text / markdown flow ──────────────────────────
+    const route = await this.resolveRoute(chatId);
+    if (!route) return;
 
-    if (Date.now() >= this.tokenExpiresAt) {
-      try {
-        await this.fetchToken();
-      } catch (e: unknown) {
-        process.stderr.write(
-          `[QQ:${this.name}] Send skipped: token refresh failed — ${e instanceof Error ? e.message : String(e)}\n`,
-        );
-        return;
-      }
-    }
-    if (!this.accessToken) {
-      process.stderr.write(`[QQ:${this.name}] Send skipped: no access token\n`);
-      return;
-    }
-
-    if (!isValidChatId(chatId)) {
-      process.stderr.write(`[QQ:${this.name}] Send skipped: invalid chatId\n`);
-      return;
-    }
-
-    const base = getApiBase(Boolean(this.qqConfig.sandbox));
-
-    const isGroup = this.chatTypeMap.get(chatId) === 'group';
-    const path = isGroup
-      ? `/v2/groups/${chatId}/messages`
-      : `/v2/users/${chatId}/messages`;
-
-    // Capture msgId at send-time to avoid race on replyMsgId
     const msgId = this.replyMsgId.get(chatId);
     const useMarkdown = hasMarkdownSyntax(text);
 
@@ -332,7 +305,12 @@ export class QQChannel extends ChannelBase {
           body['msg_seq'] = nextSeq;
         }
 
-        let resp = await sendQQMessage(base, path, this.accessToken, body);
+        let resp = await sendQQMessage(
+          route.base,
+          route.path,
+          this.accessToken,
+          body,
+        );
 
         // Markdown is a fully available, zero-permission message type on the QQ
         // Bot Open Platform — bot.q.qq.com API docs list msg_type=2 alongside
@@ -355,7 +333,12 @@ export class QQChannel extends ChannelBase {
             plainBody['msg_id'] = msgId;
             plainBody['msg_seq'] = nextSeq;
           }
-          resp = await sendQQMessage(base, path, this.accessToken, plainBody);
+          resp = await sendQQMessage(
+            route.base,
+            route.path,
+            this.accessToken,
+            plainBody,
+          );
         }
 
         if (!resp.ok) {
@@ -378,6 +361,30 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
+   * Resolve API routing: handles disposed check, token refresh, chatId validation,
+   * sandbox detection, and C2C/group path selection. Returns null if any guard fails.
+   */
+  private async resolveRoute(
+    chatId: string,
+  ): Promise<{ base: string; path: string } | null> {
+    if (this.disposed) return null;
+    if (Date.now() >= this.tokenExpiresAt) {
+      try {
+        await this.fetchToken();
+      } catch {
+        return null;
+      }
+    }
+    if (!this.accessToken || !isValidChatId(chatId)) return null;
+    const base = getApiBase(Boolean(this.qqConfig.sandbox));
+    const path =
+      this.chatTypeMap.get(chatId) === 'group'
+        ? `/v2/groups/${chatId}/messages`
+        : `/v2/users/${chatId}/messages`;
+    return { base, path };
+  }
+
+  /**
    * Send an Ark template message (msg_type=3).
    *
    * Ark messages use pre-defined templates with key-value substitution.
@@ -394,30 +401,22 @@ export class QQChannel extends ChannelBase {
     templateId: number,
     kv: ArkKV[],
   ): Promise<void> {
-    if (this.disposed) return;
-    if (Date.now() >= this.tokenExpiresAt) {
-      try {
-        await this.fetchToken();
-      } catch {
-        return;
-      }
-    }
-    if (!this.accessToken || !isValidChatId(chatId)) return;
+    const route = await this.resolveRoute(chatId);
+    if (!route) return;
 
-    const base = getApiBase(Boolean(this.qqConfig.sandbox));
-    const isGroup = this.chatTypeMap.get(chatId) === 'group';
-    const path = isGroup
-      ? `/v2/groups/${chatId}/messages`
-      : `/v2/users/${chatId}/messages`;
     const msgId = this.replyMsgId.get(chatId);
-
     const body: Record<string, unknown> = {
       msg_type: 3,
       ark: { template_id: templateId, kv },
     };
     if (msgId) body['msg_id'] = msgId;
 
-    const resp = await sendQQMessage(base, path, this.accessToken, body);
+    const resp = await sendQQMessage(
+      route.base,
+      route.path,
+      this.accessToken,
+      body,
+    );
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '');
       process.stderr.write(
@@ -444,20 +443,10 @@ export class QQChannel extends ChannelBase {
     fileUrl: string,
     text?: string,
   ): Promise<void> {
-    if (this.disposed) return;
-    if (Date.now() >= this.tokenExpiresAt) {
-      try {
-        await this.fetchToken();
-      } catch {
-        return;
-      }
-    }
-    if (!this.accessToken || !isValidChatId(chatId)) return;
+    const route = await this.resolveRoute(chatId);
+    if (!route) return;
 
-    const base = getApiBase(Boolean(this.qqConfig.sandbox));
     const isGroup = this.chatTypeMap.get(chatId) === 'group';
-
-    // file_type=4 (文件) is rejected by group upload endpoint
     if (isGroup && fileType === FileType.FILE) {
       process.stderr.write(
         `[QQ:${this.name}] Media send skipped: file_type=4 (文件) not supported in group chats\n`,
@@ -465,17 +454,13 @@ export class QQChannel extends ChannelBase {
       return;
     }
 
-    // Upload path: C2C vs group are separate
     const uploadPath = isGroup
       ? `/v2/groups/${chatId}/files`
       : `/v2/users/${chatId}/files`;
-    const sendPath = isGroup
-      ? `/v2/groups/${chatId}/messages`
-      : `/v2/users/${chatId}/messages`;
 
     try {
       const uploaded = await uploadQQMedia(
-        base,
+        route.base,
         uploadPath,
         this.accessToken,
         fileType,
@@ -490,7 +475,12 @@ export class QQChannel extends ChannelBase {
       if (msgId) body['msg_id'] = msgId;
       if (text) body['content'] = text;
 
-      const resp = await sendQQMessage(base, sendPath, this.accessToken, body);
+      const resp = await sendQQMessage(
+        route.base,
+        route.path,
+        this.accessToken,
+        body,
+      );
       if (!resp.ok) {
         const errBody = await resp.text().catch(() => '');
         process.stderr.write(
