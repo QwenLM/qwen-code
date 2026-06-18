@@ -4,7 +4,7 @@
  * Encapsulates all REST calls to the QQ Bot API:
  *  - Access token issuance
  *  - WebSocket Gateway URL resolution
- *  - Message sending (text / markdown)
+ *  - Message sending (C2C / group)
  */
 
 const TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken';
