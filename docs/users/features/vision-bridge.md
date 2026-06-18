@@ -50,13 +50,13 @@ The pinned `model` must be an image-capable model that is resolvable in your con
 
 ## Settings
 
-| Setting                       | Type    | Description                                                                                                       | Default |
-| ----------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------- | ------- |
-| `visionBridge.enabled`        | boolean | Convert images to text via a vision model when the primary model is text-only.                                    | `false` |
-| `visionBridge.model`          | string  | Vision model id used to transcribe/describe images. Leave empty to auto-select an image-capable registered model. | `""`    |
-| `visionBridge.maxImages`      | number  | Maximum number of images converted per turn; extras are reported as omitted. Clamped to 1–16.                     | `4`     |
-| `visionBridge.timeoutMs`      | number  | Timeout for the vision model call only (not the whole turn), in milliseconds. Clamped to 1000–120000.             | `30000` |
-| `visionBridge.showTranscript` | boolean | Show the generated transcription so you can catch misreads.                                                       | `true`  |
+| Setting                       | Type    | Description                                                                                                                | Default |
+| ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `visionBridge.enabled`        | boolean | Convert images to text via a vision model when the primary model is text-only.                                             | `false` |
+| `visionBridge.model`          | string  | Vision model id used to transcribe/describe images. Leave empty to auto-select an image-capable registered model.          | `""`    |
+| `visionBridge.maxImages`      | number  | Maximum number of images converted per turn; extras are reported as omitted. Clamped to 0-16; use 0 to disable conversion. | `4`     |
+| `visionBridge.timeoutMs`      | number  | Timeout for the vision model call only (not the whole turn), in milliseconds. Clamped to 1000–120000.                      | `30000` |
+| `visionBridge.showTranscript` | boolean | Show the generated transcription so you can catch misreads.                                                                | `true`  |
 
 ## What you'll see
 

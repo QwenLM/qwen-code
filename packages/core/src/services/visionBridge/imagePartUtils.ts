@@ -42,7 +42,9 @@ export function normalizeParts(input: PartListUnion): Part[] {
  * Only `inlineData` parts whose MIME type begins with `image/` and that carry
  * non-empty base64 data qualify. This deliberately excludes audio, video, and
  * PDF `inlineData` parts, which also use the same wire shape but are not
- * something an image model can interpret.
+ * something an image model can interpret. It also excludes `fileData` image
+ * references because the bridge side-query path expects local inline bytes
+ * produced by `@` file resolution.
  *
  * @param part The part to inspect.
  * @returns `true` when the part is a usable inline image.

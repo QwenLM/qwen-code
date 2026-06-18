@@ -1148,7 +1148,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 4,
         description:
-          'Maximum number of images converted per turn (clamped to 1–16).',
+          'Maximum number of images converted per turn (clamped to 0-16; use 0 to disable conversion).',
         showInDialog: false,
       },
       timeoutMs: {

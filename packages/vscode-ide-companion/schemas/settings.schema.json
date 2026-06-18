@@ -481,7 +481,7 @@
           "default": ""
         },
         "maxImages": {
-          "description": "Maximum number of images converted per turn (clamped to 1–16).",
+          "description": "Maximum number of images converted per turn (clamped to 0-16; use 0 to disable conversion).",
           "type": "number",
           "default": 4
         },

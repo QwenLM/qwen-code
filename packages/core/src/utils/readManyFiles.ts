@@ -191,9 +191,9 @@ async function readFileContent(
     const fileReadResult = await processSingleFileContent(
       filePath,
       config,
-      undefined,
-      undefined,
-      undefined,
+      undefined, // offset
+      undefined, // limit
+      undefined, // pages
       preserveUnsupportedImage,
     );
 

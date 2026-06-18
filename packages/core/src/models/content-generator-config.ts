@@ -49,21 +49,13 @@ export function buildAgentContentGeneratorConfig(
   const parentConfig = base.getContentGeneratorConfig();
   const sameProvider = authOverrides.authType === parentConfig.authType;
   const modelsConfig = base.getModelsConfig();
-  let resolvedModel: ResolvedModelConfig | undefined;
-  if (modelId) {
-    if (authOverrides.baseUrl) {
-      resolvedModel = modelsConfig.getResolvedModel(
+  const resolvedModel = modelId
+    ? modelsConfig.getResolvedModel(
         authOverrides.authType as AuthType,
         modelId,
         authOverrides.baseUrl,
-      );
-    } else {
-      resolvedModel = modelsConfig.getResolvedModel(
-        authOverrides.authType as AuthType,
-        modelId,
-      );
-    }
-  }
+      )
+    : undefined;
 
   const nextConfig: ContentGeneratorConfig = {
     ...parentConfig,

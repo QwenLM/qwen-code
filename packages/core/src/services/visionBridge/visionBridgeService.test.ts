@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Part } from '@google/genai';
 import {
   runVisionBridge,
+  formatOmittedReasons,
   resolveVisionBridgeSettings,
   selectVisionBridgeModel,
   DEFAULT_VISION_BRIDGE_SETTINGS,
@@ -225,9 +226,31 @@ describe('runVisionBridge', () => {
     expect(result.imageCount).toBe(2);
     expect(result.convertedCount).toBe(1);
     expect(result.omittedCount).toBe(1);
+    expect(result.omittedInvalidCount).toBe(0);
+    expect(result.omittedCappedCount).toBe(1);
     const sent = JSON.stringify(mockSideQuery.mock.calls[0][1].contents);
     expect(sent).toContain('FIRST');
     expect(sent).not.toContain('SECOND');
+  });
+
+  it('attributes omitted images to invalid vs capped reasons', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    const oversized = image('a'.repeat(10 * 1024 * 1024));
+
+    const result = await runVisionBridge({
+      config,
+      settings: { ...settings, maxImages: 1 },
+      parts: ['look', image('OK1'), image('OK2'), oversized],
+      signal: signal(),
+    });
+
+    expect(result.convertedCount).toBe(1);
+    expect(result.omittedCount).toBe(2);
+    expect(result.omittedInvalidCount).toBe(1);
+    expect(result.omittedCappedCount).toBe(1);
+    expect(formatOmittedReasons(1, 1)).toBe(
+      '2 image(s) omitted: 1 unreadable or too large, 1 over the per-turn limit',
+    );
   });
 
   it('fails without calling the model when none is configured or auto-detectable', async () => {
@@ -342,7 +365,7 @@ describe('runVisionBridge', () => {
     expect(result.error).toBeUndefined();
   });
 
-  it('does not apply on failure even when the user also asked a question (turn stops)', async () => {
+  it('on failure, preserves user text and appends a note while dropping images', async () => {
     mockSideQuery.mockRejectedValue(new Error('boom'));
     const result = await runVisionBridge({
       config,
@@ -351,12 +374,14 @@ describe('runVisionBridge', () => {
       signal: signal(),
     });
     expect(result.status).toBe('failed');
-    expect(result.applied).toBe(false);
-    expect(result.parts).toBeUndefined();
+    expect(result.applied).toBe(true);
+    expect(textOf(result.parts)).toContain('Explain the screenshot please');
+    expect(textOf(result.parts)).toMatch(/could not interpret/i);
+    expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
     expect(result.error).toContain('boom');
   });
 
-  it('on failure with no text either, does not apply (caller stops the turn)', async () => {
+  it('on failure with no text, passes through just the failure note', async () => {
     mockSideQuery.mockRejectedValue(new Error('boom'));
     const result = await runVisionBridge({
       config,
@@ -365,8 +390,9 @@ describe('runVisionBridge', () => {
       signal: signal(),
     });
     expect(result.status).toBe('failed');
-    expect(result.applied).toBe(false);
-    expect(result.parts).toBeUndefined();
+    expect(result.applied).toBe(true);
+    expect(textOf(result.parts)).toMatch(/could not interpret/i);
+    expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
   });
 
   it('treats an empty model response as a failure', async () => {
@@ -379,6 +405,60 @@ describe('runVisionBridge', () => {
     });
     expect(result.status).toBe('failed');
     expect(result.error).toMatch(/no description/);
+    expect(result.modelId).toBe(settings.model);
+  });
+
+  it('fails with "no usable image" when every image is invalid', async () => {
+    const oversized = image('a'.repeat(10 * 1024 * 1024));
+    const result = await runVisionBridge({
+      config,
+      settings,
+      parts: ['describe this', oversized],
+      signal: signal(),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toMatch(/no usable image/);
+    expect(result.omittedInvalidCount).toBe(1);
+    expect(mockSideQuery).not.toHaveBeenCalled();
+    expect(textOf(result.parts)).toContain('describe this');
+  });
+
+  it('reports a timeout when the bridge call exceeds timeoutMs', async () => {
+    mockSideQuery.mockImplementation(
+      (_config: unknown, opts: { abortSignal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          opts.abortSignal.addEventListener(
+            'abort',
+            () => reject(new Error('request aborted by signal')),
+            { once: true },
+          );
+        }),
+    );
+
+    const result = await runVisionBridge({
+      config,
+      settings: { ...settings, timeoutMs: 5 },
+      parts: ['describe', image()],
+      signal: signal(),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toMatch(/timed out after 5ms/);
+  });
+
+  it('surfaces only the raw description as the display transcript', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'A plain description' });
+    const result = await runVisionBridge({
+      config,
+      settings,
+      parts: ['q', image()],
+      signal: signal(),
+    });
+
+    expect(textOf(result.parts)).toContain('UNTRUSTED');
+    expect(result.transcript).toBe('A plain description');
+    expect(result.transcript).not.toContain('UNTRUSTED');
   });
 });
 
@@ -395,8 +475,12 @@ describe('resolveVisionBridgeSettings', () => {
 
   it('clamps maxImages into a sane range and rounds it', () => {
     expect(resolveVisionBridgeSettings({ maxImages: 9999 }).maxImages).toBe(16);
-    expect(resolveVisionBridgeSettings({ maxImages: 0 }).maxImages).toBe(1);
     expect(resolveVisionBridgeSettings({ maxImages: 2.7 }).maxImages).toBe(3);
+  });
+
+  it('honors maxImages: 0 as conversion disabled', () => {
+    expect(resolveVisionBridgeSettings({ maxImages: 0 }).maxImages).toBe(0);
+    expect(resolveVisionBridgeSettings({ maxImages: -5 }).maxImages).toBe(0);
   });
 
   it('falls back to the default when maxImages is not finite', () => {
@@ -541,7 +625,7 @@ describe('selectVisionBridgeModel', () => {
     });
   });
 
-  it('falls back to the first image-capable model when nothing matches', () => {
+  it('falls back to an image-capable model when nothing matches', () => {
     const picked = selectVisionBridgeModel('qwen-text-max', [
       { id: 'qwen-text-max', authType: 'openai', baseUrl: 'urlA' },
       { id: 'gpt-5.4', authType: 'gemini', baseUrl: 'urlB' },
@@ -550,6 +634,29 @@ describe('selectVisionBridgeModel', () => {
       id: 'gpt-5.4',
       authType: 'gemini',
       baseUrl: 'urlB',
+    });
+  });
+
+  it('uses a stable fallback order when no provider matches', () => {
+    const picked = selectVisionBridgeModel('qwen-text-max', [
+      { id: 'qwen-text-max', authType: 'openai', baseUrl: 'urlA' },
+      {
+        id: 'z-vision',
+        authType: 'gemini',
+        baseUrl: 'urlB',
+        modalities: { image: true },
+      },
+      {
+        id: 'a-vision',
+        authType: 'anthropic',
+        baseUrl: 'urlC',
+        modalities: { image: true },
+      },
+    ]);
+    expect(picked).toEqual({
+      id: 'a-vision',
+      authType: 'anthropic',
+      baseUrl: 'urlC',
     });
   });
 

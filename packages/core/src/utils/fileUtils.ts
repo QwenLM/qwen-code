@@ -980,10 +980,14 @@ export async function processSingleFileContent(
         // "unsupported" note. Agent tool reads / headless do not set
         // preserveUnsupportedImage, so they keep the clear "Skipped" behavior.
         // Other media (audio/video) are always skipped (bridge handles images).
+        const visionBridge = config.getVisionBridgeConfig?.();
         const bridgeWillHandleImage =
           modality === 'image' &&
           preserveUnsupportedImage &&
-          config.getVisionBridgeConfig?.()?.enabled === true;
+          visionBridge?.enabled === true &&
+          (visionBridge.maxImages ?? 1) > 0 &&
+          (Boolean(visionBridge.model) ||
+            config.getDefaultVisionBridgeModel?.() !== undefined);
         if (!bridgeWillHandleImage) {
           const message = unsupportedModalityMessage(modality, displayName);
           debugLogger.warn(

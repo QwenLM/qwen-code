@@ -57,6 +57,7 @@ import {
   activeGoalEquals,
   setActiveGoal,
   clearActiveGoal,
+  formatOmittedReasons,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -122,8 +123,14 @@ function formatVisionBridgeNotice(
       result.error ?? 'unknown error'
     }. The image was not interpreted.`;
   }
-  const omitted =
-    result.omittedCount > 0 ? ` (${result.omittedCount} omitted)` : '';
+  if (result.status === 'skipped') {
+    return '🔎 Vision bridge skipped (no images to convert).';
+  }
+  const omittedReasons = formatOmittedReasons(
+    result.omittedInvalidCount,
+    result.omittedCappedCount,
+  );
+  const omitted = omittedReasons ? ` (${omittedReasons})` : '';
   // The egress disclosure is always shown; the transcript body is optional so
   // that hiding the transcript never silently hides that data left the machine.
   // Name the endpoint too — cross-provider auto-select can route to a different
@@ -973,8 +980,8 @@ export const useGeminiStream = (
           if (bridgeResult.applied && bridgeResult.parts != null) {
             localQueryToSendToGemini = bridgeResult.parts;
           } else if (bridgeResult.status === 'failed') {
-            // Conversion failed — stop the turn so the primary model never
-            // answers as if it had seen the image. The notice above explains why.
+            // Defensive fallback for legacy/invalid failed results without
+            // transformed text. Current failures include a no-image note.
             return { queryToSend: null, shouldProceed: false };
           }
         }

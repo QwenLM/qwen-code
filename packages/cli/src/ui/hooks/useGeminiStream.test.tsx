@@ -445,6 +445,8 @@ describe('useGeminiStream', () => {
         imageCount: 1,
         convertedCount: 1,
         omittedCount: 0,
+        omittedInvalidCount: 0,
+        omittedCappedCount: 0,
         modelId: 'vm',
       });
       const { result, mockSendMessageStream } = renderTestHook();
@@ -456,16 +458,31 @@ describe('useGeminiStream', () => {
       const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
       expect(sent).toContain('[transcribed image]');
       expect(sent).not.toContain('inlineData');
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Converted 1 image(s) to text via vm'),
+        }),
+        expect.any(Number),
+      );
     });
 
-    it('stops the turn (no model stream) when the bridge fails', async () => {
+    it('keeps the turn alive with text plus a note when the bridge fails', async () => {
       enableBridge();
       mockRunVisionBridge.mockResolvedValue({
-        applied: false,
+        applied: true,
         status: 'failed',
+        parts: [
+          { text: 'describe' },
+          {
+            text: '[Vision bridge could not interpret the attached image(s): timed out.]',
+          },
+        ],
         imageCount: 1,
         convertedCount: 0,
         omittedCount: 0,
+        omittedInvalidCount: 0,
+        omittedCappedCount: 0,
         modelId: 'vm',
         error: 'timed out',
       });
@@ -474,7 +491,17 @@ describe('useGeminiStream', () => {
         await result.current.submitQuery('@img.png describe');
       });
       await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
-      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+      expect(sent).toContain('could not interpret');
+      expect(sent).not.toContain('inlineData');
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('failed: timed out'),
+        }),
+        expect.any(Number),
+      );
     });
 
     it('does not show a bridge failure notice after cancellation', async () => {
@@ -490,6 +517,8 @@ describe('useGeminiStream', () => {
           imageCount: 1,
           convertedCount: 0,
           omittedCount: 0,
+          omittedInvalidCount: 0,
+          omittedCappedCount: 0,
           modelId: 'vm',
           error: 'aborted',
         });

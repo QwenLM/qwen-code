@@ -577,9 +577,7 @@ export class BaseLlmClient {
   ): Promise<ContentGenerator> {
     const cacheKey = selector
       ? `${selector.authType ?? ''}:${selector.modelId}:${baseUrl ?? ''}`
-      : baseUrl
-        ? `${model}:${baseUrl}`
-        : model;
+      : `${model}:${baseUrl ?? ''}`;
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 

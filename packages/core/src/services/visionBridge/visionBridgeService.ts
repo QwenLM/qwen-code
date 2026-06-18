@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content, PartListUnion } from '@google/genai';
+import type { Content, Part, PartListUnion } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { AuthType, InputModalities } from '../../core/contentGenerator.js';
 import { defaultModalities } from '../../core/modalityDefaults.js';
@@ -51,6 +51,17 @@ function toSelection(model: VisionModelCandidate): VisionBridgeModelSelection {
     ...(model.authType && { authType: model.authType }),
     ...(model.baseUrl && { baseUrl: model.baseUrl }),
   };
+}
+
+function compareVisionCandidates(
+  a: VisionModelCandidate,
+  b: VisionModelCandidate,
+): number {
+  return (
+    a.id.localeCompare(b.id) ||
+    (a.authType ?? '').localeCompare(b.authType ?? '') ||
+    (a.baseUrl ?? '').localeCompare(b.baseUrl ?? '')
+  );
 }
 
 function isSameProvider(
@@ -127,19 +138,24 @@ export function selectVisionBridgeModel(
       !isPrimaryModel(m, primaryModelId, primaryProvider) && isImageCapable(m),
   );
   if (candidates.length === 0) return undefined;
+  const sortedCandidates = [...candidates].sort(compareVisionCandidates);
 
   const primary = findPrimaryModel(primaryModelId, models, primaryProvider);
   const primaryBaseUrl = primaryProvider.baseUrl ?? primary?.baseUrl;
   const primaryAuthType = primaryProvider.authType ?? primary?.authType;
   if (primaryBaseUrl) {
-    const sameEndpoint = candidates.find((m) => m.baseUrl === primaryBaseUrl);
+    const sameEndpoint = sortedCandidates.find(
+      (m) => m.baseUrl === primaryBaseUrl,
+    );
     if (sameEndpoint) return toSelection(sameEndpoint);
   }
   if (primaryAuthType) {
-    const sameAuth = candidates.find((m) => m.authType === primaryAuthType);
+    const sameAuth = sortedCandidates.find(
+      (m) => m.authType === primaryAuthType,
+    );
     if (sameAuth) return toSelection(sameAuth);
   }
-  return toSelection(candidates[0]);
+  return toSelection(sortedCandidates[0]);
 }
 
 /**
@@ -302,7 +318,7 @@ export function resolveVisionBridgeSettings(
     maxImages: clampInt(
       p.maxImages,
       DEFAULT_VISION_BRIDGE_SETTINGS.maxImages,
-      1,
+      0,
       MAX_IMAGES_CEILING,
     ),
     timeoutMs: clampInt(
@@ -318,8 +334,8 @@ export function resolveVisionBridgeSettings(
 /**
  * Outcome of a bridge attempt.
  * - `ok`: conversion succeeded; `parts` carry the description.
- * - `failed`: conversion failed; `parts` is undefined and the caller stops the
- *   turn (the failure reason is surfaced via the UI notice).
+ * - `failed`: conversion failed; `parts` preserves user text plus a note, so
+ *   the caller can continue without image data.
  * - `skipped`: nothing to do (no usable images); caller proceeds unchanged.
  */
 export type VisionBridgeStatus = 'ok' | 'failed' | 'skipped';
@@ -329,22 +345,57 @@ export interface VisionBridgeResult {
   /** Whether transformed parts should replace the original request. */
   applied: boolean;
   status: VisionBridgeStatus;
-  /** Transformed, image-free parts to send to the primary model (ok only). */
+  /** Transformed, image-free parts to send to the primary model. */
   parts?: PartListUnion;
-  /** Generated description block for display (set on `ok`). */
+  /** Raw generated description for display (set on `ok`). */
   transcript?: string;
-  /** Total usable images detected in the request. */
+  /** Total inline images detected in the request. */
   imageCount: number;
   /** Images actually sent to the bridge model. */
   convertedCount: number;
   /** Images dropped due to `maxImages` or validation failures. */
   omittedCount: number;
+  /** Images dropped because they were unreadable or too large. */
+  omittedInvalidCount: number;
+  /** Valid images dropped because they exceeded `maxImages`. */
+  omittedCappedCount: number;
   /** Resolved bridge model id, when a call was attempted. */
   modelId?: string;
   /** Host of the bridge model's endpoint, for cross-provider egress clarity. */
   modelEndpoint?: string;
   /** Failure reason, when `status === 'failed'`. */
   error?: string;
+}
+
+interface OmittedBreakdown {
+  total: number;
+  invalid: number;
+  capped: number;
+}
+
+function normalizeCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.trunc(value))
+    : 0;
+}
+
+export function formatOmittedReasons(
+  invalidCount: unknown,
+  cappedCount: unknown,
+): string {
+  const invalid = normalizeCount(invalidCount);
+  const capped = normalizeCount(cappedCount);
+  const total = invalid + capped;
+  if (total === 0) return '';
+
+  const reasons: string[] = [];
+  if (invalid > 0) {
+    reasons.push(`${invalid} unreadable or too large`);
+  }
+  if (capped > 0) {
+    reasons.push(`${capped} over the per-turn limit`);
+  }
+  return `${total} image(s) omitted: ${reasons.join(', ')}`;
 }
 
 /**
@@ -413,12 +464,10 @@ function buildInterpretationBlock(
   modelId: string,
   description: string,
   imageCount: number,
-  omittedCount: number,
+  omitted: OmittedBreakdown,
 ): string {
-  const omittedNote =
-    omittedCount > 0
-      ? `(${omittedCount} additional image(s) were omitted and not interpreted.)`
-      : '';
+  const omittedReasons = formatOmittedReasons(omitted.invalid, omitted.capped);
+  const omittedNote = omittedReasons ? `(${omittedReasons}.)` : '';
   // Trusted guidance goes BEFORE the untrusted region, and the region's content
   // is sanitized, so transcribed text cannot close the fence early and forge a
   // trusted control channel after it.
@@ -466,6 +515,8 @@ export async function runVisionBridge(params: {
       imageCount: 0,
       convertedCount: 0,
       omittedCount: 0,
+      omittedInvalidCount: 0,
+      omittedCappedCount: 0,
     };
   }
 
@@ -474,8 +525,11 @@ export async function runVisionBridge(params: {
     (part) => validateImagePart(part) === null,
   );
   const toConvert = validImages.slice(0, Math.max(0, settings.maxImages));
-  const omittedCount = imageParts.length - toConvert.length;
-  const droppedAsInvalid = imageParts.length - validImages.length;
+  const omitted: OmittedBreakdown = {
+    invalid: imageParts.length - validImages.length,
+    capped: validImages.length - toConvert.length,
+    total: imageParts.length - toConvert.length,
+  };
   // Focus the description with the request's own text (non-image parts).
   const intent = collectText(nonImageParts);
 
@@ -485,12 +539,17 @@ export async function runVisionBridge(params: {
   const modelResolution = resolveVisionBridgeModel(config, settings);
   if (modelResolution.error) {
     debugLogger.warn(modelResolution.error);
-    return failure(modelResolution.error, imageParts.length, omittedCount);
+    return failure(
+      modelResolution.error,
+      nonImageParts,
+      imageParts.length,
+      omitted,
+    );
   }
   const modelSelection = modelResolution.selection;
   const model = modelSelection?.id;
   debugLogger.debug(
-    `model=${model ?? '(none)'} (explicit=${!!settings.model}), images=${imageParts.length} convert=${toConvert.length} omitted=${omittedCount} invalid=${droppedAsInvalid}`,
+    `model=${model ?? '(none)'} (explicit=${!!settings.model}), images=${imageParts.length} convert=${toConvert.length} omitted=${omitted.total} invalid=${omitted.invalid} capped=${omitted.capped}`,
   );
   if (!model) {
     debugLogger.warn(
@@ -498,8 +557,9 @@ export async function runVisionBridge(params: {
     );
     return failure(
       'no image-capable model is configured for the vision bridge',
+      nonImageParts,
       imageParts.length,
-      omittedCount,
+      omitted,
     );
   }
 
@@ -507,10 +567,10 @@ export async function runVisionBridge(params: {
     // Distinguish "all images were unreadable" from "the cap dropped them all"
     // so the failure note is not misleading.
     const reason =
-      droppedAsInvalid === imageParts.length
+      omitted.invalid === imageParts.length
         ? 'no usable image could be read'
         : 'image conversion is disabled (maxImages is 0)';
-    return failure(reason, imageParts.length, omittedCount);
+    return failure(reason, nonImageParts, imageParts.length, omitted, model);
   }
 
   // The vision call gets its own timeout, linked to the turn's abort signal.
@@ -540,8 +600,10 @@ export async function runVisionBridge(params: {
       debugLogger.warn(`${model} returned an empty description`);
       return failure(
         'the vision model returned no description',
+        nonImageParts,
         imageParts.length,
-        omittedCount,
+        omitted,
+        model,
       );
     }
     debugLogger.debug(`ok: ${description.length} chars from ${model}`);
@@ -550,16 +612,18 @@ export async function runVisionBridge(params: {
       model,
       description,
       toConvert.length,
-      omittedCount,
+      omitted,
     );
     return {
       applied: true,
       status: 'ok',
       parts: [...nonImageParts, { text: block }],
-      transcript: block,
+      transcript: description,
       imageCount: imageParts.length,
       convertedCount: toConvert.length,
-      omittedCount,
+      omittedCount: omitted.total,
+      omittedInvalidCount: omitted.invalid,
+      omittedCappedCount: omitted.capped,
       modelId: model,
       modelEndpoint: resolveEndpointHost(config, modelSelection),
     };
@@ -571,7 +635,9 @@ export async function runVisionBridge(params: {
         status: 'skipped',
         imageCount: imageParts.length,
         convertedCount: 0,
-        omittedCount,
+        omittedCount: omitted.total,
+        omittedInvalidCount: omitted.invalid,
+        omittedCappedCount: omitted.capped,
       };
     }
     const reason =
@@ -581,7 +647,7 @@ export async function runVisionBridge(params: {
           ? error.message
           : String(error);
     debugLogger.warn(`conversion failed via ${model}: ${reason}`);
-    return failure(reason, imageParts.length, omittedCount, model);
+    return failure(reason, nonImageParts, imageParts.length, omitted, model);
   }
 }
 
@@ -617,22 +683,28 @@ function buildIntentPart(intentText: string): string {
 }
 
 /**
- * Build a failure result. The bridge does not partially apply on failure: the
- * caller stops the turn so the primary model never answers as if it had seen
- * the image. The reason is surfaced to the user via the caller's notice.
+ * Build a failure result. The bridge drops image data but keeps text plus a
+ * clear note, so the primary model can answer only what remains visible.
  */
 function failure(
   reason: string,
+  nonImageParts: Part[],
   imageCount: number,
-  omittedCount: number,
+  omitted: OmittedBreakdown,
   modelId?: string,
 ): VisionBridgeResult {
+  const note =
+    `[Vision bridge could not interpret the attached image(s): ${reason}. ` +
+    'The image content is unavailable; do not assume or invent what it shows.]';
   return {
-    applied: false,
+    applied: true,
     status: 'failed',
+    parts: [...nonImageParts, { text: note }],
     imageCount,
     convertedCount: 0,
-    omittedCount,
+    omittedCount: omitted.total,
+    omittedInvalidCount: omitted.invalid,
+    omittedCappedCount: omitted.capped,
     modelId,
     error: reason,
   };
