@@ -4,13 +4,16 @@ This guide covers setting up a Qwen Code channel on QQ via the official QQ Bot O
 
 ## Prerequisites
 
-- A QQ account (mobile app for scanning the QR code)
+- A QQ account
+- A QQ Bot application registered on [QQ Bot Open Platform](https://q.qq.com/)
 
-## Setup
+## Getting Credentials
 
-### QR Code Login
+You need an AppID and AppSecret from the QQ Bot Open Platform. There are two ways to provide them:
 
-Start the channel — the first time it will show a QR code. Scan it with your QQ app to activate. No developer account or manual registration needed. Credentials are saved and reused automatically.
+### Option 1: QR Code Login (Recommended)
+
+When no `appID` / `appSecret` is configured, the channel automatically launches a QR code login flow on first start. Scan the QR code with your QQ mobile app and the credentials are saved to `~/.qwen/channels/<name>-credentials.json` for future use.
 
 ```json
 {
@@ -22,14 +25,9 @@ Start the channel — the first time it will show a QR code. Scan it with your Q
 }
 ```
 
-```bash
-qwen channel start my-qq
-# Scan the QR code in the terminal with your QQ app
-```
+### Option 2: Manual Configuration
 
-### Manual Configuration (Developer Portal)
-
-You can also use credentials from the [QQ Bot Open Platform](https://q.qq.com/) developer portal if you already have an app registered there:
+If you already have credentials from the developer portal (`https://q.qq.com/` → your app → Development → AppID / AppSecret), provide them directly:
 
 ```json
 {
@@ -116,6 +114,14 @@ If the QQ server rejects a Markdown message for any reason, the channel automati
 
 This is the opposite of the WeChat channel, which strips all Markdown. You can let the agent use full Markdown with the QQ channel.
 
+## Images and Files
+
+You can send photos and files to the bot in QQ, not just text.
+
+**Photos:** Send an image in the chat and the agent will analyze it using its vision capabilities. This requires a multimodal model — add `"model": "qwen3.5-plus"` (or another vision-capable model) to your channel config.
+
+**Files:** Send a document (PDF, code file, text file, etc.). The bot downloads it and the agent reads it with its file-reading tools. Works with any model.
+
 ## Token Management
 
 Access tokens expire after approximately 2 hours. The channel automatically refreshes them at 80% of their TTL (typically ~1.6 hours). If a refresh fails, it retries after 60 seconds.
@@ -136,6 +142,7 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 - **Keep responses under 2000 characters** — Longer responses are automatically split into chunks. Adding a length hint to your instructions helps the agent stay concise.
 - **Sandbox for testing** — Set `"sandbox": true` to use the sandbox API during development. No production messages will be affected.
 - **Restrict access** — Use `senderPolicy: "allowlist"` for a fixed set of QQ users, or `"pairing"` to approve new users from the CLI. See [DM Pairing](./overview#dm-pairing) for details.
+- **Credentials persistence** — QR code login credentials are saved to `~/.qwen/channels/<name>-credentials.json` with restricted permissions (`0o600`). You only need to scan the QR code once.
 
 ## Key Differences from Telegram
 
@@ -155,7 +162,7 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 - Check the terminal output for errors
 - Verify the channel is running (`qwen channel status`)
 - If using `senderPolicy: "allowlist"`, make sure your QQ user ID is in `allowedUsers`
-- On first start, a QR code will appear in the terminal — scan it with your QQ app
+- If credentials are missing, the channel will launch QR code login — watch the terminal for the QR code prompt
 
 ### Bot doesn't respond in groups
 
@@ -167,6 +174,7 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 
 - The QR code is displayed in the terminal. Scan it with your QQ mobile app (Me → Scan)
 - If the QR code expires (typically after a few minutes), restart the channel to get a new one
+- As a fallback, provide `appID` and `appSecret` directly in the config
 
 ### Markdown messages appear as plain text
 
