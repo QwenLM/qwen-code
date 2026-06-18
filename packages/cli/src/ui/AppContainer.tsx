@@ -65,6 +65,7 @@ import {
   restoreWorktreeContext,
   GitWorktreeService,
   readWorktreeSessionMarker,
+  isSessionRuntimeActive,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
@@ -1256,18 +1257,31 @@ export const AppContainer = (props: AppContainerProps) => {
           const owner = await readWorktreeSessionMarker(activeWorktree.path);
           const currentSessionId = config.getSessionId();
           if (owner !== null && owner !== currentSessionId) {
-            historyManager.addItem(
-              {
-                type: MessageType.ERROR,
-                text:
-                  `Refusing to remove worktree "${activeWorktree.slug}" — ` +
-                  `it was created by a different session (owner=${owner}). ` +
-                  `Resume the owning session to drop it, or remove it ` +
-                  `manually with \`git worktree remove ${activeWorktree.path}\`.`,
-              },
-              Date.now(),
-            );
-            return;
+            const ownerActive = await isSessionRuntimeActive(owner, [
+              activeWorktree.originalCwd,
+              activeWorktree.path,
+            ]).catch((error) => {
+              config
+                .getDebugLogger()
+                .warn(
+                  `Worktree owner runtime check failed for ${owner}: ${error}`,
+                );
+              return true;
+            });
+            if (ownerActive) {
+              historyManager.addItem(
+                {
+                  type: MessageType.ERROR,
+                  text:
+                    `Refusing to remove worktree "${activeWorktree.slug}" — ` +
+                    `it was created by a different session (owner=${owner}). ` +
+                    `Resume the owning session to drop it, or remove it ` +
+                    `manually with \`git worktree remove ${activeWorktree.path}\`.`,
+                },
+                Date.now(),
+              );
+              return;
+            }
           }
           // The user just clicked Remove on a dialog that already showed
           // the dirty-state and unmerged-commit counts ("discards N
