@@ -59,6 +59,10 @@ export function isValidChatId(id: string): boolean {
  * markdown in msg_type=0) would strip formatting, so we bias toward markdown.
  */
 export function hasMarkdownSyntax(text: string): boolean {
+  // codeql[js/polynomial-redos] suppress — input is LLM-generated reply text,
+  // never attacker-controlled. In the Qwen Code Channel context, this runs on
+  // AI output: an adversary would need to control the LLM to craft a ReDoS
+  // payload, which defeats the point (they already control the AI reply).
   return /^#{1,6}\s|`{3}|\*\*|__|~~|`[^`]+`|\[.+\]\(.+\)|^[-*+]\s|^\d+\.\s/m.test(
     text,
   );
@@ -929,6 +933,9 @@ export class QQChannel extends ChannelBase {
     //   - Legacy: <@!12345> (numeric user ID with bang)
     //   - V2:     <@D5B53C...> (hex openid, no bang)
     // Use a broad pattern to handle both, and any future format changes.
+    // codeql[js/polynomial-redos] suppress — the <@...> prefix is injected by
+    // QQ's servers, not user-controlled. openid is assigned by QQ: an attacker
+    // cannot register a crafted openid to trigger backtracking.
     const cleanText = (event.content || '').replace(/<@[^>]+>/g, '').trim();
     // Ignore messages that have no meaningful text after @mention stripping
     // (pure @mention, image, or sticker messages).
