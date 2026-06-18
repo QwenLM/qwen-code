@@ -1158,53 +1158,55 @@ describe('subagent.ts', () => {
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
       });
 
-      it.skip('should terminate with TIMEOUT if the time limit is reached during an LLM call', async () => {
+      it('should terminate with TIMEOUT if the time limit is reached during an LLM call', async () => {
         // Use fake timers to reliably test timeouts
         vi.useFakeTimers();
 
-        const { config } = await createMockConfig();
-        const runConfig: RunConfig = { max_time_minutes: 5, max_turns: 100 };
+        try {
+          const { config } = await createMockConfig();
+          const runConfig: RunConfig = { max_time_minutes: 5, max_turns: 100 };
 
-        // We need to control the resolution of the sendMessageStream promise to advance the timer during execution.
-        let resolveStream: (
-          value: AsyncGenerator<unknown, void, unknown>,
-        ) => void;
-        const streamPromise = new Promise<
-          AsyncGenerator<unknown, void, unknown>
-        >((resolve) => {
+          // We need to control the resolution of the sendMessageStream promise to advance the timer during execution.
+          let resolveStream: (
+            value: AsyncGenerator<unknown, void, unknown>,
+          ) => void;
+          const streamPromise = new Promise<
+            AsyncGenerator<unknown, void, unknown>
+          >((resolve) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            resolveStream = resolve as any;
+          });
+
+          // The LLM call will hang until we resolve the promise.
+          mockSendMessageStream.mockReturnValue(streamPromise);
+
+          const scope = await AgentHeadless.create(
+            'test-agent',
+            config,
+            promptConfig,
+            defaultModelConfig,
+            runConfig,
+          );
+
+          const runPromise = scope.execute(new ContextState());
+
+          // Advance time beyond the limit (6 minutes) while the agent is awaiting the LLM response.
+          await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+
+          // Now resolve the stream. The model returns 'stop'.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          resolveStream = resolve as any;
-        });
+          resolveStream!(createMockStream(['stop'])() as any);
 
-        // The LLM call will hang until we resolve the promise.
-        mockSendMessageStream.mockReturnValue(streamPromise);
+          await runPromise;
 
-        const scope = await AgentHeadless.create(
-          'test-agent',
-          config,
-          promptConfig,
-          defaultModelConfig,
-          runConfig,
-        );
-
-        const runPromise = scope.execute(new ContextState());
-
-        // Advance time beyond the limit (6 minutes) while the agent is awaiting the LLM response.
-        await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
-
-        // Now resolve the stream. The model returns 'stop'.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        resolveStream!(createMockStream(['stop'])() as any);
-
-        await runPromise;
-
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-
-        vi.useRealTimers();
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
       });
 
-      it.skip('should terminate with ERROR if the model call throws', async () => {
+      it('should terminate with ERROR if the model call throws', async () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
 
