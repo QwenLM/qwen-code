@@ -27,23 +27,6 @@ export default {
   'Auto mode': 'Auto mode',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
-  'auto mode (classifier-evaluated)': 'auto mode (classifier-evaluated)',
-  'Auto mode enabled.': 'Auto mode enabled.',
-  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
-    'An LLM classifier evaluates each tool call and auto-approves safe actions,',
-  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
-    'blocks risky ones. Most read-only operations and in-cwd edits skip the',
-  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
-    'classifier for speed. To exit: Shift+Tab or /approval-mode default.',
-  '(This notice will not appear again.)':
-    '(This notice will not appear again.)',
-  'Auto mode temporarily disabled these allow rules':
-    'Auto mode temporarily disabled these allow rules',
-  '(they would bypass the classifier):': '(they would bypass the classifier):',
-  '(from user settings)': '(from user settings)',
-  '(session)': '(session)',
-  'These will be restored when leaving auto mode.':
-    'These will be restored when leaving auto mode.',
   'Accepting edits': 'Accepting edits',
   '(shift + tab to cycle)': '(shift + tab to cycle)',
   '(tab to cycle)': '(tab to cycle)',
@@ -533,8 +516,6 @@ export default {
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
-  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
-    'check session stats. Usage: /stats [model|tools|daily|monthly|export]',
   'Show usage statistics dashboard.': 'Show usage statistics dashboard.',
   'Show model-specific usage statistics.':
     'Show model-specific usage statistics.',

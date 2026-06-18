@@ -27,24 +27,6 @@ export default {
   'Auto mode': 'Auto-Modus',
   'plan mode': 'Planungsmodus',
   'auto-accept edits': 'Änderungen automatisch akzeptieren',
-  'auto mode (classifier-evaluated)': 'Automodus (Klassifizierer ausgewertet)',
-  'Auto mode enabled.': 'Automodus aktiviert.',
-  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
-    'Ein LLM-Klassifizierer bewertet jeden Werkzeugaufruf und genehmigt sichere Aktionen automatisch,',
-  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
-    'blockiert riskante Aktionen. Die meisten Nur-Lese-Operationen und Bearbeitungen im Arbeitsverzeichnis überspringen den',
-  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
-    'Klassifizierer aus Geschwindigkeitsgründen. Beenden: Shift+Tab oder /approval-mode default.',
-  '(This notice will not appear again.)':
-    '(Dieser Hinweis wird nicht erneut angezeigt.)',
-  'Auto mode temporarily disabled these allow rules':
-    'Der Automodus hat diese Zulassungsregeln vorübergehend deaktiviert',
-  '(they would bypass the classifier):':
-    '(sie würden den Klassifizierer umgehen):',
-  '(from user settings)': '(aus Benutzereinstellungen)',
-  '(session)': '(Sitzung)',
-  'These will be restored when leaving auto mode.':
-    'Diese werden beim Verlassen des Automodus wiederhergestellt.',
   'Accepting edits': 'Änderungen werden akzeptiert',
   '(shift + tab to cycle)': '(Shift + Tab zum Wechseln)',
   '(tab to cycle)': '(Tab zum Wechseln)',
@@ -438,8 +420,6 @@ export default {
   'Auto Edit': 'Automatisch bearbeiten',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim-Modus ein-/ausschalten',
-  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
-    'Sitzungsstatistiken prüfen. Verwendung: /stats [model|tools|daily|monthly|export]',
   'Show model-specific usage statistics.':
     'Modellspezifische Nutzungsstatistiken anzeigen.',
   'Show tool-specific usage statistics.':

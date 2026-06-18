@@ -27,24 +27,6 @@ export default {
   'Auto mode': 'Автоматический режим',
   'plan mode': 'Режим планирования',
   'auto-accept edits': 'Режим принятия правок',
-  'auto mode (classifier-evaluated)':
-    'Автоматический режим (классификатор выполнен)',
-  'Auto mode enabled.': 'Автоматический режим включен.',
-  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
-    'LLM-классификатор оценивает каждый вызов инструмента и автоматически одобряет безопасные действия,',
-  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
-    'блокируя рискованные. Большинство операций только для чтения и правок в рабочем каталоге пропускают',
-  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
-    'классификатор для скорости. Выход: Shift+Tab или /approval-mode default.',
-  '(This notice will not appear again.)':
-    '(Это уведомление больше не появится.)',
-  'Auto mode temporarily disabled these allow rules':
-    'Автоматический режим временно отключил эти разрешающие правила',
-  '(they would bypass the classifier):': '(они обходили бы классификатор):',
-  '(from user settings)': '(из пользовательских настроек)',
-  '(session)': '(сеанс)',
-  'These will be restored when leaving auto mode.':
-    'Они будут восстановлены при выходе из автоматического режима.',
   'Accepting edits': 'Принятие правок',
   '(shift + tab to cycle)': '(Shift + Tab для переключения)',
   '(tab to cycle)': '(Tab для переключения)',
@@ -456,8 +438,6 @@ export default {
   'Auto Edit': 'Авторедактирование',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Включение/выключение режима vim',
-  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
-    'Просмотр статистики сессии. Использование: /stats [model|tools|daily|monthly|export]',
   'Show model-specific usage statistics.':
     'Показать статистику использования модели.',
   'Show tool-specific usage statistics.':

@@ -25,23 +25,6 @@ export default {
   'Auto mode': 'Mode auto',
   'plan mode': 'mode de planificació',
   'auto-accept edits': 'acceptació automàtica de canvis',
-  'auto mode (classifier-evaluated)': 'mode automàtic (classificador avaluat)',
-  'Auto mode enabled.': 'Mode automàtic activat.',
-  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
-    "Un classificador LLM avalua cada crida d'eina i aprova automàticament les accions segures,",
-  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
-    "bloqueja les arriscades. La majoria d'operacions de només lectura i edicions dins del directori actual ometen el",
-  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
-    'classificador per rapidesa. Per sortir: Shift+Tab o /approval-mode default.',
-  '(This notice will not appear again.)':
-    '(Aquest avís no tornarà a aparèixer.)',
-  'Auto mode temporarily disabled these allow rules':
-    'El mode automàtic ha desactivat temporalment aquestes regles de permís',
-  '(they would bypass the classifier):': '(ometrian el classificador):',
-  '(from user settings)': "(de la configuració de l'usuari)",
-  '(session)': '(sessió)',
-  'These will be restored when leaving auto mode.':
-    'Es restauraran en sortir del mode automàtic.',
   'Accepting edits': 'Acceptant canvis',
   '(shift + tab to cycle)': '(Shift + Tab per canviar)',
   '(tab to cycle)': '(Tab per canviar)',
@@ -506,8 +489,6 @@ export default {
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activar/desactivar el mode Vim',
-  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
-    'comprovar les estadístiques de la sessió. Ús: /stats [model|tools|daily|monthly|export]',
   'Show model-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':

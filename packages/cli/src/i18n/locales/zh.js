@@ -25,22 +25,6 @@ export default {
   'Auto mode': 'Auto 模式',
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
-  'auto mode (classifier-evaluated)': '自动模式（分类器已评估）',
-  'Auto mode enabled.': '自动模式已启用。',
-  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
-    'LLM 分类器会评估每次工具调用，并自动批准安全操作，',
-  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
-    '阻止有风险的操作。多数只读操作和当前目录内编辑会跳过',
-  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
-    '分类器以提升速度。退出方式：Shift+Tab 或 /approval-mode default。',
-  '(This notice will not appear again.)': '（此提示不会再次显示。）',
-  'Auto mode temporarily disabled these allow rules':
-    '自动模式已临时禁用以下允许规则',
-  '(they would bypass the classifier):': '（它们会绕过分类器）：',
-  '(from user settings)': '（来自用户设置）',
-  '(session)': '（会话）',
-  'These will be restored when leaving auto mode.':
-    '退出自动模式时将恢复这些规则。',
   'Accepting edits': '接受编辑',
   '(shift + tab to cycle)': '(Shift + Tab 切换)',
   '(tab to cycle)': '(按 Tab 切换)',
@@ -511,8 +495,6 @@ export default {
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
-  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
-    '检查会话统计信息。用法：/stats [model|tools|daily|monthly|export]',
   'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',

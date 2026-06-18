@@ -25,24 +25,6 @@ export default {
   'Auto mode': 'Mode auto',
   'plan mode': 'mode plan',
   'auto-accept edits': 'acceptation automatique des modifications',
-  'auto mode (classifier-evaluated)':
-    'mode automatique (classificateur évalué)',
-  'Auto mode enabled.': 'Mode automatique activé.',
-  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
-    "Un classificateur LLM évalue chaque appel d'outil et approuve automatiquement les actions sûres,",
-  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
-    'bloque les actions risquées. La plupart des opérations en lecture seule et des modifications dans le dossier courant ignorent le',
-  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
-    'classificateur pour plus de rapidité. Pour quitter : Shift+Tab ou /approval-mode default.',
-  '(This notice will not appear again.)': "(Cet avis ne s'affichera plus.)",
-  'Auto mode temporarily disabled these allow rules':
-    "Le mode automatique a temporairement désactivé ces règles d'autorisation",
-  '(they would bypass the classifier):':
-    '(elles contourneraient le classificateur) :',
-  '(from user settings)': '(depuis les paramètres utilisateur)',
-  '(session)': '(session actuelle)',
-  'These will be restored when leaving auto mode.':
-    'Elles seront restaurées à la sortie du mode automatique.',
   'Accepting edits': 'Acceptation des modifications',
   '(shift + tab to cycle)': '(Shift + Tab pour cycler)',
   '(tab to cycle)': '(Tab pour cycler)',
@@ -512,8 +494,6 @@ export default {
   'Auto Edit': 'Édition automatique',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activer/désactiver le mode Vim',
-  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
-    'vérifier les stats de session. Utilisation : /stats [modèle|outils|daily|monthly|export]',
   'Show model-specific usage statistics.':
     "Afficher les statistiques d'utilisation spécifiques au modèle.",
   'Show tool-specific usage statistics.':
