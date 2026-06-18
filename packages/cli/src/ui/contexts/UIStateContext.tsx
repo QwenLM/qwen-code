@@ -187,7 +187,7 @@ export interface UIState {
   // Prompt suggestion
   promptSuggestion: string | null;
   /** Dismiss prompt suggestion (clears state, aborts speculation) */
-  dismissPromptSuggestion: () => void;
+  abortPromptSuggestion: () => void;
   // Rewind selector
   isRewindSelectorOpen: boolean;
   rewindEscPending: boolean;

@@ -119,7 +119,11 @@ export function useFollowupSuggestionsCLI(
           ...(params.outcome === 'accepted'
             ? { time_to_accept_ms: params.time_ms }
             : { time_to_ignore_ms: params.time_ms }),
-          ...(firstKeystrokeAtRef.current > 0 &&
+          // Skip for fallback accepts: the suggestion was never shown via the
+          // timer (shownAt stayed 0), so `prevShownAtRef` still holds a previous
+          // suggestion's timestamp and the delta would be meaningless.
+          ...(params.accept_source !== 'fallback' &&
+            firstKeystrokeAtRef.current > 0 &&
             prevShownAtRef.current > 0 && {
               time_to_first_keystroke_ms:
                 firstKeystrokeAtRef.current - prevShownAtRef.current,

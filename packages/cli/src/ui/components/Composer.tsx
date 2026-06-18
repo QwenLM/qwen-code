@@ -161,7 +161,7 @@ export const Composer = () => {
               : '  ' + t('Type your message or @path/to/file')
           }
           promptSuggestion={uiState.promptSuggestion}
-          onPromptSuggestionDismiss={uiState.dismissPromptSuggestion}
+          onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
         />
       )}
 

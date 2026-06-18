@@ -1470,24 +1470,20 @@ export const AppContainer = (props: AppContainerProps) => {
   const speculationRef = useRef<SpeculationState>(IDLE_SPECULATION);
   const suggestionAbortRef = useRef<AbortController | null>(null);
 
-  // Dismiss callback — aborts in-flight generation/speculation. Does NOT
-  // clear `promptSuggestion` so the placeholder can restore it when the
-  // buffer becomes empty again (user types then deletes).
-  //
-  // NOTE: The function name "dismiss" can be misleading — the suggestion
-  // text is NOT cleared from state. Only the in-flight speculation is
-  // aborted. Future maintainers should not assume this function clears
-  // `promptSuggestion`. Consider renaming to `abortPromptSuggestion` if
-  // the semantic confusion becomes a problem.
-  const dismissPromptSuggestion = useCallback(() => {
+  // Aborts in-flight suggestion generation/speculation only. It deliberately
+  // does NOT clear `promptSuggestion`, so the placeholder can restore the
+  // suggestion when the buffer becomes empty again (user types then deletes).
+  // Named "abort" (not "dismiss") precisely because the suggestion text
+  // survives — see #5145 review.
+  const abortPromptSuggestion = useCallback(() => {
     suggestionAbortRef.current?.abort();
     suggestionAbortRef.current = null;
-    // Also abort the speculation so it doesn't continue running after dismiss.
+    // Also abort the speculation so it doesn't continue running after abort.
     if (speculationRef.current.status !== 'idle') {
       abortSpeculation(speculationRef.current).catch(() => {});
       speculationRef.current = IDLE_SPECULATION;
     }
-  }, []);  
+  }, []);
 
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const geminiClient = config.getGeminiClient();
@@ -3398,7 +3394,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setSessionName,
       // Prompt suggestion
       promptSuggestion,
-      dismissPromptSuggestion,
+      abortPromptSuggestion,
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
@@ -3531,7 +3527,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setSessionName,
       // Prompt suggestion
       promptSuggestion,
-      dismissPromptSuggestion,
+      abortPromptSuggestion,
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,

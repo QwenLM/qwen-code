@@ -225,7 +225,7 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     sessionName: null,
     setSessionName: vi.fn(),
     promptSuggestion: null,
-    dismissPromptSuggestion: vi.fn(),
+    abortPromptSuggestion: vi.fn(),
     isRewindSelectorOpen: false,
     rewindEscPending: false,
     ...overrides,

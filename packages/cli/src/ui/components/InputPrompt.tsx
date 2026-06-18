@@ -531,6 +531,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setAgentTabBarFocused,
   ]);
 
+  // Single source of truth for "is there a suggestion the user can accept right
+  // now": the live followup suggestion if visible, otherwise the persisted
+  // `promptSuggestion` prop (type-then-delete / pre-show-delay). Tab/Right/Enter
+  // accept, the typing-dismiss guards, and the placeholder all derive from this
+  // so they can never drift apart.
+  const availableSuggestion: string | null =
+    followup.state.isVisible || promptSuggestion
+      ? (followup.state.suggestion ?? promptSuggestion ?? null)
+      : null;
+
   const handleInput = useCallback(
     (key: Key): boolean => {
       // When the Arena tab bar or background pill has focus, block
@@ -646,10 +656,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (key.paste) {
         // Dismiss follow-up suggestion when user starts typing/pasting
-        if (
-          buffer.text.length === 0 &&
-          (followup.state.isVisible || promptSuggestion)
-        ) {
+        if (buffer.text.length === 0 && availableSuggestion) {
           followup.dismiss();
           onPromptSuggestionDismiss?.();
         }
@@ -990,8 +997,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !showCompletionSuggestions &&
         !reverseSearchActive &&
         !commandSearchActive &&
-        (followup.state.isVisible || promptSuggestion) &&
-        (followup.state.suggestion ?? promptSuggestion)
+        availableSuggestion
       ) {
         // Use the normal accept path. When the followup controller has no live
         // suggestion (e.g. after type-then-delete), `fallbackText` carries the
@@ -1006,8 +1012,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.ctrl &&
         !key.meta &&
         buffer.text.length === 0 &&
-        (followup.state.isVisible || promptSuggestion) &&
-        (followup.state.suggestion ?? promptSuggestion)
+        availableSuggestion
       ) {
         followup.accept('right', {
           fallbackText: promptSuggestion ?? undefined,
@@ -1252,11 +1257,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // This prevents accidental execution of destructive slash commands
         // (/clear, /quit) and aligns with Claude Code's design: suggestion
         // acceptance requires explicit Tab or arrow-key action.
-        if (
-          buffer.text.length === 0 &&
-          (followup.state.isVisible || promptSuggestion) &&
-          (followup.state.suggestion ?? promptSuggestion)
-        ) {
+        if (buffer.text.length === 0 && availableSuggestion) {
           followup.accept('enter', {
             fallbackText: promptSuggestion ?? undefined,
           });
@@ -1352,7 +1353,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Dismiss follow-up suggestion only on printable character input
       if (
         buffer.text.length === 0 &&
-        (followup.state.isVisible || promptSuggestion) &&
+        availableSuggestion &&
         key.sequence &&
         key.sequence.length === 1 &&
         !key.ctrl &&
@@ -1433,6 +1434,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       enterBgDetailFromPanel,
       setBgSelectedIndex,
       followup,
+      availableSuggestion,
       onPromptSuggestionDismiss,
       promptSuggestion,
       exportCompletion,
@@ -1695,12 +1697,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         onSubmit={handleSubmitAndClear}
         onKeypress={handleInput}
         showCursor={showCursor}
-        placeholder={
-          (followup.state.isVisible || promptSuggestion) &&
-          (followup.state.suggestion ?? promptSuggestion)
-            ? (followup.state.suggestion ?? promptSuggestion ?? undefined)
-            : placeholder
-        }
+        placeholder={availableSuggestion ?? placeholder}
         prefix={prefixNode}
         borderColor={borderColor}
         topRightLabel={uiState.sessionName || undefined}
