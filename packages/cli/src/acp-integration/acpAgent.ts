@@ -3026,6 +3026,7 @@ class QwenAgent implements Agent {
       const extensionManager = new ExtensionManager({
         workspaceDir: cwd,
         isWorkspaceTrusted: settings.isTrusted,
+        locale: getCurrentLanguage(),
       });
       await extensionManager.refreshCache();
       extensions = extensionManager.getLoadedExtensions();
@@ -3052,6 +3053,7 @@ class QwenAgent implements Agent {
         return {
           id: extension.id,
           name: extension.name,
+          displayName: extension.displayName,
           version: extension.version,
           isActive: extension.isActive,
           path: extension.path,
@@ -3097,11 +3099,18 @@ class QwenAgent implements Agent {
         'extension',
       ).map((entry) => ({
         ...entry,
-        server: { ...entry.server, extensionName: extension.name },
+        server: {
+          ...entry.server,
+          extensionName: extension.displayName ?? extension.name,
+        },
       })),
     );
     const extensionHooks = activeExtensions.flatMap((extension) =>
-      readHooks({ hooks: extension.hooks ?? {} }, 'extension', extension.name),
+      readHooks(
+        { hooks: extension.hooks ?? {} },
+        'extension',
+        extension.displayName ?? extension.name,
+      ),
     );
 
     // Build the merged MCP/hook lists from the user and workspace settings
@@ -4513,6 +4522,7 @@ class QwenAgent implements Agent {
             kind: 'extension',
             id: ext.id,
             name: ext.name,
+            displayName: ext.displayName,
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
@@ -6512,6 +6522,7 @@ class QwenAgent implements Agent {
         const extensionManager = new ExtensionManager({
           workspaceDir: cwd,
           isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+          locale: getCurrentLanguage(),
         });
         await extensionManager.refreshCache();
         const extension = extensionManager

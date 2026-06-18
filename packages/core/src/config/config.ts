@@ -835,6 +835,8 @@ export interface ConfigParameters {
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
+  /** Locale code for resolving localizable extension fields (e.g., 'en', 'zh'). */
+  locale?: string;
   allowedMcpServers?: string[];
   excludedMcpServers?: string[];
   /**
@@ -1565,6 +1567,7 @@ export class Config {
       workspaceDir: this.targetDir,
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
+      locale: params.locale,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
