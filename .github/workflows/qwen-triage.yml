@@ -17,8 +17,8 @@ on:
         description: 'PR number to run tmux real-user testing on (instead of triage)'
         required: false
         type: 'number'
-      no_comment:
-        description: 'tmux dry-run: run the test but do not post a comment on the PR'
+      skip_comment:
+        description: 'Run the tmux test but do not post the result comment on the PR'
         required: false
         default: false
         type: 'boolean'
@@ -242,14 +242,39 @@ jobs:
       cancel-in-progress: false
     timeout-minutes: 25
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    # The job checks out and executes PR code. Run the steps in a container so
+    # package scripts/builds cannot persist changes in the self-hosted runner's
+    # host filesystem across workflow runs.
+    container:
+      image: 'node:22-bookworm'
     permissions:
       contents: 'read'
     outputs:
-      pr_number: '${{ steps.pr.outputs.pr_number }}'
+      pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number || github.event.inputs.tmux_pr }}'
       # steps.run sets the verdict for an actual test; steps.pr sets 'n/a' when
       # the PR has no TUI surface. Both empty -> stayed silent (skip case).
       verdict: '${{ steps.run.outputs.verdict || steps.pr.outputs.verdict }}'
     steps:
+      - name: 'Install tmux runner tools'
+        run: |-
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq tmux util-linux
+
+          install -d -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
+          npm install -g '@qwen-code/qwen-code@0.18.2'
+          qwen --version
+          gh --version
+          tmux -V
+
       - name: 'Resolve PR and check state'
         id: 'pr'
         env:
@@ -326,15 +351,14 @@ jobs:
       - name: 'Run tmux real-user testing'
         if: "steps.pr.outputs.decision == 'run'"
         id: 'run'
-        # NOTE: no GitHub token here — this step runs untrusted PR code. Only
-        # the model credentials are exposed (same as the review agent). The
-        # GITHUB_TOKEN / GH_TOKEN are pinned empty so nothing in the inherited
-        # environment can hand the agent a repo-scoped credential.
+        # NOTE: no GitHub token here — this step runs untrusted PR code. The
+        # real model key is kept out of qwen's environment; qwen talks to a
+        # root-owned loopback proxy with a dummy key instead.
         env:
           GITHUB_TOKEN: ''
           GH_TOKEN: ''
-          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
-          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.pr_number }}'
           REPOSITORY: '${{ github.repository }}'
@@ -347,29 +371,185 @@ jobs:
 
           # Bypass the runner proxy before launching qwen: the proxy cuts the
           # SSE stream to the model host, and qwen reads HTTP(S)_PROXY directly
-          # without honoring NO_PROXY. This drops the proxy for the whole agent
-          # run, including the build it drives — the ecs-qwen runner reaches the
-          # npm registry without the HTTP proxy (validated end-to-end). Unlike
-          # the review job we add no gh/git proxy wrappers: this job carries no
-          # GitHub token, so the agent does no authenticated gh/git network ops.
+          # without honoring NO_PROXY. Clear proxy env for qwen itself while
+          # restoring it for child gh/git commands the agent may spawn.
           # shellcheck disable=SC2016
           configure_qwen_network() {
-            local openai_host
+            local openai_host proxy_bin
             if ! command -v node >/dev/null 2>&1; then
-              echo "::error::node is required to parse OPENAI_BASE_URL"
+              echo "::error::node is required to parse REVIEW_OPENAI_BASE_URL"
               exit 1
             fi
-            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            openai_host="$(node -e 'console.log(new URL(process.env.REVIEW_OPENAI_BASE_URL).hostname)')"
             if [ -z "$openai_host" ]; then
-              echo "::error::Could not parse a hostname from OPENAI_BASE_URL"
+              echo "::error::Could not parse a hostname from REVIEW_OPENAI_BASE_URL"
               exit 1
             fi
             export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
             export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
+            mkdir -p "$proxy_bin"
+
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+
+            export PATH="$proxy_bin:$PATH"
             unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
-            echo "qwen_http_proxy=disabled (host=${openai_host})"
+            echo "openai_host=${openai_host}"
+            echo "qwen_http_proxy=disabled"
+            if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
+              echo "child_git_github_proxy=restored"
+            else
+              echo "child_git_github_proxy=unset"
+            fi
           }
           configure_qwen_network
+
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+
+          start_openai_proxy() {
+            local proxy_port proxy_script
+            proxy_port=8787
+            proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.js"
+            cat > "$proxy_script" <<'NODE'
+          const http = require('node:http');
+          const { Readable } = require('node:stream');
+
+          const port = Number(process.argv[2]);
+          const baseUrl = process.env.REVIEW_OPENAI_BASE_URL;
+          const apiKey = process.env.REVIEW_OPENAI_API_KEY;
+          if (!baseUrl || !apiKey || !Number.isInteger(port)) {
+            console.error('missing proxy configuration');
+            process.exit(1);
+          }
+
+          const base = new URL(baseUrl);
+          const basePath = base.pathname.replace(/\/+$/, '');
+
+          const server = http.createServer(async (req, res) => {
+            if (req.url === '/__health') {
+              res.writeHead(204);
+              res.end();
+              return;
+            }
+
+            try {
+              const incoming = new URL(req.url || '/', 'http://127.0.0.1');
+              const target = new URL(base.origin);
+              let path = incoming.pathname;
+              if (
+                basePath &&
+                basePath !== '/' &&
+                path !== basePath &&
+                !path.startsWith(`${basePath}/`)
+              ) {
+                path = `${basePath}${path.startsWith('/') ? '' : '/'}${path}`;
+              }
+              target.pathname = path;
+              target.search = incoming.search;
+
+              const headers = new Headers(req.headers);
+              headers.delete('host');
+              headers.delete('content-length');
+              headers.set('authorization', `Bearer ${apiKey}`);
+
+              const init = {
+                method: req.method,
+                headers,
+              };
+              if (req.method !== 'GET' && req.method !== 'HEAD') {
+                init.body = req;
+                init.duplex = 'half';
+              }
+
+              const upstream = await fetch(target, init);
+              const responseHeaders = {};
+              upstream.headers.forEach((value, key) => {
+                const lower = key.toLowerCase();
+                if (lower !== 'content-encoding' && lower !== 'content-length') {
+                  responseHeaders[key] = value;
+                }
+              });
+              res.writeHead(upstream.status, responseHeaders);
+              if (upstream.body) {
+                Readable.fromWeb(upstream.body).pipe(res);
+              } else {
+                res.end();
+              }
+            } catch (error) {
+              res.writeHead(502, { 'content-type': 'text/plain' });
+              res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}\n`);
+            }
+          });
+
+          server.listen(port, '127.0.0.1');
+          NODE
+
+            REVIEW_OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
+              REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
+              node "$proxy_script" "$proxy_port" &
+            OPENAI_PROXY_PID=$!
+            trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
+
+            for _ in 1 2 3 4 5; do
+              if curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
+                break
+              fi
+              if ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null; then
+                echo "::error::OpenAI proxy exited before becoming ready"
+                exit 1
+              fi
+              sleep 1
+            done
+            if ! curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
+              echo "::error::OpenAI proxy did not become ready"
+              exit 1
+            fi
+
+            LOCAL_OPENAI_BASE_URL="$(
+              REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" node -e '
+                const base = new URL(process.env.REVIEW_OPENAI_BASE_URL);
+                const path = base.pathname.replace(/\/+$/, "");
+                console.log("http://127.0.0.1:" + process.argv[1] + (path && path !== "/" ? path : ""));
+              ' "$proxy_port"
+            )"
+            export LOCAL_OPENAI_BASE_URL
+            unset REVIEW_OPENAI_API_KEY
+            echo "openai_proxy=enabled (${LOCAL_OPENAI_BASE_URL})"
+          }
+          start_openai_proxy
 
           QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
           if [ -n "${OPENAI_MODEL:-}" ]; then
@@ -377,8 +557,36 @@ jobs:
           fi
 
           mkdir -p "$RUNNER_TEMP/tmux-results"
+          chown -R node:node "$GITHUB_WORKSPACE" "$RUNNER_TEMP/tmux-results"
+          QWEN_ENV=(
+            "HOME=/home/node"
+            "USER=node"
+            "SHELL=/bin/bash"
+            "PATH=$PATH"
+            "TERM=${TERM:-xterm-256color}"
+            "LANG=${LANG:-C.UTF-8}"
+            "CI=${CI:-true}"
+            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+            "GITHUB_TOKEN="
+            "GH_TOKEN="
+            "OPENAI_API_KEY=qwen-loopback-proxy"
+            "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
+            "NO_PROXY=${NO_PROXY:-}"
+            "no_proxy=${no_proxy:-}"
+            "QWEN_CI_HTTPS_PROXY=${QWEN_CI_HTTPS_PROXY:-}"
+            "QWEN_CI_https_proxy=${QWEN_CI_https_proxy:-}"
+            "QWEN_CI_HTTP_PROXY=${QWEN_CI_HTTP_PROXY:-}"
+            "QWEN_CI_http_proxy=${QWEN_CI_http_proxy:-}"
+            "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
+            "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
+          )
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
+          fi
+
           set +e
-          timeout --kill-after=10s 20m "${QWEN_CMD[@]}" \
+          timeout --kill-after=10s 20m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
             --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
             | tee "$RUNNER_TEMP/tmux-results/output.jsonl"
@@ -413,7 +621,7 @@ jobs:
         continue-on-error: true
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
-          name: 'tmux-results-${{ steps.pr.outputs.pr_number }}'
+          name: 'tmux-results-${{ steps.pr.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
           path: '${{ runner.temp }}/tmux-results/'
           retention-days: 7
 
@@ -435,15 +643,17 @@ jobs:
   # isolated from the untrusted-code execution in tmux-testing above.
   publish-tmux:
     needs: ['tmux-testing']
-    # Post when there is a verdict to report (including the no-TUI 'n/a' case),
+    # Post when there is a real test verdict to report (not the no-TUI 'n/a'),
     # OR when tmux-testing failed for infrastructure reasons (checkout/runner/
     # setup error) so the requester gets an explicit signal instead of a silent
     # void. Only the empty-verdict success cases — PR closed/draft/conflicting,
-    # or mergeability still UNKNOWN — stay silent.
+    # mergeability still UNKNOWN, or no TUI surface — stay silent.
     if: >-
-      always() && github.event.inputs.no_comment != 'true' &&
+      always() && github.event.inputs.skip_comment != 'true' &&
       (needs.tmux-testing.result == 'failure' ||
-       (needs.tmux-testing.result == 'success' && needs.tmux-testing.outputs.verdict != ''))
+       (needs.tmux-testing.result == 'success' &&
+        needs.tmux-testing.outputs.verdict != '' &&
+        needs.tmux-testing.outputs.verdict != 'n/a'))
     runs-on: 'ubuntu-latest'
     permissions:
       pull-requests: 'write'
@@ -451,7 +661,7 @@ jobs:
       - name: 'Download tmux results'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
         with:
-          name: 'tmux-results-${{ needs.tmux-testing.outputs.pr_number }}'
+          name: 'tmux-results-${{ needs.tmux-testing.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
           path: 'tmux-results'
         continue-on-error: true
 
@@ -518,10 +728,13 @@ jobs:
           fi
 
           # Dedup: update an existing tmux comment if one is already present.
-          EXISTING="$(
+          if ! EXISTING="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate -F per_page=100 \
               | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:tmux -->"))] | last | .id // empty'
-          )" || EXISTING=""
+          )"; then
+            echo "::warning::Failed to look up existing tmux comments; will create a new one."
+            EXISTING=""
+          fi
           if [ -n "$EXISTING" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY_FILE" >/dev/null
           else
