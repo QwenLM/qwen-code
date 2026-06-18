@@ -210,9 +210,9 @@
           "default": false
         },
         "showStatusInTitle": {
-          "description": "Show Qwen Code status and thoughts in the terminal window title",
+          "description": "Show Qwen Code session name and status in the terminal window title",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "hideTips": {
           "description": "Hide helpful tips in the UI",
