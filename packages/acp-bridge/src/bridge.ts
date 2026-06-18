@@ -784,7 +784,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     opts.permissionResponseTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
   const permissionTimeoutMs =
     permissionTimeoutRaw > 0 && Number.isFinite(permissionTimeoutRaw)
-      ? permissionTimeoutRaw
+      ? // Clamp to 2^31-1: Node treats setTimeout delays larger than
+        // this as 1ms (TimeoutOverflowWarning), which would make a
+        // huge "effectively never" timeout cancel prompts almost
+        // immediately — the opposite of intent. Mirrors the sibling
+        // `resolvePositiveFiniteMs` / `resolvedChannelIdleTimeoutMs`.
+        Math.min(permissionTimeoutRaw, 2_147_483_647)
       : 0; // 0 = disabled
   const maxPendingRaw =
     opts.maxPendingPermissionsPerSession ?? DEFAULT_MAX_PENDING_PER_SESSION;
@@ -864,6 +869,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   );
   let sessionReaper: ReturnType<typeof setInterval> | undefined;
+
+  // Tracks the most recent "activity" event for idle-detection by
+  // external schedulers. Updated on prompt start/end and session
+  // spawn/restore. `null` until the first activity after boot.
+  let lastActivityTimestamp: number | null = null;
+  let activePromptCounter = 0;
+  function touchActivity(): void {
+    lastActivityTimestamp = Date.now();
+  }
 
   function resolvePositiveFiniteMs(
     raw: number | undefined,
@@ -1334,6 +1348,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           } catch {
             /* bus already closed */
           }
+          if (sessEntry.promptActive) {
+            sessEntry.promptActive = false;
+            activePromptCounter--;
+            touchActivity();
+          }
           byId.delete(sid);
           telemetry.metrics?.sessionLifecycle('die');
           // Tombstone the id so any late `extNotification` from the
@@ -1718,6 +1737,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return undefined;
   };
 
+  const assertLivePromptEntry = (
+    sessionId: string,
+    entry: SessionEntry,
+  ): void => {
+    const info = channelInfoForEntry(entry);
+    if (byId.get(sessionId) !== entry || !info || info.isDying) {
+      throw new SessionNotFoundError(sessionId);
+    }
+  };
+
   const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
     if (!info.statusClosedReject) {
       info.statusClosedReject = info.channel.exited.then(() => {
@@ -2040,6 +2069,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
+    touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
     // Drain any guardrail events that fired during this session's
     // `newSession` handler (before this entry registered) onto the
@@ -2454,6 +2484,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // closed bus.
     permissionMediator.forgetSession(sessionId);
     entry.pendingPermissionIds.clear();
+    if (entry.promptActive) {
+      entry.promptActive = false;
+      activePromptCounter--;
+      touchActivity();
+    }
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
     // Tombstone the closed sessionId so any late `extNotification`
@@ -2545,6 +2580,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     get sessionCount() {
       return byId.size;
+    },
+
+    get activePromptCount() {
+      return activePromptCounter;
+    },
+
+    get lastActivityAt() {
+      return lastActivityTimestamp;
+    },
+
+    get idleSinceMs() {
+      return lastActivityTimestamp !== null
+        ? Date.now() - lastActivityTimestamp
+        : null;
     },
 
     isChannelLive() {
@@ -2814,6 +2863,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 if (signal?.aborted) {
                   throw new DOMException('Prompt aborted', 'AbortError');
                 }
+                assertLivePromptEntry(sessionId, entry);
                 const requestedRetry =
                   (req as unknown as { retry?: unknown }).retry === true;
                 const isRetry = requestedRetry && entry.retryAllowed;
@@ -2839,7 +2889,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   return copy;
                 })();
                 entry.promptActive = true;
+                activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
+                touchActivity();
                 if (originatorClientId === undefined) {
                   delete entry.activePromptOriginatorClientId;
                 } else {
@@ -2876,15 +2928,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     );
                   }
                 } catch (echoErr) {
-                  entry.promptActive = false;
                   delete entry.activePromptOriginatorClientId;
+                  if (entry.promptActive) {
+                    entry.promptActive = false;
+                    activePromptCounter--;
+                    touchActivity();
+                  }
                   throw echoErr;
                 }
                 const promptPromise = entry.connection
                   .prompt(promptRequest)
                   .finally(() => {
-                    entry.promptActive = false;
-                    entry.sessionLastSeenAt = Date.now();
+                    if (entry.promptActive) {
+                      entry.promptActive = false;
+                      activePromptCounter--;
+                      entry.sessionLastSeenAt = Date.now();
+                      touchActivity();
+                    }
                     delete entry.activePromptOriginatorClientId;
                     if (
                       entry.clientIds.size === 0 &&
@@ -4614,6 +4674,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // byId.get(sessionId) (same order as closeSession).
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
+      if (entry.promptActive) {
+        entry.promptActive = false;
+        activePromptCounter--;
+        touchActivity();
+      }
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;

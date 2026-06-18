@@ -42,7 +42,7 @@ import {
   type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
-import { t } from '../../../i18n/index.js';
+import { localizeToolDisplayName, t } from '../../../i18n/index.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -57,7 +57,7 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
 );
 
 function formatActivityLabel(name: string, description: string | undefined) {
-  const display = TOOL_DISPLAY_BY_NAME[name] ?? name;
+  const display = localizeToolDisplayName(TOOL_DISPLAY_BY_NAME[name] ?? name);
   const singleLineDesc = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
@@ -920,6 +920,18 @@ const WorkflowDetailBody: React.FC<{
   dimSubtitleParts.push(
     `${entry.phases.length} ${entry.phases.length === 1 ? t('phase') : t('phases')}`,
   );
+  // P5: surface the per-run token usage when there's anything to report
+  // (cap set OR tokens spent). Skipped when both are absent so legacy
+  // / test runs don't show a noisy `0 tokens` chip.
+  // P5 R1 (#7): apply `formatTokenCount` for consistency with
+  // `statusLinePresets` and other token-bearing UI surfaces.
+  if (entry.tokensSpent > 0 || entry.tokenBudgetTotal !== null) {
+    dimSubtitleParts.push(
+      entry.tokenBudgetTotal !== null
+        ? `${formatTokenCount(entry.tokensSpent)}/${formatTokenCount(entry.tokenBudgetTotal)} ${t('tokens')}`
+        : `${formatTokenCount(entry.tokensSpent)} ${t('tokens')}`,
+    );
+  }
 
   // Phase tree: collapse the head when over the visible cap, keeping
   // the most recent N entries (the user almost always wants to see the
@@ -989,14 +1001,35 @@ const WorkflowDetailBody: React.FC<{
               i === visiblePhases.length - 1 &&
               entry.currentPhase === phaseTitle;
             const marker = isCurrent ? '▸' : '·';
+            // P5: per-phase token tally appended to the phase row.
+            // Skipped when no tokens attributed yet so empty phases
+            // (early register, schema-mode-pending) don't render a
+            // misleading `· 0` chip.
+            // P5 R1 (#7): apply `formatTokenCount` for consistency.
+            const phaseTokens = entry.perPhaseTokens.get(phaseTitle) ?? 0;
+            const tokenChip =
+              phaseTokens > 0 ? ` · ${formatTokenCount(phaseTokens)}t` : '';
             return (
               <Box key={`${phaseTitle}-${i}`}>
                 <Text color={isCurrent ? theme.status.success : undefined}>
-                  {`  ${marker} ${phaseTitle}`}
+                  {`  ${marker} ${phaseTitle}${tokenChip}`}
                 </Text>
               </Box>
             );
           })}
+          {/* P5 R1 (#6): surface null-sentinel attribution — tokens
+              spent BEFORE the first `phase()` call accumulate under the
+              `null` key. Without this row the entire pre-phase spend is
+              hidden in the UI. */}
+          {(entry.perPhaseTokens.get(null) ?? 0) > 0 && (
+            <Box>
+              <Text dimColor>
+                {`  · ${t('(no phase)')} · ${formatTokenCount(
+                  entry.perPhaseTokens.get(null) ?? 0,
+                )}t`}
+              </Text>
+            </Box>
+          )}
         </Fragment>
       )}
 

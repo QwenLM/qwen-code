@@ -110,6 +110,12 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the model spent too many consecutive calls reading files without making progress',
   [LoopType.ACTION_STAGNATION]:
     'the model kept calling the same tool without making progress',
+  [LoopType.GLOBAL_TOOL_CALL_DUPLICATE]:
+    'the model repeated the same tool call across the turn, even when not back-to-back',
+  [LoopType.ALTERNATING_TOOL_CALL_PATTERN]:
+    'the model alternated between the same two tool calls in a repeating pattern',
+  [LoopType.TURN_TOOL_CALL_CAP]:
+    'the model exceeded the maximum number of tool calls allowed in a single turn',
 };
 
 function emitLoopDetectedMessage(
@@ -123,9 +129,13 @@ function emitLoopDetectedMessage(
   }
   const reason = loopType ? LOOP_TYPE_LABELS[loopType] : undefined;
   const detail = reason ? ` (${loopType}: ${reason})` : '';
-  process.stderr.write(
-    `Loop detection halted the run${detail}. Set the \`model.skipLoopDetection\` setting to true to disable.\n`,
-  );
+  // The turn cap runs before the skipLoopDetection gate, so that setting can't
+  // disable it — don't suggest it for TURN_TOOL_CALL_CAP.
+  const hint =
+    loopType === LoopType.TURN_TOOL_CALL_CAP
+      ? ' This is an always-on per-turn tool-call cap and cannot be disabled via `model.skipLoopDetection`.'
+      : ' Set the `model.skipLoopDetection` setting to true to disable.';
+  process.stderr.write(`Loop detection halted the run${detail}.${hint}\n`);
 }
 
 /**
@@ -1445,10 +1455,10 @@ export async function runNonInteractive(
                 reject(err);
               };
 
-              scheduler.start((job: { prompt: string }) => {
+              scheduler.start((job: { prompt: string; cronExpr?: string }) => {
                 const label = job.prompt.slice(0, 40);
                 localQueue.push({
-                  displayText: `Cron: ${label}`,
+                  displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
                   modelText: job.prompt,
                   sendMessageType: SendMessageType.Cron,
                 });

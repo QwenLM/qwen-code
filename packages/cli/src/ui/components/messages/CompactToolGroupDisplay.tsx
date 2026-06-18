@@ -11,7 +11,7 @@ import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
-import { t } from '../../../i18n/index.js';
+import { localizeToolDisplayName, t } from '../../../i18n/index.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
@@ -166,7 +166,7 @@ export const CompactToolGroupDisplay: React.FC<
             {compactLabel
               ? renderSummaryHeader(compactLabel, toolCalls.length)
               : renderDefaultHeader(
-                  activeTool.name,
+                  localizeToolDisplayName(activeTool.name),
                   activeToolDescription,
                   toolCalls.length,
                 )}

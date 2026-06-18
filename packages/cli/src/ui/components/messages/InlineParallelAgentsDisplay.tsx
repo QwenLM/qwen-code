@@ -32,6 +32,7 @@ import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import { localizeToolDisplayName } from '../../../i18n/index.js';
 
 interface InlineParallelAgentsDisplayProps {
   toolCalls: readonly IndividualToolCallDisplay[];
@@ -108,7 +109,9 @@ function activityLabel(row: RowData): string {
   // registry's live array.
   const last = row.recentActivity;
   if (!last) return '';
-  const display = TOOL_DISPLAY_BY_NAME[last.name] ?? last.name;
+  const display = localizeToolDisplayName(
+    TOOL_DISPLAY_BY_NAME[last.name] ?? last.name,
+  );
   const desc = last.description?.replace(/\s*\n\s*/g, ' ').trim();
   return desc ? `${display} ${desc}` : display;
 }
