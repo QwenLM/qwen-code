@@ -719,6 +719,12 @@ describe('Session', () => {
         'model.name',
         'qwen3-coder-plus',
       );
+      // Id-only switch must clear any stale baseUrl disambiguator (tombstone).
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.baseUrl',
+        '',
+      );
       expect(mockSettings.setValue).toHaveBeenCalledWith(
         SettingScope.User,
         'security.auth.selectedType',
