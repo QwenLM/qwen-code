@@ -8,11 +8,9 @@ This guide covers setting up a Qwen Code channel on QQ via the official QQ Bot O
 
 ## Setup
 
-The simplest way to get started is through QR code login — no developer account or manual app registration needed.
+### QR Code Login
 
-### QR Code Login (Recommended)
-
-On first start, the channel automatically launches a QR code login flow. Scan the QR code with your QQ mobile app and the credentials are saved for future use.
+Start the channel — the first time it will show a QR code. Scan it with your QQ app to activate. No developer account or manual registration needed. Credentials are saved and reused automatically.
 
 ```json
 {
@@ -26,14 +24,12 @@ On first start, the channel automatically launches a QR code login flow. Scan th
 
 ```bash
 qwen channel start my-qq
-# Scan the QR code shown in the terminal with your QQ app
+# Scan the QR code in the terminal with your QQ app
 ```
 
-Credentials are persisted to `~/.qwen/channels/<name>-credentials.json` with restrictive permissions (`0o600`). You only need to scan once.
+### Manual Configuration (Developer Portal)
 
-### Manual Configuration
-
-If you already have credentials from the [QQ Bot Open Platform](https://q.qq.com/) developer portal, provide them directly:
+You can also use credentials from the [QQ Bot Open Platform](https://q.qq.com/) developer portal if you already have an app registered there:
 
 ```json
 {
@@ -148,7 +144,6 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 - **Keep responses under 2000 characters** — Longer responses are automatically split into chunks. Adding a length hint to your instructions helps the agent stay concise.
 - **Sandbox for testing** — Set `"sandbox": true` to use the sandbox API during development. No production messages will be affected.
 - **Restrict access** — Use `senderPolicy: "allowlist"` for a fixed set of QQ users, or `"pairing"` to approve new users from the CLI. See [DM Pairing](./overview#dm-pairing) for details.
-- **Credentials persistence** — QR code login credentials are saved to `~/.qwen/channels/<name>-credentials.json` with restricted permissions (`0o600`). You only need to scan the QR code once.
 
 ## Key Differences from Telegram
 
@@ -168,7 +163,7 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 - Check the terminal output for errors
 - Verify the channel is running (`qwen channel status`)
 - If using `senderPolicy: "allowlist"`, make sure your QQ user ID is in `allowedUsers`
-- If credentials are missing, the channel will launch QR code login — watch the terminal for the QR code prompt
+- On first start, a QR code will appear in the terminal — scan it with your QQ app
 
 ### Bot doesn't respond in groups
 
