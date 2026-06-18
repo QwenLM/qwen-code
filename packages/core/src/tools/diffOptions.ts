@@ -49,16 +49,25 @@ export function getDiffStat(
   );
   const modelStats = getStats(modelPatch);
 
-  const userPatch = Diff.structuredPatch(
-    fileName,
-    fileName,
-    aiStr,
-    userStr,
-    'Proposed',
-    'User',
-    DEFAULT_DIFF_OPTIONS,
-  );
-  const userStats = getStats(userPatch);
+  const userStats =
+    aiStr === userStr
+      ? {
+          addedLines: 0,
+          removedLines: 0,
+          addedChars: 0,
+          removedChars: 0,
+        }
+      : getStats(
+          Diff.structuredPatch(
+            fileName,
+            fileName,
+            aiStr,
+            userStr,
+            'Proposed',
+            'User',
+            DEFAULT_DIFF_OPTIONS,
+          ),
+        );
 
   return {
     model_added_lines: modelStats.addedLines,

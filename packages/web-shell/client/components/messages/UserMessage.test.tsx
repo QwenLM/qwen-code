@@ -60,32 +60,62 @@ describe('UserMessage collapse toggle', () => {
     expect(btn.getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('hides collapse metadata for slash commands', () => {
+  it('keeps collapse metadata for slash commands with hidden steps', () => {
     const container = render(
       <UserMessage
         content="/review"
-        commands={[{ name: 'review', description: 'Review changes' }]}
         collapse={head({ elapsedMs: 12_400, toolCallCount: 3 })}
         onToggleCollapse={() => {}}
       />,
     );
     expect(container.textContent).toContain('/review');
-    expect(container.textContent).not.toContain('Execution 5 steps');
+    expect(container.textContent).toContain('Execution 5 steps');
+    expect(container.textContent).toContain('12.4s');
+  });
+
+  it('hides collapse metadata when elapsed time is the only detail', () => {
+    const container = render(
+      <UserMessage
+        content="hi"
+        collapse={head({ hiddenCount: 0, elapsedMs: 12_400 })}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('hi');
     expect(container.textContent).not.toContain('12.4s');
     expect(container.querySelector('button')).toBeNull();
   });
 
-  it('keeps collapse metadata for unknown slash-prefixed text', () => {
+  it('shows elapsed time while a turn is still running', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const container = render(
+        <UserMessage
+          content="hi"
+          collapse={head({ hiddenCount: 0, liveStartedAt: 7_600 })}
+          onToggleCollapse={() => {}}
+        />,
+      );
+
+      expect(container.textContent).toContain('2.4s');
+      expect(container.querySelector('button')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows metadata for tool calls without hidden steps', () => {
     const container = render(
       <UserMessage
-        content="/Users/project"
-        commands={[{ name: 'review', description: 'Review changes' }]}
-        collapse={head({ elapsedMs: 12_400, toolCallCount: 3 })}
+        content="hi"
+        collapse={head({ hiddenCount: 0, toolCallCount: 2 })}
         onToggleCollapse={() => {}}
       />,
     );
-    expect(container.textContent).toContain('Execution 5 steps');
-    expect(container.textContent).toContain('12.4s');
+
+    expect(container.textContent).toContain('2 tool calls');
+    expect(container.querySelector('button')).toBeNull();
   });
 
   it('pluralizes a single execution step as "Execution 1 step"', () => {
