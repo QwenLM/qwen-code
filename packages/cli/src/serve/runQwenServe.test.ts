@@ -265,3 +265,53 @@ describe('runQwenServe daemon logger wiring', () => {
     }
   });
 });
+
+/**
+ * Boot validation for the embedded `runQwenServe` API: a non-finite
+ * `permissionResponseTimeoutMs` (e.g. config- or NaN-derived) must fail
+ * loud rather than reach the bridge, where it would be treated as the
+ * "disabled" sentinel and silently drop the permission deadline.
+ */
+describe('runQwenServe permissionResponseTimeoutMs validation', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-finite permissionResponseTimeoutMs', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pt-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    // Keep the daemon logger inside the temp dir so the boot path before
+    // the validation throw doesn't write into the real ~/.qwen.
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            permissionResponseTimeoutMs: Number.NaN,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/permissionResponseTimeoutMs/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+});

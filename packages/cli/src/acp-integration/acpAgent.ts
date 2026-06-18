@@ -6366,6 +6366,13 @@ class QwenAgent implements Agent {
         );
         const scope = toSettingsScope(params['scope']);
         settings.setValue(scope, key, normalizedValue);
+        if (settingKey === 'model.name') {
+          // Selecting a model by id here can't disambiguate providers that
+          // share that id, so clear the paired baseUrl disambiguator left by a
+          // previous model-picker selection. Empty-string tombstone overrides a
+          // lower-scope value on merge (undefined would be dropped from JSON).
+          settings.setValue(scope, 'model.baseUrl', '');
+        }
         if (
           settingKey === 'general.outputLanguage' &&
           typeof normalizedValue === 'string' &&
