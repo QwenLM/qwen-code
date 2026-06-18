@@ -2650,7 +2650,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
           config.getChatRecordingService()?.rewindRecording(
             targetTurnIndex,
-            { truncatedCount: originalLength - truncatedUi.length },
+            { truncatedCount: effectiveLength - truncatedUi.length },
             !hasRestoreFailure
               ? config
                   .getFileHistoryService()

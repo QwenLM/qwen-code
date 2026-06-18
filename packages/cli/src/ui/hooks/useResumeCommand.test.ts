@@ -343,6 +343,11 @@ describe('useResumeCommand', () => {
         getRunning: vi.fn().mockReturnValue([]),
         reset: resetMonitorRegistry,
       }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
+      }),
       loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
       getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
       getDebugLogger: () => ({
@@ -635,6 +640,11 @@ describe('useResumeCommand', () => {
       getMonitorRegistry: () => ({
         getRunning: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
       }),
       loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
       getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),

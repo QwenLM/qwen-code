@@ -325,7 +325,10 @@ describe('AppContainer State Management', () => {
       vimEnabled: false,
       vimMode: 'NORMAL',
     });
-    mockedUseSessionStats.mockReturnValue({ stats: {} });
+    mockedUseSessionStats.mockReturnValue({
+      stats: {},
+      seedPromptCount: vi.fn(),
+    });
     mockedUseTextBuffer.mockReturnValue({
       text: '',
       setText: vi.fn(),
