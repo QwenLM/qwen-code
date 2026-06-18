@@ -796,9 +796,15 @@
       "type": "object",
       "properties": {
         "sandbox": {
-          "description": "Sandbox execution environment (can be a boolean or a path string).",
-          "type": "object",
-          "additionalProperties": true
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Sandbox execution environment (can be a boolean or a path string)."
         },
         "sandboxImage": {
           "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",

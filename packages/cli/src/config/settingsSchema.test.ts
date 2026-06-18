@@ -120,6 +120,14 @@ describe('SettingsSchema', () => {
       );
     });
 
+    it('should define tools.sandbox schema override as boolean or string', () => {
+      expect(
+        getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
+    });
+
     it('should have top-level proxy setting in schema', () => {
       expect(getSettingsSchema().proxy).toBeDefined();
       expect(getSettingsSchema().proxy.type).toBe('string');
