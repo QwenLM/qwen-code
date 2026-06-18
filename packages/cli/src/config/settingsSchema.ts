@@ -1342,8 +1342,14 @@ const SETTINGS_SCHEMA = {
         category: 'Context',
         requiresRestart: false,
         default: undefined as string | string[] | undefined,
-        description: 'The name of the context file.',
+        description: 'The name of the context file or files.',
         showInDialog: false,
+        jsonSchemaOverride: {
+          anyOf: [
+            { type: 'string' },
+            { type: 'array', items: { type: 'string' } },
+          ],
+        },
       },
       importFormat: {
         type: 'string',
