@@ -753,6 +753,16 @@ const SETTINGS_SCHEMA = {
         description: 'Custom witty phrases to display during loading.',
         showInDialog: false,
       },
+      showResponseTokensPerSecond: {
+        type: 'boolean',
+        label: 'Show Response Tokens Per Second',
+        category: 'UI',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Show a live tokens/sec estimate next to the response token counter while the model is streaming. Takes effect in the next session.',
+        showInDialog: true,
+      },
       enableWelcomeBack: {
         type: 'boolean',
         label: 'Show Welcome Back Dialog',

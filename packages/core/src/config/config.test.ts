@@ -2592,6 +2592,21 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('Response tokens/sec display configuration', () => {
+    it('should default to false when not provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getShowResponseTokensPerSecond()).toBe(false);
+    });
+
+    it('should set showResponseTokensPerSecond when provided as true', () => {
+      const config = new Config({
+        ...baseParams,
+        showResponseTokensPerSecond: true,
+      });
+      expect(config.getShowResponseTokensPerSecond()).toBe(true);
+    });
+  });
+
   describe('createToolRegistry', () => {
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
