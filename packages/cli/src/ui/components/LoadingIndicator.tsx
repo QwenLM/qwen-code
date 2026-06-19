@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ThoughtSummary } from '@qwen-code/qwen-code-core';
 import type React from 'react';
 import { useRef } from 'react';
 import { Box, Text } from 'ink';
@@ -22,7 +21,6 @@ interface LoadingIndicatorProps {
   currentLoadingPhrase?: string;
   elapsedTime: number;
   rightContent?: React.ReactNode;
-  thought?: ThoughtSummary | null;
   candidatesTokens?: number;
   /**
    * Live-updating character counter for the streaming response. When provided
@@ -45,7 +43,6 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   currentLoadingPhrase,
   elapsedTime,
   rightContent,
-  thought,
   candidatesTokens,
   streamingCharsRef,
   isStreaming,
@@ -69,7 +66,10 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
     return null;
   }
 
-  const primaryText = thought?.subject || currentLoadingPhrase;
+  // The spinner row shows status only: phrase, timer, token estimate, and the
+  // cancel affordance. Model reasoning lives in the collapsible thinking block
+  // in history, not here.
+  const primaryText = currentLoadingPhrase;
 
   const streamingTokens = streamingCharsRef ? Math.round(animatedChars / 4) : 0;
   const outputTokens = (candidatesTokens ?? 0) + streamingTokens;

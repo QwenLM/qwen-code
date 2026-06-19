@@ -11,6 +11,7 @@ import {
   ChevronDown,
   AlertCircle,
   CornerDownRight,
+  GitBranch,
   X,
 } from 'lucide-react';
 import { Icon_Home, Icon_Folder } from '@craft-agent/ui';
@@ -2753,16 +2754,25 @@ function WorkingDirectoryBadge({
 
   // Fetch git branch when working directory changes
   React.useEffect(() => {
-    if (workingDirectory) {
-      window.electronAPI
-        ?.getGitBranch?.(workingDirectory)
-        .then((branch: string | null) => {
-          setGitBranch(branch);
-        });
-    } else {
-      setGitBranch(null);
+    let cancelled = false;
+    setGitBranch(null);
+
+    if (!workingDirectory || workingDirectory === sessionFolderPath) {
+      return;
     }
-  }, [workingDirectory]);
+
+    window.electronAPI
+      ?.getGitBranch?.(workingDirectory)
+      .then((branch: string | null) => {
+        if (!cancelled) {
+          setGitBranch(branch);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workingDirectory, sessionFolderPath]);
 
   // Reset filter, refresh history, and focus input when popover opens
   React.useEffect(() => {
@@ -2833,6 +2843,7 @@ function WorkingDirectoryBadge({
   const folderName = hasFolder
     ? getPathBasename(workingDirectory) || 'Folder'
     : 'Work in Folder';
+  const visibleGitBranch = hasFolder ? gitBranch : null;
 
   // Show reset option when a folder is selected and it differs from session folder
   const showReset =
@@ -2854,6 +2865,21 @@ function WorkingDirectoryBadge({
             <FreeFormInputContextBadge
               icon={<Icon_Home className="h-4 w-4" />}
               label={folderName}
+              ariaLabel={
+                visibleGitBranch
+                  ? `${folderName}, ${t('chat.onBranch', {
+                      branch: visibleGitBranch,
+                    })}`
+                  : folderName
+              }
+              trailingContent={
+                visibleGitBranch ? (
+                  <span className="inline-flex min-w-0 max-w-[120px] shrink items-center gap-1 text-muted-foreground">
+                    <GitBranch className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{visibleGitBranch}</span>
+                  </span>
+                ) : undefined
+              }
               isExpanded={isEmptySession}
               hasSelection={hasFolder}
               showChevron={true}

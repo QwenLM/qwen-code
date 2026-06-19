@@ -8,7 +8,9 @@ import type { DaemonClient } from './DaemonClient.js';
 import {
   isNonBlockingAccepted,
   matchTurnEvent,
+  normalizePendingPromptLimit,
   type CreateSessionRequest,
+  type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
   type SubscribeOptions,
@@ -18,6 +20,7 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
@@ -55,6 +58,13 @@ export interface DaemonSessionClientOptions {
   lastEventId?: number;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /**
+   * Local per-session prompt cap. The counter is shared with the parent
+   * `DaemonClient`; other session clients using the same parent instance
+   * contend on the same count. Set to `null`, `0`, or `Infinity` to disable
+   * the local guard. Server-side admission still applies.
+   */
+  maxPendingPromptsPerSession?: number | null;
 }
 
 export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
@@ -84,6 +94,7 @@ export class DaemonSessionClient {
   readonly replaySnapshot: DaemonReplaySnapshot;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
+  private readonly promptLimit: number;
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -101,6 +112,10 @@ export class DaemonSessionClient {
       liveJournal: [],
     };
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
+    this.promptLimit =
+      opts.maxPendingPromptsPerSession === undefined
+        ? opts.client.maxPendingPromptsPerSession
+        : normalizePendingPromptLimit(opts.maxPendingPromptsPerSession);
   }
 
   /**
@@ -226,6 +241,7 @@ export class DaemonSessionClient {
     req: PromptRequest,
     signal?: AbortSignal,
   ): Promise<PromptResult> {
+    signal?.throwIfAborted();
     if (!this.subscriptionActive) {
       return await this.client.prompt(
         this.sessionId,
@@ -235,35 +251,58 @@ export class DaemonSessionClient {
       );
     }
 
-    const accepted = await this.client.promptNonBlocking(
+    const releaseAdmission = this.client.reservePromptSlot(
       this.sessionId,
-      req,
-      signal,
-      this.clientId,
+      this.promptLimit,
     );
-    if (!isNonBlockingAccepted(accepted)) {
-      return accepted;
+    let accepted: NonBlockingPromptAccepted | PromptResult;
+    try {
+      accepted = await this.client.promptNonBlocking(
+        this.sessionId,
+        req,
+        signal,
+        this.clientId,
+      );
+      if (!isNonBlockingAccepted(accepted)) {
+        releaseAdmission();
+        return accepted;
+      }
+      if (!this.subscriptionActive) {
+        throw Error('SSE stream ended');
+      }
+    } catch (err) {
+      releaseAdmission();
+      throw err;
     }
 
     return new Promise<PromptResult>((resolve, reject) => {
       const onAbort = () => {
-        if (this._pendingPrompts.delete(accepted.promptId)) {
+        const pending = this._pendingPrompts.get(accepted.promptId);
+        if (pending && this._pendingPrompts.delete(accepted.promptId)) {
           this.client.cancel(this.sessionId, this.clientId).catch(() => {});
-          reject(signal!.reason ?? new DOMException('Aborted', 'AbortError'));
+          pending.reject(
+            signal!.reason ?? new DOMException('Aborted', 'AbortError'),
+          );
         }
       };
       const cleanup = () => signal?.removeEventListener('abort', onAbort);
       this._pendingPrompts.set(accepted.promptId, {
         resolve: (r) => {
           cleanup();
+          releaseAdmission();
           resolve(r);
         },
         reject: (e) => {
           cleanup();
+          releaseAdmission();
           reject(e);
         },
       });
-      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+      } else {
+        signal?.addEventListener('abort', onAbort, { once: true });
+      }
     });
   }
 
@@ -324,6 +363,22 @@ export class DaemonSessionClient {
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult> {
     return await this.client.btwSession(this.sessionId, question, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /**
+   * Queue a user message typed while this session's turn is still running so
+   * the ACP child can drain it mid-turn. Forwards the client id bound at
+   * create/attach. Resolves `{ accepted: false }` when the session is idle —
+   * the caller should then send the message as a normal next-turn prompt.
+   */
+  async enqueueMidTurnMessage(
+    message: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonMidTurnMessageResult> {
+    return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
@@ -456,10 +511,7 @@ export class DaemonSessionClient {
     const acquire = () => {
       if (started) return;
       if (this.subscriptionActive) {
-        throw new Error(
-          'Another event subscription is already active on this session. ' +
-            'Reuse the existing AsyncGenerator or create a separate DaemonSessionClient.',
-        );
+        throw new Error('subscription active');
       }
       this.subscriptionActive = true;
       started = true;
@@ -559,7 +611,7 @@ function validateLastEventId(
 ): number | undefined {
   if (lastEventId === undefined) return undefined;
   if (!Number.isInteger(lastEventId) || lastEventId < 0) {
-    throw new TypeError('lastEventId must be a finite non-negative integer');
+    throw new TypeError('invalid lastEventId');
   }
   return lastEventId;
 }

@@ -35,6 +35,7 @@ interface ServeArgs {
   hostname: string;
   token?: string;
   'max-sessions': number;
+  'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
   workspace?: string;
@@ -53,6 +54,7 @@ interface ServeArgs {
   'channel-idle-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
+  'permission-response-timeout-ms'?: number;
   'rate-limit'?: boolean;
   'rate-limit-prompt'?: number;
   'rate-limit-mutation'?: number;
@@ -89,6 +91,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
+      })
+      .option('max-pending-prompts-per-session', {
+        type: 'number',
+        default: 5,
+        description:
+          'Per-session cap on accepted prompts waiting or running. ' +
+          'New prompts beyond this return 503. Set to 0 to disable.',
       })
       .option('workspace', {
         type: 'string',
@@ -209,6 +218,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Idle timeout before a disconnected session is reaped (ms). ' +
           '0 = disabled. Default: 1800000 (30 min).',
       })
+      .option('permission-response-timeout-ms', {
+        type: 'number',
+        description:
+          'Wall-clock timeout for a single human permission / ' +
+          'ask_user_question response in daemon (ACP) mode (ms). ' +
+          '0 = disabled (wait forever). Default: 300000 (5 min).',
+      })
       .option('rate-limit', {
         type: 'boolean',
         description:
@@ -284,6 +300,18 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     }
     const resolvedMcpMode: 'enforce' | 'warn' | 'off' =
       mcpBudgetMode ?? (mcpClientBudget !== undefined ? 'warn' : 'off');
+    const maxPendingPromptsPerSession = argv['max-pending-prompts-per-session'];
+    if (
+      maxPendingPromptsPerSession !== Number.POSITIVE_INFINITY &&
+      (!Number.isFinite(maxPendingPromptsPerSession) ||
+        !Number.isInteger(maxPendingPromptsPerSession) ||
+        maxPendingPromptsPerSession < 0)
+    ) {
+      writeStderrLine(
+        'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).',
+      );
+      process.exit(1);
+    }
     if (mcpClientBudget !== undefined) {
       // Mirror the `--require-auth` breadcrumb: surface the active
       // policy in stderr (journald / docker logs) so operators don't
@@ -390,6 +418,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
+        maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
         workspace: argv.workspace,
@@ -415,6 +444,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['session-idle-timeout-ms'] !== undefined
           ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
+          : {}),
+        ...(argv['permission-response-timeout-ms'] !== undefined
+          ? {
+              permissionResponseTimeoutMs:
+                argv['permission-response-timeout-ms'],
+            }
           : {}),
         ...(rateLimit ? { rateLimit: true } : {}),
         ...(rateLimitPrompt !== undefined ? { rateLimitPrompt } : {}),

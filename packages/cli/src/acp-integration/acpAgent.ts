@@ -1757,10 +1757,17 @@ function normalizeStringRecord(
 
 function normalizeOptionalNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
-  const numberValue =
-    typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (!Number.isFinite(numberValue) || numberValue <= 0) {
-    throw RequestError.invalidParams(undefined, 'Expected a positive number');
+  let numberValue: number;
+  if (typeof value === 'number') {
+    numberValue = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    numberValue = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  } else {
+    numberValue = Number.NaN;
+  }
+  if (!Number.isInteger(numberValue) || numberValue <= 0) {
+    throw RequestError.invalidParams(undefined, 'Expected a positive integer');
   }
   return numberValue;
 }
@@ -3026,6 +3033,7 @@ class QwenAgent implements Agent {
       const extensionManager = new ExtensionManager({
         workspaceDir: cwd,
         isWorkspaceTrusted: settings.isTrusted,
+        locale: getCurrentLanguage(),
       });
       await extensionManager.refreshCache();
       extensions = extensionManager.getLoadedExtensions();
@@ -3052,6 +3060,7 @@ class QwenAgent implements Agent {
         return {
           id: extension.id,
           name: extension.name,
+          displayName: extension.displayName,
           version: extension.version,
           isActive: extension.isActive,
           path: extension.path,
@@ -3097,11 +3106,18 @@ class QwenAgent implements Agent {
         'extension',
       ).map((entry) => ({
         ...entry,
-        server: { ...entry.server, extensionName: extension.name },
+        server: {
+          ...entry.server,
+          extensionName: extension.displayName ?? extension.name,
+        },
       })),
     );
     const extensionHooks = activeExtensions.flatMap((extension) =>
-      readHooks({ hooks: extension.hooks ?? {} }, 'extension', extension.name),
+      readHooks(
+        { hooks: extension.hooks ?? {} },
+        'extension',
+        extension.displayName ?? extension.name,
+      ),
     );
 
     // Build the merged MCP/hook lists from the user and workspace settings
@@ -4513,6 +4529,7 @@ class QwenAgent implements Agent {
             kind: 'extension',
             id: ext.id,
             name: ext.name,
+            displayName: ext.displayName,
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
@@ -5799,6 +5816,14 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const cleared = unregisterGoalHook(config, sessionId);
+        if (cleared) {
+          session.emitGoalStatus({
+            kind: 'cleared',
+            condition: cleared.condition,
+            iterations: cleared.iterations,
+            durationMs: Date.now() - cleared.setAt,
+          });
+        }
         debugLogger.info(
           `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
         );
@@ -6145,6 +6170,16 @@ class QwenAgent implements Agent {
           sendUpdate: async (update) => {
             updates.push(update);
           },
+          // Fresh accumulator for this replay: MessageEmitter advances it from
+          // replayed usage metadata (tokens only — no per-turn durations) and
+          // PlanEmitter snapshots it onto each todo update, so resumed sessions
+          // recover per-task token spend (API time stays live-only).
+          cumulativeUsage: {
+            promptTokens: 0,
+            cachedTokens: 0,
+            candidateTokens: 0,
+            apiTimeMs: 0,
+          },
         };
         let replayError: string | undefined;
         try {
@@ -6317,6 +6352,13 @@ class QwenAgent implements Agent {
         );
         const scope = toSettingsScope(params['scope']);
         settings.setValue(scope, key, normalizedValue);
+        if (settingKey === 'model.name') {
+          // Selecting a model by id here can't disambiguate providers that
+          // share that id, so clear the paired baseUrl disambiguator left by a
+          // previous model-picker selection. Empty-string tombstone overrides a
+          // lower-scope value on merge (undefined would be dropped from JSON).
+          settings.setValue(scope, 'model.baseUrl', '');
+        }
         if (
           settingKey === 'general.outputLanguage' &&
           typeof normalizedValue === 'string' &&
@@ -6486,7 +6528,9 @@ class QwenAgent implements Agent {
         const settings = loadSettings(cwd);
         const extensionManager = new ExtensionManager({
           workspaceDir: cwd,
-          isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+          isWorkspaceTrusted:
+            isWorkspaceTrusted(settings.merged).isTrusted ?? true,
+          locale: getCurrentLanguage(),
         });
         await extensionManager.refreshCache();
         const extension = extensionManager
@@ -6688,7 +6732,12 @@ class QwenAgent implements Agent {
     resume?: boolean,
   ): Promise<Config> {
     this.settings = loadSettings(cwd);
-    const mergedMcpServers = { ...this.settings.merged.mcpServers };
+    // ACP/IDE-injected servers are session-level: they must outrank a project
+    // `.mcp.json` and stay un-gated. Collect them separately and pass them as
+    // `sessionMcpServers` (top precedence tier) rather than merging into
+    // `settings.mcpServers`, where `assembleMcpServers` would demote them below
+    // `.mcp.json` (#4615).
+    const sessionMcpServers: Record<string, MCPServerConfig> = {};
 
     for (const server of mcpServers) {
       const stdioServer = toStdioServer(server);
@@ -6697,7 +6746,7 @@ class QwenAgent implements Agent {
         for (const { name: envName, value } of stdioServer.env) {
           env[envName] = value;
         }
-        mergedMcpServers[stdioServer.name] = new MCPServerConfig(
+        sessionMcpServers[stdioServer.name] = new MCPServerConfig(
           stdioServer.command,
           stdioServer.args,
           env,
@@ -6712,7 +6761,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of sseServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[sseServer.name] = new MCPServerConfig(
+        sessionMcpServers[sseServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6730,7 +6779,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of httpServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[httpServer.name] = new MCPServerConfig(
+        sessionMcpServers[httpServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6743,7 +6792,7 @@ class QwenAgent implements Agent {
       }
     }
 
-    const settings = { ...this.settings.merged, mcpServers: mergedMcpServers };
+    const settings = this.settings.merged;
     const argvForSession = {
       ...this.argv,
       ...(resume ? { resume: sessionId } : { sessionId }),
@@ -6754,7 +6803,10 @@ class QwenAgent implements Agent {
       settings,
       argvForSession,
       cwd,
-      [],
+      // ACP sessions do not provide an extension override. Passing [] is a
+      // truthy override and prevents default/argv extension commands from
+      // loading, so leave it unset to preserve normal CLI behavior.
+      undefined,
       // Pass separated hooks for proper source attribution
       {
         userHooks: this.settings.getUserHooks(),
@@ -6767,6 +6819,7 @@ class QwenAgent implements Agent {
       // sessions otherwise leak persisted disabled skills into the first
       // <available_skills> at cold start.
       buildDisabledSkillNamesProvider(this.settings),
+      sessionMcpServers,
     );
     // ACP sessions run with piped stdio (non-TTY), so the default
     // interactive-based gating disables file checkpointing. Enable it
@@ -6906,6 +6959,9 @@ class QwenAgent implements Agent {
 
     // Install rewriter AFTER history replay to avoid rewriting historical messages
     session.installRewriter();
+
+    // After replay so a durable cron fire can't interleave with it.
+    session.startCronScheduler();
 
     return session;
   }

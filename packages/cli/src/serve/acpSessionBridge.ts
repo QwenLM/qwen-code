@@ -72,6 +72,9 @@ export type {
   BridgeClientRequestContext,
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
+  BridgeDaemonStatusLimits,
+  BridgeDaemonSessionDiagnostic,
+  BridgeDaemonStatusSnapshot,
   AcpSessionBridge,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -82,6 +85,7 @@ export {
   RestoreInProgressError,
   InvalidSessionScopeError,
   SessionLimitExceededError,
+  PromptQueueFullError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   InvalidPermissionOptionError,

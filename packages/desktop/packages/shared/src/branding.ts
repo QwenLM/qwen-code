@@ -10,6 +10,21 @@
 // Brand config type
 // ---------------------------------------------------------------------------
 
+type GitHubUpdateSource = {
+  provider: 'github';
+  owner: string;
+  repo: string;
+  releasePageUrl: string;
+};
+
+type GenericUpdateSource = {
+  provider: 'generic';
+  url: string;
+  releasePageUrl: string;
+};
+
+type UpdateSource = GitHubUpdateSource | GenericUpdateSource;
+
 export interface BrandConfig {
   /** Internal identifier */
   id: string;
@@ -30,12 +45,7 @@ export interface BrandConfig {
   /** Session viewer base URL */
   viewerUrl: string;
   /** Stable desktop auto-update source for packaged app builds. */
-  updates?: {
-    provider: 'github';
-    owner: string;
-    repo: string;
-    releasePageUrl: string;
-  };
+  updates?: UpdateSource;
   /** Brand-owned external links shown in the Help menu */
   helpMenuLinks: Array<{ labelKey: string; url: string; icon: string }>;
   /** Brand-specific Electron resource paths, relative to apps/electron/ */
@@ -80,9 +90,8 @@ const QWEN_CODE_BRAND: BrandConfig = {
   selfReferName: 'Qwen Code',
   viewerUrl: 'https://agents.craft.do',
   updates: {
-    provider: 'github',
-    owner: 'QwenLM',
-    repo: 'qwen-code',
+    provider: 'generic',
+    url: 'https://github.com/QwenLM/qwen-code/releases/download/desktop-latest',
     releasePageUrl: 'https://github.com/QwenLM/qwen-code/releases',
   },
   helpMenuLinks: [

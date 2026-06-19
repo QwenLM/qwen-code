@@ -36,8 +36,15 @@ import { StreamingState } from '../types.js';
 
 // Mock child components
 vi.mock('./LoadingIndicator.js', () => ({
-  LoadingIndicator: ({ thought }: { thought?: string }) => (
-    <Text>LoadingIndicator{thought ? `: ${thought}` : ''}</Text>
+  LoadingIndicator: ({
+    currentLoadingPhrase,
+  }: {
+    currentLoadingPhrase?: string;
+  }) => (
+    <Text>
+      LoadingIndicator
+      {currentLoadingPhrase ? `: ${currentLoadingPhrase}` : ''}
+    </Text>
   ),
 }));
 
@@ -103,7 +110,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     commandContext: null,
     shellModeActive: false,
     isFocused: true,
-    thought: '',
+    thought: null,
     currentLoadingPhrase: '',
     elapsedTime: 0,
     ctrlCPressedOnce: false,
@@ -180,13 +187,9 @@ describe('Composer', () => {
   });
 
   describe('Loading Indicator', () => {
-    it('renders LoadingIndicator with thought when streaming', () => {
+    it('renders LoadingIndicator with phrase when streaming', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,
-        thought: {
-          subject: 'Processing',
-          description: 'Processing your request...',
-        },
         currentLoadingPhrase: 'Analyzing',
         elapsedTime: 1500,
       });
@@ -195,22 +198,7 @@ describe('Composer', () => {
 
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
-    });
-
-    it('renders LoadingIndicator without thought when accessibility disables loading phrases', () => {
-      const uiState = createMockUIState({
-        streamingState: StreamingState.Responding,
-        thought: { subject: 'Hidden', description: 'Should not show' },
-      });
-      const config = createMockConfig({
-        getAccessibility: vi.fn(() => ({ disableLoadingPhrases: true })),
-      });
-
-      const { lastFrame } = renderComposer(uiState, config);
-
-      const output = lastFrame();
-      expect(output).toContain('LoadingIndicator');
-      expect(output).not.toContain('Should not show');
+      expect(output).toContain('LoadingIndicator: Analyzing');
     });
 
     // ─── Narrow-terminal suppression (suppressBottomLoadingIndicator) ───
@@ -293,20 +281,14 @@ describe('Composer', () => {
       expect(lastFrame()).toContain('LoadingIndicator');
     });
 
-    it('suppresses thought when waiting for confirmation', () => {
+    it('renders LoadingIndicator during WaitingForConfirmation', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.WaitingForConfirmation,
-        thought: {
-          subject: 'Confirmation',
-          description: 'Should not show during confirmation',
-        },
       });
 
       const { lastFrame } = renderComposer(uiState);
 
-      const output = lastFrame();
-      expect(output).toContain('LoadingIndicator');
-      expect(output).not.toContain('Should not show during confirmation');
+      expect(lastFrame()).toContain('LoadingIndicator');
     });
   });
 

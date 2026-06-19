@@ -16,6 +16,7 @@ import type {
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { CompactModeProvider } from '../contexts/CompactModeContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -333,5 +334,76 @@ describe('<HistoryItemDisplay />', () => {
     );
     expect(lastFrame()).toContain('Read txt files');
     expect(lastFrame()).toContain('●');
+  });
+
+  it('renders committed thinking text in full transcript mode', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 1200,
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </CompactModeProvider>,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for');
+    expect(output).toContain('Inspecting the repository');
+  });
+
+  it('renders committed thinking continuations in full transcript mode', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought_content',
+      text: 'Continuing the reasoning',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </CompactModeProvider>,
+    );
+
+    expect(lastFrame()).toContain('Continuing the reasoning');
+  });
+
+  it('keeps committed thinking collapsed in compact mode', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 1200,
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <CompactModeProvider value={{ compactMode: true, compactInline: false }}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </CompactModeProvider>,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for');
+    expect(output).toContain('ctrl+o to expand');
+    expect(output).not.toContain('Inspecting the repository');
+  });
+
+  it('keeps committed thinking continuations hidden in compact mode', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought_content',
+      text: 'Continuing the reasoning',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <CompactModeProvider value={{ compactMode: true, compactInline: false }}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </CompactModeProvider>,
+    );
+
+    expect(lastFrame()).not.toContain('Continuing the reasoning');
   });
 });

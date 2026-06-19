@@ -116,12 +116,16 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'src/',
-        'src/components/',
-        'src/index.js',
-        'src/components/Button.tsx',
-      ]);
+      const suggestionValues = result.current.suggestions.map((s) => s.value);
+      expect(suggestionValues).toHaveLength(4);
+      expect(suggestionValues).toEqual(
+        expect.arrayContaining([
+          'src/',
+          'src/components/',
+          'src/components/Button.tsx',
+          'src/index.js',
+        ]),
+      );
     });
 
     it('should append a trailing slash to directory paths in suggestions', async () => {

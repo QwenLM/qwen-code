@@ -61,6 +61,7 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
       ToolNames.MONITOR,
       ToolNames.CRON_CREATE,
       ToolNames.CRON_DELETE,
+      ToolNames.LOOP_WAKEUP,
       // `send_message` injects arbitrary text into another running agent
       // as a new instruction — the classifier must see destination + body
       // so it can detect inter-agent steering toward destructive actions.

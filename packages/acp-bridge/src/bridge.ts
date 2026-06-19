@@ -51,6 +51,7 @@ import {
   RestoreInProgressError,
   InvalidSessionScopeError,
   SessionLimitExceededError,
+  PromptQueueFullError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   SessionShellClientRequiredError,
@@ -77,6 +78,8 @@ import type {
   BridgeClientRequestContext,
   CloseSessionOpts,
   AcpSessionBridge,
+  MidTurnQueueEntry,
+  BridgeDaemonStatusSnapshot,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -226,6 +229,21 @@ interface SessionEntry {
    * caller still observes the rejection on its own returned promise.
    */
   promptQueue: Promise<void>;
+  /** Accepted prompts that have not settled yet (queued + active). */
+  pendingPromptCount: number;
+  /**
+   * Mid-turn user messages pushed by the browser (`POST
+   * /session/:id/mid-turn-message`) while a turn is running. The ACP child
+   * drains these between tool batches via the `craft/drainMidTurnQueue`
+   * ext-method so the model sees them before the turn ends. The queue is
+   * accepted into only while the session is busy (`pendingPromptCount > 0`)
+   * and emptied when the session next goes idle — see the settle handler in
+   * `sendPrompt`. The browser keeps its own copy as the next-turn fallback,
+   * so a message left undrained here is NOT lost: it is dropped server-side
+   * (preventing a stale next-turn re-injection) and resent by the browser as
+   * a fresh prompt.
+   */
+  midTurnMessageQueue: MidTurnQueueEntry[];
   /**
    * Per-session model-change FIFO. Prevents two concurrent
    * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
@@ -299,6 +317,7 @@ interface SessionEntry {
    *  an originator clientId is known. Used by the session reaper to avoid
    *  killing sessions mid-prompt. */
   promptActive: boolean;
+  retryAllowed: boolean;
   /**
    * Per-prompt "already broadcast `prompt_cancelled`" latch. The explicit
    * `cancelSession` route and the `sendPrompt` abort path (originator SSE
@@ -605,6 +624,7 @@ function broadcastTurnError(
 ): void {
   const message = extractErrorMessage(err);
   const code = extractErrorCode(err);
+  entry.retryAllowed = true;
   entry.events.publish({
     type: 'turn_error',
     data: {
@@ -631,6 +651,7 @@ const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
 const MCP_RESTART_TIMEOUT_MS = 300_000;
 const MCP_OAUTH_TIMEOUT_MS = 600_000;
+const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 /**
  * Backstop timeout for `qwen/control/session/recap`. The underlying
  * side-query is single-attempt with `maxOutputTokens: 300`, so a
@@ -644,7 +665,17 @@ const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
+// Per-session cap on undrained mid-turn messages: a busy turn with no drain
+// point (a long tool-free generation) must not let a client pin unbounded
+// messages in the in-memory queue. Past the cap, `enqueueMidTurnMessage`
+// returns `{ accepted: false }` and the browser keeps the message for the next
+// turn. Intentionally a fixed const for now; if this ever needs tuning, promote
+// it to a `BridgeOptions` knob the same way `maxPendingPromptsPerSession`
+// (the analogous bound `/prompt` enforces, default 5) is wired.
+const MAX_MID_TURN_QUEUE_DEPTH = 20;
 const DEFAULT_MAX_SESSIONS = 20;
+// Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
+const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
  * typos before they OOM the daemon. At ~500 B per `BridgeEvent` an
@@ -747,13 +778,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
   // Bd1yh + Bd1z5: per-permission deadline + per-session pending cap.
-  // 0 / Infinity / non-finite (NaN, -1) all disable — same sentinel
-  // convention as maxSessions / maxConnections.
+  // Permission caps keep the legacy sentinel behavior; prompt caps are
+  // stricter because they are an admission-control surface.
   const permissionTimeoutRaw =
     opts.permissionResponseTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
   const permissionTimeoutMs =
     permissionTimeoutRaw > 0 && Number.isFinite(permissionTimeoutRaw)
-      ? permissionTimeoutRaw
+      ? // Clamp to 2^31-1: Node treats setTimeout delays larger than
+        // this as 1ms (TimeoutOverflowWarning), which would make a
+        // huge "effectively never" timeout cancel prompts almost
+        // immediately — the opposite of intent. Mirrors the sibling
+        // `resolvePositiveFiniteMs` / `resolvedChannelIdleTimeoutMs`.
+        Math.min(permissionTimeoutRaw, 2_147_483_647)
       : 0; // 0 = disabled
   const maxPendingRaw =
     opts.maxPendingPermissionsPerSession ?? DEFAULT_MAX_PENDING_PER_SESSION;
@@ -761,6 +797,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     maxPendingRaw > 0 && Number.isFinite(maxPendingRaw)
       ? maxPendingRaw
       : Infinity;
+  const maxPendingPromptsRaw =
+    opts.maxPendingPromptsPerSession ?? DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
+  let maxPendingPromptsPerSession: number;
+  if (
+    maxPendingPromptsRaw === 0 ||
+    maxPendingPromptsRaw === Number.POSITIVE_INFINITY
+  ) {
+    maxPendingPromptsPerSession = Infinity;
+  } else if (
+    !Number.isInteger(maxPendingPromptsRaw) ||
+    maxPendingPromptsRaw < 0
+  ) {
+    throw new TypeError(
+      `Invalid maxPendingPromptsPerSession: ${maxPendingPromptsRaw}. ` +
+        `Must be a non-negative integer (0 / Infinity = unlimited).`,
+    );
+  } else {
+    maxPendingPromptsPerSession = maxPendingPromptsRaw;
+  }
   // The bound path is the canonical form `spawnOrAttach` compares
   // incoming `workspaceCwd` against. The caller MUST pass an already-
   // canonical value (via `canonicalizeWorkspace`). `runQwenServe`
@@ -814,6 +869,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   );
   let sessionReaper: ReturnType<typeof setInterval> | undefined;
+
+  // Tracks the most recent "activity" event for idle-detection by
+  // external schedulers. Updated on prompt start/end and session
+  // spawn/restore. `null` until the first activity after boot.
+  let lastActivityTimestamp: number | null = null;
+  let activePromptCounter = 0;
+  function touchActivity(): void {
+    lastActivityTimestamp = Date.now();
+  }
 
   function resolvePositiveFiniteMs(
     raw: number | undefined,
@@ -1284,6 +1348,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           } catch {
             /* bus already closed */
           }
+          if (sessEntry.promptActive) {
+            sessEntry.promptActive = false;
+            activePromptCounter--;
+            touchActivity();
+          }
           byId.delete(sid);
           telemetry.metrics?.sessionLifecycle('die');
           // Tombstone the id so any late `extNotification` from the
@@ -1668,6 +1737,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return undefined;
   };
 
+  const assertLivePromptEntry = (
+    sessionId: string,
+    entry: SessionEntry,
+  ): void => {
+    const info = channelInfoForEntry(entry);
+    if (byId.get(sessionId) !== entry || !info || info.isDying) {
+      throw new SessionNotFoundError(sessionId);
+    }
+  };
+
   const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
     if (!info.statusClosedReject) {
       info.statusClosedReject = info.channel.exited.then(() => {
@@ -1974,6 +2053,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       connection: ci.connection,
       events,
       promptQueue: Promise.resolve(),
+      pendingPromptCount: 0,
+      midTurnMessageQueue: [],
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
       modelPublishGeneration: 0,
@@ -1984,9 +2065,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       attachCount: 0,
       spawnOwnerWantedKill: false,
       promptActive: false,
+      retryAllowed: false,
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
+    touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
     // Drain any guardrail events that fired during this session's
     // `newSession` handler (before this entry registered) onto the
@@ -2401,6 +2484,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // closed bus.
     permissionMediator.forgetSession(sessionId);
     entry.pendingPermissionIds.clear();
+    if (entry.promptActive) {
+      entry.promptActive = false;
+      activePromptCounter--;
+      touchActivity();
+    }
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
     // Tombstone the closed sessionId so any late `extNotification`
@@ -2449,8 +2537,63 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   startSessionReaper();
 
   return {
+    getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot {
+      return {
+        limits: {
+          maxSessions: maxSessions === Infinity ? null : maxSessions,
+          maxPendingPromptsPerSession:
+            maxPendingPromptsPerSession === Infinity
+              ? null
+              : maxPendingPromptsPerSession,
+          eventRingSize,
+          channelIdleTimeoutMs: resolvedChannelIdleTimeoutMs(),
+          sessionIdleTimeoutMs,
+        },
+        sessionCount: byId.size,
+        pendingPermissionCount: permissionMediator.pendingCount,
+        channelLive: !!liveChannelInfo(),
+        permissionPolicy: permissionMediator.policy,
+        sessions: [...byId.values()].map((entry) => ({
+          sessionId: entry.sessionId,
+          workspaceCwd: entry.workspaceCwd,
+          createdAt: entry.createdAt,
+          ...(entry.displayName ? { displayName: entry.displayName } : {}),
+          clientCount: entry.clientIds.size,
+          subscriberCount: entry.events.subscriberCount,
+          attachCount: entry.attachCount,
+          pendingPromptCount: entry.pendingPromptCount,
+          pendingPermissionCount: entry.pendingPermissionIds.size,
+          hasActivePrompt: entry.promptActive,
+          lastEventId: entry.events.lastEventId,
+          ...(entry.sessionLastSeenAt !== undefined
+            ? { lastSeenAt: entry.sessionLastSeenAt }
+            : {}),
+          ...(entry.currentModelId
+            ? { currentModelId: entry.currentModelId }
+            : {}),
+          ...(entry.currentApprovalMode
+            ? { currentApprovalMode: entry.currentApprovalMode }
+            : {}),
+        })),
+      };
+    },
+
     get sessionCount() {
       return byId.size;
+    },
+
+    get activePromptCount() {
+      return activePromptCounter;
+    },
+
+    get lastActivityAt() {
+      return lastActivityTimestamp;
+    },
+
+    get idleSinceMs() {
+      return lastActivityTimestamp !== null
+        ? Date.now() - lastActivityTimestamp
+        : null;
     },
 
     isChannelLive() {
@@ -2650,7 +2793,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
-    async sendPrompt(sessionId, req, signal, context) {
+    // Keep this method non-async: admission failures must throw before
+    // HTTP routes return 202.
+    sendPrompt(sessionId, req, signal, context) {
       opts.onDiagnosticLine?.(
         `qwen serve: bridge sendPrompt for session=${sessionId}`,
         'info',
@@ -2658,11 +2803,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const capturedContext = telemetry.captureContext();
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
-      if (!entry) throw new SessionNotFoundError(sessionId);
-      const originatorClientId = resolveTrustedClientId(
-        entry,
-        context?.clientId,
-      );
+      if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
+      let originatorClientId: string | undefined;
+      try {
+        originatorClientId = resolveTrustedClientId(entry, context?.clientId);
+      } catch (err) {
+        return Promise.reject(err);
+      }
       // Pre-aborted: skip the queue entirely. Without this the prompt
       // chains onto promptQueue, waits its turn, and the FIFO worker
       // checks `signal.aborted` only AFTER reaching the head — wasted
@@ -2671,6 +2818,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (signal?.aborted) {
         throw new DOMException('Prompt aborted', 'AbortError');
       }
+      if (entry.pendingPromptCount >= maxPendingPromptsPerSession) {
+        throw new PromptQueueFullError(
+          maxPendingPromptsPerSession,
+          entry.pendingPromptCount,
+          sessionId,
+        );
+      }
+      entry.pendingPromptCount += 1;
+      let promptSlotReleased = false;
+      const releasePromptSlot = () => {
+        if (promptSlotReleased) return;
+        promptSlotReleased = true;
+        entry.pendingPromptCount = Math.max(0, entry.pendingPromptCount - 1);
+      };
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
@@ -2702,8 +2863,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 if (signal?.aborted) {
                   throw new DOMException('Prompt aborted', 'AbortError');
                 }
+                assertLivePromptEntry(sessionId, entry);
+                const requestedRetry =
+                  (req as unknown as { retry?: unknown }).retry === true;
+                const isRetry = requestedRetry && entry.retryAllowed;
+                entry.retryAllowed = false;
+                const promptRequest = (() => {
+                  const copy = {
+                    ...normalized,
+                  } as PromptRequest & { retry?: unknown };
+                  delete copy.retry;
+                  const meta =
+                    copy._meta && typeof copy._meta === 'object'
+                      ? { ...copy._meta }
+                      : {};
+                  delete meta[DAEMON_RETRY_META_KEY];
+                  if (isRetry) {
+                    meta[DAEMON_RETRY_META_KEY] = true;
+                  }
+                  if (Object.keys(meta).length > 0) {
+                    copy._meta = meta;
+                  } else {
+                    delete copy._meta;
+                  }
+                  return copy;
+                })();
                 entry.promptActive = true;
+                activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
+                touchActivity();
                 if (originatorClientId === undefined) {
                   delete entry.activePromptOriginatorClientId;
                 } else {
@@ -2728,18 +2916,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // Multi-modal: one envelope per content block. Non-text blocks
                   // pass through verbatim (the agent's Core multimodal echo is a
                   // for now the common text path is the immediate fix.
+                  //
+                  // Retry: skip echo — the original user_message_chunk is already
+                  // in the transcript from the first attempt.
                   entry.cancelBroadcast = false;
-                  echoPromptToSessionBus(entry, normalized, originatorClientId);
+                  if (!isRetry) {
+                    echoPromptToSessionBus(
+                      entry,
+                      promptRequest,
+                      originatorClientId,
+                    );
+                  }
                 } catch (echoErr) {
-                  entry.promptActive = false;
                   delete entry.activePromptOriginatorClientId;
+                  if (entry.promptActive) {
+                    entry.promptActive = false;
+                    activePromptCounter--;
+                    touchActivity();
+                  }
                   throw echoErr;
                 }
                 const promptPromise = entry.connection
-                  .prompt(normalized)
+                  .prompt(promptRequest)
                   .finally(() => {
-                    entry.promptActive = false;
-                    entry.sessionLastSeenAt = Date.now();
+                    if (entry.promptActive) {
+                      entry.promptActive = false;
+                      activePromptCounter--;
+                      entry.sessionLastSeenAt = Date.now();
+                      touchActivity();
+                    }
                     delete entry.activePromptOriginatorClientId;
                     if (
                       entry.clientIds.size === 0 &&
@@ -2861,6 +3066,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         () => undefined,
         () => undefined,
       );
+      result
+        .finally(() => {
+          releasePromptSlot();
+          // Mid-turn messages are scoped to the turn the user typed them
+          // during. Once the session goes fully idle with some still
+          // undrained, drop the server-side copy: the browser still holds
+          // them in its own queue and resends them as the next turn. Leaving
+          // them here would let the NEXT turn's first tool batch inject a
+          // stale message the browser ALSO resends — double delivery. The
+          // `pendingPromptCount === 0` guard keeps queued messages intact
+          // across a back-to-back FIFO of prompts (still "one turn" to the
+          // user) and only clears at the true idle boundary.
+          if (
+            entry.pendingPromptCount === 0 &&
+            entry.midTurnMessageQueue.length > 0
+          ) {
+            // One line when we actually drop something — makes the
+            // "queued-but-never-drained, browser will resend" path visible.
+            writeStderrLine(
+              `[mid-turn] session=${entry.sessionId} dropped ${entry.midTurnMessageQueue.length} undrained message(s) at idle; browser resends next turn`,
+            );
+            entry.midTurnMessageQueue.length = 0;
+          }
+        })
+        .catch(() => {});
       return result;
     },
 
@@ -3951,6 +4181,53 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     },
 
+    enqueueMidTurnMessage(sessionId, message, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Authorize the caller against THIS session before doing anything —
+      // mirrors `/prompt` and `/btw`. Throws `InvalidClientIdError` when the
+      // client-declared id isn't bound to the session, so a token-holding
+      // client attached to another session can't push into this turn. Returns
+      // the trusted id (or undefined for anonymous callers) — recorded as the
+      // message's originator so the drain's SSE echo only dedupes that client.
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      const trimmed = message.trim();
+      // Reject empty messages and — critically — messages that arrive while
+      // the session is idle. The browser only pushes here when it believes a
+      // turn is running, but the turn may have settled in the small window
+      // before its turn-complete frame landed. Accepting an idle message
+      // would strand it until the NEXT turn's first tool batch drained it,
+      // by which point the browser has already resent it as a fresh prompt —
+      // double delivery. Rejecting keeps the browser's next-turn fallback the
+      // single delivery path in that race.
+      if (trimmed.length === 0 || entry.pendingPromptCount === 0) {
+        // Rejects are low-volume (the browser only pushes when it believes a
+        // turn is running) but the silent path made "why wasn't my mid-turn
+        // message injected?" undiagnosable. Empty is a client bug; idle is the
+        // settle-window race the browser recovers from via its next-turn queue.
+        writeStderrLine(
+          `[mid-turn] session=${entry.sessionId} rejected: ${
+            trimmed.length === 0 ? 'empty message' : 'session idle'
+          }; browser keeps it for next turn`,
+        );
+        return { accepted: false };
+      }
+      // Bound queue depth (see MAX_MID_TURN_QUEUE_DEPTH). Full → reject so the
+      // browser keeps the message in its own queue for the next turn rather than
+      // pinning it here unboundedly when the turn has no drain point.
+      if (entry.midTurnMessageQueue.length >= MAX_MID_TURN_QUEUE_DEPTH) {
+        writeStderrLine(
+          `[mid-turn] session=${entry.sessionId} rejected: queue full (depth ${entry.midTurnMessageQueue.length} >= ${MAX_MID_TURN_QUEUE_DEPTH}); browser keeps it for next turn`,
+        );
+        return { accepted: false };
+      }
+      entry.midTurnMessageQueue.push({ text: trimmed, originatorClientId });
+      return { accepted: true };
+    },
+
     async generateSessionBtw(sessionId, question, signal, _context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -4397,6 +4674,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // byId.get(sessionId) (same order as closeSession).
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
+      if (entry.promptActive) {
+        entry.promptActive = false;
+        activePromptCounter--;
+        touchActivity();
+      }
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;

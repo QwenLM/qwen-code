@@ -560,7 +560,10 @@ export class BackgroundAgentResumeService {
         'default',
       );
       const resolvedApprovalMode = reconcileResumedApprovalMode(
-        normalizeApprovalMode(meta.resolvedApprovalMode, parentApprovalMode),
+        normalizeApprovalMode(
+          meta.resolvedApprovalMode ?? meta.persistedCliFlags?.approvalMode,
+          parentApprovalMode,
+        ),
         parentApprovalMode,
         this.config.isTrustedFolder(),
       );
@@ -576,6 +579,7 @@ export class BackgroundAgentResumeService {
         await createApprovalModeOverride(
           this.config,
           resolvedApprovalMode as ApprovalMode,
+          { persistedCliFlags: meta.persistedCliFlags },
         );
       // Mirror the launch path's permission-bubbling gate (agent.ts): an
       // agent whose definition uses `approvalMode: bubble` surfaces

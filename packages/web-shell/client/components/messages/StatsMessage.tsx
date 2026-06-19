@@ -4,6 +4,7 @@ import type {
   DaemonSessionStatsToolByName,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { localizeToolDisplayName } from './toolFormatting';
 import styles from './StatsMessage.module.css';
 
 const SENTINEL = 'web-shell:session-stats:v1:';
@@ -35,7 +36,7 @@ export function parseStatsMessage(content: string): ParsedStats | null {
   }
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   if (ms <= 0) return '0s';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const totalSeconds = ms / 1000;
@@ -463,7 +464,7 @@ function ToolStatsCard({ status }: { status: DaemonSessionStatsStatus }) {
         return (
           <div key={e.name} className={styles.tableRow}>
             <span className={`${styles.tableToolCol} ${styles.metricCell}`}>
-              {e.name}
+              {localizeToolDisplayName(e.name, t)}
             </span>
             <span className={styles.tableNumCol}>{e.stats.count}</span>
             <span

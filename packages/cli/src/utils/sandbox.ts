@@ -23,6 +23,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
+import { parseSandboxImageName } from './sandboxImageName.js';
+import { isContainerPathWithinWorkdir } from './sandbox-path.js';
 
 const execAsync = promisify(exec);
 
@@ -102,14 +104,6 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
   return false;
 }
 
-// docker does not allow container names to contain ':' or '/', so we
-// parse those out to shorten the name
-function parseImageName(image: string): string {
-  const [fullName, tag] = image.split(':');
-  const name = fullName.split('/').at(-1) ?? 'unknown-image';
-  return tag ? `${name}-${tag}` : name;
-}
-
 function ports(): string[] {
   return (process.env['SANDBOX_PORTS'] ?? '')
     .split(',')
@@ -128,9 +122,7 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
     const paths = process.env['PATH'].split(pathSeparator);
     for (const p of paths) {
       const containerPath = getContainerPath(p);
-      if (
-        containerPath.toLowerCase().startsWith(containerWorkdir.toLowerCase())
-      ) {
+      if (isContainerPathWithinWorkdir(containerWorkdir, containerPath)) {
         pathSuffix += `:${containerPath}`;
       }
     }
@@ -144,9 +136,7 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
     const paths = process.env['PYTHONPATH'].split(pathSeparator);
     for (const p of paths) {
       const containerPath = getContainerPath(p);
-      if (
-        containerPath.toLowerCase().startsWith(containerWorkdir.toLowerCase())
-      ) {
+      if (isContainerPathWithinWorkdir(containerWorkdir, containerPath)) {
         pythonPathSuffix += `:${containerPath}`;
       }
     }
@@ -603,7 +593,7 @@ export async function start_sandbox(
   }
 
   // name container after image, plus random suffix to avoid conflicts
-  const imageName = parseImageName(image);
+  const imageName = parseSandboxImageName(image);
   const isIntegrationTest =
     process.env['QWEN_CODE_INTEGRATION_TEST'] === 'true';
   let containerName;
@@ -632,6 +622,22 @@ export async function start_sandbox(
     args.push(
       '--env',
       `QWEN_CODE_TEST_VAR=${process.env['QWEN_CODE_TEST_VAR']}`,
+    );
+  }
+  for (const envVar of [
+    'QWEN_DEBUG_LOG_FILE',
+    'QWEN_CODE_LEGACY_MCP_BLOCKING',
+  ] as const) {
+    if (process.env[envVar]) {
+      args.push('--env', `${envVar}=${process.env[envVar]}`);
+    }
+  }
+  if (process.env['QWEN_CODE_MCP_APPROVALS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_MCP_APPROVALS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_MCP_APPROVALS_PATH'],
+      )}`,
     );
   }
 
@@ -714,8 +720,13 @@ export async function start_sandbox(
   // also mount-replace VIRTUAL_ENV directory with <project_settings>/sandbox.venv
   // sandbox can then set up this new VIRTUAL_ENV directory using sandbox.bashrc (see below)
   // directory will be empty if not set up, which is still preferable to having host binaries
+  const virtualEnv = process.env['VIRTUAL_ENV'];
   if (
-    process.env['VIRTUAL_ENV']?.toLowerCase().startsWith(workdir.toLowerCase())
+    virtualEnv &&
+    isContainerPathWithinWorkdir(
+      getContainerPath(workdir),
+      getContainerPath(virtualEnv),
+    )
   ) {
     const sandboxVenvPath = path.resolve(
       SETTINGS_DIRECTORY_NAME,
@@ -724,14 +735,8 @@ export async function start_sandbox(
     if (!fs.existsSync(sandboxVenvPath)) {
       fs.mkdirSync(sandboxVenvPath, { recursive: true });
     }
-    args.push(
-      '--volume',
-      `${sandboxVenvPath}:${getContainerPath(process.env['VIRTUAL_ENV'])}`,
-    );
-    args.push(
-      '--env',
-      `VIRTUAL_ENV=${getContainerPath(process.env['VIRTUAL_ENV'])}`,
-    );
+    args.push('--volume', `${sandboxVenvPath}:${getContainerPath(virtualEnv)}`);
+    args.push('--env', `VIRTUAL_ENV=${getContainerPath(virtualEnv)}`);
   }
 
   // copy additional environment variables from SANDBOX_ENV

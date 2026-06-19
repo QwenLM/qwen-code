@@ -79,17 +79,17 @@
 
 .lineExpandable {
   cursor: pointer;
+  margin: -2px 0;
+  padding: 2px 0;
+  user-select: none;
+}
+
+.lineExpandable * {
+  cursor: pointer;
 }
 
 .lineExpandable:hover .lineName {
   color: var(--accent-color);
-}
-
-.lineChevron {
-  font-size: 10px;
-  color: var(--text-dimmed);
-  flex-shrink: 0;
-  margin-left: 6px;
 }
 
 .agentSummary {
@@ -108,6 +108,21 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.4;
+}
+
+/* Full, wrapped tool argument shown below the header when the row is expanded
+   (the header drops its single-line ellipsised copy). Aligns with the expanded
+   output block below it. */
+.lineFullArg {
+  margin-left: 16px;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .lineDetail {
@@ -164,30 +179,15 @@
   background: var(--info-bg);
 }
 
-.todoList {
-  padding: 6px 0 4px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.todoItem {
-  font-size: 13px;
-  font-family: var(--font-mono);
-  line-height: 1.6;
-  padding-left: 4px;
-}
-
-.todoDone {
-  color: var(--text-primary);
-}
-
-.todoActive {
-  font-weight: 600;
-}
-
-.todoPending {
+.todoProgress {
   color: var(--text-dimmed);
+  font-size: 12px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.todoBody {
+  padding: 4px 0 2px 24px;
 }
 
 .compactGroup {

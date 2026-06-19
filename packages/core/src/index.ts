@@ -67,6 +67,7 @@ export * from './core/logger.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
+export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
 
 // ============================================================================
@@ -111,6 +112,7 @@ export {
   buildSkillLlmContent,
   applySkillAllowedTools,
 } from './tools/skill-utils.js';
+export { atomicWriteFile } from './utils/atomicFileWrite.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
@@ -141,6 +143,7 @@ export type {
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
+export { FORK_SUBAGENT_TYPE } from './tools/agent/fork-subagent.js';
 export type {
   WorkflowTool,
   WorkflowParams,
@@ -173,6 +176,7 @@ export {
 } from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
+export type { DurableCronTask } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
@@ -183,6 +187,27 @@ export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
 export * from './services/sleepInhibitor.js';
+// Named exports keep @internal test helpers out of the barrel.
+export {
+  apiResponseEventToTokenUsageRecord,
+  exportTokenUsageSummary,
+  formatTokenUsageSummaryAsCsv,
+  formatTokenUsageSummaryAsJson,
+  getTokenUsageFilePath,
+  queryTokenUsage,
+  recordTokenUsageFromApiResponse,
+  recordTokenUsageFromApiResponseBestEffort,
+} from './services/tokenUsageService.js';
+export type {
+  TokenUsageExportFormat,
+  TokenUsageExportOptions,
+  TokenUsageGroupSummary,
+  TokenUsagePeriod,
+  TokenUsageQuery,
+  TokenUsageRecord,
+  TokenUsageSummary,
+  TokenUsageTotals,
+} from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
@@ -193,6 +218,7 @@ export {
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
+export * from './agents/workflow-run-registry.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';
@@ -270,6 +296,7 @@ export type {
   OAuthAuthorizationServerMetadata,
   OAuthProtectedResourceMetadata,
 } from './mcp/oauth-utils.js';
+export { hashMcpServerConfig } from './mcp/configHash.js';
 
 // ============================================================================
 // Telemetry

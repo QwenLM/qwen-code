@@ -129,6 +129,31 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     );
   });
 
+  it('tells the selector not to recall active tool schemas or failed calls', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: [],
+    });
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'read the ATA article',
+      docs,
+      2,
+      ['mcp__ata__article-list-query'],
+    );
+
+    const options = vi.mocked(runSideQuery).mock.calls[0]![1];
+    expect(options.systemInstruction).toContain(
+      'parameter schemas, field mappings, guessed call formats, or failed-call transcripts',
+    );
+    expect(options.systemInstruction).toContain(
+      'known gotchas, warnings, or confirmed workarounds',
+    );
+    expect(JSON.stringify(options.contents)).toContain(
+      'Recently used tools: mcp__ata__article-list-query',
+    );
+  });
+
   it('lets runSideQuery choose the default side-query model when fast model is configured', async () => {
     vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-flash-model');
     vi.mocked(runSideQuery).mockResolvedValue({

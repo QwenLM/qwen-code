@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
-
-export type WebShellTheme = 'dark' | 'light';
+import { WEB_SHELL_THEMES, type WebShellTheme } from '../../themeContext';
 
 interface ThemeDialogProps {
   currentTheme: WebShellTheme;
@@ -11,15 +10,13 @@ interface ThemeDialogProps {
   onClose: () => void;
 }
 
-const THEME_IDS: WebShellTheme[] = ['dark', 'light'];
-
 export function ThemeDialog({
   currentTheme,
   onSelect,
   onClose,
 }: ThemeDialogProps) {
   const { t } = useI18n();
-  const themes = THEME_IDS.map((id) => ({
+  const themes = WEB_SHELL_THEMES.map((id) => ({
     id,
     label: t(`theme.${id}`),
     description: t(`theme.${id}.desc`),
@@ -80,7 +77,7 @@ export function ThemeDialog({
         <button
           className={dp('resume-picker-close')}
           onClick={onClose}
-          title="Close"
+          title={t('common.close')}
         >
           ESC
         </button>

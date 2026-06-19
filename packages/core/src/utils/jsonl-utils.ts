@@ -31,6 +31,10 @@ import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('JSONL');
 
+type JsonlReadOptions = {
+  throwOnNonEnoentError?: boolean;
+};
+
 /**
  * A map of file paths to mutexes for preventing concurrent writes.
  */
@@ -206,7 +210,10 @@ export async function readLines<T = unknown>(
  * Reads all lines from a JSONL file.
  * Returns an array of parsed objects.
  */
-export async function read<T = unknown>(filePath: string): Promise<T[]> {
+export async function read<T = unknown>(
+  filePath: string,
+  options: JsonlReadOptions = {},
+): Promise<T[]> {
   let fileStream: fs.ReadStream | undefined;
   let rl: readline.Interface | undefined;
   try {
@@ -229,6 +236,9 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.error(`Error reading ${filePath}:`, error);
+      if (options.throwOnNonEnoentError) {
+        throw error;
+      }
     }
     return [];
   } finally {

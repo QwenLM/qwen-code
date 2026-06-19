@@ -9,6 +9,50 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  // ============================================================================
+  // Tool display names (chat-stream badge labels)
+  // ----------------------------------------------------------------------------
+  // Keyed by `toolDisplayName.<English display name>` (from core
+  // `ToolDisplayNames`); a missing key falls back to the English display name
+  // via `localizeToolDisplayName`. A product name (e.g. `Notebook`) is kept
+  // verbatim inside an otherwise-translated label.
+  // ============================================================================
+  'toolDisplayName.Edit': '編輯',
+  'toolDisplayName.WriteFile': '寫入檔案',
+  'toolDisplayName.ReadFile': '讀取檔案',
+  'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.Glob': 'Glob',
+  'toolDisplayName.Shell': '運行命令',
+  'toolDisplayName.Shell Command': 'Shell 命令',
+  'toolDisplayName.TodoList': '任務清單',
+  'toolDisplayName.SaveMemory': '儲存記憶',
+  'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Skill': '技能',
+  'toolDisplayName.EnterPlanMode': '進入計畫模式',
+  'toolDisplayName.ExitPlanMode': '退出計畫模式',
+  'toolDisplayName.WebFetch': '網路擷取',
+  'toolDisplayName.WebSearch': '網路搜尋',
+  'toolDisplayName.ListFiles': '列出檔案',
+  'toolDisplayName.Lsp': 'LSP',
+  'toolDisplayName.AskUserQuestion': '詢問使用者',
+  'toolDisplayName.CronCreate': '建立定時任務',
+  'toolDisplayName.CronList': '定時任務清單',
+  'toolDisplayName.CronDelete': '刪除定時任務',
+  'toolDisplayName.LoopWakeup': '循環喚醒',
+  'toolDisplayName.TaskCreate': '建立任務',
+  'toolDisplayName.TaskUpdate': '更新任務',
+  'toolDisplayName.TaskList': '任務列表',
+  'toolDisplayName.TaskStop': '停止任務',
+  'toolDisplayName.TeamCreate': '建立團隊',
+  'toolDisplayName.TeamDelete': '刪除團隊',
+  'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.StructuredOutput': '結構化輸出',
+  'toolDisplayName.Monitor': '監控',
+  'toolDisplayName.NotebookEdit': '編輯 Notebook',
+  'toolDisplayName.ToolSearch': '工具搜尋',
+  'toolDisplayName.EnterWorktree': '進入 Worktree',
+  'toolDisplayName.ExitWorktree': '退出 Worktree',
+  'toolDisplayName.Workflow': '工作流程',
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
   'Attachments: ': '附件：',
@@ -209,8 +253,8 @@ export default {
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
   'Connect an LLM provider': '連接 LLM 提供商',
-  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
-    '將最近的 AI 回應複製到剪貼簿（/copy N 複製倒數第 N 則）',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    '複製到剪貼簿：AI 回應、程式碼區塊（可依語言篩選）、LaTeX 或 Mermaid。N 為倒數第 N 則訊息，index 為程式碼區塊序號',
   'Show working-tree change stats versus HEAD':
     '顯示工作區相對 HEAD 的變更統計',
   'Could not determine current working directory.': '無法確定當前工作目錄。',
@@ -454,8 +498,50 @@ export default {
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
-  'Show model-specific usage statistics.': '顯示模型相關的使用統計信息',
-  'Show tool-specific usage statistics.': '顯示工具相關的使用統計信息',
+  'Show model-specific usage statistics.': '顯示模型相關的使用統計資訊',
+  'Show tool-specific usage statistics.': '顯示工具相關的使用統計資訊',
+  'Show daily token usage statistics.': '顯示每日 token 使用統計資訊',
+  'Show monthly token usage statistics.': '顯示每月 token 使用統計資訊',
+  'Export token usage statistics to CSV or JSON.':
+    '將 token 使用統計資訊匯出為 CSV 或 JSON',
+  'No usage data.': '沒有使用資料。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}：{{tokens}} 個 token（{{requests}} 個請求）',
+  'Daily token usage for {{value}}': '{{value}} 的每日 token 使用情況',
+  'Monthly token usage for {{value}}': '{{value}} 的每月 token 使用情況',
+  'Total: {{tokens}} tokens': '總計：{{tokens}} 個 token',
+  'Requests: {{requests}}': '請求數：{{requests}}',
+  'Breakdown:': '明細：',
+  'Input: {{tokens}}': '輸入：{{tokens}}',
+  'Output: {{tokens}}': '輸出：{{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    '快取（已包含在輸入中）：{{tokens}}',
+  'Thoughts: {{tokens}}': '思考：{{tokens}}',
+  'By model:': '按模型：',
+  'By auth type:': '按認證類型：',
+  'By model/auth type:': '按模型/認證類型：',
+  'By source:': '按來源：',
+  'Failed to load token usage stats: {{error}}':
+    '載入 token 使用統計資訊失敗：{{error}}',
+  'Expected --format csv or --format json.':
+    '應為 --format csv 或 --format json。',
+  'Expected a file path after --output.': '--output 後應提供檔案路徑。',
+  'Unexpected argument: {{argument}}': '未預期的參數：{{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '用法：/stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Token 使用匯出路徑必須位於專案工作目錄內。',
+  'Export target does not exist: {{path}}': '匯出目標不存在：{{path}}',
+  'Cannot resolve export path within the working directory.':
+    '無法在工作目錄內解析匯出路徑。',
+  'Could not create a temporary export file.': '無法建立臨時匯出檔案。',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token 使用情況已匯出為 {{format}}：{{path}}',
+  'Failed to export token usage stats: {{error}}':
+    '匯出 token 使用統計資訊失敗：{{error}}',
+  'Unclosed quote in arguments.': '參數中有未閉合的引號。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注意：生成耗時（TTFT/TPS）屬於生成指標。',
   'exit the cli': '退出命令行界面',
   'Manage workspace directories': '管理工作區目錄',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -765,8 +851,6 @@ export default {
   'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
   'Cannot fork before the first conversation turn.': '首次對話輪次前無法分支。',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    '/fork 命令需要啟用 fork 功能開關。設定 QWEN_CODE_ENABLE_FORK_SUBAGENT=1 以啟用。',
   'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；無法分支。',
   'Failed to launch fork: {{error}}': '啟動分支失敗：{{error}}',
   'the background agent could not be started.': '背景智能體無法啟動。',
@@ -835,6 +919,7 @@ export default {
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
   'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
+  'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',
   'Could not retrieve tool registry.': '無法檢索工具註冊表',
   "Successfully authenticated and refreshed tools for '{{name}}'.":

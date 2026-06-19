@@ -1,11 +1,26 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
+import type { SubagentConfig } from '../../subagents/types.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
+/**
+ * Fork subagent availability gate.
+ *
+ * Fork is available in interactive sessions. Non-interactive sessions
+ * (e.g. `qwen -p`, SDK headless, CI/CD) lack a terminal UI for fork progress
+ * display and permission prompts, which can cause hangs or silent failures.
+ *
+ * Forking is an explicit choice — the caller selects it with
+ * `subagent_type: "fork"`. Omitting `subagent_type` always resolves to the
+ * general-purpose subagent (awaitable, returns its result inline), never a
+ * fork. This preserves the long-standing "omit ⇒ awaitable subagent" contract
+ * that skills and callers depend on. When fork is unavailable, an explicit
+ * `subagent_type: "fork"` also falls back to the general-purpose subagent.
+ */
 export function isForkSubagentEnabled(config: Config): boolean {
-  return config.isForkSubagentEnabled() && config.isInteractive();
+  return config.isInteractive();
 }
 
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
@@ -14,12 +29,13 @@ export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
 export const FORK_AGENT = {
   name: FORK_SUBAGENT_TYPE,
   description:
-    'Implicit fork — inherits full conversation context. Not selectable via subagent_type; triggered by omitting subagent_type.',
+    'Fork yourself — inherits your full conversation context. Selected explicitly via `subagent_type: "fork"` (only in interactive sessions). Runs detached in the background; you are notified when it completes.',
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',
+  approvalMode: 'default',
   level: 'session' as const,
-};
+} satisfies SubagentConfig;
 
 // Recursive-fork guard. A fork child keeps the `agent` tool in its declarations
 // for byte-identical cache parity with the parent, so tool-availability

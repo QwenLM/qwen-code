@@ -9,6 +9,51 @@
 
 export default {
   // ============================================================================
+  // Tool display names (chat-stream badge labels)
+  // ----------------------------------------------------------------------------
+  // Namespaced `toolDisplayName.<English display name>` keys (from core
+  // `ToolDisplayNames`). Per this file's key-is-default-text convention each
+  // English entry maps to itself; `localizeToolDisplayName` detects that
+  // self-mapping and returns the bare display name. Localized values live in
+  // zh.js / zh-TW.js; other locales fall back to the English display name.
+  // ============================================================================
+  'toolDisplayName.Edit': 'toolDisplayName.Edit',
+  'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',
+  'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
+  'toolDisplayName.Grep': 'toolDisplayName.Grep',
+  'toolDisplayName.Glob': 'toolDisplayName.Glob',
+  'toolDisplayName.Shell': 'toolDisplayName.Shell',
+  'toolDisplayName.Shell Command': 'toolDisplayName.Shell Command',
+  'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
+  'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
+  'toolDisplayName.Agent': 'toolDisplayName.Agent',
+  'toolDisplayName.Skill': 'toolDisplayName.Skill',
+  'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
+  'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
+  'toolDisplayName.WebFetch': 'toolDisplayName.WebFetch',
+  'toolDisplayName.WebSearch': 'toolDisplayName.WebSearch',
+  'toolDisplayName.ListFiles': 'toolDisplayName.ListFiles',
+  'toolDisplayName.Lsp': 'toolDisplayName.Lsp',
+  'toolDisplayName.AskUserQuestion': 'toolDisplayName.AskUserQuestion',
+  'toolDisplayName.CronCreate': 'toolDisplayName.CronCreate',
+  'toolDisplayName.CronList': 'toolDisplayName.CronList',
+  'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
+  'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
+  'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
+  'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
+  'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
+  'toolDisplayName.TaskStop': 'toolDisplayName.TaskStop',
+  'toolDisplayName.TeamCreate': 'toolDisplayName.TeamCreate',
+  'toolDisplayName.TeamDelete': 'toolDisplayName.TeamDelete',
+  'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
+  'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
+  'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
+  'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
+  'toolDisplayName.ToolSearch': 'toolDisplayName.ToolSearch',
+  'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
+  'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
+  'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
+  // ============================================================================
   // Help / UI Components
   // ============================================================================
   // Attachment hints
@@ -232,8 +277,8 @@ export default {
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
   'Connect an LLM provider': 'Connect an LLM provider',
-  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
-    'Copy the last AI response to clipboard (/copy N for Nth-latest)',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number',
   'Show working-tree change stats versus HEAD':
     'Show working-tree change stats versus HEAD',
   'Could not determine current working directory.':
@@ -521,6 +566,52 @@ export default {
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
     'Show tool-specific usage statistics.',
+  'Show daily token usage statistics.': 'Show daily token usage statistics.',
+  'Show monthly token usage statistics.':
+    'Show monthly token usage statistics.',
+  'Export token usage statistics to CSV or JSON.':
+    'Export token usage statistics to CSV or JSON.',
+  'No usage data.': 'No usage data.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} requests)',
+  'Daily token usage for {{value}}': 'Daily token usage for {{value}}',
+  'Monthly token usage for {{value}}': 'Monthly token usage for {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requests: {{requests}}',
+  'Breakdown:': 'Breakdown:',
+  'Input: {{tokens}}': 'Input: {{tokens}}',
+  'Output: {{tokens}}': 'Output: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cached (included in Input): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Thoughts: {{tokens}}',
+  'By model:': 'By model:',
+  'By auth type:': 'By auth type:',
+  'By model/auth type:': 'By model/auth type:',
+  'By source:': 'By source:',
+  'Failed to load token usage stats: {{error}}':
+    'Failed to load token usage stats: {{error}}',
+  'Expected --format csv or --format json.':
+    'Expected --format csv or --format json.',
+  'Expected a file path after --output.':
+    'Expected a file path after --output.',
+  'Unexpected argument: {{argument}}': 'Unexpected argument: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Token usage export path must be within the project working directory.',
+  'Export target does not exist: {{path}}':
+    'Export target does not exist: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    'Cannot resolve export path within the working directory.',
+  'Could not create a temporary export file.':
+    'Could not create a temporary export file.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token usage exported to {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Failed to export token usage stats: {{error}}',
+  'Unclosed quote in arguments.': 'Unclosed quote in arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Note: generation timing (TTFT/TPS) belongs to generation metrics.',
   'exit the cli': 'exit the cli',
   'Manage workspace directories': 'Manage workspace directories',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -894,8 +985,6 @@ export default {
     'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
   'Cannot fork before the first conversation turn.':
     'Cannot fork before the first conversation turn.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
   'The agent tool is unavailable; cannot fork.':
     'The agent tool is unavailable; cannot fork.',
   'Failed to launch fork: {{error}}': 'Failed to launch fork: {{error}}',
@@ -978,6 +1067,8 @@ export default {
     'No managed auto-memory entries matched: {{query}}',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
+  'Import MCP servers from Claude configs':
+    'Import MCP servers from Claude configs',
   'Open MCP management dialog': 'Open MCP management dialog',
   'Could not retrieve tool registry.': 'Could not retrieve tool registry.',
   "Successfully authenticated and refreshed tools for '{{name}}'.":

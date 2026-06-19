@@ -44,6 +44,9 @@ const DIST_REQUIRED_PATHS = [
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  // bin wrapper emitted by prepare-package.js that re-spawns `node --expose-gc
+  // cli.js`; ships in dist/ as the package `bin` entry (#4914).
+  'cli-entry.js',
   // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',
@@ -494,7 +497,7 @@ function writeShims(packageRoot) {
   const unixShim = `#!/usr/bin/env sh
 set -e
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-exec "$ROOT/node/bin/node" "$ROOT/lib/cli.js" "$@"
+exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"
 `;
   const unixShimPath = path.join(binDir, 'qwen');
   fs.writeFileSync(unixShimPath, unixShim);
@@ -503,7 +506,7 @@ exec "$ROOT/node/bin/node" "$ROOT/lib/cli.js" "$@"
   const windowsShim = `@echo off
 setlocal
 set "ROOT=%~dp0.."
-"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli.js" %*
+"%ROOT%\\node\\node.exe" --expose-gc "%ROOT%\\lib\\cli.js" %*
 `;
   fs.writeFileSync(path.join(binDir, 'qwen.cmd'), windowsShim);
 }
