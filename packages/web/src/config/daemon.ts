@@ -5,15 +5,28 @@ export interface WebDaemonConfig {
   clientId?: string;
 }
 
+export interface WebDaemonLocation {
+  origin: string;
+  pathname: string;
+  search: string;
+}
+
 export function getWebDaemonConfig(): WebDaemonConfig {
   if (typeof window === 'undefined') return { baseUrl: '' };
+  return getWebDaemonConfigFromLocation(window.location);
+}
 
-  const params = new URLSearchParams(window.location.search);
-  const baseUrl = resolveBaseUrl(params.get('daemon') ?? undefined);
+export function getWebDaemonConfigFromLocation(
+  location: WebDaemonLocation,
+): WebDaemonConfig {
+  const params = new URLSearchParams(location.search);
+  const baseUrl = resolveBaseUrl(
+    params.get('daemon') ?? undefined,
+    location.origin,
+  );
   const token = params.get('token') ?? undefined;
   const initialSessionId =
-    params.get('session') ||
-    readSessionIdFromPathname(window.location.pathname);
+    params.get('session') || readSessionIdFromPathname(location.pathname);
   const clientId = params.get('clientId') ?? undefined;
 
   return {
@@ -36,16 +49,19 @@ export function readSessionIdFromPathname(
   }
 }
 
-function resolveBaseUrl(input: string | undefined): string {
-  if (!input) return window.location.origin;
-  const allowed = getAllowedDaemonOrigin(input);
-  return allowed ?? window.location.origin;
+function resolveBaseUrl(input: string | undefined, origin: string): string {
+  if (!input) return origin;
+  const allowed = getAllowedDaemonOrigin(input, origin);
+  return allowed ?? origin;
 }
 
-function getAllowedDaemonOrigin(input: string): string | undefined {
+function getAllowedDaemonOrigin(
+  input: string,
+  origin: string,
+): string | undefined {
   try {
-    const url = new URL(input, window.location.origin);
-    const current = new URL(window.location.origin);
+    const url = new URL(input, origin);
+    const current = new URL(origin);
     if (url.origin === current.origin) return url.origin;
 
     const isLocalhost =

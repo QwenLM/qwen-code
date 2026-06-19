@@ -1,7 +1,21 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { ProxyOptions } from 'vite';
+import type { ProxyOptions, UserConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+
+const serveAliases: Record<string, string> = {
+  '@qwen-code/web-shell': resolve(__dirname, '../web-shell/client/index.tsx'),
+  '@qwen-code/webui/daemon-react-sdk': resolve(
+    __dirname,
+    '../webui/src/daemon-react-sdk.ts',
+  ),
+  '@qwen-code/webui': resolve(__dirname, '../webui/src/index.ts'),
+  '@qwen-code/sdk/daemon': resolve(
+    __dirname,
+    '../sdk-typescript/src/daemon/index.ts',
+  ),
+  '@qwen-code/sdk': resolve(__dirname, '../sdk-typescript/src/index.ts'),
+};
 
 const daemonProxy: ProxyOptions = {
   target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
@@ -33,59 +47,40 @@ const daemonProxy: ProxyOptions = {
   },
 };
 
-export default defineConfig(({ command }) => ({
-  plugins: [react()],
-  resolve: {
-    alias:
-      command === 'serve'
-        ? {
-            '@qwen-code/web-shell': resolve(
-              __dirname,
-              '../web-shell/client/index.tsx',
-            ),
-            '@qwen-code/webui/daemon-react-sdk': resolve(
-              __dirname,
-              '../webui/src/daemon-react-sdk.ts',
-            ),
-            '@qwen-code/webui': resolve(__dirname, '../webui/src/index.ts'),
-            '@qwen-code/sdk/daemon': resolve(
-              __dirname,
-              '../sdk-typescript/src/daemon/index.ts',
-            ),
-            '@qwen-code/sdk': resolve(
-              __dirname,
-              '../sdk-typescript/src/index.ts',
-            ),
-          }
-        : {},
-    dedupe: [
-      'react',
-      'react-dom',
-      '@qwen-code/web-shell',
-      '@qwen-code/webui',
-      '@qwen-code/sdk',
-    ],
-  },
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
-    sourcemap: true,
-  },
-  server: {
-    cors: false,
-    port: 5174,
-    proxy: {
-      '/health': daemonProxy,
-      '/capabilities': daemonProxy,
-      '/daemon': daemonProxy,
-      '/session': daemonProxy,
-      '/sessions': daemonProxy,
-      '/workspace': daemonProxy,
-      '/permission': daemonProxy,
-      '/file': daemonProxy,
-      '/stat': daemonProxy,
-      '/list': daemonProxy,
-      '/glob': daemonProxy,
+export default defineConfig(
+  ({ command }): UserConfig => ({
+    plugins: [react()],
+    resolve: {
+      alias: command === 'serve' ? serveAliases : {},
+      dedupe: [
+        'react',
+        'react-dom',
+        '@qwen-code/web-shell',
+        '@qwen-code/webui',
+        '@qwen-code/sdk',
+      ],
     },
-  },
-}));
+    build: {
+      outDir: 'dist',
+      emptyOutDir: true,
+      sourcemap: true,
+    },
+    server: {
+      cors: false,
+      port: 5174,
+      proxy: {
+        '/health': daemonProxy,
+        '/capabilities': daemonProxy,
+        '/daemon': daemonProxy,
+        '/session': daemonProxy,
+        '/sessions': daemonProxy,
+        '/workspace': daemonProxy,
+        '/permission': daemonProxy,
+        '/file': daemonProxy,
+        '/stat': daemonProxy,
+        '/list': daemonProxy,
+        '/glob': daemonProxy,
+      },
+    },
+  }),
+);

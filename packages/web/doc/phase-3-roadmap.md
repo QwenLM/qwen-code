@@ -263,24 +263,40 @@ npm run dev:web
 
 ### 自动化检查
 
+主入口：
+
+```bash
+PATH="/Users/jifeng/.nvm/versions/node/v24.14.0/bin:$PATH" npm run validate:web
+```
+
+拆分排障：
+
 ```bash
 PATH="/Users/jifeng/.nvm/versions/node/v24.14.0/bin:$PATH" npm run build --workspace=packages/web
 PATH="/Users/jifeng/.nvm/versions/node/v24.14.0/bin:$PATH" npm run typecheck --workspace=packages/web
 PATH="/Users/jifeng/.nvm/versions/node/v24.14.0/bin:$PATH" npm run test --workspace=packages/web
-PATH="/Users/jifeng/.nvm/versions/node/v24.14.0/bin:$PATH" npx eslint packages/web/src --ext .ts,.tsx
+PATH="/Users/jifeng/.nvm/versions/node/v24.14.0/bin:$PATH" npm run lint --workspace=packages/web
+```
+
+运行中 Web / daemon proxy smoke：
+
+```bash
+PATH="/Users/jifeng/.nvm/versions/node/v24.14.0/bin:$PATH" npm run dev:web
+PATH="/Users/jifeng/.nvm/versions/node/v24.14.0/bin:$PATH" npm run smoke:web
 ```
 
 ### 浏览器验证
 
-使用 Chrome DevTools MCP 验证：
+使用 Chrome DevTools MCP 或人工访问验证真实浏览器交互：
 
 1. 首页输入框可输入。
 2. 可以发送一条消息。
 3. 会话页能看到当前 session。
 4. 文件页能预览 `package.json`。
 5. 刷新 `/session/:sessionId` 可恢复。
-6. daemon 关闭后页面有明确错误。
-7. 重启 daemon 后页面可恢复连接。
+6. `/mcp`、`/tools`、`/skills`、`/memory`、`/settings` 不出现空白页。
+7. daemon 关闭后页面有明确错误。
+8. 重启 daemon 后页面可恢复连接。
 
 ## 推荐开发顺序
 

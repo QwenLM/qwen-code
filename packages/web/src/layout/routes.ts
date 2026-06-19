@@ -21,8 +21,12 @@ const PATH_VIEWS = new Map(
 export function parseWebRoute(url: URL): WebRoute {
   const pathname = stripTrailingSlash(url.pathname);
   if (pathname.startsWith('/session/')) {
-    const sessionId = decodeURIComponent(pathname.slice('/session/'.length));
-    return sessionId ? { view: 'chat', sessionId } : { view: 'chat' };
+    try {
+      const sessionId = decodeURIComponent(pathname.slice('/session/'.length));
+      return sessionId ? { view: 'chat', sessionId } : { view: 'chat' };
+    } catch {
+      return { view: 'chat' };
+    }
   }
   const view = PATH_VIEWS.get(pathname);
   if (!view || view === 'chat') return { view: 'chat' };

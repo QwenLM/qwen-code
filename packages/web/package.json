@@ -9,6 +9,8 @@
     "test": "vitest run",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint src vite.config.ts --ext .ts,.tsx --max-warnings 0",
+    "validate": "npm run build && npm run typecheck && npm run test && npm run lint",
     "preview": "vite preview"
   },
   "dependencies": {
