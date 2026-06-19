@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 /**
  * Content-Security-Policy for the Web Shell HTML shell.
@@ -43,26 +44,33 @@ export const WEB_SHELL_CSP = [
  */
 export function resolveWebShellDir(): string | undefined {
   const selfDir = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    // esbuild bundle: this module is hoisted into dist/cli.js (or a
-    // dist/chunks/*.js shared chunk). `resolveBundleDir` strips the
-    // `chunks/` segment so we land on dist/, where copy_bundle_assets.js
-    // drops the UI as dist/web-shell/.
-    path.join(resolveBundleDir(import.meta.url), 'web-shell'),
-    // Source / tsx run: packages/cli/src/serve/ -> packages/web-shell/dist.
-    path.resolve(selfDir, '..', '..', '..', 'web-shell', 'dist'),
-  ];
-  for (const dir of candidates) {
-    // Require BOTH index.html and assets/: a partial build (index.html
-    // without its hashed chunks) would otherwise pass and serve a shell
-    // whose every script/style 404s. copy_bundle_assets.js applies the same
-    // two-part check before copying.
-    if (
-      existsSync(path.join(dir, 'index.html')) &&
-      existsSync(path.join(dir, 'assets'))
-    ) {
-      return dir;
-    }
+  // Require BOTH index.html and assets/: a partial build (index.html without
+  // its hashed chunks) would otherwise pass and serve a shell whose every
+  // script/style 404s. copy_bundle_assets.js applies the same two-part check.
+  const hasShell = (dir: string): boolean =>
+    existsSync(path.join(dir, 'index.html')) &&
+    existsSync(path.join(dir, 'assets'));
+
+  // esbuild bundle: this module is hoisted into dist/cli.js (or a
+  // dist/chunks/*.js shared chunk). `resolveBundleDir` strips the `chunks/`
+  // segment so we land on dist/, where copy_bundle_assets.js drops the UI as
+  // dist/web-shell/.
+  const bundled = path.join(resolveBundleDir(import.meta.url), 'web-shell');
+  if (hasShell(bundled)) return bundled;
+
+  // Non-bundled runs sit at different depths under the repo: tsx on source
+  // (packages/cli/src/serve/), per-package `tsc` output
+  // (packages/cli/dist/src/serve/), and the integration daemon harness
+  // (packages/cli/dist/index.js). Walk up from this module to find a sibling
+  // packages/web-shell/dist instead of hard-coding one `..` depth — which
+  // only matched the tsx case and left the transpiled layouts serving no UI.
+  let dir = selfDir;
+  for (let i = 0; i < 10; i++) {
+    const candidate = path.join(dir, 'packages', 'web-shell', 'dist');
+    if (hasShell(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
   return undefined;
 }
@@ -119,8 +127,21 @@ export function registerWebShell(app: Application, webShellDir: string): void {
       // chunks that no longer exist. Asset files themselves are immutable.
       .set('Cache-Control', 'no-cache');
     res.sendFile(indexPath, { cacheControl: false }, (err) => {
-      if (err && !res.headersSent) {
+      if (!err) return;
+      // Only 5xx path in the serve app that would otherwise emit nothing —
+      // log it like the sibling /demo handler so an operator can see why the
+      // shell stopped loading (EACCES/ESTALE on a network mount, a perms
+      // change, a partial deploy).
+      writeStderrLine(
+        `qwen serve: Web Shell index send failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      if (!res.headersSent) {
         res.status(500).type('text/plain').send('Failed to load Web Shell');
+      } else {
+        // Failed mid-stream (truncated/corrupt index.html): end the
+        // half-written response instead of leaving the client hanging on a
+        // 200 with a partial body.
+        res.end();
       }
     });
   };
