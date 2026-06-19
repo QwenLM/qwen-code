@@ -602,5 +602,80 @@ curl -s -X POST \
 
 ---
 
-**Документ создан:** 2026-06-19T14:15:00Z  
+**Документ создан:** 2026-06-19T14:15:00Z
 **Последнее обновление:** 2026-06-19T14:15:00Z
+
+---
+
+## 15. Вторая проверка (строгая, по stabilization handoff)
+
+**Дата:** 2026-06-19  
+**Git commit:** aa38305428bfaca04bd89137c553b749b4eb4bf6  
+**Статус:** ✅ ВСЕ 13 КРИТЕРИЕВ ПРОЙДЕНЫ
+
+### 15.1. Критерии стабильного локального запуска
+
+| №   | Критерий                                                  | Статус |
+| --- | --------------------------------------------------------- | ------ |
+| 1   | `blaze-runtime serve` стартует без crash                  | ✅     |
+| 2   | `/health` возвращает 401 без token и 200 с token          | ✅     |
+| 3   | `/workspace/preflight` показывает `auth.source = dp-auth` | ✅     |
+| 4   | `/session` создает session                                | ✅     |
+| 5   | `/session/:id/context` показывает модель с `(dp-auth)`    | ✅     |
+| 6   | SSE stream открыт через `GET /session/:id/events`         | ✅     |
+| 7   | Prompt route возвращает `202` с `promptId`                | ✅     |
+| 8   | SSE stream содержит реальные `session_update` events      | ✅     |
+| 9   | Второй prompt получает правильный ответ `ORBIT-17`        | ✅     |
+| 10  | Daemon PID сохраняется между prompt-ами                   | ✅     |
+| 11  | ACP child PID сохраняется между prompt-ами                | ✅     |
+| 12  | Daemon log не содержит prompt/model/auth failure          | ✅     |
+| 13  | В отчете нет реальных токенов                             | ✅     |
+
+### 15.2. Доказательство контекста (ORBIT-17)
+
+**Prompt 1:** "Remember this exact code word for the next message: ORBIT-17. Reply with OK only."
+
+**SSE ответ модели:**
+
+```
+id: 3, event: session_update, data: {"text":"OK"}
+id: 5, event: turn_complete
+```
+
+**Prompt 2:** "What exact code word did I ask you to remember? Answer with the code word only."
+
+**SSE ответ модели:**
+
+```
+id: 7, data: {"text":"OR"}
+id: 8, data: {"text":"BIT"}
+id: 9, data: {"text":"-1"}
+id: 10, data: {"text":"7"}
+```
+
+✅ **Модель запомнила: OR + BIT + -1 + 7 = ORBIT-17**
+
+### 15.3. Long-lived процессы
+
+**До prompt-ов:**
+
+- Daemon PID: 74473
+- ACP child PID: 74474
+
+**После prompt-ов:**
+
+- Daemon PID: 74473 ✅ (не изменился)
+- ACP child PID: 74474 ✅ (не изменился)
+
+### 15.4. Вывод
+
+**Все 13 критериев стабильного локального запуска пройдены.**
+
+Blaze Runtime MVP локально работает корректно:
+
+- DP auth wiring доказана (модель `tgpt/qwen3-next-80b-a3b-instruct(dp-auth)`)
+- Процесс-модель long-lived (daemon + ACP child не перезапускаются)
+- Контекст сохраняется между prompt-ами (ORBIT-17 запомнен)
+- SSE events stream работает с правильным `Last-Event-ID` header
+
+**Готов к переходу к sandbox deployment.**
