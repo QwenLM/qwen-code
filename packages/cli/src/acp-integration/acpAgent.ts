@@ -4861,10 +4861,10 @@ class QwenAgent implements Agent {
           settings: createLoadedSettingsAdapter(this.settings, persistScope),
           reloadModelProviders: (modelProviders) =>
             this.config.reloadModelProvidersConfig(modelProviders),
-          syncAuthState: (authType, modelId) =>
+          syncAuthState: (authType, modelId, baseUrl) =>
             this.config
               .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId),
+              .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => this.config.refreshAuth(authType),
         });
 
@@ -4874,6 +4874,9 @@ class QwenAgent implements Agent {
           providerLabel: providerConfig.label,
           authType: plan.authType,
           modelId: plan.modelSelection?.modelId,
+          ...(plan.modelSelection?.baseUrl
+            ? { baseUrl: plan.modelSelection.baseUrl }
+            : {}),
         };
       }
       case 'qwen/skills/install': {

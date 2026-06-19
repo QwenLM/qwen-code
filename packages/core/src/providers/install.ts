@@ -84,7 +84,11 @@ export interface ApplyProviderInstallPlanOptions {
   /** Callback to reload model providers config in the runtime. */
   reloadModelProviders?: (mp: ModelProvidersConfig) => void;
   /** Callback to sync auth state after install. */
-  syncAuthState?: (authType: AuthType, modelId: string) => void;
+  syncAuthState?: (
+    authType: AuthType,
+    modelId: string,
+    baseUrl?: string,
+  ) => void;
   /** Callback to refresh auth after install. */
   refreshAuth?: (authType: AuthType) => Promise<void>;
   /** Whether to call refreshAuth after install. Defaults to true. */
@@ -210,12 +214,16 @@ export async function applyProviderInstallPlan(
     currentStep = 'modelSelection';
     if (plan.modelSelection?.modelId) {
       settings.setValue('model.name', plan.modelSelection.modelId);
-      // The plan selects by model id only, so clear any baseUrl disambiguator
-      // left by a previous model-picker selection — otherwise the next launch
-      // could resolve to a stale provider sharing this model id. Empty-string
-      // tombstone so the clear overrides a lower-scope value on merge (an
-      // undefined write is dropped from JSON and would not override).
-      settings.setValue('model.baseUrl', '');
+      if (plan.modelSelection.baseUrl) {
+        settings.setValue('model.baseUrl', plan.modelSelection.baseUrl);
+      } else {
+        // The plan selects by model id only, so clear any baseUrl disambiguator
+        // left by a previous model-picker selection — otherwise the next launch
+        // could resolve to a stale provider sharing this model id. Empty-string
+        // tombstone so the clear overrides a lower-scope value on merge (an
+        // undefined write is dropped from JSON and would not override).
+        settings.setValue('model.baseUrl', '');
+      }
     }
 
     // Provider state metadata
@@ -235,7 +243,15 @@ export async function applyProviderInstallPlan(
     reloadModelProviders?.(updatedModelProviders);
     if (plan.modelSelection?.modelId) {
       currentStep = 'syncAuthState';
-      syncAuthState?.(plan.authType, plan.modelSelection.modelId);
+      if (plan.modelSelection.baseUrl) {
+        syncAuthState?.(
+          plan.authType,
+          plan.modelSelection.modelId,
+          plan.modelSelection.baseUrl,
+        );
+      } else {
+        syncAuthState?.(plan.authType, plan.modelSelection.modelId);
+      }
     }
     if (doRefreshAuth && refreshAuth) {
       currentStep = 'refreshAuth';
