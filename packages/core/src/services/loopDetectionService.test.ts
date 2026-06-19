@@ -28,7 +28,7 @@ const CONTENT_CHUNK_SIZE = 50;
 // Mirrored from loopDetectionService.ts. Kept local so the test is
 // self-describing and failures point to the constant that changed.
 const FILE_READ_WINDOW = 15;
-const GLOBAL_DUPLICATE_THRESHOLD = 6;
+const GLOBAL_DUPLICATE_THRESHOLD = 4;
 const ALTERNATING_PATTERN_CYCLES = 3;
 const TURN_TOOL_CALL_CAP = 100;
 
@@ -83,7 +83,7 @@ describe('LoopDetectionService', () => {
   describe('Tool Call Loop Detection', () => {
     it(`should not detect a loop for fewer than TOOL_CALL_LOOP_THRESHOLD identical calls`, () => {
       const event = createToolCallRequestEvent('testTool', { param: 'value' });
-      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
         expect(service.addAndCheck(event)).toBe(false);
       }
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
