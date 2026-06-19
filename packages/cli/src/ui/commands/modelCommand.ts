@@ -22,6 +22,12 @@ import {
 import type { LoadedSettings } from '../../config/settings.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 
+const MAIN_MODEL_CONFIGURATION_HINT =
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model without arguments to choose from configured models.';
+
+const FAST_MODEL_CONFIGURATION_HINT =
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --fast without a model to choose from configured models.';
+
 function persistSetting(
   settings: LoadedSettings,
   path: string,
@@ -49,11 +55,18 @@ async function switchMainModel(
     );
     persistSetting(settings, 'security.auth.selectedType', parsed.authType);
     persistSetting(settings, 'model.name', parsed.modelId);
+    // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
+    // by a previous model-picker selection — otherwise next launch would
+    // resolve to a different provider than this switch just chose. Use an
+    // empty-string tombstone so the clear overrides a lower-scope value (an
+    // undefined write is dropped from JSON and would not override on merge).
+    persistSetting(settings, 'model.baseUrl', '');
     return parsed.modelId;
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
   persistSetting(settings, 'model.name', modelArg);
+  persistSetting(settings, 'model.baseUrl', '');
   return modelArg;
 }
 
@@ -74,7 +87,9 @@ function formatUnavailableModelMessage(
   return (
     `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
     `${availableModelsLine}\n` +
-    'Configure models in settings.modelProviders or run /model to select an available model.'
+    (kind === 'Fast model'
+      ? FAST_MODEL_CONFIGURATION_HINT
+      : MAIN_MODEL_CONFIGURATION_HINT)
   );
 }
 
@@ -93,7 +108,7 @@ function formatUnavailableFastModelMessage(
   return (
     `Fast model '${modelName}' is not configured for any auth type.\n` +
     `${availableModelsLine}\n` +
-    'Configure models in settings.modelProviders or run /model to select an available model.'
+    FAST_MODEL_CONFIGURATION_HINT
   );
 }
 

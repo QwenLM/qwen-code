@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.16.1",
+  "version": "0.18.3",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -11,18 +11,22 @@
     "packages/channels/telegram",
     "packages/channels/weixin",
     "packages/channels/dingtalk",
-    "packages/channels/plugin-example"
+    "packages/channels/feishu",
+    "packages/channels/qqbot",
+    "packages/channels/plugin-example",
+    "!packages/desktop"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.16.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.18.3"
   },
   "scripts": {
-    "start": "cross-env node scripts/start.js",
+    "start": "node scripts/start.js",
     "dev": "node scripts/dev.js",
+    "dev:daemon": "node scripts/daemon-dev.js",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",
@@ -63,6 +67,7 @@
     "build:sdk:python": "python3 -m build packages/sdk-python",
     "check-i18n": "npm run check-i18n --workspace=packages/cli",
     "preflight": "npm run clean && npm ci && npm run format && npm run lint:ci && npm run build && npm run typecheck && npm run test:ci",
+    "postinstall": "patch-package",
     "prepare": "husky && npm run build && npm run bundle",
     "prepare:package": "node scripts/prepare-package.js",
     "package:hosted-installation": "node scripts/build-hosted-installation-assets.js",
@@ -70,8 +75,11 @@
     "package:standalone:release": "node scripts/build-standalone-release.js",
     "verify:installation-release": "node scripts/verify-installation-release.js",
     "release:version": "node scripts/version.js",
+    "changelog": "node scripts/generate-changelog.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
+    "check:desktop-isolation": "node scripts/check-desktop-isolation.js",
+    "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
   },
@@ -88,10 +96,11 @@
     "@types/react-dom": "^19.2.0"
   },
   "bin": {
-    "qwen": "dist/cli.js"
+    "qwen": "scripts/cli-entry.js"
   },
   "files": [
     "dist/",
+    "scripts/cli-entry.js",
     "README.md",
     "LICENSE"
   ],
@@ -100,6 +109,7 @@
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
     "@types/mock-fs": "^4.13.4",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/shell-quote": "^1.7.5",
     "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^3.1.1",
@@ -125,6 +135,7 @@
     "mock-fs": "^5.5.0",
     "msw": "^2.10.4",
     "npm-run-all": "^4.1.5",
+    "patch-package": "^8.0.1",
     "prettier": "^3.5.3",
     "react-devtools-core": "^6.1.5",
     "semver": "^7.7.2",

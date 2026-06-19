@@ -132,12 +132,17 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Zhipu GLM
   // -------------------
-  [/^glm-5/, 202_752 as TokenCount], // GLM-5: exact vendor limit
-  [/^glm-/, 202_752 as TokenCount], // GLM fallback: 128K
+  // 1M context is the forward default for new GLM releases (GLM-5.2+, GLM-6.x,
+  // and beyond) so they need no future code change. Confirmed 200K families
+  // (GLM-5 / 5.0 / 5.1, GLM-4.x and older) are pinned explicitly first.
+  [/^glm-5(\.[01])?(-|$)/, 202_752 as TokenCount], // GLM-5 / 5.0 / 5.1: 200K
+  [/^glm-(?:[5-9]|\d{2,})/, LIMITS['1m']], // GLM-5.2+, 6.x..9.x, 10.x+: 1M
+  [/^glm-/, 202_752 as TokenCount], // GLM <=4.x / non-numeric fallback: 200K
 
   // -------------------
   // MiniMax
   // -------------------
+  [/^minimax-m3/i, LIMITS['1m']], // MiniMax-M3: 1,000,000
   [/^minimax-m2\.5/i, LIMITS['192k']], // MiniMax-M2.5: 196,608
   [/^minimax-/i, LIMITS['200k']], // MiniMax fallback: 200K
 
@@ -184,7 +189,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
-  [/^glm-5/, LIMITS['16k']],
+  [/^glm-5(?:\.\d+)?(?:-|$)/, LIMITS['128k']],
   [/^glm-4\.7/, LIMITS['16k']],
 
   // MiniMax

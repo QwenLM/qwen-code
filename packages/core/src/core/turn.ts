@@ -18,7 +18,7 @@ import type {
   ToolResult,
   ToolResultDisplay,
 } from '../tools/tools.js';
-import type { ToolErrorType } from '../tools/tool-error.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
@@ -35,6 +35,7 @@ import {
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import { getProviderToolCallId } from './toolCallIdUtils.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -98,6 +99,11 @@ export interface GeminiFinishedEventValue {
 
 export interface ToolCallRequestInfo {
   callId: string;
+  /**
+   * Original tool-call id emitted by the provider/model. When present, this is
+   * the idempotency key for suppressing duplicate provider tool calls.
+   */
+  providerCallId?: string;
   name: string;
   args: Record<string, unknown>;
   isClientInitiated: boolean;
@@ -115,6 +121,32 @@ export interface ToolCallResponseInfo {
   errorType: ToolErrorType | undefined;
   contentLength?: number;
   modelOverride?: string;
+}
+
+function duplicateProviderToolCallMessage(providerCallId: string): string {
+  return `Duplicate provider tool call id "${providerCallId}" was already handled. The duplicate tool call was ignored and not executed again.`;
+}
+
+export function createDuplicateProviderToolCallResponse(
+  request: ToolCallRequestInfo,
+): ToolCallResponseInfo {
+  const providerCallId = request.providerCallId ?? request.callId;
+  const message = duplicateProviderToolCallMessage(providerCallId);
+  return {
+    callId: request.callId,
+    responseParts: [
+      {
+        functionResponse: {
+          id: request.callId,
+          name: request.name,
+          response: { error: message },
+        },
+      },
+    ],
+    resultDisplay: message,
+    error: new Error(message),
+    errorType: ToolErrorType.EXECUTION_FAILED,
+  };
 }
 
 export interface ServerToolCallConfirmationDetails {
@@ -186,10 +218,21 @@ export enum CompressionStatus {
   COMPRESSION_FAILED_OUTPUT_TRUNCATED,
 }
 
+/**
+ * Why an auto-compaction fired. Drives the user-facing notice so a
+ * screenshot-overflow trigger isn't mislabeled as "approached the token
+ * limit". Undefined on NOOP / failure paths and for callers that don't set it.
+ */
+export type CompactionTriggerReason =
+  | 'token_limit'
+  | 'image_overflow'
+  | 'manual';
+
 export interface ChatCompressionInfo {
   originalTokenCount: number;
   newTokenCount: number;
   compressionStatus: CompressionStatus;
+  triggerReason?: CompactionTriggerReason;
 }
 
 export type ServerGeminiChatCompressedEvent = {
@@ -277,7 +320,6 @@ export type ServerGeminiStreamEvent =
 // A turn manages the agentic loop turn within the server context.
 export class Turn {
   readonly pendingToolCalls: ToolCallRequestInfo[] = [];
-  private debugResponses: GenerateContentResponse[] = [];
   private pendingCitations = new Set<string>();
   finishReason: FinishReason | undefined = undefined;
   private currentResponseId?: string;
@@ -317,7 +359,6 @@ export class Turn {
         if (streamEvent.type === 'retry') {
           this.pendingToolCalls.length = 0;
           this.pendingCitations.clear();
-          this.debugResponses = [];
           this.finishReason = undefined;
           yield {
             type: GeminiEventType.Retry,
@@ -343,8 +384,6 @@ export class Turn {
         // Assuming other events are chunks with a `value` property
         const resp = streamEvent.value as GenerateContentResponse;
         if (!resp) continue; // Skip if there's no response body
-
-        this.debugResponses.push(resp);
 
         // Track the current response ID for tool call correlation
         if (resp.responseId) {
@@ -450,11 +489,13 @@ export class Turn {
     const callId =
       fnCall.id ??
       `${fnCall.name}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const providerCallId = getProviderToolCallId(fnCall) ?? fnCall.id;
     const name = fnCall.name || 'undefined_tool_name';
     const args = (fnCall.args || {}) as Record<string, unknown>;
 
     const toolCallRequest: ToolCallRequestInfo = {
       callId,
+      ...(providerCallId ? { providerCallId } : {}),
       name,
       args,
       isClientInitiated: false,
@@ -466,10 +507,6 @@ export class Turn {
 
     // Yield a request for the tool call, not the pending/confirming status
     return { type: GeminiEventType.ToolCallRequest, value: toolCallRequest };
-  }
-
-  getDebugResponses(): GenerateContentResponse[] {
-    return this.debugResponses;
   }
 }
 

@@ -22,6 +22,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Mode shell',
   'YOLO mode': 'Mode YOLO',
+  'Auto mode': 'Mode auto',
   'plan mode': 'mode plan',
   'auto-accept edits': 'acceptation automatique des modifications',
   'Accepting edits': 'Acceptation des modifications',
@@ -106,7 +107,43 @@ export default {
     'Analyse le projet et crée un fichier QWEN.md personnalisé.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Lister les outils Qwen Code disponibles. Utilisation : /tools [desc]',
-  'List available skills.': 'Lister les compétences disponibles.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'Ouvrir le panneau des compétences (parcourir, rechercher, activer, choisir).',
+  'Manage Skills': 'Gérer les compétences',
+  'Skills configuration saved.': 'Configuration des compétences enregistrée.',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'Configuration des compétences enregistrée, mais le rafraîchissement a échoué : {{error}}. Redémarrez pour garantir l’application du nouvel état.',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'L’espace de travail n’est pas approuvé ; les paramètres de l’espace de travail sont ignorés par la configuration fusionnée. Exécutez d’abord /trust, ou modifiez directement ~/.qwen/settings.json pour gérer les compétences au niveau utilisateur.',
+  'SkillManager not available.': 'SkillManager non disponible.',
+  'Loading skills…': 'Chargement des compétences…',
+  'Failed to load skills: {{error}}':
+    'Échec du chargement des compétences : {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    "Échec de l'enregistrement de la configuration des compétences : {{error}}",
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Toutes les compétences disponibles sont désactivées. Modifiez ~/.qwen/settings.json ou .qwen/settings.json (skills.disabled) pour les réactiver.',
+  'Press esc to close.': 'Appuyez sur Échap pour fermer.',
+  '{{count}} skills · ': '{{count}} compétences · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} compétences · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'Espace bascule · Entrée choisir (remplit l’entrée) · Échap enregistrer & quitter · portée espace de travail',
+  'Search:': 'Recherche :',
+  'type to filter…': 'tapez pour filtrer…',
+  'No skills are currently available.':
+    'Aucune compétence n’est actuellement disponible.',
+  'All available skills are locked at a higher scope (see below).':
+    'Toutes les compétences disponibles sont verrouillées à une portée supérieure (voir ci-dessous).',
+  'No skills match the search.':
+    'Aucune compétence ne correspond à la recherche.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    'Verrouillées par des paramètres de portée supérieure (impossible de basculer ici) :',
+  'higher scope': 'portée supérieure',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [verrouillée : {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ naviguer · Retour modifie la recherche',
+  Bundled: 'Intégrée',
   'Available Qwen Code CLI tools:': 'Outils Qwen Code CLI disponibles :',
   'No tools available': 'Aucun outil disponible',
   'View or change the approval mode for tool usage':
@@ -191,8 +228,8 @@ export default {
     'ouvrir la documentation complète de Qwen Code dans votre navigateur',
   'Configuration not available.': 'Configuration non disponible.',
   'Connect an LLM provider': 'Se connecter à un fournisseur LLM',
-  'Copy the last result or code snippet to clipboard':
-    'Copier le dernier résultat ou extrait de code dans le presse-papiers',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Copier la dernière réponse IA dans le presse-papiers (/copy N pour la Nième)',
 
   // ============================================================================
   // Commandes - Agents
@@ -453,16 +490,63 @@ export default {
   Text: 'Texte',
   JSON: 'JSON',
   Plan: 'Plan',
-  Default: 'Par défaut',
+  'Ask permissions': "Demander l'autorisation",
   'Auto Edit': 'Édition automatique',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activer/désactiver le mode Vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'vérifier les stats de session. Utilisation : /stats [modèle|outils]',
   'Show model-specific usage statistics.':
     "Afficher les statistiques d'utilisation spécifiques au modèle.",
   'Show tool-specific usage statistics.':
     "Afficher les statistiques d'utilisation spécifiques aux outils.",
+  'Show daily token usage statistics.':
+    "Afficher les statistiques quotidiennes d'utilisation des tokens.",
+  'Show monthly token usage statistics.':
+    "Afficher les statistiques mensuelles d'utilisation des tokens.",
+  'Export token usage statistics to CSV or JSON.':
+    "Exporter les statistiques d'utilisation des tokens en CSV ou JSON.",
+  'No usage data.': "Aucune donnée d'utilisation.",
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}} : {{tokens}} tokens ({{requests}} requêtes)',
+  'Daily token usage for {{value}}':
+    'Utilisation quotidienne des tokens pour {{value}}',
+  'Monthly token usage for {{value}}':
+    'Utilisation mensuelle des tokens pour {{value}}',
+  'Total: {{tokens}} tokens': 'Total : {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requêtes : {{requests}}',
+  'Breakdown:': 'Détail :',
+  'Input: {{tokens}}': 'Entrée : {{tokens}}',
+  'Output: {{tokens}}': 'Sortie : {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (inclus dans l’entrée) : {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raisonnement : {{tokens}}',
+  'By model:': 'Par modèle :',
+  'By auth type:': "Par type d'authentification :",
+  'By model/auth type:': "Par modèle/type d'authentification :",
+  'By source:': 'Par source :',
+  'Failed to load token usage stats: {{error}}':
+    "Échec du chargement des statistiques d'utilisation des tokens : {{error}}",
+  'Expected --format csv or --format json.':
+    '--format csv ou --format json attendu.',
+  'Expected a file path after --output.':
+    'Un chemin de fichier est attendu après --output.',
+  'Unexpected argument: {{argument}}': 'Argument inattendu : {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Utilisation : /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    "Le chemin d'export de l'utilisation des tokens doit rester dans le répertoire de travail du projet.",
+  'Export target does not exist: {{path}}':
+    "La cible d'export n'existe pas : {{path}}",
+  'Cannot resolve export path within the working directory.':
+    "Impossible de résoudre le chemin d'export dans le répertoire de travail.",
+  'Could not create a temporary export file.':
+    "Impossible de créer un fichier d'export temporaire.",
+  'Token usage exported to {{format}}: {{path}}':
+    'Utilisation des tokens exportée en {{format}} : {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    "Échec de l'export des statistiques d'utilisation des tokens : {{error}}",
+  'Unclosed quote in arguments.': 'Guillemet non fermé dans les arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Remarque : les temps de génération (TTFT/TPS) relèvent des métriques de génération.',
   'exit the cli': 'quitter le CLI',
   'Manage workspace directories':
     "Gérer les répertoires de l'espace de travail",
@@ -721,6 +805,8 @@ export default {
   'After tool execution fails': "Après l'échec de l'exécution de l'outil",
   'When notifications are sent': 'Quand des notifications sont envoyées',
   'When the user submits a prompt': "Quand l'utilisateur soumet une invite",
+  'When a slash command expands into a prompt':
+    'Quand une commande slash se développe en invite',
   'When a new session is started': 'Quand une nouvelle session est démarrée',
   'Right before Qwen Code concludes its response':
     'Juste avant que Qwen Code conclue sa réponse',
@@ -745,6 +831,8 @@ export default {
     "L'entrée de la commande est du JSON avec le message et le type de notification.",
   'Input to command is JSON with original user prompt text.':
     "L'entrée de la commande est du JSON avec le texte d'invite original de l'utilisateur.",
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    "L'entrée de la commande est du JSON avec command_name, command_args et le texte d'invite développé.",
   'Input to command is JSON with session start source.':
     "L'entrée de la commande est du JSON avec la source de démarrage de session.",
   'Input to command is JSON with session end reason.':
@@ -772,6 +860,8 @@ export default {
     "afficher stderr à l'utilisateur uniquement mais continuer l'appel d'outil",
   'block processing, erase original prompt, and show stderr to user only':
     "bloquer le traitement, effacer l'invite originale et afficher stderr à l'utilisateur uniquement",
+  'block expanded prompt submission and show stderr to user only':
+    "bloquer l'envoi de l'invite développée et afficher stderr uniquement à l'utilisateur",
   'stdout shown to Qwen': 'stdout affiché à Qwen',
   'show stderr to user only (blocking errors ignored)':
     "afficher stderr à l'utilisateur uniquement (erreurs bloquantes ignorées)",
@@ -817,6 +907,21 @@ export default {
   'Resume a previous session': 'Reprendre une session précédente',
   'Fork the current conversation into a new session':
     'Créer une branche de la conversation actuelle dans une nouvelle session',
+  'Spawn a background agent that inherits the full conversation':
+    'Lancer un agent en arrière-plan qui hérite de toute la conversation',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Veuillez fournir une directive. Utilisation : /fork <directive>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    "Impossible de créer un fork pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
+  'Cannot fork before the first conversation turn.':
+    'Impossible de créer un fork avant le premier tour de conversation.',
+  'The agent tool is unavailable; cannot fork.':
+    "L'outil agent est indisponible ; impossible de créer un fork.",
+  'Failed to launch fork: {{error}}': 'Échec du lancement du fork : {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    "L'utilisateur a lancé un fork en arrière-plan via /fork : {{directive}}",
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    "Fork lancé dans un agent en arrière-plan. Il hérite de cette conversation et s'exécute sans bloquer — suivez-le dans le panneau des tâches en arrière-plan ; il fera un rapport une fois terminé.",
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     "Impossible de créer une branche pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
   'No conversation to branch.':
@@ -868,13 +973,14 @@ export default {
   // Commandes - Mode d'approbation
   // ============================================================================
   'Tool Approval Mode': "Mode d'approbation des outils",
-  '{{mode}} mode': 'Mode {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Analyser uniquement, ne pas modifier les fichiers ni exécuter des commandes',
   'Require approval for file edits or shell commands':
     "Demander l'approbation pour les modifications de fichiers ou les commandes shell",
   'Automatically approve file edits':
     'Approuver automatiquement les modifications de fichiers',
+  'Use classifier to automatically approve safe tool calls':
+    'Utiliser le classificateur pour approuver automatiquement les appels d’outils sûrs',
   'Automatically approve all tools':
     'Approuver automatiquement tous les outils',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
@@ -1405,6 +1511,21 @@ export default {
     "Aucun appel d'outil n'a été effectué dans cette session.",
   'Session start time is unavailable, cannot calculate stats.':
     "L'heure de début de session est indisponible, impossible de calculer les stats.",
+  Activity: 'Activité',
+  Efficiency: 'Efficacité',
+  Today: "Aujourd'hui",
+  'Token Trend': 'Tendance Tokens',
+  'Cache Hit Rate': 'Taux de cache',
+  'Tool Success': 'Succès outils',
+  'Tool Leaderboard': 'Classement outils',
+  Time: 'Temps',
+  Success: 'Succès',
+  Cache: 'Cache',
+  Latency: 'Latence',
+  'Code Impact': 'Impact code',
+  net: 'net',
+  streak: 'série',
+  best: 'record',
 
   // ============================================================================
   // Migration de format de commande
@@ -1415,6 +1536,28 @@ export default {
   'Found {{count}} TOML command files:':
     'Trouvé {{count}} fichiers de commande TOML :',
   'Current tasks': 'Tâches actuelles',
+  'Background tasks': 'Tâches en arrière-plan',
+  'No tasks currently running': 'Aucune tâche en cours',
+  'No entry to show.': 'Aucune entrée à afficher.',
+  'needs approval': 'nécessite une approbation',
+  'Background agent needs approval':
+    "L'agent en arrière-plan nécessite une approbation",
+  'Approve or deny the request above':
+    'Approuvez ou refusez la demande ci-dessus',
+  Running: 'En cours',
+  Paused: 'En pause',
+  Completed: 'Terminé',
+  Failed: 'Échec',
+  Stopped: 'Arrêté',
+  Shell: 'Shell',
+  Monitor: 'Moniteur',
+  Command: 'Commande',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidation de la mémoire',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidation de la mémoire (analyse de {{count}} session)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidation de la mémoire (analyse de {{count}} sessions)',
   '... and {{count}} more': '... et {{count}} de plus',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Le format TOML est obsolète. Souhaitez-vous les migrer vers le format Markdown ?',
@@ -1859,6 +2002,7 @@ export default {
   'Auto-memory: {{status}}': 'Mémoire automatique : {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Rêve automatique : {{status}} · {{lastDream}} · /dream pour lancer',
+  'Auto-skill: {{status}}': 'Compétence automatique : {{status}}',
   never: 'jamais',
   on: 'activé',
   off: 'désactivé',
@@ -1896,4 +2040,41 @@ export default {
   Tokens: 'Jetons',
   tokens: 'jetons',
   '中国 (China)': 'Chine',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': "Carte d'activité",
+  Less: 'Moins',
+  More: 'Plus',
+  Sessions: 'Sessions',
+  Duration: 'Durée',
+  Projects: 'Projets',
+  'Loading stats...': 'Chargement des stats...',
+  '(no data)': '(aucune donnée)',
+  d: 'j',
+  h: 'h',
+  m: 'm',
+  Input: 'Entrée',
+  Models: 'Modèles',
+  'All time': 'Tout le temps',
+  'Last 7 days': '7 derniers jours',
+  'Last 30 days': '30 derniers jours',
+  'Show usage statistics dashboard.':
+    "Afficher le tableau de bord des statistiques d'utilisation.",
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'Requêtes API',
+  'Tool Calls': "Appels d'outils",
+  'Success rate': 'Taux de réussite',
+  'Code Changes': 'Modifications du code',
+  Tool: 'Outil',
+  reqs: 'req.',
+  in: 'ent.',
+  out: 'sort.',
+  'In/Out': 'Ent/Sort',
 };

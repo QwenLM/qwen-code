@@ -237,7 +237,15 @@ function convertToHistoryItems(
           | undefined;
         if (!payload) continue;
         if (payload.phase === 'invocation' && payload.rawCommand) {
-          items.push({ type: 'user', text: payload.rawCommand });
+          const sentToModel =
+            typeof payload.sentToModel === 'boolean'
+              ? payload.sentToModel
+              : undefined;
+          items.push({
+            type: 'user',
+            text: payload.rawCommand,
+            ...(sentToModel === undefined ? {} : { sentToModel }),
+          });
         }
         if (payload.phase === 'result') {
           const outputs = payload.outputHistoryItems ?? [];
@@ -287,7 +295,7 @@ function convertToHistoryItems(
             payload?.displayText ||
             extractTextFromParts(record.message?.parts as Part[]);
           if (text) {
-            items.push({ type: 'user', text });
+            items.push({ type: 'notification', text });
           }
           break;
         }
@@ -337,13 +345,11 @@ function convertToHistoryItems(
       case 'assistant': {
         const parts = record.message?.parts as Part[] | undefined;
 
-        // Extract thought content. With no config (standalone picker preview),
-        // default to showing thoughts verbatim (same path as
-        // `!useSummarizedThinking()`).
-        const thoughtText =
-          !config || !config.getContentGenerator().useSummarizedThinking()
-            ? extractThoughtTextFromParts(parts)
-            : '';
+        // The interactive TUI treats thinking as transient live state, so
+        // resumed history should not reintroduce thought rows into scrollback.
+        // With no config (standalone picker preview), keep showing thoughts
+        // verbatim because there is no live loading area in that view.
+        const thoughtText = !config ? extractThoughtTextFromParts(parts) : '';
 
         // Extract text content (non-function-call, non-thought)
         const text = extractTextFromParts(parts);

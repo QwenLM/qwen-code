@@ -29,6 +29,7 @@ import {
 } from '../../utils/schemaConverter.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
+const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
 
 /**
  * Extended usage type that supports both OpenAI standard format and alternative formats
@@ -284,8 +285,13 @@ export function convertGeminiToolParametersToOpenAI(
         key === 'maxItems'
       ) {
         // Ensure length constraints are integers, not strings
-        if (typeof value === 'string' && !isNaN(Number(value))) {
-          result[key] = parseInt(value, 10);
+        const numberValue = typeof value === 'string' ? Number(value) : NaN;
+        if (
+          typeof value === 'string' &&
+          value.trim() !== '' &&
+          Number.isInteger(numberValue)
+        ) {
+          result[key] = numberValue;
         } else {
           result[key] = value;
         }
@@ -380,11 +386,11 @@ export function convertGeminiRequestToOpenAI(
   // Handle contents
   processContents(request.contents, messages, requestContext);
 
-  // Clean up orphaned tool calls and merge consecutive assistant messages
+  messages = mergeConsecutiveAssistantMessages(messages);
   if (options.cleanOrphanToolCalls) {
     messages = cleanOrphanedToolCalls(messages);
+    messages = mergeConsecutiveAssistantMessages(messages);
   }
-  messages = mergeConsecutiveAssistantMessages(messages);
 
   return messages;
 }
@@ -544,6 +550,11 @@ function processContent(
   const reasoningParts: string[] = [];
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
   let toolCallIndex = 0;
+  const emittedFunctionCallIds = new Set<string>();
+  const emittedFunctionResponseIds = new Set<string>();
+  // New history is normalized before reaching this converter. These local
+  // guards only keep already-corrupted or programmatic duplicate parts from
+  // leaking duplicate IDs into OpenAI payloads.
   // When `splitToolMedia` is enabled, media stripped from tool messages is
   // accumulated here and emitted as a single follow-up user message after
   // ALL tool messages in this group have been pushed. OpenAI Chat
@@ -575,8 +586,19 @@ function processContent(
     }
 
     if ('functionCall' in part && part.functionCall && role === 'assistant') {
+      const callId = part.functionCall.id;
+      if (callId) {
+        if (emittedFunctionCallIds.has(callId)) {
+          debugLogger.debug(
+            `Dropping duplicate functionCall id=${callId} while converting content`,
+          );
+          continue;
+        }
+        emittedFunctionCallIds.add(callId);
+      }
+
       toolCalls.push({
-        id: part.functionCall.id || `call_${toolCallIndex}`,
+        id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
         function: {
           name: part.functionCall.name || '',
@@ -587,24 +609,33 @@ function processContent(
     }
 
     if (part.functionResponse && role === 'user') {
+      const responseId = part.functionResponse.id;
+      if (responseId) {
+        if (emittedFunctionResponseIds.has(responseId)) {
+          continue;
+        }
+        emittedFunctionResponseIds.add(responseId);
+      }
+
       // Create tool message for the function response (with embedded media)
       const toolMessage = createToolMessage(
         part.functionResponse,
         requestContext,
       );
       if (toolMessage) {
-        // Opt-in only (ContentGeneratorConfig.splitToolMedia). OpenAI spec
-        // only permits string / text-part content on `role: "tool"` messages.
-        // Strict OpenAI-compatible servers (e.g. LM Studio) reject tool
-        // messages containing image_url / input_audio / video_url / file
-        // parts with HTTP 400 "Invalid 'messages' in payload". When the flag
-        // is set, strip non-text media from this tool message and accumulate
-        // it; the combined media is emitted as a single follow-up user
-        // message after the parts loop completes — preserving the
-        // "all tool responses contiguous" requirement for parallel tool
-        // calls. Default (flag false) preserves prior behavior: media is
-        // embedded in the tool message and permissive providers continue
-        // to receive it that way. See #3616.
+        // Controlled by ContentGeneratorConfig.splitToolMedia (default true;
+        // resolved in pipeline.ts). OpenAI spec only permits string / text-part
+        // content on `role: "tool"` messages. Strict OpenAI-compatible servers
+        // (e.g. doubao / new-api / LM Studio) silently drop or reject tool
+        // messages containing image_url / input_audio / video_url / file parts
+        // (HTTP 400 "Invalid 'messages' in payload"), so an image read via
+        // read_file never reaches the model. When the flag is set, strip
+        // non-text media from this tool message and accumulate it; the combined
+        // media is emitted as a single follow-up user message after the parts
+        // loop completes — preserving the "all tool responses contiguous"
+        // requirement for parallel tool calls. Opt out (flag false) to restore
+        // the legacy behavior: media embedded in the tool message, which only
+        // permissive providers accept. See #4876, #3616.
         if (
           requestContext.splitToolMedia &&
           Array.isArray(toolMessage.content)
@@ -631,6 +662,20 @@ function processContent(
             accumulatedSplitMedia.push(...mediaParts);
           }
         }
+        if (
+          requestContext.toolResultContentFormat === 'string' &&
+          Array.isArray(toolMessage.content)
+        ) {
+          const toolContent = toolMessage.content as OpenAIContentPart[];
+          if (
+            toolContent.every(
+              (cp): cp is OpenAI.Chat.ChatCompletionContentPartText =>
+                cp?.type === 'text',
+            )
+          ) {
+            toolMessage.content = toolContent.map((cp) => cp.text).join('\n');
+          }
+        }
         messages.push(toolMessage);
       }
     }
@@ -645,7 +690,7 @@ function processContent(
       content: [
         {
           type: 'text',
-          text: '(attached media from previous tool call)',
+          text: SPLIT_TOOL_MEDIA_TEXT,
         },
         ...accumulatedSplitMedia,
       ] as unknown as OpenAI.Chat.ChatCompletionContentPartText[],
@@ -1137,9 +1182,11 @@ export function convertOpenAIResponseToGemini(
     let finalCompletionTokens = completionTokens;
 
     if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output
+      // Estimate: assume 70% input, 30% output. Derive completion from the
+      // remainder so the two halves always add back up to totalTokens rather
+      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
       finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = Math.round(totalTokens * 0.3);
+      finalCompletionTokens = totalTokens - finalPromptTokens;
     }
 
     response.usageMetadata = {
@@ -1334,9 +1381,11 @@ export function convertOpenAIChunkToGemini(
     let finalCompletionTokens = completionTokens;
 
     if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output
+      // Estimate: assume 70% input, 30% output. Derive completion from the
+      // remainder so the two halves always add back up to totalTokens rather
+      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
       finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = Math.round(totalTokens * 0.3);
+      finalCompletionTokens = totalTokens - finalPromptTokens;
     }
 
     response.usageMetadata = {
@@ -1378,60 +1427,161 @@ function mapGeminiFinishReasonToOpenAI(
     case FinishReason.MAX_TOKENS:
       return 'length';
     case FinishReason.SAFETY:
+    case FinishReason.RECITATION:
+    case FinishReason.BLOCKLIST:
+    case FinishReason.PROHIBITED_CONTENT:
+    case FinishReason.SPII:
+    case FinishReason.IMAGE_SAFETY:
+    case FinishReason.IMAGE_RECITATION:
+    case FinishReason.IMAGE_PROHIBITED_CONTENT:
+    case FinishReason.IMAGE_OTHER:
       return 'content_filter';
+    case FinishReason.NO_IMAGE:
+      return 'stop';
     default:
-      if (geminiReason === ('RECITATION' as FinishReason)) {
-        return 'content_filter';
-      }
       return 'stop';
   }
 }
 
+/** Type guard: is this an assistant message with at least one tool call? */
+function hasToolCalls(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+  tool_calls: OpenAI.Chat.ChatCompletionMessageToolCall[];
+} {
+  return (
+    message.role === 'assistant' &&
+    'tool_calls' in message &&
+    Array.isArray(message.tool_calls) &&
+    message.tool_calls.length > 0
+  );
+}
+
+function isSplitToolMediaMessage(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): boolean {
+  if (
+    message.role !== 'user' ||
+    !('content' in message) ||
+    !Array.isArray(message.content)
+  ) {
+    return false;
+  }
+
+  const firstPart = message.content[0] as
+    | { type?: string; text?: string }
+    | undefined;
+  return firstPart?.type === 'text' && firstPart.text === SPLIT_TOOL_MEDIA_TEXT;
+}
+
 /**
  * Clean up orphaned tool calls from message history to prevent OpenAI API errors.
+ *
+ * Assumes consecutive assistant messages have already been merged.
  */
 function cleanOrphanedToolCalls(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const cleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  const toolCallIds = new Set<string>();
-  const toolResponseIds = new Set<string>();
+  const validToolCallsByAssistant = new Map<
+    number,
+    OpenAI.Chat.ChatCompletionMessageToolCall[]
+  >();
+  const validToolResponseIndexesByAssistant = new Map<number, number[]>();
+  const splitMediaIndexesByAssistant = new Map<number, number[]>();
+  const emittedWithAssistant = new Set<number>();
+  const survivingToolCallIds = new Set<string>();
 
-  // First pass: collect all tool call IDs and tool response IDs
-  for (const message of messages) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (hasToolCalls(message)) {
+      const candidateToolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] =
+        [];
+      const candidateToolCallIds = new Set<string>();
       for (const toolCall of message.tool_calls) {
-        if (toolCall.id) {
-          toolCallIds.add(toolCall.id);
+        const id = toolCall.id;
+        if (!id || survivingToolCallIds.has(id)) {
+          continue;
         }
+        if (candidateToolCallIds.has(id)) {
+          continue;
+        }
+        candidateToolCallIds.add(id);
+        candidateToolCalls.push(toolCall);
       }
-    } else if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      toolResponseIds.add(message.tool_call_id);
+
+      const adjacentToolResponseIds = new Set<string>();
+      const toolResponseIndexes: number[] = [];
+      const splitMediaIndexes: number[] = [];
+      let lastToolResponseMatchesAssistant = false;
+
+      for (
+        let nextIndex = index + 1;
+        nextIndex < messages.length;
+        nextIndex += 1
+      ) {
+        const nextMessage = messages[nextIndex];
+        if (nextMessage.role === 'tool' && 'tool_call_id' in nextMessage) {
+          if (!nextMessage.tool_call_id) {
+            lastToolResponseMatchesAssistant = false;
+            continue;
+          }
+
+          if (
+            candidateToolCallIds.has(nextMessage.tool_call_id) &&
+            !adjacentToolResponseIds.has(nextMessage.tool_call_id)
+          ) {
+            adjacentToolResponseIds.add(nextMessage.tool_call_id);
+            toolResponseIndexes.push(nextIndex);
+            lastToolResponseMatchesAssistant = true;
+          } else {
+            lastToolResponseMatchesAssistant = false;
+          }
+
+          // Other tool responses in this block may belong to another assistant.
+          continue;
+        }
+
+        if (isSplitToolMediaMessage(nextMessage)) {
+          if (lastToolResponseMatchesAssistant) {
+            splitMediaIndexes.push(nextIndex);
+          }
+          continue;
+        }
+
+        if (nextMessage.role === 'assistant' && !hasToolCalls(nextMessage)) {
+          // Consecutive assistant turns are merged before cleanup.
+          continue;
+        }
+
+        break;
+      }
+
+      const validToolCalls = candidateToolCalls.filter((toolCall) =>
+        adjacentToolResponseIds.has(toolCall.id),
+      );
+      for (const toolCall of validToolCalls) {
+        survivingToolCallIds.add(toolCall.id);
+      }
+      validToolCallsByAssistant.set(index, validToolCalls);
+      validToolResponseIndexesByAssistant.set(index, toolResponseIndexes);
+      splitMediaIndexesByAssistant.set(index, splitMediaIndexes);
     }
   }
 
-  // Second pass: filter out orphaned messages
-  for (const message of messages) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
-      // Filter out tool calls that don't have corresponding responses
-      const validToolCalls = message.tool_calls.filter(
-        (toolCall) => toolCall.id && toolResponseIds.has(toolCall.id),
-      );
+  for (let index = 0; index < messages.length; index += 1) {
+    if (emittedWithAssistant.has(index)) {
+      continue;
+    }
+
+    const message = messages[index];
+    if (hasToolCalls(message)) {
+      const reasoningContent = (
+        message as ExtendedChatCompletionAssistantMessageParam
+      ).reasoning_content;
+      const validToolCalls = validToolCallsByAssistant.get(index) ?? [];
 
       if (validToolCalls.length > 0) {
-        // Keep the message but only with valid tool calls
         const cleanedMessage = { ...message };
         (
           cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -1439,11 +1589,30 @@ function cleanOrphanedToolCalls(
           }
         ).tool_calls = validToolCalls;
         cleaned.push(cleanedMessage);
+
+        for (const toolResponseIndex of validToolResponseIndexesByAssistant.get(
+          index,
+        ) ?? []) {
+          const toolResponse = messages[toolResponseIndex];
+          if (toolResponse) {
+            cleaned.push(toolResponse);
+            emittedWithAssistant.add(toolResponseIndex);
+          }
+        }
+
+        for (const splitMediaIndex of splitMediaIndexesByAssistant.get(index) ??
+          []) {
+          const splitMediaMessage = messages[splitMediaIndex];
+          if (splitMediaMessage) {
+            cleaned.push(splitMediaMessage);
+            emittedWithAssistant.add(splitMediaIndex);
+          }
+        }
       } else if (
-        typeof message.content === 'string' &&
-        message.content.trim()
+        (typeof message.content === 'string' && message.content.trim()) ||
+        reasoningContent
       ) {
-        // Keep the message if it has text content, but remove tool calls
+        // Keep text/reasoning content, but remove orphaned tool calls.
         const cleanedMessage = { ...message };
         delete (
           cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -1451,91 +1620,25 @@ function cleanOrphanedToolCalls(
           }
         ).tool_calls;
         cleaned.push(cleanedMessage);
+      } else {
+        debugLogger.debug(
+          `cleanOrphanedToolCalls: dropping assistant with ${message.tool_calls.length} orphaned tool call(s) and no text/reasoning content`,
+        );
       }
-      // If no valid tool calls and no content, skip the message entirely
-    } else if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      // Only keep tool responses that have corresponding tool calls
-      if (toolCallIds.has(message.tool_call_id)) {
-        cleaned.push(message);
-      }
+    } else if (message.role === 'tool' && 'tool_call_id' in message) {
+      debugLogger.debug(
+        `cleanOrphanedToolCalls: dropping orphaned tool response ${message.tool_call_id || '<empty>'}`,
+      );
+    } else if (isSplitToolMediaMessage(message)) {
+      debugLogger.debug(
+        'cleanOrphanedToolCalls: dropping orphaned split tool media message',
+      );
     } else {
-      // Keep all other messages as-is
       cleaned.push(message);
     }
   }
 
-  // Final validation: ensure every assistant message with tool_calls has corresponding tool responses
-  const finalCleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  const finalToolCallIds = new Set<string>();
-
-  // Collect all remaining tool call IDs
-  for (const message of cleaned) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
-      for (const toolCall of message.tool_calls) {
-        if (toolCall.id) {
-          finalToolCallIds.add(toolCall.id);
-        }
-      }
-    }
-  }
-
-  // Verify all tool calls have responses
-  const finalToolResponseIds = new Set<string>();
-  for (const message of cleaned) {
-    if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      finalToolResponseIds.add(message.tool_call_id);
-    }
-  }
-
-  // Remove any remaining orphaned tool calls
-  for (const message of cleaned) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
-      const finalValidToolCalls = message.tool_calls.filter(
-        (toolCall) => toolCall.id && finalToolResponseIds.has(toolCall.id),
-      );
-
-      if (finalValidToolCalls.length > 0) {
-        const cleanedMessage = { ...message };
-        (
-          cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-            tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-          }
-        ).tool_calls = finalValidToolCalls;
-        finalCleaned.push(cleanedMessage);
-      } else if (
-        typeof message.content === 'string' &&
-        message.content.trim()
-      ) {
-        const cleanedMessage = { ...message };
-        delete (
-          cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-            tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-          }
-        ).tool_calls;
-        finalCleaned.push(cleanedMessage);
-      }
-    } else {
-      finalCleaned.push(message);
-    }
-  }
-
-  return finalCleaned;
+  return cleaned;
 }
 
 /**

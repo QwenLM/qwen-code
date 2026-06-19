@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import type { Config } from '../config/config.js';
@@ -24,6 +27,7 @@ describe('runSideQuery', () => {
       getBaseLlmClient: vi.fn().mockReturnValue(mockBaseLlmClient),
       getModel: vi.fn().mockReturnValue('main-model'),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
   });
 
@@ -139,6 +143,74 @@ describe('runSideQuery', () => {
       expect(mockBaseLlmClient.generateJson).toHaveBeenCalledWith(
         expect.objectContaining({ promptId: 'legacy-id' }),
       );
+    });
+
+    it('adds the configured output language to JSON side queries', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'qwen-side-query-'));
+      try {
+        const outputLanguagePath = path.join(dir, 'output-language.md');
+        await writeFile(outputLanguagePath, '请始终用中文回答用户可见文本。');
+        vi.mocked(mockConfig.getOutputLanguageFilePath).mockReturnValue(
+          outputLanguagePath,
+        );
+        vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({
+          title: '测试标题',
+        });
+
+        await runSideQuery<{ title: string }>(mockConfig, {
+          purpose: 'session-title',
+          contents: [{ role: 'user', parts: [{ text: 'title please' }] }],
+          schema: {
+            type: 'object',
+            properties: { title: { type: 'string' } },
+            required: ['title'],
+          },
+          abortSignal: abortController.signal,
+          systemInstruction: 'Generate a short title.',
+        });
+
+        const callArg = vi.mocked(mockBaseLlmClient.generateJson).mock
+          .calls[0][0];
+        expect(callArg.systemInstruction).toContain('Generate a short title.');
+        expect(callArg.systemInstruction).toContain(
+          '请始终用中文回答用户可见文本。',
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('skips output language when skipOutputLanguagePreference is true', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'qwen-side-query-'));
+      try {
+        const outputLanguagePath = path.join(dir, 'output-language.md');
+        await writeFile(outputLanguagePath, '请始终用中文回答用户可见文本。');
+        vi.mocked(mockConfig.getOutputLanguageFilePath).mockReturnValue(
+          outputLanguagePath,
+        );
+        vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({
+          title: '测试标题',
+        });
+
+        await runSideQuery<{ title: string }>(mockConfig, {
+          purpose: 'permission_classifier_stage1',
+          contents: [{ role: 'user', parts: [{ text: 'classify' }] }],
+          schema: {
+            type: 'object',
+            properties: { title: { type: 'string' } },
+            required: ['title'],
+          },
+          abortSignal: abortController.signal,
+          systemInstruction: 'Classify this request.',
+          skipOutputLanguagePreference: true,
+        });
+
+        const callArg = vi.mocked(mockBaseLlmClient.generateJson).mock
+          .calls[0][0];
+        expect(callArg.systemInstruction).toBe('Classify this request.');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
 
     it('throws when the response does not satisfy the schema', async () => {
@@ -352,6 +424,34 @@ describe('runSideQuery', () => {
           systemInstruction: 'custom side query prompt',
         }),
       );
+    });
+
+    it('adds the configured output language to text side queries', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'qwen-side-query-'));
+      try {
+        const outputLanguagePath = path.join(dir, 'output-language.md');
+        await writeFile(outputLanguagePath, 'Respond in Spanish.');
+        vi.mocked(mockConfig.getOutputLanguageFilePath).mockReturnValue(
+          outputLanguagePath,
+        );
+        mockTextResult('ok');
+
+        await runSideQuery(mockConfig, {
+          purpose: 'tool-use-summary',
+          contents: [{ role: 'user', parts: [{ text: 'summarize tool use' }] }],
+          abortSignal: abortController.signal,
+          systemInstruction: 'Summarize the tool batch.',
+        });
+
+        const callArg = vi.mocked(mockBaseLlmClient.generateText).mock
+          .calls[0][0];
+        expect(callArg.systemInstruction).toContain(
+          'Summarize the tool batch.',
+        );
+        expect(callArg.systemInstruction).toContain('Respond in Spanish.');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
 
     it('omits systemInstruction when caller does not provide one', async () => {

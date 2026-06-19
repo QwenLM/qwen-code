@@ -6,14 +6,25 @@ let builtinsPromise: Promise<void> | null = null;
 function ensureBuiltins(): Promise<void> {
   if (!builtinsPromise) {
     builtinsPromise = (async () => {
-      const [telegram, weixin, dingtalk] = await Promise.all([
-        import('@qwen-code/channel-telegram'),
-        import('@qwen-code/channel-weixin'),
-        import('@qwen-code/channel-dingtalk'),
-      ]);
+      const labelled = [
+        { name: 'telegram', promise: import('@qwen-code/channel-telegram') },
+        { name: 'weixin', promise: import('@qwen-code/channel-weixin') },
+        { name: 'dingtalk', promise: import('@qwen-code/channel-dingtalk') },
+        { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
+        { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
+      ];
 
-      for (const mod of [telegram, weixin, dingtalk]) {
-        registry.set(mod.plugin.channelType, mod.plugin);
+      const results = await Promise.allSettled(labelled.map((l) => l.promise));
+
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i]!;
+        if (result.status === 'fulfilled') {
+          registry.set(result.value.plugin.channelType, result.value.plugin);
+        } else {
+          process.stderr.write(
+            `[channel-registry] Failed to load "${labelled[i]!.name}" channel: ${result.reason}\n`,
+          );
+        }
       }
     })();
   }

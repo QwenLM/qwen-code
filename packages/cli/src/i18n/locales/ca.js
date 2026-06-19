@@ -22,6 +22,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Mode shell',
   'YOLO mode': 'Mode YOLO',
+  'Auto mode': 'Mode auto',
   'plan mode': 'mode de planificació',
   'auto-accept edits': 'acceptació automàtica de canvis',
   'Accepting edits': 'Acceptant canvis',
@@ -108,7 +109,42 @@ export default {
     'Analitza el projecte i crea un fitxer QWEN.md personalitzat.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Llistar les eines disponibles de Qwen Code. Ús: /tools [desc]',
-  'List available skills.': 'Llistar les habilitats disponibles.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    "Obrir el panell d'habilitats (explorar, cercar, activar, triar).",
+  'Manage Skills': 'Gestionar habilitats',
+  'Skills configuration saved.': "Configuració d'habilitats desada.",
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    "Configuració d'habilitats desada, però l'actualització ha fallat: {{error}}. Reinicia per assegurar-te que el nou estat s'apliqui.",
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    "L'espai de treball no és de confiança; els paràmetres de l'espai de treball s'ignoren a la configuració fusionada. Executa /trust primer, o edita ~/.qwen/settings.json directament per gestionar habilitats a l'àmbit d'usuari.",
+  'SkillManager not available.': 'SkillManager no disponible.',
+  'Loading skills…': 'Carregant habilitats…',
+  'Failed to load skills: {{error}}':
+    'No s’han pogut carregar les habilitats: {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    "No s'ha pogut desar la configuració d'habilitats: {{error}}",
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Totes les habilitats disponibles estan desactivades. Edita ~/.qwen/settings.json o .qwen/settings.json (skills.disabled) per tornar-les a activar.',
+  'Press esc to close.': 'Prem Esc per tancar.',
+  '{{count}} skills · ': '{{count}} habilitats · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} habilitats · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    "Espai alternar · Enter triar (omple l'entrada) · Esc desar i sortir · àmbit d'espai de treball",
+  'Search:': 'Cerca:',
+  'type to filter…': 'escriu per filtrar…',
+  'No skills are currently available.':
+    'No hi ha habilitats disponibles actualment.',
+  'All available skills are locked at a higher scope (see below).':
+    'Totes les habilitats disponibles estan bloquejades en un àmbit superior (veure a sota).',
+  'No skills match the search.': 'Cap habilitat coincideix amb la cerca.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    "Bloquejades per paràmetres d'àmbit superior (aquí no es poden commutar):",
+  'higher scope': 'àmbit superior',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [bloquejada: {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ navega · Retrocés edita la cerca',
+  Bundled: 'Integrada',
   'Available Qwen Code CLI tools:': 'Eines del CLI de Qwen Code disponibles:',
   'No tools available': 'No hi ha eines disponibles',
   'View or change the approval mode for tool usage':
@@ -191,8 +227,8 @@ export default {
     'obrir la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
   'Connect an LLM provider': 'Connectar un proveïdor LLM',
-  'Copy the last result or code snippet to clipboard':
-    "Copiar l'últim resultat o fragment de codi al porta-retalls",
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    "Copia l'última resposta de la IA al porta-retalls (/copy N per a l'N-èsima)",
 
   // ============================================================================
   // Ordres - Agents
@@ -449,16 +485,61 @@ export default {
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Planificació',
-  Default: 'Per defecte',
+  'Ask permissions': 'Demanar permisos',
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activar/desactivar el mode Vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'comprovar les estadístiques de la sessió. Ús: /stats [model|tools]',
   'Show model-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques de les eines.",
+  'Show daily token usage statistics.':
+    "Mostrar les estadístiques diàries d'ús de tokens.",
+  'Show monthly token usage statistics.':
+    "Mostrar les estadístiques mensuals d'ús de tokens.",
+  'Export token usage statistics to CSV or JSON.':
+    "Exportar les estadístiques d'ús de tokens a CSV o JSON.",
+  'No usage data.': "No hi ha dades d'ús.",
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} sol·licituds)',
+  'Daily token usage for {{value}}': 'Ús diari de tokens per a {{value}}',
+  'Monthly token usage for {{value}}': 'Ús mensual de tokens per a {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Sol·licituds: {{requests}}',
+  'Breakdown:': 'Desglossament:',
+  'Input: {{tokens}}': 'Entrada: {{tokens}}',
+  'Output: {{tokens}}': 'Sortida: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Memòria cau (inclosa a l’entrada): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raonament: {{tokens}}',
+  'By model:': 'Per model:',
+  'By auth type:': "Per tipus d'autenticació:",
+  'By model/auth type:': "Per model/tipus d'autenticació:",
+  'By source:': 'Per origen:',
+  'Failed to load token usage stats: {{error}}':
+    "No s'han pogut carregar les estadístiques d'ús de tokens: {{error}}",
+  'Expected --format csv or --format json.':
+    "S'esperava --format csv o --format json.",
+  'Expected a file path after --output.':
+    "S'esperava una ruta de fitxer després de --output.",
+  'Unexpected argument: {{argument}}': 'Argument inesperat: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Ús: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    "La ruta d'exportació de l'ús de tokens ha d'estar dins del directori de treball del projecte.",
+  'Export target does not exist: {{path}}':
+    "La destinació d'exportació no existeix: {{path}}",
+  'Cannot resolve export path within the working directory.':
+    "No s'ha pogut resoldre la ruta d'exportació dins del directori de treball.",
+  'Could not create a temporary export file.':
+    "No s'ha pogut crear un fitxer temporal d'exportació.",
+  'Token usage exported to {{format}}: {{path}}':
+    'Ús de tokens exportat a {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    "No s'han pogut exportar les estadístiques d'ús de tokens: {{error}}",
+  'Unclosed quote in arguments.': 'Cometes sense tancar als arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Nota: el temps de generació (TTFT/TPS) pertany a les mètriques de generació.',
   'exit the cli': 'sortir del CLI',
   'Manage workspace directories':
     "Gestionar els directoris de l'espai de treball",
@@ -714,6 +795,8 @@ export default {
   'After tool execution fails': "Quan falla l'execució de l'eina",
   'When notifications are sent': "Quan s'envien notificacions",
   'When the user submits a prompt': "Quan l'usuari envia un missatge",
+  'When a slash command expands into a prompt':
+    "Quan una ordre de barra s'expandeix en un missatge",
   'When a new session is started': "Quan s'inicia una nova sessió",
   'Right before Qwen Code concludes its response':
     'Immediatament abans que Qwen Code conclou la seva resposta',
@@ -735,6 +818,8 @@ export default {
     "L'entrada a l'ordre és JSON amb el missatge de notificació i el tipus.",
   'Input to command is JSON with original user prompt text.':
     "L'entrada a l'ordre és JSON amb el text original del missatge de l'usuari.",
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    "L'entrada a l'ordre és JSON amb command_name, command_args i el text del missatge expandit.",
   'Input to command is JSON with session start source.':
     "L'entrada a l'ordre és JSON amb la font d'inici de sessió.",
   'Input to command is JSON with session end reason.':
@@ -758,6 +843,8 @@ export default {
     "mostrar stderr només a l'usuari però continuar amb la crida a l'eina",
   'block processing, erase original prompt, and show stderr to user only':
     "blocar el processament, esborrar el missatge original i mostrar stderr només a l'usuari",
+  'block expanded prompt submission and show stderr to user only':
+    "blocar l'enviament del missatge expandit i mostrar stderr només a l'usuari",
   'stdout shown to Qwen': 'stdout mostrat a Qwen',
   'show stderr to user only (blocking errors ignored)':
     "mostrar stderr només a l'usuari (errors de bloqueig ignorats)",
@@ -797,6 +884,22 @@ export default {
   'Resume a previous session': 'Reprendre una sessió anterior',
   'Fork the current conversation into a new session':
     'Bifurca la conversa actual en una sessió nova',
+  'Spawn a background agent that inherits the full conversation':
+    'Inicia un agent en segon pla que hereta tota la conversa',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Proporcioneu una directiva. Ús: /fork <directiva>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    "No es pot crear una bifurcació mentre hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resolgueu la crida a l'eina pendent.",
+  'Cannot fork before the first conversation turn.':
+    'No es pot crear una bifurcació abans del primer torn de conversa.',
+  'The agent tool is unavailable; cannot fork.':
+    "L'eina d'agent no està disponible; no es pot crear una bifurcació.",
+  'Failed to launch fork: {{error}}':
+    'No s’ha pogut iniciar la bifurcació: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    "L'usuari ha iniciat una bifurcació en segon pla amb /fork: {{directive}}",
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    "S'ha bifurcat a un agent en segon pla. Hereta aquesta conversa i s'executa sense bloquejar — feu-ne el seguiment al tauler de tasques en segon pla; informarà quan acabi.",
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     "No es pot bifurcar mentre hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resolgueu la crida a l'eina pendent.",
   'No conversation to branch.': 'No hi ha cap conversa per bifurcar.',
@@ -845,13 +948,14 @@ export default {
   // Ordres - Mode d'aprovació
   // ============================================================================
   'Tool Approval Mode': "Mode d'aprovació d'eines",
-  '{{mode}} mode': 'Mode {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Analitzar només, sense modificar fitxers ni executar ordres',
   'Require approval for file edits or shell commands':
     'Requerir aprovació per a edicions de fitxers o ordres shell',
   'Automatically approve file edits':
     'Aprovar automàticament les edicions de fitxers',
+  'Use classifier to automatically approve safe tool calls':
+    'Utilitzar el classificador per aprovar automàticament les crides segures a eines',
   'Automatically approve all tools': 'Aprovar automàticament totes les eines',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     "Existeix un mode d'aprovació de l'espai de treball i té prioritat. El canvi a nivell d'usuari no tindrà cap efecte.",
@@ -861,6 +965,7 @@ export default {
   'Auto-memory: {{status}}': 'Memòria automàtica: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-dream: {{status}} · {{lastDream}} · /dream per executar',
+  'Auto-skill: {{status}}': 'Habilitat automàtica: {{status}}',
   never: 'mai',
   on: 'activada',
   off: 'desactivada',
@@ -1409,6 +1514,21 @@ export default {
     "No s'ha realitzat cap crida a eines en aquesta sessió.",
   'Session start time is unavailable, cannot calculate stats.':
     "L'hora d'inici de la sessió no està disponible, no es poden calcular les estadístiques.",
+  Activity: 'Activitat',
+  Efficiency: 'Eficiència',
+  Today: 'Avui',
+  'Token Trend': 'Tendència de Tokens',
+  'Cache Hit Rate': "Taxa d'encert de cache",
+  'Tool Success': "Èxit d'eines",
+  'Tool Leaderboard': "Classificació d'eines",
+  Time: 'Temps',
+  Success: 'Èxit',
+  Cache: 'Cache',
+  Latency: 'Latència',
+  'Code Impact': 'Impacte al codi',
+  net: 'net',
+  streak: 'ratxa',
+  best: 'rècord',
 
   // ============================================================================
   // Migració del format d'ordres
@@ -1419,6 +1539,26 @@ export default {
   'Found {{count}} TOML command files:':
     "S'han trobat {{count}} fitxers d'ordres TOML:",
   'Current tasks': 'Tasques actuals',
+  'Background tasks': 'Tasques en segon pla',
+  'No tasks currently running': 'No hi ha cap tasca en execució',
+  'No entry to show.': 'No hi ha cap entrada per mostrar.',
+  'needs approval': 'necessita aprovació',
+  'Background agent needs approval': "L'agent en segon pla necessita aprovació",
+  'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
+  Running: 'En execució',
+  Paused: 'En pausa',
+  Completed: 'Completada',
+  Failed: 'Fallida',
+  Stopped: 'Aturada',
+  Shell: 'Shell',
+  Monitor: 'Monitor',
+  Command: 'Ordre',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidació de memòria',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidació de memòria (revisant {{count}} sessió)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidació de memòria (revisant {{count}} sessions)',
   '... and {{count}} more': '... i {{count}} més',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'El format TOML és obsolet. Voleu migrar-los al format Markdown?',
@@ -1859,4 +1999,40 @@ export default {
   'Ref:': 'Referència:',
   '中国 (China)': 'Xina',
   '中国 (China) - 阿里云百炼': 'Xina - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': "Mapa d'activitat",
+  Less: 'Menys',
+  More: 'Més',
+  Sessions: 'Sessions',
+  Duration: 'Durada',
+  Projects: 'Projectes',
+  'Loading stats...': 'Carregant estadístiques...',
+  '(no data)': '(sense dades)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+  Input: 'Entrada',
+  Models: 'Models',
+  'All time': 'Tot el temps',
+  'Last 7 days': 'Últims 7 dies',
+  'Last 30 days': 'Últims 30 dies',
+  'Show usage statistics dashboard.': "Mostra el tauler d'estadístiques d'ús.",
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': "Sol·licituds d'API",
+  'Tool Calls': "Crides d'eines",
+  'Success rate': "Taxa d'èxit",
+  'Code Changes': 'Canvis de codi',
+  Tool: 'Eina',
+  reqs: 'sol.',
+  in: 'ent.',
+  out: 'sort.',
+  'In/Out': 'Ent/Sort',
 };

@@ -14,13 +14,19 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
 import { Storage } from '../config/storage.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
 // Mock fs modules
 vi.mock('fs/promises');
 vi.mock('fs');
 
+vi.mock('../utils/atomicFileWrite.js', () => ({
+  atomicWriteFile: vi.fn(),
+}));
+
 const mockFs = vi.mocked(fs);
 const mockFsSync = vi.mocked(fsSync);
+const mockAtomicWrite = vi.mocked(atomicWriteFile);
 
 describe('TodoWriteTool', () => {
   let tool: TodoWriteTool;
@@ -143,7 +149,7 @@ describe('TodoWriteTool', () => {
       enoentError.code = 'ENOENT';
       mockFs.readFile.mockRejectedValue(enoentError);
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
@@ -161,10 +167,10 @@ describe('TodoWriteTool', () => {
           { id: '2', content: 'Task 2', status: 'in_progress' },
         ],
       });
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
+      expect(mockAtomicWrite).toHaveBeenCalledWith(
         expect.stringContaining('test-session-123.json'),
         expect.stringContaining('"todos"'),
-        'utf-8',
+        { encoding: 'utf-8' },
       );
     });
 
@@ -185,7 +191,7 @@ describe('TodoWriteTool', () => {
         JSON.stringify({ todos: existingTodos }),
       );
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
@@ -203,10 +209,10 @@ describe('TodoWriteTool', () => {
           { id: '2', content: 'New Task', status: 'pending' },
         ],
       });
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
+      expect(mockAtomicWrite).toHaveBeenCalledWith(
         expect.stringContaining('test-session-123.json'),
         expect.stringMatching(/"Updated Task"/),
-        'utf-8',
+        { encoding: 'utf-8' },
       );
     });
 
@@ -223,7 +229,7 @@ describe('TodoWriteTool', () => {
       enoentError.code = 'ENOENT';
       mockFs.readFile.mockRejectedValue(enoentError);
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockRejectedValue(new Error('Write failed'));
+      mockAtomicWrite.mockRejectedValue(new Error('Write failed'));
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
@@ -241,7 +247,7 @@ describe('TodoWriteTool', () => {
       };
 
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
       // Mock readTodosFromFile returning existing todos
       mockFs.readFile.mockResolvedValue(
         JSON.stringify({
@@ -260,10 +266,10 @@ describe('TodoWriteTool', () => {
         type: 'todo_list',
         todos: [],
       });
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
+      expect(mockAtomicWrite).toHaveBeenCalledWith(
         expect.stringContaining('test-session-123.json'),
         expect.stringContaining('"todos"'),
-        'utf-8',
+        { encoding: 'utf-8' },
       );
     });
 
@@ -312,7 +318,7 @@ describe('TodoWriteTool', () => {
         HookPhase.Validation,
         mockAbortSignal,
       );
-      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
       expect(result.llmContent).toContain(
         'Todo creation blocked: Creation denied',
       );
@@ -369,7 +375,7 @@ describe('TodoWriteTool', () => {
         HookPhase.Validation,
         mockAbortSignal,
       );
-      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
       expect(result.llmContent).toContain(
         'Todo completion blocked: Completion denied',
       );
@@ -421,12 +427,12 @@ describe('TodoWriteTool', () => {
       enoentError.code = 'ENOENT';
       mockFs.readFile.mockRejectedValue(enoentError);
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      expect(mockFs.writeFile).toHaveBeenCalled();
+      expect(mockAtomicWrite).toHaveBeenCalled();
       expect(mockHookSystem.fireTodoCreatedEvent).toHaveBeenNthCalledWith(
         1,
         '1',
@@ -511,7 +517,7 @@ describe('TodoWriteTool', () => {
       releaseSlowHook?.();
       const result = await executionPromise;
 
-      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
       expect(result.llmContent).toContain(
         'Todo creation blocked: Second todo denied',
       );
@@ -548,12 +554,12 @@ describe('TodoWriteTool', () => {
       enoentError.code = 'ENOENT';
       mockFs.readFile.mockRejectedValue(enoentError);
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      expect(mockFs.writeFile).toHaveBeenCalled();
+      expect(mockAtomicWrite).toHaveBeenCalled();
       expect(result.llmContent).toContain(
         'Todos have been modified successfully',
       );
@@ -618,12 +624,12 @@ describe('TodoWriteTool', () => {
       enoentError.code = 'ENOENT';
       mockFs.readFile.mockRejectedValue(enoentError);
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      expect(mockFs.writeFile).toHaveBeenCalled();
+      expect(mockAtomicWrite).toHaveBeenCalled();
       expect(postWriteStarted).toEqual(['1', '2']);
       expect(postWriteReleaseCount).toBe(2);
       expect(result.llmContent).toContain(
@@ -639,7 +645,7 @@ describe('TodoWriteTool', () => {
     });
 
     it('should have correct display name', () => {
-      expect(tool.displayName).toBe('TodoWrite');
+      expect(tool.displayName).toBe('TodoList');
     });
 
     it('should have correct kind', () => {
@@ -724,13 +730,13 @@ describe('TodoWriteTool – runtime output directory', () => {
     enoentError.code = 'ENOENT';
     mockFs.readFile.mockRejectedValue(enoentError);
     mockFs.mkdir.mockResolvedValue(undefined);
-    mockFs.writeFile.mockResolvedValue(undefined);
+    mockAtomicWrite.mockResolvedValue(undefined);
 
     const invocation = tool.build(params);
     await invocation.execute(mockAbortSignal);
 
     // Verify the file path starts with the custom runtime dir
-    const writePath = mockFs.writeFile.mock.calls[0]?.[0] as string;
+    const writePath = mockAtomicWrite.mock.calls[0]?.[0] as string;
     expect(writePath).toContain(path.join(customRuntimeDir, 'todos'));
     expect(writePath).toContain('runtime-session.json');
   });
@@ -748,12 +754,12 @@ describe('TodoWriteTool – runtime output directory', () => {
     enoentError.code = 'ENOENT';
     mockFs.readFile.mockRejectedValue(enoentError);
     mockFs.mkdir.mockResolvedValue(undefined);
-    mockFs.writeFile.mockResolvedValue(undefined);
+    mockAtomicWrite.mockResolvedValue(undefined);
 
     const invocation = tool.build(params);
     await invocation.execute(mockAbortSignal);
 
-    const writePath = mockFs.writeFile.mock.calls[0]?.[0] as string;
+    const writePath = mockAtomicWrite.mock.calls[0]?.[0] as string;
     expect(writePath).toContain(path.join(envRuntimeDir, 'todos'));
   });
 
@@ -767,12 +773,12 @@ describe('TodoWriteTool – runtime output directory', () => {
     enoentError.code = 'ENOENT';
     mockFs.readFile.mockRejectedValue(enoentError);
     mockFs.mkdir.mockResolvedValue(undefined);
-    mockFs.writeFile.mockResolvedValue(undefined);
+    mockAtomicWrite.mockResolvedValue(undefined);
 
     const invocation = tool.build(params);
     await invocation.execute(mockAbortSignal);
 
-    const writePath = mockFs.writeFile.mock.calls[0]?.[0] as string;
+    const writePath = mockAtomicWrite.mock.calls[0]?.[0] as string;
     expect(writePath).toContain(path.join('.qwen', 'todos'));
   });
 

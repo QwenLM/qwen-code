@@ -11,15 +11,18 @@ import {
   buildStatusLinePresetData,
   buildStatusLinePresetLines,
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
+  formatModelWithReasoning,
   formatTokenCount,
   getRunStateLabel,
   inferPullRequestNumber,
   normalizeStatusLinePresetConfig,
+  orderStatusLinePresetItems,
   STATUS_LINE_PRESET_ITEM_IDS,
+  STATUS_LINE_PRESET_ITEMS,
 } from './statusLinePresets.js';
 
 describe('statusLinePresets', () => {
-  it('normalizes valid preset configs and drops unknown items', () => {
+  it('normalizes valid preset configs and orders items by priority', () => {
     expect(
       normalizeStatusLinePresetConfig({
         type: 'preset',
@@ -54,7 +57,51 @@ describe('statusLinePresets', () => {
     ).toEqual(DEFAULT_STATUS_LINE_PRESET_CONFIG);
   });
 
-  it('renders available preset items and omits unavailable optional fields', () => {
+  it('keeps default preset items in priority order', () => {
+    expect(DEFAULT_STATUS_LINE_PRESET_CONFIG.items).toEqual(
+      orderStatusLinePresetItems(
+        [...DEFAULT_STATUS_LINE_PRESET_CONFIG.items].reverse(),
+      ),
+    );
+  });
+
+  it('orders preset items directly', () => {
+    expect(orderStatusLinePresetItems([])).toEqual([]);
+    expect(orderStatusLinePresetItems(['bogus'])).toEqual([]);
+    expect(orderStatusLinePresetItems([42, null])).toEqual([]);
+    expect(
+      orderStatusLinePresetItems([
+        'run-state',
+        'model',
+        'git-branch',
+        'model',
+        'context-remaining',
+      ]),
+    ).toEqual(['model', 'git-branch', 'context-remaining', 'run-state']);
+  });
+
+  it('formats model reasoning directly', () => {
+    expect(formatModelWithReasoning('qwen3-code-plus', false)).toBe(
+      'qwen3-code-plus reasoning off',
+    );
+    expect(
+      formatModelWithReasoning('qwen3-code-plus', { effort: 'high' }),
+    ).toBe('qwen3-code-plus high');
+    expect(
+      formatModelWithReasoning('qwen3-code-plus', { effort: undefined }),
+    ).toBe('qwen3-code-plus');
+    expect(formatModelWithReasoning('qwen3-code-plus', undefined)).toBe(
+      'qwen3-code-plus',
+    );
+  });
+
+  it('labels the plain model preset as model-only', () => {
+    expect(
+      STATUS_LINE_PRESET_ITEMS.find((item) => item.id === 'model')?.label,
+    ).toBe('model-only');
+  });
+
+  it('renders available preset items in priority order', () => {
     const data = buildStatusLinePresetData({
       sessionId: 'session-123',
       version: '1.2.3',
@@ -75,12 +122,12 @@ describe('statusLinePresets', () => {
         {
           type: 'preset',
           items: [
-            'model',
-            'context-remaining',
-            'current-dir',
-            'pull-request-number',
-            'branch-changes',
             'run-state',
+            'model',
+            'branch-changes',
+            'pull-request-number',
+            'current-dir',
+            'context-remaining',
           ],
         },
         data,
@@ -95,6 +142,7 @@ describe('statusLinePresets', () => {
       sessionId: 'session-123',
       version: '1.2.3',
       modelDisplayName: 'qwen3-code-plus',
+      reasoning: { effort: 'high' },
       currentDir: '/repo/project',
       branch: 'feature/pr-4087-statusline',
       contextWindowSize: 1000,
@@ -115,11 +163,67 @@ describe('statusLinePresets', () => {
         data,
       ),
     ).toEqual([
-      'qwen3-code-plus | Context 75% left | /repo/project | Context 25% used | feature/pr-4087-statusline | project | #4087 | +12 -3 | Ready | v1.2.3 | 1.0k window | 250 used | 1.2k in | 340 out | session-123',
+      'qwen3-code-plus high | qwen3-code-plus | feature/pr-4087-statusline | Context 75% left | 1.2k total in | 340 total out | /repo/project | project | #4087 | +12 -3 | Context 25% used | Ready | v1.2.3 | 1.0k window | 250 used | session-123',
     ]);
   });
 
-  it('treats model and model-with-reasoning as mutually exclusive', () => {
+  it('renders model and model-with-reasoning together', () => {
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'qwen3-code-plus',
+      reasoning: { effort: 'high' },
+      currentDir: '/repo/project',
+      branch: undefined,
+      contextWindowSize: 0,
+      currentUsage: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
+      streamingState: StreamingState.Idle,
+    });
+
+    expect(
+      buildStatusLinePresetLines(
+        {
+          type: 'preset',
+          items: ['model', 'model-with-reasoning'],
+        },
+        data,
+      ),
+    ).toEqual(['qwen3-code-plus high | qwen3-code-plus']);
+  });
+
+  it('shows when reasoning is disabled', () => {
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'qwen3-code-plus',
+      reasoning: false,
+      currentDir: '/repo/project',
+      branch: undefined,
+      contextWindowSize: 0,
+      currentUsage: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
+      streamingState: StreamingState.Idle,
+    });
+
+    expect(
+      buildStatusLinePresetLines(
+        {
+          type: 'preset',
+          items: ['model-with-reasoning'],
+        },
+        data,
+      ),
+    ).toEqual(['qwen3-code-plus reasoning off']);
+  });
+
+  it('falls back to the model name when reasoning is unset', () => {
     const data = buildStatusLinePresetData({
       sessionId: 'session-123',
       version: '1.2.3',
@@ -139,7 +243,7 @@ describe('statusLinePresets', () => {
       buildStatusLinePresetLines(
         {
           type: 'preset',
-          items: ['model-with-reasoning', 'model'],
+          items: ['model-with-reasoning'],
         },
         data,
       ),

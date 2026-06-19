@@ -100,19 +100,88 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   }),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
+  DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
+  DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 500_000,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 1000,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 25_000,
+  ApprovalMode: {
+    DEFAULT: 'default',
+    AUTO_EDIT: 'auto-edit',
+    YOLO: 'yolo',
+    PLAN: 'plan',
+  },
+  Kind: {
+    Read: 'read',
+    Edit: 'edit',
+    Delete: 'delete',
+    Move: 'move',
+    Search: 'search',
+    Execute: 'execute',
+    Think: 'think',
+    Fetch: 'fetch',
+    Other: 'other',
+  },
   AuthType: {},
   clearCachedCredentialFile: vi.fn(),
   QwenOAuth2Event: {},
   qwenOAuth2Events: { on: vi.fn(), off: vi.fn() },
+  MCP_BUDGET_WARN_FRACTION: 0.75,
   MCPServerConfig: vi.fn().mockImplementation((...args: unknown[]) => ({
     _args: args,
   })),
   SessionService: vi.fn(),
   SESSION_TITLE_MAX_LENGTH: 200,
+  DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 200_000,
   tokenLimit: vi.fn(),
+  getMCPDiscoveryState: vi.fn(() => 'not_started'),
+  getMCPServerStatus: vi.fn(() => 'disconnected'),
+  MCPDiscoveryState: {
+    NOT_STARTED: 'not_started',
+    IN_PROGRESS: 'in_progress',
+    COMPLETED: 'completed',
+  },
+  MCPServerStatus: {
+    DISCONNECTED: 'disconnected',
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
+  },
+  McpTransportPool: vi.fn().mockImplementation(() => ({
+    acquire: vi.fn(),
+    release: vi.fn(),
+    shutdown: vi.fn().mockResolvedValue(undefined),
+    on: vi.fn(),
+    off: vi.fn(),
+  })),
+  POOLED_TRANSPORTS_DEFAULT: new Set<string>(),
   SessionStartSource: { Startup: 'startup', Resume: 'resume' },
   SessionEndReason: { PromptInputExit: 'prompt_input_exit', Other: 'other' },
+  WorkspaceMcpBudget: vi.fn().mockImplementation(() => ({
+    register: vi.fn(),
+    unregister: vi.fn(),
+    snapshot: vi.fn(() => ({})),
+  })),
   restoreWorktreeContext: mockRestoreWorktreeContext,
+  HookEventName: {
+    PreToolUse: 'PreToolUse',
+    PostToolUse: 'PostToolUse',
+    PostToolUseFailure: 'PostToolUseFailure',
+    PostToolBatch: 'PostToolBatch',
+    Notification: 'Notification',
+    UserPromptSubmit: 'UserPromptSubmit',
+    UserPromptExpansion: 'UserPromptExpansion',
+    SessionStart: 'SessionStart',
+    Stop: 'Stop',
+    SubagentStart: 'SubagentStart',
+    SubagentStop: 'SubagentStop',
+    PreCompact: 'PreCompact',
+    PostCompact: 'PostCompact',
+    SessionEnd: 'SessionEnd',
+    PermissionRequest: 'PermissionRequest',
+    PermissionDenied: 'PermissionDenied',
+    StopFailure: 'StopFailure',
+    TodoCreated: 'TodoCreated',
+    TodoCompleted: 'TodoCompleted',
+  },
 }));
 
 vi.mock('./runtimeOutputDirContext.js', () => ({
@@ -125,7 +194,20 @@ vi.mock('./runtimeOutputDirContext.js', () => ({
   ),
 }));
 
-vi.mock('./authMethods.js', () => ({ buildAuthMethods: vi.fn() }));
+vi.mock('./authMethods.js', () => {
+  const buildAuthMethods = vi.fn();
+  return {
+    buildAuthMethods,
+    pickAuthMethodsForAuthRequired: vi.fn((selectedType?: string) => {
+      const authMethods = buildAuthMethods();
+      if (!selectedType) return authMethods;
+      const matched = authMethods.filter(
+        (method: { id: string }) => method.id === selectedType,
+      );
+      return matched.length ? matched : authMethods;
+    }),
+  };
+});
 vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
@@ -133,7 +215,10 @@ vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
 }));
-vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
+vi.mock('../config/config.js', () => ({
+  loadCliConfig: vi.fn(),
+  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+}));
 vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
 vi.mock('../utils/acpModelUtils.js', () => ({
   formatAcpModelId: vi.fn(),
@@ -222,6 +307,13 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getSessionService: vi.fn().mockReturnValue(mockSessionService),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        getDirectories: vi.fn().mockReturnValue([]),
+        addDirectory: vi.fn(),
+      }),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      getMcpServers: vi.fn().mockReturnValue({}),
+      setMcpBudgetEventCallback: vi.fn(),
     };
   }
 
@@ -259,6 +351,13 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        getDirectories: vi.fn().mockReturnValue([]),
+        addDirectory: vi.fn(),
+      }),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      getMcpServers: vi.fn().mockReturnValue({}),
+      setMcpBudgetEventCallback: vi.fn(),
     } as unknown as Config;
 
     processExitSpy = vi
@@ -298,6 +397,8 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,
       };
       lastSessionMock = mock;

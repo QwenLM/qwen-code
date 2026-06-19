@@ -23,7 +23,6 @@ Rules:
 - Sentence case: capitalize only the first word and proper nouns. NOT Title Case.
 - No trailing punctuation.
 - No quotes, backticks, or markdown.
-- Match the dominant language of the conversation (English or Chinese). For Chinese, treat as roughly 12-20 characters total; still no trailing punctuation.
 - Be specific about the user's actual goal — name the feature, bug, or subject area. Avoid vague "Code changes", "Help request", "Conversation".
 
 Good examples:
@@ -113,7 +112,7 @@ export async function tryGenerateSessionTitle(
     const geminiClient = config.getGeminiClient();
     if (!geminiClient) return { ok: false, reason: 'no_client' };
 
-    const fullHistory = geminiClient.getChat().getHistory();
+    const fullHistory = geminiClient.getHistoryShallow();
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
     const dialog = filterToDialog(fullHistory);

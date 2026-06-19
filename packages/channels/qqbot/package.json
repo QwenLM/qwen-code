@@ -1,0 +1,29 @@
+{
+  "name": "@qwen-code/channel-qqbot",
+  "version": "0.18.1",
+  "description": "QQ Bot (QQ机器人) channel adapter for Qwen Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@qwen-code/channel-base": "file:../base",
+    "@tencent-connect/qqbot-connector": "^1.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

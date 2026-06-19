@@ -36,6 +36,7 @@ function makeConfigWithRegistry(): {
   // need end-to-end chat behaviour, just to confirm the call is tolerated.
   vi.spyOn(config, 'getGeminiClient').mockReturnValue({
     setTools: vi.fn().mockResolvedValue(undefined),
+    refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
   } as never);
   return { config, registry };
 }
@@ -508,8 +509,8 @@ describe('ToolSearchTool', () => {
   });
 
   it('select: tolerates JSON-quoted tool names (model often pastes them back verbatim)', async () => {
-    // Pin: deferred-tools section of the system prompt renders names
-    // as JSON string literals ("cron_create"); models often paste them
+    // Pin: deferred-tools startup reminder renders names as JSON string
+    // literals ("cron_create"); models often paste them
     // back as `select:"cron_create"`. Without quote-stripping the
     // lookup searches for a tool literally named `"cron_create"`
     // (with quotes) and misses.
@@ -553,12 +554,17 @@ describe('ToolSearchTool', () => {
     // First search uses keyword path (which calls loadAndReturnSchemas →
     // revealDeferredTool); confirm registry agrees.
     expect(registry.isDeferredToolRevealed('slack_send_message')).toBe(true);
+    const geminiClient = config.getGeminiClient() as unknown as {
+      refreshStartupContextReminder: ReturnType<typeof vi.fn>;
+    };
+    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
 
     // Second: same keyword search now finds nothing (tool excluded).
     const second = await tool
       .build({ query: 'slack' })
       .execute(new AbortController().signal);
     expect(String(second.llmContent)).toContain('No tools found matching');
+    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
   });
 
   it('returns an error result when setTools() throws — model must NOT see schemas as ready', async () => {

@@ -6,20 +6,19 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import type {
-  ChatCompressionSettings,
-  ConfigParameters,
-  SandboxConfig,
-} from './config.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
   ApprovalMode,
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
+  TrustGateError,
 } from './config.js';
 import { Storage } from './storage.js';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
 import {
@@ -42,7 +41,6 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { GeminiClient } from '../core/client.js';
-import { GitService } from '../services/gitService.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
@@ -52,10 +50,13 @@ import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
+import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
+import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -144,6 +145,7 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 
 vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../hooks/index.js', () => {
@@ -154,6 +156,29 @@ vi.mock('../hooks/index.js', () => {
   return {
     HookSystem: HookSystemMock,
     createHookOutput: vi.fn(),
+    createInstructionsLoadedCallback:
+      (
+        getHookSystem: () => {
+          fireInstructionsLoadedEvent?: (...args: unknown[]) => unknown;
+        },
+      ) =>
+      async (notification: {
+        filePath: string;
+        memoryType: string;
+        loadReason: string;
+        triggerFilePath?: string;
+        parentFilePath?: string;
+      }) => {
+        await getHookSystem()?.fireInstructionsLoadedEvent?.(
+          notification.filePath,
+          notification.memoryType,
+          notification.loadReason,
+          {
+            triggerFilePath: notification.triggerFilePath,
+            parentFilePath: notification.parentFilePath,
+          },
+        );
+      },
   };
 });
 
@@ -239,12 +264,6 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/gitService.js', () => {
-  const GitServiceMock = vi.fn();
-  GitServiceMock.prototype.initialize = vi.fn();
-  return { GitService: GitServiceMock };
-});
-
 vi.mock('../skills/skill-manager.js', () => {
   const SkillManagerMock = vi.fn();
   SkillManagerMock.prototype.startWatching = vi
@@ -292,6 +311,12 @@ vi.mock('../ide/ide-client.js', () => ({
 
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 
+const MEMORY_PRESSURE_ENV_KEYS = [
+  'QWEN_MEMORY_PRESSURE_SOFT',
+  'QWEN_MEMORY_PRESSURE_HARD',
+  'QWEN_MEMORY_PRESSURE_CRITICAL',
+];
+
 vi.mock('../core/baseLlmClient.js');
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -332,6 +357,9 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
+      delete process.env[envName];
+    }
     (fs.existsSync as Mock).mockReturnValue(true);
     (fs.readdirSync as Mock).mockReturnValue([]);
     (fs.statSync as Mock).mockReturnValue({
@@ -383,6 +411,81 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSystemPrompt()).toBeUndefined();
   });
 
+  it('wires file history snapshot updates to chat recording', async () => {
+    const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
+    const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
+    const config = new Config({
+      ...baseParams,
+      cwd: projectDir,
+      fileCheckpointingEnabled: true,
+      chatRecording: true,
+    });
+    const recordedSnapshots: FileHistorySnapshot[] = [];
+    const recordFileHistorySnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+      recordedSnapshots.push(structuredClone(snapshot));
+    });
+    vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+      recordFileHistorySnapshot,
+    } as unknown as ReturnType<Config['getChatRecordingService']>);
+    const getGlobalQwenDirSpy = vi
+      .spyOn(Storage, 'getGlobalQwenDir')
+      .mockReturnValue(storageDir);
+
+    try {
+      const trackedFile = path.join(projectDir, 'a.txt');
+      await writeFile(trackedFile, 'original');
+
+      const fileHistoryService = config.getFileHistoryService();
+      await fileHistoryService.makeSnapshot('p1');
+      await fileHistoryService.trackEdit(trackedFile);
+
+      expect(recordFileHistorySnapshot).toHaveBeenCalledTimes(1);
+      expect(recordedSnapshots[0].trackedFileBackups['a.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    } finally {
+      getGlobalQwenDirSpy.mockRestore();
+      await rm(projectDir, { recursive: true, force: true });
+      await rm(storageDir, { recursive: true, force: true });
+    }
+  });
+
+  it('drops stale file history callbacks after session switch', async () => {
+    const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
+    const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
+    const config = new Config({
+      ...baseParams,
+      cwd: projectDir,
+      fileCheckpointingEnabled: true,
+    });
+    const recordFileHistorySnapshot = vi.fn();
+    vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+      recordFileHistorySnapshot,
+    } as unknown as ReturnType<Config['getChatRecordingService']>);
+    const getGlobalQwenDirSpy = vi
+      .spyOn(Storage, 'getGlobalQwenDir')
+      .mockReturnValue(storageDir);
+
+    try {
+      const trackedFile = path.join(projectDir, 'a.txt');
+      await writeFile(trackedFile, 'original');
+
+      const oldFileHistoryService = config.getFileHistoryService();
+      await oldFileHistoryService.makeSnapshot('p1');
+      config.startNewSession('new-session-id');
+      await oldFileHistoryService.trackEdit(trackedFile);
+
+      expect(recordFileHistorySnapshot).not.toHaveBeenCalled();
+    } finally {
+      getGlobalQwenDirSpy.mockRestore();
+      await rm(projectDir, { recursive: true, force: true });
+      await rm(storageDir, { recursive: true, force: true });
+    }
+  });
+
   describe('FileReadCache isolation', () => {
     it('returns a distinct cache for child Configs created via Object.create', () => {
       // Subagent / scoped-agent / fork construction all use
@@ -426,6 +529,194 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('MemoryPressureMonitor isolation', () => {
+    it('returns a distinct monitor for child Configs created via Object.create', async () => {
+      const parent = new Config(baseParams);
+      await parent.initialize({ skipGeminiInitialization: true });
+      const child = Object.create(parent) as Config;
+
+      const parentMonitor = parent.getMemoryPressureMonitor();
+      const childMonitor = child.getMemoryPressureMonitor();
+
+      expect(parentMonitor).toBeDefined();
+      expect(childMonitor).toBeDefined();
+      expect(childMonitor).not.toBe(parentMonitor);
+      expect(child.getMemoryPressureMonitor()).toBe(childMonitor);
+    });
+
+    it('resets monitor cleanup state when starting a new session', async () => {
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      const monitor = config.getMemoryPressureMonitor();
+      expect(monitor).toBeDefined();
+      const resetSpy = vi.spyOn(monitor!, 'resetForNewSession');
+
+      config.startNewSession();
+
+      expect(resetSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('MemoryPressure configuration environment', () => {
+    const restorers: Array<() => void> = [];
+    const originalEnv = new Map<string, string | undefined>();
+
+    beforeEach(() => {
+      originalEnv.clear();
+      for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
+        originalEnv.set(envName, process.env[envName]);
+        delete process.env[envName];
+      }
+    });
+
+    afterEach(() => {
+      while (restorers.length > 0) {
+        restorers.pop()?.();
+      }
+      for (const [envName, value] of originalEnv) {
+        if (value === undefined) {
+          delete process.env[envName];
+        } else {
+          process.env[envName] = value;
+        }
+      }
+      originalEnv.clear();
+    });
+
+    function mockMemoryRatio(rssRatio: number, heapUsedBytes = 0): void {
+      const spy = vi.spyOn(process, 'memoryUsage').mockReturnValue({
+        rss: Math.ceil(os.totalmem() * rssRatio),
+        heapTotal: 512 * 1024 * 1024,
+        heapUsed: heapUsedBytes,
+        external: 0,
+        arrayBuffers: 0,
+      });
+      restorers.push(() => spy.mockRestore());
+    }
+
+    function mockStderrWrite(): Mock {
+      const spy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      restorers.push(() => spy.mockRestore());
+      return spy as unknown as Mock;
+    }
+
+    it('applies valid memory pressure env overrides', async () => {
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.35);
+
+      expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+        'soft',
+      );
+    });
+
+    it('falls back to defaults and warns on strict env parse failures', async () => {
+      const stderrSpy = mockStderrWrite();
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3extra';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.35);
+
+      expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+        'normal',
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Invalid memory pressure config'),
+      );
+    });
+
+    it('falls back to defaults and warns on invalid threshold ordering', async () => {
+      const stderrSpy = mockStderrWrite();
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.7';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+
+      expect(config.getMemoryPressureMonitor()).toBeDefined();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'softPressureRatio must be < hardPressureRatio',
+        ),
+      );
+    });
+
+    it.each(['NaN', 'Infinity', '0'])(
+      'falls back to defaults for invalid soft threshold %s',
+      async (value) => {
+        const stderrSpy = mockStderrWrite();
+        process.env['QWEN_MEMORY_PRESSURE_SOFT'] = value;
+
+        const config = new Config(baseParams);
+        await config.initialize({ skipGeminiInitialization: true });
+        mockMemoryRatio(0.35);
+
+        expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+          'normal',
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Invalid memory pressure config'),
+        );
+      },
+    );
+
+    it('explicit GC is enabled by default', async () => {
+      const globalWithGc = global as typeof global & { gc?: () => void };
+      const originalGc = globalWithGc.gc;
+      const gcSpy = vi.fn();
+      Object.defineProperty(globalWithGc, 'gc', {
+        value: gcSpy,
+        configurable: true,
+      });
+      restorers.push(() => {
+        if (originalGc) {
+          Object.defineProperty(globalWithGc, 'gc', {
+            value: originalGc,
+            configurable: true,
+          });
+        } else {
+          delete globalWithGc.gc;
+        }
+      });
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.85);
+
+      config.getMemoryPressureMonitor()?.performCheck();
+      // Critical tier has 4 async steps, need enough microtask drains
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await Promise.resolve();
+
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('child Config monitors inherit the parent memory pressure config snapshot', async () => {
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+      const parent = new Config(baseParams);
+      await parent.initialize({ skipGeminiInitialization: true });
+
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.9';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.95';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.97';
+      const child = Object.create(parent) as Config;
+      mockMemoryRatio(0.35);
+
+      expect(child.getMemoryPressureMonitor()?.getPressureLevel()).toBe('soft');
+    });
+  });
+
   describe('startNewSession', () => {
     it('clears the FileReadCache so a new session does not inherit prior reads', () => {
       // Regression guard: the file-read cache backs ReadFile's
@@ -459,6 +750,28 @@ describe('Server Config (config.ts)', () => {
       const newSessionId = config.startNewSession();
 
       expect(refreshSessionContext).toHaveBeenCalledWith(newSessionId);
+    });
+
+    it('flushes the outgoing chat recording service when switching sessions', () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+      });
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          chatRecordingService?: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = { finalize, flush };
+
+      config.startNewSession();
+
+      expect(finalize).toHaveBeenCalledTimes(1);
+      expect(flush).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -570,34 +883,9 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
-    it('should throw an error if checkpointing is enabled and GitService fails', async () => {
-      const gitError = new Error('Git is not installed');
-      (GitService.prototype.initialize as Mock).mockRejectedValue(gitError);
-
-      const config = new Config({
-        ...baseParams,
-        checkpointing: true,
-      });
-
-      await expect(config.initialize()).rejects.toThrow(gitError);
-    });
-
-    it('should not throw an error if checkpointing is disabled and GitService fails', async () => {
-      const gitError = new Error('Git is not installed');
-      (GitService.prototype.initialize as Mock).mockRejectedValue(gitError);
-
-      const config = new Config({
-        ...baseParams,
-        checkpointing: false,
-      });
-
-      await expect(config.initialize()).resolves.toBeUndefined();
-    });
-
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
       });
 
       await expect(config.initialize()).resolves.toBeUndefined();
@@ -613,7 +901,6 @@ describe('Server Config (config.ts)', () => {
 
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
         bareMode: true,
       });
 
@@ -636,8 +923,28 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('registers loop_wakeup when cron is enabled', async () => {
+      const config = new Config({ ...baseParams, cronEnabled: true });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.LOOP_WAKEUP);
+    });
+
+    it('does not register loop_wakeup when cron is disabled', async () => {
+      const config = new Config({ ...baseParams, cronEnabled: false });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.LOOP_WAKEUP);
+    });
+
     it('skips inline MCP discovery by default (progressive availability)', async () => {
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       await config.initialize();
 
       // Default path passes `skipDiscovery: true` to createToolRegistry,
@@ -650,7 +957,7 @@ describe('Server Config (config.ts)', () => {
       const originalLegacy = process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
       try {
-        const config = new Config({ ...baseParams, checkpointing: false });
+        const config = new Config({ ...baseParams });
         await config.initialize();
 
         // Legacy escape hatch must call back into the synchronous discover
@@ -671,7 +978,7 @@ describe('Server Config (config.ts)', () => {
       // No MCP servers + non-bare + default mode: startMcpDiscoveryInBackground
       // is called but the registry mock returns no manager, so the discovery
       // promise stays undefined and waitForMcpReady is a no-op.
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       await config.initialize();
       await expect(config.waitForMcpReady()).resolves.toBeUndefined();
     });
@@ -681,7 +988,7 @@ describe('Server Config (config.ts)', () => {
       // failed to start" emission. Must be a no-op when there's nothing
       // to warn about, otherwise --prompt runs with no MCP config would
       // emit a spurious warning every time.
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       expect(config.getFailedMcpServerNames()).toEqual([]);
     });
 
@@ -692,11 +999,36 @@ describe('Server Config (config.ts)', () => {
       // `excludedMcpServers` (see `isMcpServerDisabled`).
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
         mcpServers: { off: new MCPServerConfig() },
         excludedMcpServers: ['off'],
       } as ConfigParameters);
       expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('getFailedMcpServerNames skips pending approval servers', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        mcpServers: { pending: new MCPServerConfig() },
+        pendingMcpServers: ['pending'],
+      } as ConfigParameters);
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('approveMcpServerForSession drops only the approved pending server', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        pendingMcpServers: ['a', 'b'],
+      } as ConfigParameters);
+
+      config.approveMcpServerForSession('a');
+
+      expect(config.isMcpServerPendingApproval('a')).toBe(false);
+      expect(config.isMcpServerPendingApproval('b')).toBe(true);
+
+      config.approveMcpServerForSession('not-pending');
+      expect(config.isMcpServerPendingApproval('b')).toBe(true);
     });
   });
 
@@ -1190,6 +1522,21 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toBe('');
   });
 
+  it('Config constructor should enable runtime sleep prevention by default', () => {
+    const config = new Config(baseParams);
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(true);
+  });
+
+  it('Config constructor should store runtime sleep prevention override', () => {
+    const config = new Config({
+      ...baseParams,
+      preventSystemSleep: false,
+    });
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(false);
+  });
+
   it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
     const config = new Config(baseParams);
 
@@ -1209,6 +1556,451 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).toContain('# auto memory');
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+  });
+
+  it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
+    const config = new Config({
+      ...baseParams,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: 'short project rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(
+      '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+    );
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+  });
+
+  it('refreshHierarchicalMemory should warn when always-loaded context is large for the model window', async () => {
+    const config = new Config({
+      ...baseParams,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+      memoryContent: 'a'.repeat(800),
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("model's 1,000 token context window"),
+    );
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('more than 15%'),
+    );
+  });
+
+  it('getWarnings should include oversized context before initialize refresh runs', () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(800),
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+  });
+
+  it('getWarnings should use the model token limit when no contextWindowSize is configured', () => {
+    const config = new Config({
+      ...baseParams,
+      model: 'unknown-model-for-context-warning-test',
+      userMemory: 'a'.repeat(100_000),
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("model's 131,072 token context window"),
+    );
+  });
+
+  it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
+    const config = new Config({
+      ...baseParams,
+      enableManagedAutoMemory: false,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+      memoryContent: 'short project context',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(
+      config
+        .getWarnings()
+        .some((warning) =>
+          warning.includes('Loaded QWEN.md/context instructions'),
+        ),
+    ).toBe(false);
+  });
+
+  it('relocateWorkingDirectory should update the session working roots', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const workspaceContext = config.getWorkspaceContext();
+    const directoriesChanged = vi.fn();
+    workspaceContext.onDirectoriesChanged(directoriesChanged);
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(chdirSpy).toHaveBeenCalledWith(newDir);
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(config.getProjectRoot()).toBe(newDir);
+    expect(config.getCwd()).toBe(newDir);
+    expect(config.getWorkingDir()).toBe(newDir);
+    expect(config.getWorkspaceContext()).toBe(workspaceContext);
+    expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
+    expect(config.storage.getProjectRoot()).toBe(newDir);
+    expect(directoriesChanged).toHaveBeenCalled();
+    expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
+      newDir,
+      expect.any(Array),
+      expect.any(Object),
+      expect.any(Array),
+      expect.any(Boolean),
+      expect.any(String),
+      expect.any(Array),
+      expect.any(Object),
+    );
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const fileServiceBefore = config.getFileService();
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getFileService()).not.toBe(fileServiceBefore);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
+    const config = new Config(baseParams);
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(config.getTargetDir());
+    const newStorage = new Storage(newDir);
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
+    const oldRuntimeStatusPath = path.join(
+      oldChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const oldWorktreeSessionPath = path.join(
+      oldChatsDir,
+      `${sessionId}.worktree.json`,
+    );
+    const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
+    const newRuntimeStatusPath = path.join(
+      newChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const newWorktreeSessionPath = path.join(
+      newChatsDir,
+      `${sessionId}.worktree.json`,
+    );
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const existingArtifacts = [
+      oldTranscriptPath,
+      oldRuntimeStatusPath,
+      oldWorktreeSessionPath,
+    ];
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return existingArtifacts.includes(checked) || checked === newDir;
+    });
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(fs.mkdirSync).toHaveBeenCalledWith(newChatsDir, {
+      recursive: true,
+    });
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldTranscriptPath,
+      newTranscriptPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldWorktreeSessionPath,
+      newWorktreeSessionPath,
+    );
+    expect(config.getTranscriptPath()).toBe(newTranscriptPath);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(config.getTargetDir());
+    const newStorage = new Storage(newDir);
+    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockResolvedValue(newRuntimeStatusPath);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === oldRuntimeStatusPath || checked === newDir;
+    });
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+    expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(newRuntimeStatusPath, {
+      sessionId,
+      workDir: newDir,
+      qwenVersion: null,
+    });
+
+    writeRuntimeStatusSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
+    const config = new Config(baseParams);
+    const oldDir = config.getTargetDir();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(oldDir);
+    const newStorage = new Storage(newDir);
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
+    const oldRuntimeStatusPath = path.join(
+      oldChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
+    const newRuntimeStatusPath = path.join(
+      newChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const moveError = new Error('move failed');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+    const existingArtifacts = [oldTranscriptPath, oldRuntimeStatusPath];
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return existingArtifacts.includes(checked) || checked === newDir;
+    });
+    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+      if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
+        throw moveError;
+      }
+    });
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      moveError,
+    );
+
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldTranscriptPath,
+      newTranscriptPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      newTranscriptPath,
+      oldTranscriptPath,
+    );
+    expect(chdirSpy).toHaveBeenCalledWith(newDir);
+    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(config.getTargetDir()).toBe(oldDir);
+    expect(config.storage.getProjectRoot()).toBe(oldDir);
+    expect(config.getTranscriptPath()).toBe(oldTranscriptPath);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should remove a partial EXDEV copy when source cleanup fails', async () => {
+    const config = new Config(baseParams);
+    const oldDir = config.getTargetDir();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(oldDir);
+    const newStorage = new Storage(newDir);
+    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const cleanupError = new Error('cleanup failed');
+    const exdevError = Object.assign(new Error('cross device'), {
+      code: 'EXDEV',
+    });
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === oldRuntimeStatusPath || checked === newDir;
+    });
+    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+      if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
+        throw exdevError;
+      }
+    });
+    vi.mocked(fs.unlinkSync).mockImplementation((pathToUnlink) => {
+      if (pathToUnlink === oldRuntimeStatusPath) {
+        throw cleanupError;
+      }
+    });
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      cleanupError,
+    );
+
+    expect(fs.copyFileSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+    expect(fs.unlinkSync).toHaveBeenCalledWith(newRuntimeStatusPath);
+    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(config.getTargetDir()).toBe(oldDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject and roll back when the final cwd differs from the expected path', async () => {
+    const config = new Config(baseParams);
+    const oldDir = config.getTargetDir();
+    const newDir = path.resolve('/path/to/other');
+    const expectedDir = path.resolve('/path/to/confirmed');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+
+    await expect(
+      config.relocateWorkingDirectory(newDir, expectedDir),
+    ).rejects.toThrow(
+      `Changed directory to ${newDir}, expected ${expectedDir}.`,
+    );
+
+    expect(chdirSpy).toHaveBeenCalledWith(newDir);
+    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(config.getTargetDir()).toBe(oldDir);
+    expect(config.storage.getProjectRoot()).toBe(oldDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject before mutating config when include directories are stale', async () => {
+    const staleIncludeDir = path.resolve('/path/to/stale-include');
+    const config = new Config({
+      ...baseParams,
+      includeDirectories: [staleIncludeDir],
+    });
+    const oldDir = config.getTargetDir();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(oldDir);
+    vi.mocked(fs.existsSync).mockImplementation(
+      (pathToCheck) => pathToCheck !== staleIncludeDir,
+    );
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      `Directory does not exist: ${staleIncludeDir}`,
+    );
+
+    expect(chdirSpy).not.toHaveBeenCalled();
+    expect(config.getTargetDir()).toBe(oldDir);
+    expect(config.storage.getProjectRoot()).toBe(oldDir);
+    expect(config.getWorkspaceContext().getDirectories()[0]).toBe(oldDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should return memory refresh failures after moving', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
   });
 
   it('refreshHierarchicalMemory should include empty memory prompt when no managed auto-memory index exists', async () => {
@@ -1247,7 +2039,7 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
-    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
     expect(lastCall?.[1]).toEqual([]);
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
@@ -1275,7 +2067,49 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     expect(lastCall?.[1]).toEqual([explicitDir]);
-    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
+  });
+
+  it('refreshHierarchicalMemory should fire InstructionsLoaded hooks from memory notifications', async () => {
+    const config = new Config(baseParams);
+    const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
+    config['hookSystem'] = {
+      fireInstructionsLoadedEvent,
+    } as unknown as HookSystem;
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
+    const options = lastCall?.at(-1) as
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
+    expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
+
+    await options?.onInstructionsLoaded?.({
+      filePath: '/tmp/project/QWEN.md',
+      memoryType: 'project',
+      loadReason: 'include',
+      triggerFilePath: '/tmp/project/AGENTS.md',
+      parentFilePath: '/tmp/project/AGENTS.md',
+    });
+
+    expect(fireInstructionsLoadedEvent).toHaveBeenCalledWith(
+      '/tmp/project/QWEN.md',
+      'project',
+      'include',
+      {
+        triggerFilePath: '/tmp/project/AGENTS.md',
+        parentFilePath: '/tmp/project/AGENTS.md',
+      },
+    );
   });
 
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {
@@ -1758,6 +2592,21 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('Response tokens/sec display configuration', () => {
+    it('should default to false when not provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getShowResponseTokensPerSecond()).toBe(false);
+    });
+
+    it('should set showResponseTokensPerSecond when provided as true', () => {
+      const config = new Config({
+        ...baseParams,
+        showResponseTokensPerSecond: true,
+      });
+      expect(config.getShowResponseTokensPerSecond()).toBe(true);
+    });
+  });
+
   describe('createToolRegistry', () => {
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
@@ -2151,6 +3000,76 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getClearContextOnIdle', () => {
+    it('should default the cumulative tool result threshold to 500000 chars', () => {
+      const config = new Config(baseParams);
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+    });
+
+    it('should use a custom cumulative tool result threshold if provided', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsTotalCharsThreshold: 123_456,
+        },
+      });
+
+      expect(
+        config.getClearContextOnIdle().toolResultsTotalCharsThreshold,
+      ).toBe(123_456);
+    });
+
+    it('should preserve an explicit disabled cumulative tool result threshold', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsTotalCharsThreshold: -1,
+        },
+      });
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: -1,
+      });
+    });
+
+    it('should keep legacy disabled idle cleanup disabled for the size trigger too', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsThresholdMinutes: -1,
+        },
+      });
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: -1,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: -1,
+      });
+    });
+
+    it('should treat any negative legacy idle threshold as disabling the size trigger too', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsThresholdMinutes: -2,
+        },
+      });
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: -2,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: -1,
+      });
+    });
+  });
+
   // PR 14b fix (codex round 4 — wenshao gpt-5.5 review): the
   // `Config.setMcpBudgetEventCallback → pendingMcpBudgetCallback →
   // createToolRegistry → registry.getMcpClientManager().setOnBudgetEvent`
@@ -2270,17 +3189,28 @@ describe('setApprovalMode with folder trust', () => {
     cwd: '.',
   };
 
-  it('should throw an error when setting YOLO mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting YOLO mode in an untrusted folder', () => {
+    // #4297 fold-in 1 (16:32:44-round S3): assert on the typed class,
+    // not just message text. The 403 mapping in `serve/server.ts`
+    // matches `err instanceof TrustGateError`; an accidental revert
+    // to `throw new Error(...)` would silently downgrade to 500
+    // while the message text test kept passing.
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
   });
 
-  it('should throw an error when setting AUTO_EDIT mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting AUTO_EDIT mode in an untrusted folder', () => {
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
@@ -2469,11 +3399,20 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getAutoModeSettings()).toEqual({});
     });
 
-    it('returns the provided autoMode hints and environment', () => {
+    it('returns the provided autoMode classifier settings, hints, and environment', () => {
       const config = new Config({
         ...baseParams,
         permissions: {
           autoMode: {
+            classifier: {
+              timeouts: {
+                stage1Ms: 12_345,
+                stage2Ms: 67_890,
+              },
+              thinking: {
+                stage2Enabled: true,
+              },
+            },
             hints: {
               allow: ['Allow xyz commands'],
               deny: ['Block intranet calls'],
@@ -2483,6 +3422,15 @@ describe('setApprovalMode with folder trust', () => {
         },
       });
       expect(config.getAutoModeSettings()).toEqual({
+        classifier: {
+          timeouts: {
+            stage1Ms: 12_345,
+            stage2Ms: 67_890,
+          },
+          thinking: {
+            stage2Enabled: true,
+          },
+        },
         hints: {
           allow: ['Allow xyz commands'],
           deny: ['Block intranet calls'],
@@ -2992,6 +3940,68 @@ describe('setApprovalMode with folder trust', () => {
   });
 });
 
+describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
+  it('initializes from `disabledTools` ConfigParameters', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['Foo', 'Bar'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['Foo', 'Bar']));
+  });
+
+  it('defaults to an empty set when `disabledTools` is omitted', () => {
+    const config = new Config(baseParams);
+    expect(config.getDisabledTools()).toEqual(new Set());
+  });
+
+  it('setDisabledTools replaces the live snapshot for runtime sync', () => {
+    // The daemon's `acpAgent` MCP-restart handler calls
+    // `setDisabledTools(new Set(disabledList))` after re-reading
+    // workspace settings, so a `tools.disabled` toggle applied
+    // since this Config was constructed takes effect on the next
+    // `ToolRegistry.registerTool` call. Pin that contract so a
+    // future regression that drops the setter (or re-freezes the
+    // field) fails this test instead of silently re-enabling
+    // tools the user just disabled.
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['A', 'B']));
+    config.setDisabledTools(new Set(['B', 'C']));
+    expect(config.getDisabledTools()).toEqual(new Set(['B', 'C']));
+  });
+
+  it('setDisabledTools copies the input — caller mutations do not leak', () => {
+    // The setter constructs a fresh `new Set(disabled)` from the
+    // input, so a caller that holds a reference to the input set
+    // and later mutates it cannot retroactively change the live
+    // Config snapshot. Locks this defensive-copy contract.
+    const config = new Config(baseParams);
+    const liveInput = new Set(['X']);
+    config.setDisabledTools(liveInput);
+    liveInput.add('Y');
+    expect(config.getDisabledTools()).toEqual(new Set(['X']));
+    expect(config.getDisabledTools().has('Y')).toBe(false);
+  });
+
+  it('setDisabledTools accepts an empty set (clears the live snapshot)', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    config.setDisabledTools(new Set());
+    expect(config.getDisabledTools()).toEqual(new Set());
+  });
+});
+
 describe('BaseLlmClient Lifecycle', () => {
   const MODEL = 'gemini-pro';
   const SANDBOX: SandboxConfig = {
@@ -3096,6 +4106,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['toolResultContentFormat']: 'string',
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -3105,6 +4116,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        toolResultContentFormat: { kind: 'settings' },
       },
     });
 
@@ -3124,6 +4136,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['toolResultContentFormat']).toBe('string');
 
     // Verify sources are also updated
     const sources = config.getContentGeneratorConfigSources();
@@ -3133,6 +4146,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['toolResultContentFormat']?.kind).toBe('settings');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {
@@ -3369,54 +4383,141 @@ describe('Model Switching and Config Updates', () => {
     });
   });
 
-  describe('chatCompression.contextPercentageThreshold deprecation', () => {
-    // The proportional-threshold knob `contextPercentageThreshold` was
-    // removed in the auto-compaction threshold redesign (Task 8) — the
-    // value is now derived from `computeThresholds(...)` in the
-    // ChatCompressionService and is no longer user-tunable. Existing
-    // settings.json files that still set the field should keep working
-    // but get a one-time stderr warning so users know to remove it.
-    let warnSpy: ReturnType<typeof vi.spyOn>;
-
-    beforeEach(() => {
-      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    });
-
-    afterEach(() => {
-      warnSpy.mockRestore();
-    });
-
-    it('logs a stderr warning when the deprecated field is set', () => {
-      new Config({
+  describe('Config runtime MCP overlay', () => {
+    it('addRuntimeMcpServer does not mutate this.mcpServers', () => {
+      const config = new Config({
         ...baseParams,
-        chatCompression: {
-          contextPercentageThreshold: 0.5,
-        } as ChatCompressionSettings,
+        mcpServers: {
+          'settings-server': new MCPServerConfig('cmd-a'),
+        },
       });
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'chatCompression.contextPercentageThreshold has been removed',
-        ),
+      // Simulate post-init state
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer(
+        'runtime-server',
+        new MCPServerConfig('cmd-b'),
       );
+      const settingsLayer = (
+        config as unknown as {
+          mcpServers: Record<string, MCPServerConfig>;
+        }
+      ).mcpServers;
+      expect(Object.keys(settingsLayer)).toEqual(['settings-server']);
+      expect(settingsLayer['runtime-server']).toBeUndefined();
     });
 
-    it('does not warn when chatCompression is absent', () => {
-      new Config({ ...baseParams });
-      const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
-      expect(
-        warnCalls.some((m) => m.includes('contextPercentageThreshold')),
-      ).toBe(false);
+    it('removeRuntimeMcpServer returns false when name not present', () => {
+      const config = new Config(baseParams);
+      expect(config.removeRuntimeMcpServer('does-not-exist')).toBe(false);
     });
 
-    it('does not warn when chatCompression is set without the deprecated field', () => {
-      new Config({
+    it('removeRuntimeMcpServer returns true and drops the entry', () => {
+      const config = new Config(baseParams);
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('x', new MCPServerConfig('cmd'));
+      expect(config.removeRuntimeMcpServer('x')).toBe(true);
+      expect(config.removeRuntimeMcpServer('x')).toBe(false);
+    });
+  });
+
+  describe('getMcpServers cascade with runtime overlay', () => {
+    it('runtime layer overlays settings layer (last write wins)', () => {
+      const config = new Config({
         ...baseParams,
-        chatCompression: { imageTokenEstimate: 1600 },
+        mcpServers: {
+          shared: new MCPServerConfig('settings-cmd'),
+        },
       });
-      const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
-      expect(
-        warnCalls.some((m) => m.includes('contextPercentageThreshold')),
-      ).toBe(false);
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('shared', new MCPServerConfig('runtime-cmd'));
+      const merged = config.getMcpServers();
+      expect(merged!['shared'].command).toBe('runtime-cmd');
+    });
+
+    it('runtime-only entries appear in cascade', () => {
+      const config = new Config({ ...baseParams, mcpServers: {} });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('only-runtime', new MCPServerConfig('cmd'));
+      const merged = config.getMcpServers();
+      expect(merged!['only-runtime']).toBeDefined();
+    });
+
+    it('removing runtime entry restores settings entry', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          shared: new MCPServerConfig('settings-cmd'),
+        },
+      });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('shared', new MCPServerConfig('runtime-cmd'));
+      expect(config.getMcpServers()!['shared'].command).toBe('runtime-cmd');
+      config.removeRuntimeMcpServer('shared');
+      expect(config.getMcpServers()!['shared'].command).toBe('settings-cmd');
+    });
+
+    it('isMcpServerDisabled still flags runtime entries when excluded', () => {
+      const config = new Config({ ...baseParams });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('blocked', new MCPServerConfig('cmd'));
+      config.setExcludedMcpServers(['blocked']);
+      // The entry appears in getMcpServers (UI layer filters via isMcpServerDisabled)
+      expect(config.getMcpServers()!['blocked']).toBeDefined();
+      expect(config.isMcpServerDisabled('blocked')).toBe(true);
+    });
+  });
+
+  describe('getModelDisplayName', () => {
+    it('should return resolved name when model is in registry', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4o',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getModelDisplayName()).toBe('GPT-4o');
+    });
+
+    it('should return raw modelId when model is not in registry', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'custom-runtime-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getModelDisplayName()).toBe('custom-runtime-model');
+    });
+
+    it('should return raw modelId when currentAuthType is falsy', () => {
+      const config = new Config({
+        ...baseParams,
+        model: 'some-model',
+        // authType is not set
+      });
+
+      // getModel() returns 'some-model', getModelDisplayName returns it as-is
+      // because currentAuthType is falsy
+      expect(config.getModelDisplayName()).toBe('some-model');
     });
   });
 });

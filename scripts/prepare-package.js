@@ -16,191 +16,234 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const rootDir = path.resolve(__dirname, '..');
+const defaultRootDir = path.resolve(__dirname, '..');
 
-const distDir = path.join(rootDir, 'dist');
-const cliBundlePath = path.join(distDir, 'cli.js');
-const vendorDir = path.join(distDir, 'vendor');
+export function preparePackage({ rootDir = defaultRootDir } = {}) {
+  const distDir = path.join(rootDir, 'dist');
 
-// Verify dist directory and bundle exist
-if (!fs.existsSync(distDir)) {
-  console.error('Error: dist/ directory not found');
-  console.error('Please run "npm run bundle" first');
-  process.exit(1);
+  verifyBundleArtifacts(rootDir, distDir);
+  copyDocumentationFiles(rootDir, distDir);
+  copyLocales(rootDir, distDir);
+  copyExtensionExamples(rootDir, distDir);
+  writeDistPackageJson(rootDir, distDir);
+  printPackageStructure(distDir);
 }
 
-if (!fs.existsSync(cliBundlePath)) {
-  console.error(`Error: Bundle not found at ${cliBundlePath}`);
-  console.error('Please run "npm run bundle" first');
-  process.exit(1);
+if (isDirectRun()) {
+  preparePackage();
 }
 
-if (!fs.existsSync(vendorDir)) {
-  console.error(`Error: Vendor directory not found at ${vendorDir}`);
-  console.error('Please run "npm run bundle" first');
-  process.exit(1);
+function isDirectRun() {
+  return process.argv[1]
+    ? fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+    : false;
 }
 
-const bundledDocsDir = path.join(distDir, 'bundled', 'qc-helper', 'docs');
-if (!fs.existsSync(bundledDocsDir)) {
-  console.error(`Error: Bundled docs not found at ${bundledDocsDir}`);
-  console.error('Please run "npm run bundle" first');
-  process.exit(1);
+function verifyBundleArtifacts(rootDir, distDir) {
+  const requiredPaths = [
+    path.join(distDir, 'cli.js'),
+    path.join(distDir, 'vendor'),
+    path.join(distDir, 'bundled', 'qc-helper', 'docs'),
+    // The Web Shell ships with the published package ("Web Shell out of the
+    // box"). Gate on it here so a build that skipped the web-shell workspace
+    // (e.g. `npm ci --ignore-scripts` bypassing the root `prepare`) fails
+    // loudly during packaging instead of silently publishing an API-only CLI
+    // whose `GET /` 404s. copy_bundle_assets.js stays warn-and-skip for
+    // --cli-only dev bundles; this is the release gate.
+    path.join(distDir, 'web-shell', 'index.html'),
+    path.join(distDir, 'web-shell', 'assets'),
+  ];
+
+  if (!fs.existsSync(distDir)) {
+    console.error('Error: dist/ directory not found');
+    console.error('Please run "npm run bundle" first');
+    process.exit(1);
+  }
+
+  for (const requiredPath of requiredPaths) {
+    if (!fs.existsSync(requiredPath)) {
+      console.error(
+        `Error: Required package artifact not found: ${requiredPath}`,
+      );
+      console.error('Please run "npm run bundle" first');
+      process.exit(1);
+    }
+  }
 }
 
-// Copy README and LICENSE
-console.log('Copying documentation files...');
-const filesToCopy = ['README.md', 'LICENSE'];
-for (const file of filesToCopy) {
-  const sourcePath = path.join(rootDir, file);
-  const destPath = path.join(distDir, file);
-  if (fs.existsSync(sourcePath)) {
-    fs.copyFileSync(sourcePath, destPath);
-    console.log(`Copied ${file}`);
+function copyDocumentationFiles(rootDir, distDir) {
+  console.log('Copying documentation files...');
+  const filesToCopy = ['README.md', 'LICENSE'];
+  for (const file of filesToCopy) {
+    const sourcePath = path.join(rootDir, file);
+    const destPath = path.join(distDir, file);
+    if (fs.existsSync(sourcePath)) {
+      fs.copyFileSync(sourcePath, destPath);
+      console.log(`Copied ${file}`);
+    } else {
+      console.warn(`Warning: ${file} not found at ${sourcePath}`);
+    }
+  }
+}
+
+function copyLocales(rootDir, distDir) {
+  console.log('Copying locales folder...');
+  const localesSourceDir = path.join(
+    rootDir,
+    'packages',
+    'cli',
+    'src',
+    'i18n',
+    'locales',
+  );
+  const localesDestDir = path.join(distDir, 'locales');
+
+  if (fs.existsSync(localesSourceDir)) {
+    copyRecursiveSync(localesSourceDir, localesDestDir);
+    console.log('Copied locales folder');
   } else {
-    console.warn(`Warning: ${file} not found at ${sourcePath}`);
+    console.warn(`Warning: locales folder not found at ${localesSourceDir}`);
   }
 }
 
-// Copy locales folder
-console.log('Copying locales folder...');
-const localesSourceDir = path.join(
-  rootDir,
-  'packages',
-  'cli',
-  'src',
-  'i18n',
-  'locales',
-);
-const localesDestDir = path.join(distDir, 'locales');
+function copyExtensionExamples(rootDir, distDir) {
+  console.log('Copying extension examples folder...');
+  const extensionExamplesDir = path.join(
+    rootDir,
+    'packages',
+    'cli',
+    'src',
+    'commands',
+    'extensions',
+    'examples',
+  );
+  const extensionExamplesDestDir = path.join(distDir, 'examples');
 
-if (fs.existsSync(localesSourceDir)) {
-  // Recursive copy function
-  function copyRecursiveSync(src, dest) {
-    const stats = fs.statSync(src);
-    if (stats.isDirectory()) {
-      if (!fs.existsSync(dest)) {
-        fs.mkdirSync(dest, { recursive: true });
-      }
-      const entries = fs.readdirSync(src);
-      for (const entry of entries) {
-        const srcPath = path.join(src, entry);
-        const destPath = path.join(dest, entry);
-        copyRecursiveSync(srcPath, destPath);
-      }
-    } else {
-      fs.copyFileSync(src, dest);
-    }
+  if (fs.existsSync(extensionExamplesDir)) {
+    copyRecursiveSync(extensionExamplesDir, extensionExamplesDestDir);
+    console.log('Copied extension examples folder');
+  } else {
+    console.warn(
+      `Warning: extension examples folder not found at ${extensionExamplesDir}`,
+    );
   }
-
-  copyRecursiveSync(localesSourceDir, localesDestDir);
-  console.log('Copied locales folder');
-} else {
-  console.warn(`Warning: locales folder not found at ${localesSourceDir}`);
 }
 
-// Copy extensions folder
-console.log('Copying extension examples folder...');
-const extensionExamplesDir = path.join(
-  rootDir,
-  'packages',
-  'cli',
-  'src',
-  'commands',
-  'extensions',
-  'examples',
+function writeDistPackageJson(rootDir, distDir) {
+  console.log('Creating package.json for distribution...');
+
+  const cliEntryContent = `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const cliPath = join(__dirname, 'cli.js');
+
+const result = spawnSync(
+  process.execPath,
+  ['--expose-gc', cliPath, ...process.argv.slice(2)],
+  { stdio: 'inherit' },
 );
-const extensionExamplesDestDir = path.join(distDir, 'examples');
 
-if (fs.existsSync(extensionExamplesDir)) {
-  // Recursive copy function
-  function copyRecursiveSync(src, dest) {
-    const stats = fs.statSync(src);
-    if (stats.isDirectory()) {
-      if (!fs.existsSync(dest)) {
-        fs.mkdirSync(dest, { recursive: true });
-      }
-      const entries = fs.readdirSync(src);
-      for (const entry of entries) {
-        const srcPath = path.join(src, entry);
-        const destPath = path.join(dest, entry);
-        copyRecursiveSync(srcPath, destPath);
-      }
-    } else {
-      fs.copyFileSync(src, dest);
-    }
-  }
-
-  copyRecursiveSync(extensionExamplesDir, extensionExamplesDestDir);
-  console.log('Copied extension examples folder');
+if (result.signal) {
+  process.kill(process.pid, result.signal);
 } else {
-  console.warn(
-    `Warning: extension examples folder not found at ${extensionExamplesDir}`,
+  process.exit(result.status ?? 1);
+}
+`;
+
+  const cliEntryPath = path.join(distDir, 'cli-entry.js');
+  fs.writeFileSync(cliEntryPath, cliEntryContent, { mode: 0o755 });
+  console.log('Created dist cli-entry.js wrapper');
+
+  const rootPackageJson = JSON.parse(
+    fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
+  );
+
+  const distPackageJson = {
+    name: rootPackageJson.name,
+    version: rootPackageJson.version,
+    description:
+      rootPackageJson.description || 'Qwen Code - AI-powered coding assistant',
+    repository: rootPackageJson.repository,
+    type: 'module',
+    main: 'cli.js',
+    bin: {
+      qwen: 'cli-entry.js',
+    },
+    files: [
+      'cli-entry.js',
+      'cli.js',
+      // Worker thread entry loaded by FzfWorkerHandle at runtime via
+      // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.
+      // Must ship in the tarball or the @-picker silently falls back to the
+      // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
+      'fzfWorker.js',
+      'chunks',
+      'vendor',
+      '*.sb',
+      'README.md',
+      'LICENSE',
+      'locales',
+      'examples',
+      'bundled',
+      'web-shell',
+    ],
+    config: rootPackageJson.config,
+    dependencies: {},
+    optionalDependencies: {
+      '@lydell/node-pty': '1.2.0-beta.10',
+      '@lydell/node-pty-darwin-arm64': '1.2.0-beta.10',
+      '@lydell/node-pty-darwin-x64': '1.2.0-beta.10',
+      '@lydell/node-pty-linux-x64': '1.2.0-beta.10',
+      '@lydell/node-pty-win32-arm64': '1.2.0-beta.10',
+      '@lydell/node-pty-win32-x64': '1.2.0-beta.10',
+      '@teddyzhu/clipboard': '0.0.5',
+      '@teddyzhu/clipboard-darwin-arm64': '0.0.5',
+      '@teddyzhu/clipboard-darwin-x64': '0.0.5',
+      '@teddyzhu/clipboard-linux-x64-gnu': '0.0.5',
+      '@teddyzhu/clipboard-linux-arm64-gnu': '0.0.5',
+      '@teddyzhu/clipboard-win32-x64-msvc': '0.0.5',
+      '@teddyzhu/clipboard-win32-arm64-msvc': '0.0.5',
+    },
+    engines: rootPackageJson.engines,
+  };
+
+  fs.writeFileSync(
+    path.join(distDir, 'package.json'),
+    JSON.stringify(distPackageJson, null, 2) + '\n',
   );
 }
 
-// Copy package.json from root and modify it for publishing
-console.log('Creating package.json for distribution...');
-const rootPackageJson = JSON.parse(
-  fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
-);
+function printPackageStructure(distDir) {
+  console.log('\n✅ Package prepared for publishing at dist/');
+  console.log('\nPackage structure:');
+  // Use Node.js to list directory contents (cross-platform)
+  const distFiles = fs.readdirSync(distDir);
+  for (const file of distFiles) {
+    const filePath = path.join(distDir, file);
+    const stats = fs.statSync(filePath);
+    const size = stats.isDirectory() ? '<DIR>' : formatBytes(stats.size);
+    console.log(`  ${size.padEnd(12)} ${file}`);
+  }
+}
 
-// Create a clean package.json for the published package
-const distPackageJson = {
-  name: rootPackageJson.name,
-  version: rootPackageJson.version,
-  description:
-    rootPackageJson.description || 'Qwen Code - AI-powered coding assistant',
-  repository: rootPackageJson.repository,
-  type: 'module',
-  main: 'cli.js',
-  bin: {
-    qwen: 'cli.js',
-  },
-  files: [
-    'cli.js',
-    'chunks',
-    'vendor',
-    '*.sb',
-    'README.md',
-    'LICENSE',
-    'locales',
-    'bundled',
-  ],
-  config: rootPackageJson.config,
-  dependencies: {},
-  optionalDependencies: {
-    '@lydell/node-pty': '1.2.0-beta.10',
-    '@lydell/node-pty-darwin-arm64': '1.2.0-beta.10',
-    '@lydell/node-pty-darwin-x64': '1.2.0-beta.10',
-    '@lydell/node-pty-linux-x64': '1.2.0-beta.10',
-    '@lydell/node-pty-win32-arm64': '1.2.0-beta.10',
-    '@lydell/node-pty-win32-x64': '1.2.0-beta.10',
-    '@teddyzhu/clipboard': '0.0.5',
-    '@teddyzhu/clipboard-darwin-arm64': '0.0.5',
-    '@teddyzhu/clipboard-darwin-x64': '0.0.5',
-    '@teddyzhu/clipboard-linux-x64-gnu': '0.0.5',
-    '@teddyzhu/clipboard-linux-arm64-gnu': '0.0.5',
-    '@teddyzhu/clipboard-win32-x64-msvc': '0.0.5',
-    '@teddyzhu/clipboard-win32-arm64-msvc': '0.0.5',
-  },
-  engines: rootPackageJson.engines,
-};
-
-fs.writeFileSync(
-  path.join(distDir, 'package.json'),
-  JSON.stringify(distPackageJson, null, 2) + '\n',
-);
-
-console.log('\n✅ Package prepared for publishing at dist/');
-console.log('\nPackage structure:');
-// Use Node.js to list directory contents (cross-platform)
-const distFiles = fs.readdirSync(distDir);
-for (const file of distFiles) {
-  const filePath = path.join(distDir, file);
-  const stats = fs.statSync(filePath);
-  const size = stats.isDirectory() ? '<DIR>' : formatBytes(stats.size);
-  console.log(`  ${size.padEnd(12)} ${file}`);
+function copyRecursiveSync(src, dest) {
+  const stats = fs.statSync(src);
+  if (stats.isDirectory()) {
+    if (!fs.existsSync(dest)) {
+      fs.mkdirSync(dest, { recursive: true });
+    }
+    const entries = fs.readdirSync(src);
+    for (const entry of entries) {
+      const srcPath = path.join(src, entry);
+      const destPath = path.join(dest, entry);
+      copyRecursiveSync(srcPath, destPath);
+    }
+  } else {
+    fs.copyFileSync(src, dest);
+  }
 }
 
 function formatBytes(bytes) {

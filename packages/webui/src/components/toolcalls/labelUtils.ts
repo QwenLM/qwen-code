@@ -59,7 +59,7 @@ export const getToolDisplayLabel = ({
     case 'update_todos':
     case 'updated_plan':
     case 'updatedplan':
-      return 'TodoWrite';
+      return 'TodoList';
     case 'web_fetch':
     case 'webfetch':
     case 'fetch':
@@ -90,9 +90,20 @@ export const getToolDisplayLabel = ({
     case 'savememory':
     case 'memory':
       return 'SaveMemory';
+    case 'enter_plan_mode':
+      return 'EnterPlanMode';
     case 'exit_plan_mode':
-    case 'switch_mode':
+    case 'switch_mode': {
+      // enter and exit share the 'switch_mode' kind; disambiguate by title.
+      const titleStr = typeof title === 'string' ? title.toLowerCase() : '';
+      if (
+        titleStr.includes('enterplanmode') ||
+        titleStr.includes('enter plan')
+      ) {
+        return 'EnterPlanMode';
+      }
       return 'ExitPlanMode';
+    }
     case 'task':
       return 'Task';
     case 'skill':

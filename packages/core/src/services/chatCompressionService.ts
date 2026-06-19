@@ -6,8 +6,13 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/config.js';
 import type { GeminiChat } from '../core/geminiChat.js';
-import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
+import {
+  type ChatCompressionInfo,
+  type CompactionTriggerReason,
+  CompressionStatus,
+} from '../core/turn.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
@@ -15,35 +20,24 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import {
-  DEFAULT_IMAGE_TOKEN_ESTIMATE,
   estimateContentChars,
+  resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
-import { estimatePromptTokens } from './tokenEstimation.js';
-
-/**
- * The fraction of the latest chat history to keep. A value of 0.3
- * means that only the last 30% of the chat history will be kept after compression.
- */
-export const COMPRESSION_PRESERVE_THRESHOLD = 0.3;
-
-/**
- * Minimum fraction of history (by character count) that must be compressible
- * to proceed with a compression API call. Prevents futile calls where the
- * model receives almost no context and generates a useless summary.
- */
-export const MIN_COMPRESSION_FRACTION = 0.05;
-
-/**
- * When the trailing entry is an in-flight `model+functionCall` and the regular
- * scan finds no clean split past the target fraction, the splitter falls back
- * to compressing everything except the last few entries. This constant sets
- * how many most-recent complete `(model+functionCall, user+functionResponse)`
- * tool rounds are retained as working context (the trailing in-flight call is
- * always retained on top of these).
- */
-export const TOOL_ROUND_RETAIN_COUNT = 2;
+import {
+  CHARS_PER_TOKEN,
+  estimateContentTokens,
+  estimatePromptTokens,
+} from './tokenEstimation.js';
+import {
+  buildStateReminderParts,
+  composePostCompactHistory,
+  countToolResponseImages,
+  postProcessSummary,
+  stripAnalysisBlock,
+  type SubagentSnapshot,
+} from './postCompactAttachments.js';
 
 /**
  * Hard cap on the compression sideQuery output (summary text only, since
@@ -101,6 +95,42 @@ export const HARD_BUFFER = 3_000;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
+const CJK_CHAR_TOKEN_MULTIPLIER = 1.5;
+const CJK_CHAR_PATTERN =
+  /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/g;
+
+function estimateSummaryOutputTokens(
+  summary: string,
+  imageTokenEstimate: number,
+): number {
+  const genericEstimate = estimateContentTokens(
+    [{ role: 'model', parts: [{ text: summary }] }],
+    imageTokenEstimate,
+  );
+  const cjkCharCount = summary.match(CJK_CHAR_PATTERN)?.length ?? 0;
+  if (cjkCharCount === 0) {
+    return genericEstimate;
+  }
+
+  const nonCjkCharCount = Math.max(0, summary.length - cjkCharCount);
+  const cjkAwareEstimate =
+    Math.ceil(nonCjkCharCount / CHARS_PER_TOKEN) +
+    Math.ceil(cjkCharCount * CJK_CHAR_TOKEN_MULTIPLIER);
+  return Math.max(genericEstimate, cjkAwareEstimate);
+}
+
+/**
+ * Hard cap on the PreCompact hook's `additionalContext` once it is merged
+ * into the side-query system prompt. The user-supplied `/compress` text is
+ * already capped at `MAX_COMPRESS_INSTRUCTIONS_CHARS` (2000) in
+ * compressCommand.ts for exactly this reason — the side-query has no
+ * input-truncation retry, so an unbounded hook payload could inflate the
+ * prompt and trigger a PTL the compaction path can't recover from. Hooks
+ * may legitimately concatenate context across several scripts, so this cap
+ * is set higher than the user-text cap.
+ */
+export const MAX_HOOK_INSTRUCTIONS_CHARS = 4000;
+
 export interface CompactionThresholds {
   /** Token count at which UI warn tier triggers. */
   readonly warn: number;
@@ -118,7 +148,7 @@ export interface CompactionThresholds {
  * Each tier is `max(proportional, absolute)`:
  *   auto = max(DEFAULT_PCT * window,                       effectiveWindow - AUTOCOMPACT_BUFFER)
  *   warn = max((DEFAULT_PCT - WARN_PCT_OFFSET) * window,   auto - WARN_BUFFER)
- *   hard = max(effectiveWindow - HARD_BUFFER,              auto)   // hard degrades to auto for tiny windows
+ *   hard = min(window, max(effectiveWindow - HARD_BUFFER,  auto + HARD_BUFFER))
  *
  * Small windows (where the absolute branch goes negative) automatically
  * fall back to the proportional branch. Large windows are dominated by
@@ -142,124 +172,15 @@ export function computeThresholds(window: number): CompactionThresholds {
   const warn = Math.max((DEFAULT_PCT - WARN_PCT_OFFSET) * window, absWarn);
 
   const rawHard = effectiveWindow - HARD_BUFFER;
-  const hard = Math.max(rawHard, auto);
+  // Guarantee hard > auto so compaction doesn't wait until the last moment.
+  // For tiny/zero windows where auto is already at the proportional floor,
+  // clamp hard to the window itself so it never exceeds the actual limit.
+  const hard = Math.min(window, Math.max(rawHard, auto + HARD_BUFFER));
 
   return { warn, auto, hard, effectiveWindow };
 }
 
 export type CompactTrigger = 'manual' | 'auto';
-
-const hasFunctionCall = (content: Content | undefined): boolean =>
-  !!content?.parts?.some((part) => !!part.functionCall);
-
-const hasFunctionResponse = (content: Content | undefined): boolean =>
-  !!content?.parts?.some((part) => !!part.functionResponse);
-
-/**
- * Walk backward from the trailing in-flight `model+functionCall` and return
- * the index after which the most-recent `retainCount` complete tool-round
- * pairs sit (plus the trailing fc itself). Used by the splitter's in-flight
- * fallback path. Stops counting at the first non-pair encountered, so the
- * retain count is best-effort: if there are fewer complete pairs than
- * requested, all of them are retained.
- */
-function splitPointRetainingTrailingPairs(
-  contents: Content[],
-  retainCount: number,
-): number {
-  let pairsFound = 0;
-  let i = contents.length - 2;
-  while (i >= 1 && pairsFound < retainCount) {
-    if (hasFunctionCall(contents[i - 1]) && hasFunctionResponse(contents[i])) {
-      pairsFound += 1;
-      i -= 2;
-    } else {
-      break;
-    }
-  }
-  return contents.length - (2 * pairsFound + 1);
-}
-
-/**
- * Returns the index of the oldest item to keep when compressing. May return
- * contents.length which indicates that everything should be compressed.
- *
- * The algorithm has two phases:
- *
- * 1. **Scan:** walk left-to-right looking for the first non-functionResponse
- *    user message that lands past `fraction` of total chars. That's the
- *    "clean" split — the kept slice starts with a fresh user prompt.
- *
- * 2. **Fallbacks** (no clean split found): the gate that gets us here has
- *    already decided we need to compress, so all three fallbacks bias toward
- *    *more* compression rather than less:
- *
- *    - last entry is `model` without functionCall → compress everything.
- *    - last entry is `user` with functionResponse → compress everything (the
- *      trailing tool round is complete; no orphans).
- *    - last entry is `model` with functionCall (in-flight) → compress
- *      everything except the trailing call plus the last `retainCount`
- *      complete tool rounds. The kept slice may start with `model+fc`;
- *      callers must inject a synthetic continuation user message between
- *      `summary_ack_model` and the kept slice to preserve role alternation.
- *
- * The pre-fallback returns of `lastSplitPoint` (compress less) only happen
- * for malformed histories that don't end in user/model.
- *
- * Exported for testing purposes.
- */
-export function findCompressSplitPoint(
-  contents: Content[],
-  fraction: number,
-  retainCount = TOOL_ROUND_RETAIN_COUNT,
-  precomputedCharCounts?: number[],
-): number {
-  if (fraction <= 0 || fraction >= 1) {
-    throw new Error('Fraction must be between 0 and 1');
-  }
-
-  // Slimming-aware char estimator: base64 payloads in inlineData
-  // would otherwise dominate the split. The caller can pre-compute and
-  // pass `precomputedCharCounts` to avoid a redundant walk when the
-  // surrounding compress() loop also needs the values.
-  //
-  // NOTE on the fallback: when `precomputedCharCounts` is omitted, we
-  // use `DEFAULT_IMAGE_TOKEN_ESTIMATE` rather than the user's resolved
-  // setting / env override. The only production caller is `compress()`,
-  // which always passes precomputed counts, so the fallback is a
-  // test-friendly default — not a behavior path users can influence.
-  // Production callers MUST pass `precomputedCharCounts`.
-  const charCounts =
-    precomputedCharCounts ??
-    contents.map((content) =>
-      estimateContentChars(content, DEFAULT_IMAGE_TOKEN_ESTIMATE),
-    );
-  const totalCharCount = charCounts.reduce((a, b) => a + b, 0);
-  const targetCharCount = totalCharCount * fraction;
-
-  let lastSplitPoint = 0;
-  let cumulativeCharCount = 0;
-  for (let i = 0; i < contents.length; i++) {
-    const content = contents[i];
-    if (content.role === 'user' && !hasFunctionResponse(content)) {
-      if (cumulativeCharCount >= targetCharCount) {
-        return i;
-      }
-      lastSplitPoint = i;
-    }
-    cumulativeCharCount += charCounts[i];
-  }
-
-  const lastContent = contents[contents.length - 1];
-  if (lastContent?.role === 'model') {
-    if (!hasFunctionCall(lastContent)) return contents.length;
-    return splitPointRetainingTrailingPairs(contents, retainCount);
-  }
-  if (lastContent?.role === 'user' && hasFunctionResponse(lastContent)) {
-    return contents.length;
-  }
-  return lastSplitPoint;
-}
 
 export interface CompressOptions {
   promptId: string;
@@ -305,6 +226,74 @@ export interface CompressOptions {
    * (review #4168 R1.3 / R1.4)
    */
   precomputedEffectiveTokens?: number;
+  /**
+   * User-supplied focus directives passed to the compression side-query.
+   * Appended to the system prompt as an `Additional Instructions:` block.
+   * Sourced from `/compress <text>`. PreCompact hooks may further append
+   * `additionalContext` via `hookSpecificOutput`; user text always comes
+   * first, hook text last (matches claude-code mergeHookInstructions).
+   */
+  customInstructions?: string;
+}
+
+/**
+ * Project active background subagent tasks into the minimal shape
+ * `composePostCompactHistory` needs. `running` and `paused` are the only
+ * statuses the post-compact agent might need to act on; terminal states
+ * (completed / failed / cancelled) already emitted their notification XML
+ * and need no reminder. Only `agent` kinds are interactive (shell and
+ * monitor kinds are excluded — they don't have a send_message channel).
+ *
+ * Returns `[]` (not `undefined`) when the registry is absent so the
+ * downstream attachment builder takes the empty-array branch and emits
+ * no block, rather than treating `undefined` as a configuration error.
+ */
+function collectActiveSubagents(config: Config): SubagentSnapshot[] {
+  const registry = config.getBackgroundTaskRegistry?.();
+  if (!registry) return [];
+  return registry
+    .getAll()
+    .filter(
+      (t) =>
+        t.kind === 'agent' &&
+        // Only TRUE background subagents belong in a `<background-tasks>`
+        // block. Foreground entries (`isBackgrounded: false`) are the
+        // parent's synchronously-awaited tool call — their pending
+        // functionCall is still in history and resolves through the normal
+        // tool-result channel, so a reminder would mislabel them. Mirrors
+        // the `getRunningBackgroundCount` filter in background-tasks.ts.
+        t.isBackgrounded &&
+        (t.status === 'running' || t.status === 'paused'),
+    )
+    .map((t) => ({
+      id: t.id,
+      description: t.description,
+      status: t.status as 'running' | 'paused',
+      startTime: t.startTime,
+    }));
+}
+
+/**
+ * Compose the compression side-query system prompt: the base template,
+ * optionally followed by an `Additional Instructions:` block containing
+ * the user's `/compress <text>` directives and any `additionalContext`
+ * returned by PreCompact hooks. Order is user-first / hook-appended so an
+ * explicit user intent outranks a global hook policy when both speak.
+ */
+function buildCompressionSystemPrompt(
+  userInstructions: string | undefined,
+  hookInstructions: string,
+): string {
+  const base = getCompressionPrompt();
+  const parts: string[] = [];
+  if (userInstructions && userInstructions.trim().length > 0) {
+    parts.push(userInstructions.trim());
+  }
+  if (hookInstructions.length > 0) {
+    parts.push(hookInstructions);
+  }
+  if (parts.length === 0) return base;
+  return `${base}\n\nAdditional Instructions:\n${parts.join('\n\n')}`;
 }
 
 export class ChatCompressionService {
@@ -323,8 +312,14 @@ export class ChatCompressionService {
       signal,
     } = opts;
     const compactTrigger = trigger ?? (force ? 'manual' : 'auto');
+    // Why this compaction fired, surfaced on the COMPRESSED result so the UI
+    // notice is accurate. Defaults by trigger; the gate below upgrades it to
+    // 'image_overflow' when the screenshot trigger is what let it through.
+    let triggerReason: CompactionTriggerReason =
+      compactTrigger === 'manual' ? 'manual' : 'token_limit';
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
+    const tuning = resolveCompactionTuning(chatCompressionSettings);
 
     // Cheap gates first — these don't need the curated history. Forward
     // originalTokenCount on NOOP (matching the threshold-gate branch below)
@@ -361,18 +356,36 @@ export class ChatCompressionService {
                 chat.getHistoryShallow(true),
                 pendingUserMessage,
                 originalTokenCount,
+                // lastOutputTokenCount is unavailable here. The common
+                // sendMessageStream path passes precomputedEffectiveTokens,
+                // which already includes the chat's previous output tokens.
+                0,
                 slimmingConfig.imageTokenEstimate,
               )
             : originalTokenCount;
       if (effectiveTokens < auto) {
-        return {
-          newHistory: null,
-          info: {
-            originalTokenCount,
-            newTokenCount: originalTokenCount,
-            compressionStatus: CompressionStatus.NOOP,
-          },
-        };
+        // Screenshot-overflow trigger: even below the token threshold,
+        // compact once tool-returned images accumulate past the configured
+        // count, so computer-use sessions don't drown the model in stale
+        // screenshots. Only counted in the would-be-NOOP path and only when
+        // enabled, so the common case pays nothing. Counts NESTED tool media
+        // only (countToolResponseImages), not user-pasted top-level images.
+        const screenshotOverflow =
+          tuning.enableScreenshotTrigger &&
+          countToolResponseImages(chat.getHistoryShallow(true)) >=
+            tuning.screenshotTriggerThreshold;
+        if (!screenshotOverflow) {
+          return {
+            newHistory: null,
+            info: {
+              originalTokenCount,
+              newTokenCount: originalTokenCount,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          };
+        }
+        // Below the token threshold but the screenshot trigger fired.
+        triggerReason = 'image_overflow';
       }
     }
 
@@ -393,7 +406,32 @@ export class ChatCompressionService {
       };
     }
 
-    // Fire PreCompact hook before compression begins
+    // CLAUDE-CODE-STYLE FULL-HISTORY COMPRESSION: the entire curated
+    // history is sent to the summary side-query (no split, no tail
+    // preservation), and the post-compact history is assembled by
+    // composePostCompactHistory below (summary + model ack + recent
+    // file restores + recent image restore).
+
+    // Guard: need at least a user+model pair for a meaningful summary.
+    // This runs BEFORE the PreCompact hook fires — a hook with side effects
+    // (transcript dump, external notification) shouldn't be triggered for
+    // a session we're about to NOOP on anyway.
+    if (curatedHistory.length < 2) {
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
+    }
+
+    // Fire PreCompact hook before compression begins. Pass any user-supplied
+    // `/compress` instructions so hook scripts can read / log / amend them
+    // via `hookSpecificOutput.additionalContext`. The aggregator concatenates
+    // additionalContext across all hooks with '\n' separators.
+    let hookExtraInstructions = '';
     const hookSystem = config.getHookSystem();
     if (hookSystem) {
       const preCompactTrigger =
@@ -401,90 +439,33 @@ export class ChatCompressionService {
           ? PreCompactTrigger.Manual
           : PreCompactTrigger.Auto;
       try {
-        await hookSystem.firePreCompactEvent(preCompactTrigger, '', signal);
+        const result = await hookSystem.firePreCompactEvent(
+          preCompactTrigger,
+          opts.customInstructions ?? '',
+          signal,
+        );
+        // `getAdditionalContext()` sanitises (`<`/`>` → `&lt;`/`&gt;`) so a
+        // hook can't inject XML structure into the summary prompt. Mirrors
+        // every other call-site in this repo (toolHookTriggers, agent.ts,
+        // client.ts) — keep it consistent.
+        const merged = result?.getAdditionalContext();
+        if (merged && merged.trim().length > 0) {
+          // Cap like the user-text path: an unbounded hook payload would
+          // otherwise bypass MAX_COMPRESS_INSTRUCTIONS_CHARS and inflate the
+          // side-query prompt past a recoverable size.
+          hookExtraInstructions = merged
+            .trim()
+            .slice(0, MAX_HOOK_INSTRUCTIONS_CHARS);
+        }
       } catch (err) {
         config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
       }
     }
 
-    // Only manual `/compress` (trigger='manual') performs the orphan-strip:
-    // if the chat was interrupted with a trailing model funcCall whose
-    // funcResponse never arrived, the user-initiated /compress between
-    // turns can safely drop it before computing the split point.
-    //
-    // Both automatic paths (trigger='auto') — cheap-gate (force=false) AND
-    // hard-rescue (force=true) — must NOT strip. They fire inside
-    // sendMessageStream() BEFORE the pending funcResponse is pushed onto
-    // history, so the trailing funcCall is still active, not orphaned.
-    //
-    // Gating on `trigger === 'manual'` instead of `force` disambiguates
-    // "user wants this compressed now, history can be mutated" from
-    // "automatic compression mid-turn, history snapshot is live state and
-    // must be preserved verbatim". Earlier the predicate used `force`,
-    // which is correct for manual /compress (force=true, trigger='manual')
-    // but conflated hard-rescue (force=true, trigger='auto') and silently
-    // stripped active funcCalls there.
-    const lastMessage = curatedHistory[curatedHistory.length - 1];
-    const hasOrphanedFuncCall =
-      compactTrigger === 'manual' &&
-      lastMessage?.role === 'model' &&
-      lastMessage.parts?.some((p) => !!p.functionCall);
-    const historyForSplit = hasOrphanedFuncCall
-      ? curatedHistory.slice(0, -1)
-      : curatedHistory;
-
-    // Precompute charCounts once and share with the splitter + the
-    // MIN_COMPRESSION_FRACTION guard below, avoiding two extra walks.
-    const charCounts = historyForSplit.map((c) =>
-      estimateContentChars(c, slimmingConfig.imageTokenEstimate),
-    );
-    const splitPoint = findCompressSplitPoint(
-      historyForSplit,
-      1 - COMPRESSION_PRESERVE_THRESHOLD,
-      TOOL_ROUND_RETAIN_COUNT,
-      charCounts,
-    );
-
-    const historyToCompress = historyForSplit.slice(0, splitPoint);
-    const historyToKeep = historyForSplit.slice(splitPoint);
-    // The in-flight fallback path may produce a kept slice starting with
-    // model+functionCall; the post-summary history needs a synthetic user
-    // between the summary's model_ack and the kept entries.
-    const keepNeedsContinuationBridge = historyToKeep[0]?.role === 'model';
-
-    if (historyToCompress.length === 0) {
-      return {
-        newHistory: null,
-        info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
-          compressionStatus: CompressionStatus.NOOP,
-        },
-      };
-    }
-
-    // Guard: if historyToCompress is too small relative to the total history,
-    // skip compression. This prevents futile API calls where the model receives
-    // almost no context and generates a useless "summary" that inflates tokens.
-    let compressCharCount = 0;
-    for (let i = 0; i < splitPoint; i++) compressCharCount += charCounts[i]!;
-    const totalCharCount = charCounts.reduce((a, b) => a + b, 0);
-    if (
-      totalCharCount > 0 &&
-      compressCharCount / totalCharCount < MIN_COMPRESSION_FRACTION
-    ) {
-      return {
-        newHistory: null,
-        info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
-          compressionStatus: CompressionStatus.NOOP,
-        },
-      };
-    }
-
-    // Slim the side-query; live history unchanged.
-    const slim = slimCompactionInput(historyToCompress);
+    // Slim the side-query input: replace inlineData with placeholders.
+    // The original history (with images) is preserved separately for
+    // the post-compact image restoration block.
+    const slim = slimCompactionInput(curatedHistory);
     if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
       config
         .getDebugLogger()
@@ -496,18 +477,22 @@ export class ChatCompressionService {
 
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',
+      skipOutputLanguagePreference: true,
       model,
       // Best-effort: failures fall back to NOOP and the next turn re-triggers
       // compression anyway, so don't burn 7 retries blocking the user mid-turn.
       maxAttempts: 1,
-      systemInstruction: getCompressionPrompt(),
+      systemInstruction: buildCompressionSystemPrompt(
+        opts.customInstructions,
+        hookExtraInstructions,
+      ),
       contents: [
         ...slim.slimmedHistory,
         {
           role: 'user',
           parts: [
             {
-              text: 'First, reason in your scratchpad. Then, generate the <state_snapshot>.',
+              text: 'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.',
             },
           ],
         },
@@ -524,7 +509,15 @@ export class ChatCompressionService {
       promptId,
     });
     const summary = summaryResult.text;
-    const isSummaryEmpty = !summary || summary.trim().length === 0;
+    // Check the PROCESSED summary: postProcessSummary strips <analysis>
+    // blocks, so a response that is ONLY <analysis>...</analysis> (no
+    // <state_snapshot>) has a non-empty RAW body but strips to nothing. If
+    // we gated on the raw body, compaction would "succeed" and the agent
+    // would resume with `[Summary unavailable]` as its only context — total
+    // amnesia with green metrics. Treat strip-to-empty as an empty summary
+    // so it takes the COMPRESSION_FAILED_EMPTY_SUMMARY path (NOOP) instead.
+    const isSummaryEmpty =
+      !summary || stripAnalysisBlock(summary).trim().length === 0;
     const compressionUsageMetadata = summaryResult.usage;
     const compressionInputTokenCount =
       compressionUsageMetadata?.promptTokenCount;
@@ -539,6 +532,19 @@ export class ChatCompressionService {
         0,
         compressionUsageMetadata.totalTokenCount - compressionInputTokenCount,
       );
+    }
+    if (compressionOutputTokenCount === undefined && !isSummaryEmpty) {
+      compressionOutputTokenCount = estimateSummaryOutputTokens(
+        summary,
+        slimmingConfig.imageTokenEstimate,
+      );
+      config
+        .getDebugLogger()
+        .warn(
+          `[chat-compression] compression side-query omitted usage metadata; ` +
+            `using local estimate for summary output token count ` +
+            `(${compressionOutputTokenCount}).`,
+        );
     }
 
     // Defensive guard: if the side-query hit COMPACT_MAX_OUTPUT_TOKENS, the
@@ -588,41 +594,104 @@ export class ChatCompressionService {
     let canCalculateNewTokenCount = false;
 
     if (!isSummaryEmpty) {
-      extraHistory = [
-        {
-          role: 'user',
-          parts: [{ text: summary }],
-        },
-        {
-          role: 'model',
-          parts: [{ text: 'Got it. Thanks for the additional context!' }],
-        },
-        // When the kept slice starts with model+functionCall (because
-        // tool-round absorption pulled the only fresh user message into
-        // compress), inject a synthetic continuation prompt so the joined
-        // history alternates correctly.
-        ...(keepNeedsContinuationBridge
-          ? [
-              {
-                role: 'user' as const,
-                parts: [
-                  {
-                    text: 'Continue with the prior task using the context above.',
-                  },
-                ],
-              },
-            ]
-          : []),
-        ...historyToKeep,
-      ];
+      // Manual /compress has no pending functionResponse, so a trailing
+      // model+functionCall is an ORPHAN (e.g. an interrupted/cancelled tool
+      // call). Preserving it emits model[functionCall] immediately followed
+      // by the next user TEXT turn, which the API rejects (a functionCall
+      // must be followed by its functionResponse). Strip it for manual;
+      // auto-compaction keeps it because the pending functionResponse pairs
+      // with it (trailingFunctionCallContent).
+      const lastCurated = curatedHistory[curatedHistory.length - 1];
+      const historyForCompose =
+        compactTrigger === 'manual' &&
+        lastCurated?.role === 'model' &&
+        lastCurated.parts?.some((p) => !!p.functionCall)
+          ? curatedHistory.slice(0, -1)
+          : curatedHistory;
 
-      // Best-effort token math using *only* model-reported token counts.
+      // Use the new composer — assembles summary + ack + file restores +
+      // image restore. No tail preservation, no continuation bridge.
+      try {
+        extraHistory = await composePostCompactHistory(
+          historyForCompose,
+          summary,
+          {
+            workspaceRoot: config.getTargetDir(),
+            signal,
+            maxFiles: tuning.maxRecentFiles,
+            maxImages: tuning.maxRecentImages,
+            // Restore plan-mode reminder + running-subagent snapshot so the
+            // post-compact agent does not lose either piece of mid-session
+            // state. Both reduce to no-ops when the corresponding source is
+            // empty.
+            planModeActive: config.getApprovalMode?.() === ApprovalMode.PLAN,
+            runningSubagents: collectActiveSubagents(config),
+          },
+        );
+      } catch (err) {
+        // The summary side-query already succeeded; only restoration
+        // assembly (disk I/O, history walking) failed. Degrade to
+        // summary + ack rather than letting the throw escape to
+        // sendMessageStream — an uncaught error there crashes the active
+        // turn AND bypasses the COMPRESSION_FAILED breaker. The summary
+        // still reduces context, so this is a degraded success, not a
+        // compression failure.
+        config
+          .getDebugLogger()
+          .warn(`[chat-compression] composePostCompactHistory failed: ${err}`);
+        // Fold a trailing model+functionCall into the ack so a pending
+        // functionResponse (auto-compaction mid-tool-loop) keeps its matching
+        // call — otherwise the next request has an orphaned functionResponse
+        // → 400. (Manual orphans were already stripped above.) Folding into
+        // the ack avoids a model→model adjacency.
+        const trailingFc = historyForCompose[historyForCompose.length - 1];
+        const fcParts =
+          trailingFc?.role === 'model'
+            ? (trailingFc.parts ?? []).filter((p) => !!p.functionCall)
+            : [];
+        // Re-apply the SAME plan-mode + subagent reminders the normal path
+        // injects. These builders are pure (no disk I/O / history walking),
+        // so the failure that took out composePostCompactHistory can't take
+        // them out too — and dropping them here would silently lose plan-mode
+        // enforcement and the subagent roster on the degraded path.
+        const reminderParts = buildStateReminderParts({
+          planModeActive: config.getApprovalMode?.() === ApprovalMode.PLAN,
+          runningSubagents: collectActiveSubagents(config),
+        });
+        extraHistory = [
+          {
+            role: 'user',
+            parts: [{ text: postProcessSummary(summary) }, ...reminderParts],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'Got it. Thanks for the additional context!' },
+              ...fcParts,
+            ],
+          },
+        ];
+      }
+
+      // Best-effort token math using model-reported token counts when
+      // available. Some OpenAI-compatible providers omit usage for the
+      // compression side-query; in that case, fall back to the same local
+      // content estimator used by the auto-compaction gate so a valid summary
+      // can still shrink the history instead of failing with a token-count
+      // error.
       //
-      // Note: compressionInputTokenCount includes the compression prompt and
-      // the extra "reason in your scratchpad" instruction(approx. 1000 tokens), and
-      // compressionOutputTokenCount reflects the summary tokens only since
-      // thinking is disabled.
-      // We accept these inaccuracies to avoid local token estimation.
+      // Note: compressionInputTokenCount includes the entire compression
+      // system prompt (the <state_snapshot> instructions, ~900 tokens) PLUS
+      // the short kick-off user turn ("First, reason in your <analysis>
+      // block. Then, produce the <state_snapshot> XML.", ~20 tokens) — the
+      // "approx. 1000 tokens" subtracted below is for that combined fixed
+      // overhead, not for any single instruction.
+      // compressionOutputTokenCount reflects the raw model response (i.e.
+      // <analysis> + <state_snapshot>); the <analysis> block is stripped
+      // by postProcessSummary before the summary enters history, so the
+      // real cost in newHistory is slightly lower than this count
+      // suggests. We accept that inaccuracy in favor of avoiding local
+      // token estimation.
       if (
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
@@ -636,6 +705,55 @@ export class ChatCompressionService {
             (compressionInputTokenCount - 1000) +
             compressionOutputTokenCount,
         );
+        // The composer injects file-restoration blocks (up to
+        // maxRecentFiles × 5K tokens) and an image-restoration block (up to
+        // maxRecentImages images) that are NOT in
+        // compressionOutputTokenCount. Estimate their cost locally so the
+        // inflation guard below fires when attachments dominate the
+        // post-compact size.
+        const restorationChars = extraHistory
+          .slice(2) // skip [summary, model ack]
+          .reduce(
+            (acc, c) =>
+              acc + estimateContentChars(c, slimmingConfig.imageTokenEstimate),
+            0,
+          );
+        newTokenCount += Math.ceil(restorationChars / CHARS_PER_TOKEN);
+      } else {
+        const estimatedOriginalVisibleTokenCount = estimateContentTokens(
+          curatedHistory,
+          slimmingConfig.imageTokenEstimate,
+        );
+        const estimatedNewVisibleTokenCount = estimateContentTokens(
+          extraHistory,
+          slimmingConfig.imageTokenEstimate,
+        );
+        if (
+          estimatedOriginalVisibleTokenCount > 0 &&
+          estimatedNewVisibleTokenCount > 0
+        ) {
+          const estimatedNonVisibleTokenCount = Math.max(
+            0,
+            originalTokenCount - estimatedOriginalVisibleTokenCount,
+          );
+          // Keep the API-reported system/tool/prompt remainder intact. The
+          // local estimator is only used for the visible conversation delta, so
+          // missing usage metadata cannot replace the authoritative total with
+          // a much smaller visible-history-only estimate.
+          newTokenCount =
+            estimatedNonVisibleTokenCount + estimatedNewVisibleTokenCount;
+          canCalculateNewTokenCount = true;
+          config
+            .getDebugLogger()
+            .debug(
+              `[chat-compression] usage metadata missing; estimated ` +
+                `post-compression token count by preserving the ` +
+                `API-reported non-visible remainder ` +
+                `(${estimatedNonVisibleTokenCount}) and replacing the ` +
+                `visible-history estimate (${estimatedOriginalVisibleTokenCount} -> ` +
+                `${estimatedNewVisibleTokenCount}).`,
+            );
+        }
       }
     }
 
@@ -685,9 +803,18 @@ export class ChatCompressionService {
           compactTrigger === 'manual'
             ? PostCompactTrigger.Manual
             : PostCompactTrigger.Auto;
+        // Pass the stripped summary (Finding 8a) so hook consumers see
+        // the same text that lands in history — not the raw side-query
+        // output with the <analysis> scratchpad still attached. The
+        // resume trailer is NOT included; it is wrapper decoration for
+        // the next agent turn, not state for downstream consumers.
         await config
           .getHookSystem()
-          ?.firePostCompactEvent(postCompactTrigger, summary, signal);
+          ?.firePostCompactEvent(
+            postCompactTrigger,
+            stripAnalysisBlock(summary),
+            signal,
+          );
       } catch (err) {
         config.getDebugLogger().warn(`PostCompact hook failed: ${err}`);
       }
@@ -698,6 +825,7 @@ export class ChatCompressionService {
           originalTokenCount,
           newTokenCount,
           compressionStatus: CompressionStatus.COMPRESSED,
+          triggerReason,
         },
       };
     }

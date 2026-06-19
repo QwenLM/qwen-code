@@ -26,7 +26,6 @@ import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOu
 import {
   normalizePartList,
   extractPartsFromUserMessage,
-  extractUsageFromGeminiClient,
   computeUsageFromMetrics,
   buildSystemMessage,
   createToolProgressHandler,
@@ -237,104 +236,6 @@ describe('extractPartsFromUserMessage', () => {
       parent_tool_use_id: null,
     };
     expect(extractPartsFromUserMessage(message)).toBeNull();
-  });
-});
-
-describe('extractUsageFromGeminiClient', () => {
-  it('should return undefined for null client', () => {
-    expect(extractUsageFromGeminiClient(null)).toBeUndefined();
-  });
-
-  it('should return undefined for non-object client', () => {
-    expect(extractUsageFromGeminiClient('not an object')).toBeUndefined();
-  });
-
-  it('should return undefined when getChat is not a function', () => {
-    const client = { getChat: 'not a function' };
-    expect(extractUsageFromGeminiClient(client)).toBeUndefined();
-  });
-
-  it('should return undefined when chat does not have getDebugResponses', () => {
-    const client = {
-      getChat: vi.fn().mockReturnValue({}),
-    };
-    expect(extractUsageFromGeminiClient(client)).toBeUndefined();
-  });
-
-  it('should extract usage from latest response with usageMetadata', () => {
-    const client = {
-      getChat: vi.fn().mockReturnValue({
-        getDebugResponses: vi.fn().mockReturnValue([
-          { usageMetadata: { promptTokenCount: 50 } },
-          {
-            usageMetadata: {
-              promptTokenCount: 100,
-              candidatesTokenCount: 200,
-              totalTokenCount: 300,
-              cachedContentTokenCount: 10,
-            },
-          },
-        ]),
-      }),
-    };
-    const result = extractUsageFromGeminiClient(client);
-    expect(result).toEqual({
-      input_tokens: 100,
-      output_tokens: 200,
-      total_tokens: 300,
-      cache_read_input_tokens: 10,
-    });
-  });
-
-  it('should return default values when metadata values are not numbers', () => {
-    const client = {
-      getChat: vi.fn().mockReturnValue({
-        getDebugResponses: vi.fn().mockReturnValue([
-          {
-            usageMetadata: {
-              promptTokenCount: 'not a number',
-              candidatesTokenCount: null,
-            },
-          },
-        ]),
-      }),
-    };
-    const result = extractUsageFromGeminiClient(client);
-    expect(result).toEqual({
-      input_tokens: 0,
-      output_tokens: 0,
-    });
-  });
-
-  it('should handle errors gracefully', () => {
-    const client = {
-      getChat: vi.fn().mockImplementation(() => {
-        throw new Error('Test error');
-      }),
-    };
-    const result = extractUsageFromGeminiClient(client);
-    expect(result).toBeUndefined();
-  });
-
-  it('should skip responses without usageMetadata', () => {
-    const client = {
-      getChat: vi.fn().mockReturnValue({
-        getDebugResponses: vi.fn().mockReturnValue([
-          { someOtherData: 'value' },
-          {
-            usageMetadata: {
-              promptTokenCount: 50,
-              candidatesTokenCount: 75,
-            },
-          },
-        ]),
-      }),
-    };
-    const result = extractUsageFromGeminiClient(client);
-    expect(result).toEqual({
-      input_tokens: 50,
-      output_tokens: 75,
-    });
   });
 });
 
@@ -827,6 +728,64 @@ describe('createAgentToolProgressHandler', () => {
       expect.objectContaining({
         callId: 'tool-1',
         resultDisplay: 'Success result',
+      }),
+      'parent-tool-id',
+    );
+  });
+
+  it('forwards subagent tool args and response parts for JSON output', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+    const responseParts: Part[] = [
+      {
+        functionResponse: {
+          name: 'test_tool',
+          id: 'tool-1',
+          response: { output: 'Success from responseParts' },
+        },
+      },
+    ];
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: { arg1: 'value1' },
+          status: 'success',
+          responseParts,
+        },
+      ],
+    };
+
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+        status: 'executing',
+      }),
+      'parent-tool-id',
+    );
+    expect(mockAdapter.emitToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+      }),
+      expect.objectContaining({
+        callId: 'tool-1',
+        responseParts,
       }),
       'parent-tool-id',
     );

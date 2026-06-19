@@ -1,0 +1,177 @@
+name: 'Qwen Triage'
+
+on:
+  issues:
+    types: ['opened']
+  pull_request_target:
+    types: ['opened', 'ready_for_review']
+  issue_comment:
+    types: ['created']
+  workflow_dispatch:
+    inputs:
+      number:
+        description: 'Issue or PR number to triage'
+        required: true
+        type: 'number'
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+
+jobs:
+  authorize:
+    # Gate PR and /triage-comment triggers on the principal having write+
+    # permission: the PR author for PR events, the commenter for /triage
+    # comments. Replaces the old eligibility checks based on same-repo PRs and
+    # comment author_association, so fork PRs by trusted authors are triaged.
+    # `issues` and `workflow_dispatch` triggers do not need this gate.
+    if: |-
+      github.repository == 'QwenLM/qwen-code' &&
+      (github.event_name == 'pull_request_target' ||
+       (github.event_name == 'issue_comment' &&
+        startsWith(github.event.comment.body, '@qwen-code /triage')))
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    outputs:
+      should_run: '${{ steps.perm.outputs.should_run }}'
+    steps:
+      - name: 'Check principal write permission'
+        id: 'perm'
+        env:
+          # CI_BOT_PAT (not GITHUB_TOKEN): reading a user's collaborator
+          # permission requires write/maintain/admin access, which the
+          # GITHUB_TOKEN with contents:read does not have. Safe here — this job
+          # runs no agent, checks out nothing, and processes no untrusted PR
+          # content; it only reads event metadata and calls one read API.
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          COMMENT_USER: '${{ github.event.comment.user.login }}'
+        run: |-
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request_target) principal="$PR_AUTHOR" ;;
+            issue_comment) principal="$COMMENT_USER" ;;
+            *) principal="" ;;
+          esac
+          if [ -z "$principal" ]; then
+            echo "No principal resolved for ${EVENT_NAME}; denying." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail closed: any API error or non-write permission denies the run.
+          api_error_file="$(mktemp)"
+          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+            api_error="$(cat "$api_error_file")"
+            rm -f "$api_error_file"
+            api_error="${api_error:-unknown error}"
+            api_error="${api_error//$'\r'/ }"
+            api_error="${api_error//$'\n'/ }"
+            echo "::error::Permission API call failed for ${principal}: ${api_error}"
+            echo "Failed to check permission for ${principal} (API error: ${api_error}); denying." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rm -f "$api_error_file"
+          case "$permission" in
+            admin|maintain|write)
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Denying triage: ${principal} permission is '${permission}' (needs write)." >> "$GITHUB_STEP_SUMMARY"
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+  triage:
+    needs: ['authorize']
+    timeout-minutes: 30
+    concurrency:
+      # GitHub evaluates concurrency before the job `if`, but after `needs`.
+      # Keep non-runnable PR/comment triggers out of the shared per-number
+      # group so they cannot cancel or replace an authorized run.
+      group: >-
+        ${{
+          (
+            (github.event_name == 'pull_request_target' &&
+             (github.event.pull_request.draft == true ||
+              needs.authorize.outputs.should_run != 'true')) ||
+            (github.event_name == 'issue_comment' &&
+             needs.authorize.outputs.should_run != 'true')
+          ) &&
+          format('{0}-run-{1}', github.workflow, github.run_id) ||
+          format('{0}-{1}', github.workflow, github.event.issue.number || github.event.pull_request.number || github.event.inputs.number)
+        }}
+      cancel-in-progress: >-
+        ${{
+          github.event_name == 'issues' ||
+          github.event_name == 'workflow_dispatch' ||
+          (((github.event_name == 'pull_request_target' &&
+             github.event.pull_request.draft == false) ||
+            (github.event_name == 'issue_comment' &&
+             startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
+           needs.authorize.outputs.should_run == 'true')
+        }}
+    runs-on: 'ubuntu-latest'
+    # startsWith (not contains) prevents false triggers from comments that
+    # mention the phrase in quoted text or mid-sentence descriptions.
+    # always() so the job still evaluates when the upstream `authorize` job is
+    # skipped (issues / workflow_dispatch paths, which need no permission gate).
+    if: >-
+      always() &&
+      github.repository == 'QwenLM/qwen-code' && (
+        github.event_name == 'issues' ||
+        github.event_name == 'workflow_dispatch' ||
+        (
+          ((github.event_name == 'pull_request_target' &&
+            github.event.pull_request.draft == false) ||
+           (github.event_name == 'issue_comment' &&
+            startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
+          needs.authorize.outputs.should_run == 'true'
+        )
+      )
+    steps:
+      - name: 'Checkout repo'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          token: '${{ secrets.GITHUB_TOKEN }}'
+
+      - name: 'Resolve target number'
+        id: 'resolve'
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=${{ github.event.inputs.number }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Run Qwen Triage'
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          REPOSITORY: '${{ github.repository }}'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          settings_json: |-
+            {
+              "coreTools": [
+                "run_shell_command",
+                "write_file",
+                "read_file",
+                "grep_search",
+                "glob",
+                "agent",
+                "enter_worktree",
+                "exit_worktree"
+              ],
+              "sandbox": false
+            }
+          prompt: '/triage ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'

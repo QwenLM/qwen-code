@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const mockSetGlobalDispatcher = vi.hoisted(() => vi.fn());
 const mockProxyAgent = vi.hoisted(() =>
@@ -84,7 +86,11 @@ vi.mock('@qwen-code/channel-base', () => ({
   SessionRouter: mockSessionRouter,
 }));
 
-import { resolveProxy, startCommand } from './start.js';
+import {
+  resolveExtensionChannelEntrySpecifier,
+  resolveProxy,
+  startCommand,
+} from './start.js';
 
 type StartCommandArgs = Parameters<NonNullable<typeof startCommand.handler>>[0];
 
@@ -165,6 +171,17 @@ describe('resolveProxy', () => {
 
     expect(proxy).toBe('http://env.example.com:8080');
     expect(mockProxyAgent).toHaveBeenCalledWith('http://env.example.com:8080');
+  });
+});
+
+describe('resolveExtensionChannelEntrySpecifier', () => {
+  it('returns a file URL for extension channel entry paths', () => {
+    const extensionPath = join('/tmp', 'qwen extension');
+    const entry = join('dist', 'channel.js');
+
+    expect(resolveExtensionChannelEntrySpecifier(extensionPath, entry)).toBe(
+      pathToFileURL(join(extensionPath, entry)).href,
+    );
   });
 });
 

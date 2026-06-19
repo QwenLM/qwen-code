@@ -23,12 +23,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { atomicWriteFileSync } from './atomicFileWrite.js';
 import readline from 'node:readline';
 import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('JSONL');
+
+type JsonlReadOptions = {
+  throwOnNonEnoentError?: boolean;
+};
 
 /**
  * A map of file paths to mutexes for preventing concurrent writes.
@@ -205,7 +210,10 @@ export async function readLines<T = unknown>(
  * Reads all lines from a JSONL file.
  * Returns an array of parsed objects.
  */
-export async function read<T = unknown>(filePath: string): Promise<T[]> {
+export async function read<T = unknown>(
+  filePath: string,
+  options: JsonlReadOptions = {},
+): Promise<T[]> {
   let fileStream: fs.ReadStream | undefined;
   let rl: readline.Interface | undefined;
   try {
@@ -228,6 +236,9 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.error(`Error reading ${filePath}:`, error);
+      if (options.throwOnNonEnoentError) {
+        throw error;
+      }
     }
     return [];
   } finally {
@@ -267,13 +278,35 @@ export async function writeLine(
       await fs.promises.mkdir(dir, { recursive: true });
       ensuredDirs.add(dir);
     }
-    await fs.promises.appendFile(filePath, line, 'utf8');
+    // flush:true fsyncs after each line so a process killed mid-write
+    // doesn't leave a glued `}{` record on disk (closes #3681). On
+    // Node v22/v24 strace shows string + utf8 + flush:true does fsync
+    // correctly; passing a Buffer is forward-compat insurance against
+    // any future C++ fast path that might bypass JS-side flush logic
+    // for the string case, with no behavior delta on tested versions.
+    await fs.promises.appendFile(filePath, Buffer.from(line, 'utf8'), {
+      flush: true,
+    });
   });
 }
 
 /**
  * Synchronous version of writeLine for use in non-async contexts.
- * Uses a simple flag-based locking mechanism (less robust than async version).
+ *
+ * NOTE: this function is unsynchronized — there is no locking. The
+ * `writeLine` async variant uses a per-file `Mutex` to serialize
+ * concurrent writers, but that lock is bypassed by `writeLineSync`
+ * and `write()`. Callers that share a JSONL file with concurrent
+ * `writeLine()` callers must serialize externally.
+ *
+ * `flush: true` fsyncs after each appended record so a `kill -9`
+ * mid-tool-call cannot leave a glued `}{` record on disk (closes
+ * #3681). The line is converted to a `Buffer` for forward-compat
+ * insurance — strace on Node v22/v24 confirms string + utf8 +
+ * flush:true does fsync correctly today, but Buffer is the
+ * unambiguous slow-path form and protects against any future C++
+ * fast-path optimization that might bypass the flush hook for
+ * strings.
  */
 export function writeLineSync(filePath: string, data: unknown): void {
   const line = `${JSON.stringify(data)}\n`;
@@ -282,7 +315,7 @@ export function writeLineSync(filePath: string, data: unknown): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.appendFileSync(filePath, line, 'utf8');
+  fs.appendFileSync(filePath, Buffer.from(line, 'utf8'), { flush: true });
 }
 
 /**
@@ -296,7 +329,7 @@ export function write(filePath: string, data: unknown[]): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(filePath, `${lines}\n`, 'utf8');
+  atomicWriteFileSync(filePath, `${lines}\n`, { encoding: 'utf8' });
 }
 
 /**

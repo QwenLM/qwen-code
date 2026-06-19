@@ -28,7 +28,7 @@ export const MAX_TOTAL_IMAGE_SIZE = 20 * 1024 * 1024;
 
 // ---------- Path escaping ----------
 
-export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~]/;
+export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~,]/;
 
 export function escapePath(filePath: string): string {
   let result = '';
@@ -63,6 +63,7 @@ export function unescapePath(filePath: string): string {
 
 const PASTED_IMAGE_MIME_TO_EXTENSION: Record<string, string> = {
   'image/bmp': '.bmp',
+  'image/gif': '.gif',
   'image/heic': '.heic',
   'image/jpeg': '.jpg',
   'image/jpg': '.jpg',

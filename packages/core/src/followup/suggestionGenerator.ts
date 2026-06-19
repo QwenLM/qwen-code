@@ -168,6 +168,7 @@ async function generateViaForkedQuery(
   // Report usage to session stats
   if (result.usage) {
     reportSuggestionUsage(
+      config,
       model,
       {
         promptTokenCount: result.usage.inputTokens,
@@ -226,7 +227,7 @@ async function generateViaBaseLlm(
 
   // Report usage to session stats so /stats tracks suggestion model tokens
   if (result.usage) {
-    reportSuggestionUsage(model, result.usage, durationMs);
+    reportSuggestionUsage(config, model, result.usage, durationMs);
   }
 
   const text = result.text;
@@ -272,6 +273,15 @@ const ALLOWED_SINGLE_WORDS = new Set([
 export function getFilterReason(suggestion: string): string | null {
   const lower = suggestion.toLowerCase();
   const wordCount = suggestion.trim().split(/\s+/).length;
+
+  // Reject C0/C1 control bytes and ANSI escapes first. The suggestion is
+  // influenceable through conversation history (tool/file/web output) and is
+  // rendered verbatim in the input placeholder, so raw control chars (CR,
+  // ESC/CSI, etc.) could be injected into the terminal. Rejecting here keeps the
+  // displayed and inserted text consistent, since the accept path strips them on
+  // buffer.insert.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(suggestion)) return 'control_chars';
 
   if (lower === 'done') return 'done';
 
@@ -351,6 +361,7 @@ export function shouldFilterSuggestion(suggestion: string): boolean {
  * Report suggestion API usage to the UI telemetry service so it appears in /stats.
  */
 function reportSuggestionUsage(
+  config: Config,
   model: string,
   usage: {
     promptTokenCount?: number;
@@ -375,9 +386,8 @@ function reportSuggestionUsage(
       thoughtsTokenCount: usage.thoughtsTokenCount ?? 0,
     },
   );
-  // Override event.name to match UiEvent type (UiTelemetryService switch)
   const uiEvent = Object.assign(event, {
     'event.name': EVENT_API_RESPONSE as typeof EVENT_API_RESPONSE,
   });
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
 }

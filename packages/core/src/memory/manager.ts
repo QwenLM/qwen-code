@@ -39,6 +39,7 @@ import { randomUUID } from 'node:crypto';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   logMemoryDream,
@@ -46,7 +47,7 @@ import {
   MemoryDreamEvent,
   MemoryExtractEvent,
 } from '../telemetry/index.js';
-import { isAutoMemPath } from './paths.js';
+import { isAnyAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryMetadataPath,
@@ -68,7 +69,10 @@ import {
   type ResolveRelevantAutoMemoryPromptOptions,
 } from './recall.js';
 import { getManagedAutoMemoryStatus } from './status.js';
-import { appendManagedAutoMemoryToUserMemory } from './prompt.js';
+import {
+  appendManagedAutoMemoryToUserMemory,
+  type UserAutoMemorySection,
+} from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
 import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
@@ -143,7 +147,8 @@ export interface SkillReviewScheduleResult {
     | 'below_threshold'
     | 'skills_modified_in_session'
     | 'disabled'
-    | 'already_running';
+    | 'already_running'
+    | 'memory_pressure';
   promise?: Promise<MemoryTaskRecord>;
 }
 
@@ -171,7 +176,8 @@ export interface DreamScheduleResult {
     | 'min_sessions'
     | 'scan_throttled'
     | 'locked'
-    | 'running';
+    | 'running'
+    | 'memory_pressure';
   promise?: Promise<MemoryTaskRecord>;
 }
 
@@ -249,7 +255,10 @@ function partWritesToMemory(part: Part, projectRoot: string): boolean {
     const args = part.functionCall?.args as Record<string, unknown> | undefined;
     const filePath =
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
-    if (typeof filePath === 'string' && isAutoMemPath(filePath, projectRoot)) {
+    if (
+      typeof filePath === 'string' &&
+      isAnyAutoMemPath(filePath, projectRoot)
+    ) {
       return true;
     }
   }
@@ -288,10 +297,10 @@ async function writeDreamMetadata(
   projectRoot: string,
   metadata: AutoMemoryMetadata,
 ): Promise<void> {
-  await fs.writeFile(
+  await atomicWriteFile(
     getAutoMemoryMetadataPath(projectRoot),
     `${JSON.stringify(metadata, null, 2)}\n`,
-    'utf-8',
+    { encoding: 'utf-8' },
   );
 }
 
@@ -667,11 +676,26 @@ export class MemoryManager {
     return this.track(record.id, this.runExtract(record.id, params)) as never;
   }
 
+  /**
+   * True when the runtime is under hard or critical memory pressure, as
+   * reported by the shared MemoryPressureMonitor (#5147). The monitor is
+   * cgroup-aware and compares RSS/heap against their actual limits as a
+   * ratio, so this adapts to `--max-old-space-size`, containers, and large
+   * hosts alike — unlike an absolute megabyte threshold. Returns false when
+   * no monitor is wired (e.g. unit tests, headless), so extraction proceeds
+   * normally in those contexts.
+   */
+  private isUnderMemoryPressure(config?: Config): boolean {
+    const level = config?.getMemoryPressureMonitor?.()?.getPressureLevel?.();
+    return level === 'hard' || level === 'critical';
+  }
+
   private async runExtract(
     taskId: string,
     params: ScheduleExtractParams,
   ): Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>> {
     const record = this.tasks.get(taskId)!;
+
     this.extractCurrentTaskId.set(params.projectRoot, taskId);
     this.extractRunning.add(params.projectRoot);
     this.update(record, {
@@ -682,6 +706,39 @@ export class MemoryManager {
 
     const t0 = Date.now();
     try {
+      // Memory-pressure gate. Checked inside try so the finally block
+      // always runs — extractRunning/extractCurrentTaskId are cleaned up
+      // and startQueuedExtract is called regardless of the gate outcome.
+      if (this.isUnderMemoryPressure(params.config)) {
+        debugLogger.warn('Skipping extract: memory pressure too high.');
+        this.update(record, {
+          status: 'skipped',
+          progressText: 'Skipped: memory pressure too high for extraction.',
+          metadata: { skippedReason: 'memory_pressure' },
+        });
+        if (params.config) {
+          logMemoryExtract(
+            params.config,
+            new MemoryExtractEvent({
+              trigger: 'auto',
+              status: 'skipped',
+              skipped_reason: 'memory_pressure',
+              patches_count: 0,
+              touched_topics: [],
+              duration_ms: 0,
+            }),
+          );
+        }
+        return {
+          touchedTopics: [],
+          skippedReason: 'memory_pressure' as const,
+          cursor: {
+            sessionId: params.sessionId,
+            updatedAt: (params.now ?? new Date()).toISOString(),
+          },
+        };
+      }
+
       const result = await runAutoMemoryExtract(params);
       const durationMs = Date.now() - t0;
       this.update(record, {
@@ -804,7 +861,20 @@ export class MemoryManager {
     params: ScheduleSkillReviewParams,
   ): Promise<MemoryTaskRecord> {
     this.skillReviewInFlightByProject.set(params.projectRoot, record.id);
+
     try {
+      // Memory-pressure gate — inside try so finally always cleans up
+      // the skillReviewInFlightByProject entry.
+      if (this.isUnderMemoryPressure(params.config)) {
+        this.update(record, {
+          status: 'skipped',
+          progressText: 'Skipped: memory pressure too high.',
+          metadata: { skippedReason: 'memory_pressure' },
+        });
+        debugLogger.warn('Skipping skill review: memory pressure too high.');
+        return record;
+      }
+
       const result = await runSkillReviewByAgent({
         config: params.config!,
         projectRoot: params.projectRoot,
@@ -848,6 +918,14 @@ export class MemoryManager {
     // failed dream entry in the bg-tasks dialog.
     if (!params.config || !params.config.getManagedAutoDreamEnabled()) {
       return { status: 'skipped', skippedReason: 'disabled' };
+    }
+
+    // Also skip dream under memory pressure — dream does its own
+    // structuredClone of full history, and shouldn't add extra pressure
+    // when the heap is already under hard/critical load.
+    if (this.isUnderMemoryPressure(params.config)) {
+      debugLogger.warn('Skipping dream: memory pressure too high.');
+      return { status: 'skipped', skippedReason: 'memory_pressure' };
     }
 
     const now = params.now ?? new Date();
@@ -1242,16 +1320,23 @@ export class MemoryManager {
 
   // ─── Prompt append ────────────────────────────────────────────────────────────
 
-  /** Append the managed auto-memory section to a user memory string. */
+  /**
+   * Append the managed auto-memory section to a user memory string.
+   * When `userSection` is provided, the prompt teaches the model to route
+   * saves between the project dir and the user (cross-project) dir using
+   * the per-type scope guidance.
+   */
   appendToUserMemory(
     userMemory: string,
     memoryDir: string,
     indexContent?: string | null,
+    userSection?: UserAutoMemorySection,
   ): string {
     return appendManagedAutoMemoryToUserMemory(
       userMemory,
       memoryDir,
       indexContent,
+      userSection,
     );
   }
 

@@ -78,6 +78,30 @@ function buildGenerationConfig(
   return hasAny ? parts : undefined;
 }
 
+function buildAdvancedGenerationConfig(
+  advCfg: ProviderSetupInputs['advancedConfig'] | undefined,
+): ProviderModelConfig['generationConfig'] | undefined {
+  const cfg: ProviderModelConfig['generationConfig'] = {};
+  let hasAny = false;
+  if (advCfg?.enableThinking) {
+    cfg.extra_body = { enable_thinking: true };
+    hasAny = true;
+  }
+  if (advCfg?.multimodal && Object.values(advCfg.multimodal).some(Boolean)) {
+    cfg.modalities = advCfg.multimodal;
+    hasAny = true;
+  }
+  if (advCfg?.contextWindowSize && advCfg.contextWindowSize > 0) {
+    cfg.contextWindowSize = advCfg.contextWindowSize;
+    hasAny = true;
+  }
+  if (advCfg?.maxTokens && advCfg.maxTokens > 0) {
+    cfg.samplingParams = { max_tokens: advCfg.maxTokens };
+    hasAny = true;
+  }
+  return hasAny ? cfg : undefined;
+}
+
 function specToModelConfig(
   spec: ModelSpec,
   prefix: string,
@@ -117,11 +141,13 @@ function buildModelConfigs(
       if (spec) {
         return specToModelConfig(spec, prefix, inputs.baseUrl, envKey);
       }
+      const genConfig = buildAdvancedGenerationConfig(inputs.advancedConfig);
       return {
         id,
         name: prefix ? `[${prefix}] ${id}` : id,
         baseUrl: inputs.baseUrl,
         envKey,
+        ...(genConfig ? { generationConfig: genConfig } : {}),
       };
     });
   }
@@ -129,34 +155,10 @@ function buildModelConfigs(
   // No predefined models (custom provider) — use advancedConfig
   const advCfg = inputs.advancedConfig;
 
-  function buildCustomGenConfig():
-    | ProviderModelConfig['generationConfig']
-    | undefined {
-    const cfg: ProviderModelConfig['generationConfig'] = {};
-    let hasAny = false;
-    if (advCfg?.enableThinking) {
-      cfg.extra_body = { enable_thinking: true };
-      hasAny = true;
-    }
-    if (advCfg?.multimodal && Object.values(advCfg.multimodal).some(Boolean)) {
-      cfg.modalities = advCfg.multimodal;
-      hasAny = true;
-    }
-    if (advCfg?.contextWindowSize && advCfg.contextWindowSize > 0) {
-      cfg.contextWindowSize = advCfg.contextWindowSize;
-      hasAny = true;
-    }
-    if (advCfg?.maxTokens && advCfg.maxTokens > 0) {
-      cfg.samplingParams = { max_tokens: advCfg.maxTokens };
-      hasAny = true;
-    }
-    return hasAny ? cfg : undefined;
-  }
-
   const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
 
   return inputs.modelIds.map((id) => {
-    const genConfig = buildCustomGenConfig();
+    const genConfig = buildAdvancedGenerationConfig(advCfg);
     return {
       id,
       name: displayName(id),
@@ -224,24 +226,37 @@ export function buildInstallPlan(
   const protocol = inputs.protocol ?? config.protocol;
   const envKey = resolveEnvKey(config, inputs);
   const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  const ownsModel = config.mergeModelsByIdentity
+    ? undefined
+    : resolveOwnsModel(config);
+  const firstModel = models[0];
   if (models.length === 0) {
     throw new Error(
       `No models configured for provider "${config.id}". Check model list or provider configuration.`,
     );
   }
-  const firstModelId = models[0]?.id;
+  const firstModelId = firstModel?.id;
+  const modelSelection =
+    firstModelId === undefined
+      ? undefined
+      : {
+          modelId: firstModelId,
+          ...(config.mergeModelsByIdentity && firstModel.baseUrl
+            ? { baseUrl: firstModel.baseUrl }
+            : {}),
+        };
 
   return {
     providerId: config.id,
     authType: protocol,
     env: { [envKey]: inputs.apiKey },
-    ...(firstModelId ? { modelSelection: { modelId: firstModelId } } : {}),
+    ...(modelSelection ? { modelSelection } : {}),
     modelProviders: [
       {
         authType: protocol,
         models,
         mergeStrategy: 'prepend-and-remove-owned' as const,
-        ownsModel: resolveOwnsModel(config),
+        ...(ownsModel ? { ownsModel } : {}),
       },
     ],
     providerState: resolveProviderState(config, inputs.baseUrl, models),

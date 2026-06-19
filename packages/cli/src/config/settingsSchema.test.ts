@@ -84,17 +84,6 @@ describe('SettingsSchema', () => {
       ).toBe('boolean');
     });
 
-    it('should have checkpointing nested properties', () => {
-      expect(
-        getSettingsSchema().general?.properties?.checkpointing.properties
-          ?.enabled,
-      ).toBeDefined();
-      expect(
-        getSettingsSchema().general?.properties?.checkpointing.properties
-          ?.enabled.type,
-      ).toBe('boolean');
-    });
-
     it('should have fileFiltering nested properties', () => {
       expect(
         getSettingsSchema().context.properties.fileFiltering.properties
@@ -110,6 +99,17 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
     });
 
+    it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
+      const threshold =
+        getSettingsSchema().context.properties.clearContextOnIdle.properties
+          ?.toolResultsTotalCharsThreshold;
+
+      expect(threshold).toBeDefined();
+      expect(threshold?.type).toBe('number');
+      expect(threshold?.default).toBe(500_000);
+      expect(threshold?.requiresRestart).toBe(false);
+    });
+
     it('should have sandboxImage setting under tools', () => {
       expect(getSettingsSchema().tools.properties.sandboxImage).toBeDefined();
       expect(getSettingsSchema().tools.properties.sandboxImage.type).toBe(
@@ -118,6 +118,14 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().tools.properties.sandboxImage.default).toBe(
         undefined,
       );
+    });
+
+    it('should define tools.sandbox schema override as boolean or string', () => {
+      expect(
+        getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
     });
 
     it('should have top-level proxy setting in schema', () => {
@@ -201,6 +209,10 @@ describe('SettingsSchema', () => {
         true,
       );
       expect(
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond
+          .showInDialog,
+      ).toBe(true);
+      expect(
         getSettingsSchema().privacy.properties.usageStatisticsEnabled
           .showInDialog,
       ).toBe(true);
@@ -218,9 +230,6 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().ui.properties.customThemes.showInDialog).toBe(
         false,
       ); // Managed via theme editor
-      expect(
-        getSettingsSchema().general.properties.checkpointing.showInDialog,
-      ).toBe(false); // Experimental feature
       expect(getSettingsSchema().ui.properties.accessibility.showInDialog).toBe(
         false,
       );
@@ -247,6 +256,26 @@ describe('SettingsSchema', () => {
         { value: 'render', label: 'Render visual previews' },
         { value: 'raw', label: 'Show raw source' },
       ]);
+    });
+
+    it('should have useTerminalBuffer in ui settings', () => {
+      const useTerminalBuffer =
+        getSettingsSchema().ui.properties.useTerminalBuffer;
+      expect(useTerminalBuffer).toBeDefined();
+      expect(useTerminalBuffer.type).toBe('boolean');
+      expect(useTerminalBuffer.default).toBe(false);
+      expect(useTerminalBuffer.showInDialog).toBe(true);
+      expect(useTerminalBuffer.requiresRestart).toBe(false);
+    });
+
+    it('should expose response tokens/sec as an opt-in UI setting', () => {
+      const responseTokensPerSecond =
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond;
+      expect(responseTokensPerSecond).toBeDefined();
+      expect(responseTokensPerSecond.type).toBe('boolean');
+      expect(responseTokensPerSecond.default).toBe(false);
+      expect(responseTokensPerSecond.showInDialog).toBe(true);
+      expect(responseTokensPerSecond.requiresRestart).toBe(true);
     });
 
     it('should infer Settings type correctly', () => {
@@ -282,6 +311,17 @@ describe('SettingsSchema', () => {
       expect(
         getSettingsSchema().context?.properties.includeDirectories.default,
       ).toEqual([]);
+    });
+
+    it('should define context.fileName schema override as string or string array', () => {
+      expect(
+        getSettingsSchema().context?.properties.fileName.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [
+          { type: 'string' },
+          { type: 'array', items: { type: 'string' } },
+        ],
+      });
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {

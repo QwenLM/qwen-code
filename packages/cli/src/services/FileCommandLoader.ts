@@ -182,7 +182,7 @@ export class FileCommandLoader implements ICommandLoader {
         for (const cmdPath of commandsPaths) {
           dirs.push({
             path: cmdPath,
-            extensionName: ext.name,
+            extensionName: ext.displayName ?? ext.name,
           });
         }
       }

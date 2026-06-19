@@ -57,12 +57,14 @@ vi.mock('@opentelemetry/instrumentation-undici');
 vi.mock('./gcp-exporters.js');
 vi.mock('./log-to-span-processor.js');
 vi.mock('./session-context.js');
+vi.mock('./trace-context.js');
 vi.mock('./tracer.js', () => ({
   createSessionRootContext: vi.fn((id: string) => ({ __sessionId: id })),
 }));
 
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { setSessionContext } from './session-context.js';
+import { setShellTracePropagation } from './trace-context.js';
 import { createSessionRootContext } from './tracer.js';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
@@ -148,6 +150,7 @@ describe('Telemetry SDK', () => {
       getSessionId: () => 'test-session',
       getCliVersion: () => '1.0.0-test',
       getOutboundCorrelationPropagateTraceContext: () => false,
+      isInteractive: () => false,
     } as unknown as Config;
   });
 
@@ -343,9 +346,10 @@ describe('Telemetry SDK', () => {
     });
     // Logs falls back to LogToSpanProcessor (bridges logs → spans)
     expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
-    expect(LogToSpanProcessor).toHaveBeenCalledWith(expect.anything(), {
-      includeSensitiveSpanAttributes: false,
-    });
+    expect(LogToSpanProcessor).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ includeSensitiveSpanAttributes: false }),
+    );
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
   });
 
@@ -362,9 +366,108 @@ describe('Telemetry SDK', () => {
 
     initializeTelemetry(mockConfig);
 
-    expect(LogToSpanProcessor).toHaveBeenCalledWith(expect.anything(), {
-      includeSensitiveSpanAttributes: true,
-    });
+    expect(LogToSpanProcessor).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ includeSensitiveSpanAttributes: true }),
+    );
+  });
+
+  it('in interactive mode, routes log-to-span diagnostics through the OTEL debug logger to avoid TUI pollution', async () => {
+    vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+      'http://traces-host/token/api/otlp/traces',
+    );
+    vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+
+    const mkdirSpy = vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    const appendFileSpy = vi
+      .spyOn(fs, 'appendFile')
+      .mockResolvedValue(undefined);
+    const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+    try {
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      setDebugLogSession({ getSessionId: () => 'log-to-span-sink-test' });
+
+      initializeTelemetry(mockConfig);
+
+      const call = vi.mocked(LogToSpanProcessor).mock.calls.at(-1);
+      const opts = call?.[1] as { diagnosticsSink?: (m: string) => void };
+      expect(typeof opts.diagnosticsSink).toBe('function');
+
+      opts.diagnosticsSink?.('[LogToSpan] sink wiring smoke test');
+
+      await vi.waitFor(() => {
+        expect(appendFileSpy).toHaveBeenCalledWith(
+          expect.stringContaining('log-to-span-sink-test'),
+          expectOtelDebugLogLine('WARN', '[LogToSpan] sink wiring smoke test'),
+          'utf8',
+        );
+      });
+    } finally {
+      if (previousDebugLogFileEnv === undefined) {
+        delete process.env['QWEN_DEBUG_LOG_FILE'];
+      } else {
+        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+      }
+      setDebugLogSession(null);
+      resetDebugLoggingState();
+      mkdirSpy.mockRestore();
+      appendFileSpy.mockRestore();
+    }
+  });
+
+  it('in non-interactive mode, leaves diagnostics on the default stderr sink so CI/scripts see export failures', async () => {
+    vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+      'http://traces-host/token/api/otlp/traces',
+    );
+    vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(false);
+
+    initializeTelemetry(mockConfig);
+
+    const call = vi.mocked(LogToSpanProcessor).mock.calls.at(-1);
+    const opts = call?.[1] as { diagnosticsSink?: (m: string) => void };
+    // No explicit sink → processor falls back to its default (stderr).
+    expect(opts.diagnosticsSink).toBeUndefined();
+
+    // End-to-end check: the real default sink must hit stderr, not silently
+    // drop. Construct a processor with no sink and trigger a failed export.
+    const { LogToSpanProcessor: RealProcessor } = await vi.importActual<
+      typeof import('./log-to-span-processor.js')
+    >('./log-to-span-processor.js');
+    const failingExporter = {
+      export: (
+        _spans: unknown,
+        cb: (r: { code: number; error?: Error }) => void,
+      ) => cb({ code: 1, error: new Error('boom') }),
+      shutdown: () => Promise.resolve(),
+      forceFlush: () => Promise.resolve(),
+    };
+    const realProcessor = new RealProcessor(
+      failingExporter as unknown as ConstructorParameters<
+        typeof RealProcessor
+      >[0],
+      { flushIntervalMs: 60000 },
+    );
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      realProcessor.onEmit({
+        body: 'event',
+        hrTime: [1000, 0] as [number, number],
+        attributes: { 'event.name': 'event' },
+      } as unknown as Parameters<typeof realProcessor.onEmit>[0]);
+      await realProcessor.forceFlush();
+      expect(stderrWrite).toHaveBeenCalledWith(
+        '[LogToSpan] export failed: code=1 error="boom"\n',
+      );
+    } finally {
+      stderrWrite.mockRestore();
+      await realProcessor.shutdown();
+    }
   });
 
   it('should warn and skip startup for gRPC per-signal endpoints without base endpoint', () => {
@@ -1161,6 +1264,7 @@ describe('refreshSessionContext', () => {
       getSessionId: () => 'test-session',
       getCliVersion: () => '1.0.0-test',
       getOutboundCorrelationPropagateTraceContext: () => false,
+      isInteractive: () => false,
     } as unknown as Config;
   });
 
@@ -1199,5 +1303,56 @@ describe('refreshSessionContext', () => {
 
     expect(createSessionRootContext).toHaveBeenCalledWith('bad-session');
     expect(setSessionContext).not.toHaveBeenCalled();
+  });
+});
+
+describe('shell trace propagation wiring', () => {
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig = {
+      getTelemetryEnabled: () => true,
+      getTelemetryOtlpEndpoint: () => 'http://localhost:4317',
+      getTelemetryOtlpProtocol: () => 'grpc',
+      getTelemetryOtlpTracesEndpoint: () => undefined,
+      getTelemetryOtlpLogsEndpoint: () => undefined,
+      getTelemetryOtlpMetricsEndpoint: () => undefined,
+      getTelemetryTarget: () => 'local',
+      getTelemetryOutfile: () => undefined,
+      getTelemetryIncludeSensitiveSpanAttributes: () => false,
+      getTelemetryResourceAttributes: () => ({}),
+      getTelemetryMetricsIncludeSessionId: () => false,
+      getTelemetryResourceAttributeWarnings: () => [],
+      getDebugMode: () => false,
+      getSessionId: () => 'test-session',
+      getCliVersion: () => '1.0.0-test',
+      getOutboundCorrelationPropagateTraceContext: () => false,
+      isInteractive: () => false,
+    } as unknown as Config;
+  });
+
+  afterEach(async () => {
+    await shutdownTelemetry();
+  });
+
+  it('sets shell trace propagation on init based on config', () => {
+    const config = {
+      ...mockConfig,
+      getOutboundCorrelationPropagateTraceContext: () => true,
+    } as unknown as Config;
+
+    initializeTelemetry(config);
+
+    expect(setShellTracePropagation).toHaveBeenCalledWith(true);
+  });
+
+  it('resets shell trace propagation on shutdown', async () => {
+    initializeTelemetry(mockConfig);
+    vi.mocked(setShellTracePropagation).mockClear();
+
+    await shutdownTelemetry();
+
+    expect(setShellTracePropagation).toHaveBeenCalledWith(false);
   });
 });

@@ -22,15 +22,31 @@ export const isGitHubRepository = (): boolean => {
       }) || ''
     ).trim();
 
-    const pattern = /github\.com/;
-
-    return pattern.test(remotes);
+    return remotes.split('\n').some((line) => {
+      const remoteUrl = line.trim().split(/\s+/)[1];
+      return remoteUrl ? isGitHubRemoteUrl(remoteUrl) : false;
+    });
   } catch (_error) {
     // If any filesystem error occurs, assume not a git repo
     debugLogger.debug(`Failed to get git remote:`, _error);
     return false;
   }
 };
+
+function isGitHubRemoteUrl(remoteUrl: string): boolean {
+  if (remoteUrl.startsWith('git@github.com:')) {
+    return true;
+  }
+  if (remoteUrl.startsWith('git@')) {
+    return false;
+  }
+
+  try {
+    return new URL(remoteUrl).hostname === 'github.com';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * getGitRepoRoot returns the root directory of the git repository.
@@ -126,7 +142,7 @@ export function getGitHubRepoInfo(): { owner: string; repo: string } {
     );
   }
 
-  if (parsedUrl.host !== 'github.com') {
+  if (parsedUrl.hostname !== 'github.com') {
     throw new Error(
       `Owner & repo could not be extracted from remote URL: ${remoteUrl}`,
     );

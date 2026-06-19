@@ -10,7 +10,7 @@ import {
   type AgentParams,
   resolveSubagentApprovalMode,
 } from './agent.js';
-import type { PartListUnion } from '@google/genai';
+import type { Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
@@ -62,6 +62,31 @@ function escapeRegExp(value: string): string {
 // Mock dependencies
 vi.mock('../../subagents/subagent-manager.js');
 vi.mock('../../agents/runtime/agent-headless.js');
+
+// Spies for the subagent-span layer so tests can assert what status taxonomy
+// was published. The real runInSubagentSpanContext sets up OTel context-with,
+// which is irrelevant here — we just need the body to run. Review wenshao
+// @ #4410.
+const mockStartSubagentSpan = vi.fn();
+const mockEndSubagentSpan = vi.fn();
+
+vi.mock('../../telemetry/index.js', async (importOriginal) => {
+  const orig =
+    await importOriginal<typeof import('../../telemetry/index.js')>();
+  return {
+    ...orig,
+    startSubagentSpan: (opts: unknown) => {
+      mockStartSubagentSpan(opts);
+      // Minimal stand-in — endSubagentSpan is mocked too, so no method
+      // on this object is ever invoked.
+      return {} as ReturnType<typeof orig.startSubagentSpan>;
+    },
+    endSubagentSpan: (span: unknown, metadata: unknown) => {
+      mockEndSubagentSpan(span, metadata);
+    },
+    runInSubagentSpanContext: <T>(_span: unknown, fn: () => Promise<T>) => fn(),
+  };
+});
 
 const MockedSubagentManager = vi.mocked(SubagentManager);
 const MockedContextState = vi.mocked(ContextState);
@@ -141,8 +166,17 @@ describe('AgentTool', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getTeamManager: vi.fn().mockReturnValue(undefined),
+      isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getModel: vi.fn().mockReturnValue('parent-model'),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getSandbox: vi.fn().mockReturnValue(undefined),
+      getScreenReader: vi.fn().mockReturnValue(false),
+      getMaxSessionTurns: vi.fn().mockReturnValue(-1),
+      getMaxToolCalls: vi.fn().mockReturnValue(-1),
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      isInteractive: vi.fn().mockReturnValue(false),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(stubMonitorRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
@@ -190,7 +224,7 @@ describe('AgentTool', () => {
     it('should initialize with correct name and properties', () => {
       expect(agentTool.name).toBe('agent');
       expect(agentTool.displayName).toBe('Agent');
-      expect(agentTool.kind).toBe('other');
+      expect(agentTool.kind).toBe('agent');
     });
 
     it('should load available subagents during initialization', () => {
@@ -235,6 +269,57 @@ describe('AgentTool', () => {
       expect(failedAgentTool.description).toContain('general-purpose');
       expect(failedAgentTool.description).toContain('Explore');
     });
+
+    it('includes "When to fork" section in description when fork enabled + interactive', async () => {
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+
+      const interactiveTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(interactiveTool.description).toContain('When to fork');
+      expect(interactiveTool.description).toContain("Don't peek");
+      expect(interactiveTool.description).toContain("Don't race");
+      expect(interactiveTool.description).toContain('Writing a fork prompt');
+    });
+
+    it('omits fork discipline but keeps "Writing the prompt" when non-interactive', async () => {
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(false);
+
+      const nonInteractiveTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      // Fork-specific sections must be absent
+      expect(nonInteractiveTool.description).not.toContain('When to fork');
+      expect(nonInteractiveTool.description).not.toContain("Don't peek");
+      expect(nonInteractiveTool.description).not.toContain("Don't race");
+      expect(nonInteractiveTool.description).not.toContain(
+        'Writing a fork prompt',
+      );
+
+      // "Writing the prompt" section is always present (useful for fresh agents too)
+      expect(nonInteractiveTool.description).toContain('Writing the prompt');
+      expect(nonInteractiveTool.description).toContain(
+        'Never delegate understanding',
+      );
+    });
+
+    it('includes fork discipline when interactive', async () => {
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain('When to fork');
+      expect(tool.description).toContain("Don't peek");
+      expect(tool.description).toContain("Don't race");
+      expect(tool.description).toContain('Writing a fork prompt');
+    });
   });
 
   describe('schema generation', () => {
@@ -251,6 +336,59 @@ describe('AgentTool', () => {
         'file-search',
         'code-review',
       ]);
+    });
+
+    it('does not advertise "fork" in the enum, even when interactive', async () => {
+      // `fork` is intentionally omitted from the enum so the model is not
+      // steered to fork result-bearing work; it stays valid via validation.
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+      const interactiveTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = interactiveTool.schema;
+      const properties = schema.parametersJsonSchema as {
+        properties: {
+          subagent_type: {
+            enum?: string[];
+          };
+        };
+      };
+      expect(properties.properties.subagent_type.enum).toEqual([
+        'file-search',
+        'code-review',
+      ]);
+      expect(properties.properties.subagent_type.enum).not.toContain('fork');
+    });
+
+    it('does not expose teammate name when teams are disabled', () => {
+      const schema = agentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          name?: unknown;
+        };
+      };
+
+      expect(parameters.properties.name).toBeUndefined();
+    });
+
+    it('exposes teammate name when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = teamAgentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          name?: {
+            description?: string;
+          };
+        };
+      };
+
+      expect(parameters.properties.name?.description).toContain('active team');
     });
 
     it('should generate schema without enum when no subagents available', async () => {
@@ -340,15 +478,34 @@ describe('AgentTool', () => {
       ).toMatch(/isolation/i);
     });
 
-    it('rejects isolation without subagent_type (fork is not isolatable)', () => {
-      const { subagent_type: _ignored, ...forkParams } = validParams;
+    it('rejects isolation without an explicit subagent_type', () => {
+      const { subagent_type: _ignored, ...noTypeParams } = validParams;
       void _ignored;
       expect(
         agentTool.validateToolParams({
-          ...forkParams,
+          ...noTypeParams,
           isolation: 'worktree',
         }),
       ).toMatch(/subagent_type/i);
+    });
+
+    it('accepts subagent_type "fork" without consulting the registry', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects isolation combined with subagent_type "fork"', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          isolation: 'worktree',
+        }),
+      ).toMatch(/fork/i);
     });
   });
 
@@ -430,6 +587,26 @@ describe('AgentTool', () => {
       } finally {
         await fs.rm(repo, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('team routing', () => {
+    it('falls back to one-shot when `name` is supplied without a team', async () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+
+      const invocation = agentTool.build({
+        description: 'Spawn helper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).not.toContain('no active team');
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
     });
   });
 
@@ -544,9 +721,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
     });
 
     it('should execute subagent successfully', async () => {
@@ -732,9 +910,255 @@ describe('AgentTool', () => {
 
       expect(description).toBe('Search files');
     });
+
+    describe('qwen-code.subagent span outcome (#4410 wenshao)', () => {
+      beforeEach(() => {
+        mockStartSubagentSpan.mockClear();
+        mockEndSubagentSpan.mockClear();
+      });
+
+      async function runForegroundOnce(): Promise<void> {
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        await invocation.execute();
+      }
+
+      function lastEndMeta(): {
+        status?: string;
+        terminateReason?: string;
+        resultSummaryPresent?: boolean;
+        error?: string;
+        errorType?: string;
+      } {
+        const calls = mockEndSubagentSpan.mock.calls;
+        return calls[calls.length - 1][1] as {
+          status?: string;
+          terminateReason?: string;
+          resultSummaryPresent?: boolean;
+          error?: string;
+          errorType?: string;
+        };
+      }
+
+      function lastStartSpec(): {
+        depth?: number;
+        parentAgentId?: string;
+      } {
+        const calls = mockStartSubagentSpan.mock.calls;
+        return calls[calls.length - 1][0] as {
+          depth?: number;
+          parentAgentId?: string;
+        };
+      }
+
+      it('GOAL terminateMode → status="completed" + resultSummaryPresent', async () => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.GOAL,
+        );
+        await runForegroundOnce();
+        expect(mockEndSubagentSpan).toHaveBeenCalledTimes(1);
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('completed');
+        expect(meta.resultSummaryPresent).toBe(true);
+      });
+
+      it('ERROR terminateMode → status="failed" + terminateReason="error"', async () => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.ERROR,
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.terminateReason).toBe('error');
+      });
+
+      it('MAX_TURNS terminateMode → status="failed" + error/errorType populated', async () => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.MAX_TURNS,
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.terminateReason).toBe('max_turns');
+        // Same shape as the ERROR test above so a regression in the
+        // error-stamping for non-throwing failure paths is caught here
+        // too. wenshao @ #4410 DeepSeek 3292521241.
+        expect(meta.error).toBe('subagent terminated with mode: MAX_TURNS');
+        expect(meta.errorType).toBe('MAX_TURNS');
+      });
+
+      it('CANCELLED terminateMode → status="cancelled"', async () => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.CANCELLED,
+        );
+        await runForegroundOnce();
+        // No external signal abort → "subagent_cancelled" branch (terminate
+        // mode came from inside the subagent itself).
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('cancelled');
+        expect(meta.terminateReason).toBe('subagent_cancelled');
+      });
+
+      it('SHUTDOWN terminateMode → status="cancelled" + terminateReason="subagent_shutdown"', async () => {
+        // SHUTDOWN is graceful arena/team-session-end, not failure.
+        // wenshao @ #4410 DeepSeek 3291876034.
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.SHUTDOWN,
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('cancelled');
+        expect(meta.terminateReason).toBe('subagent_shutdown');
+      });
+
+      it('ERROR terminateMode populates error + errorType for OTel exception attrs', async () => {
+        // Non-throwing failure paths (ERROR/MAX_TURNS/TIMEOUT) must
+        // populate error/errorType so endSubagentSpan sets the standard
+        // OTel exception attributes — generic 'subagent failed' was
+        // hiding the reason from dashboards. wenshao @ #4410 DeepSeek
+        // 3291876053.
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.ERROR,
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.error).toBe('subagent terminated with mode: ERROR');
+        expect(meta.errorType).toBe('ERROR');
+      });
+
+      it('subagent.execute throws → status="failed" + errorType=Error', async () => {
+        vi.mocked(mockAgent.execute).mockRejectedValue(
+          new Error('catastrophic boom'),
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.error).toBe('catastrophic boom');
+        expect(meta.errorType).toBe('Error');
+        expect(meta.terminateReason).toBe('exception');
+      });
+
+      it('non-Error throw → errorType="NonErrorThrown"', async () => {
+        vi.mocked(mockAgent.execute).mockRejectedValue('plain string');
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.error).toBe('plain string');
+        expect(meta.errorType).toBe('NonErrorThrown');
+      });
+
+      it('endSubagentSpan is always called exactly once per invocation', async () => {
+        // Lifecycle invariant: the wrapper's finally block fires once
+        // for every runWithSubagentSpan call regardless of the body's
+        // path. Default mockAgent here uses GOAL termination →
+        // runSubagentWithHooks calls recordSpanOutcome internally.
+        await runForegroundOnce();
+        expect(mockEndSubagentSpan).toHaveBeenCalledTimes(1);
+      });
+
+      it('fallback: body that skips recordOutcome → status="failed" + wiring-bug terminateReason', async () => {
+        // Defensive fallback in runWithSubagentSpan's finally — fires
+        // when the body returns without calling recordOutcome. Today
+        // no production path hits this (runSubagentWithHooks always
+        // records), so we have to STUB out runSubagentWithHooks to
+        // exercise the branch. wenshao @ #4410 DeepSeek 3292521244.
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        // Replace runSubagentWithHooks on this instance so it returns
+        // without calling recordSpanOutcome.
+        (
+          invocation as unknown as { runSubagentWithHooks: () => Promise<void> }
+        ).runSubagentWithHooks = vi.fn().mockResolvedValue(undefined);
+        await invocation.execute();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.terminateReason).toBe(
+          'wiring_bug_record_outcome_not_called',
+        );
+        expect(meta.error).toBe('recordOutcome was never called (wiring bug)');
+      });
+
+      it('startSubagentSpan receives depth=0 for top-level foreground (no parent ALS frame)', async () => {
+        await runForegroundOnce();
+        expect(mockStartSubagentSpan).toHaveBeenCalledTimes(1);
+        const spec = lastStartSpec();
+        expect(spec.depth).toBe(0);
+        expect(spec.parentAgentId).toBeUndefined();
+      });
+
+      it('startSubagentSpan receives depth=parentDepth+1 when invoked inside an outer agent frame', async () => {
+        await runWithAgentContext('outer-parent', async () => {
+          await runForegroundOnce();
+        });
+        // Outer ALS frame at depth=0 → subagent itself records depth=1.
+        // This regression-guards wenshao's depth-off-by-one fix at #4410.
+        const spec = lastStartSpec();
+        expect(spec.depth).toBe(1);
+        expect(spec.parentAgentId).toBe('outer-parent');
+      });
+
+      it('CANCELLED terminateMode + aborted signal → status="cancelled" + terminateReason="signal_aborted"', async () => {
+        // The signalAborted=true branch in deriveSubagentOutcomeMetadata —
+        // user-initiated stop (Ctrl-C / task_stop) must classify as
+        // signal_aborted, not subagent_cancelled. wenshao @ #4410.
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.CANCELLED,
+        );
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        const controller = new AbortController();
+        controller.abort();
+        await invocation.execute(controller.signal);
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('cancelled');
+        expect(meta.terminateReason).toBe('signal_aborted');
+      });
+
+      it('throw + aborted signal → status="aborted" + terminateReason="signal_aborted"', async () => {
+        // The signalAborted=true branch in deriveSubagentExceptionMetadata.
+        // A throw under an already-aborted signal is user-cancellation,
+        // not a programmer error — must classify as aborted, not failed.
+        vi.mocked(mockAgent.execute).mockRejectedValue(
+          new Error('boom mid-cancel'),
+        );
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        const controller = new AbortController();
+        controller.abort();
+        await invocation.execute(controller.signal);
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('aborted');
+        expect(meta.terminateReason).toBe('signal_aborted');
+      });
+    });
   });
 
-  describe('Fork dispatch (subagent_type omitted)', () => {
+  describe('Fork dispatch (subagent_type: "fork")', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
 
@@ -781,13 +1205,113 @@ describe('AgentTool', () => {
         }),
       } as unknown as ReturnType<Config['getGeminiClient']>);
 
+      vi.mocked(AgentHeadless.create).mockClear();
       vi.mocked(AgentHeadless.create).mockResolvedValue(mockAgent);
+
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+    });
+
+    it('forks in interactive mode', async () => {
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const params: AgentParams = {
+        description: 'some task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('omitting subagent_type uses general-purpose, not fork', async () => {
+      // Restored contract: omission resolves to the awaitable general-purpose
+      // subagent (inline result), never a fork — even in interactive mode.
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const params: AgentParams = {
+        description: 'some task',
+        prompt: 'do the thing',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
+    });
+
+    it('falls back to general-purpose when non-interactive', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+      // Non-interactive sessions cannot service fork progress or prompts.
+
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const params: AgentParams = {
+        description: 'fork task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      // Should fall back to general-purpose
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
     });
 
     it('should call AgentHeadless.create directly and execute without options', async () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
 
       const invocation = (
@@ -802,6 +1326,7 @@ describe('AgentTool', () => {
 
       const createArgs = vi.mocked(AgentHeadless.create).mock.calls[0];
       expect(createArgs[0]).toBe('fork'); // name
+      expect(createArgs[1].getApprovalMode()).toBe(ApprovalMode.DEFAULT);
       // First-turn fork (no cache params): systemPrompt path, no
       // renderedSystemPrompt. initialMessages is undefined (empty history).
       const promptConfig = createArgs[2];
@@ -863,6 +1388,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -875,7 +1401,7 @@ describe('AgentTool', () => {
       expect(stopSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('routes owned monitor notifications and cleanup for implicit forks', async () => {
+    it('routes owned monitor notifications and cleanup for forks', async () => {
       let releaseExecute: (() => void) | undefined;
       vi.mocked(mockAgent.execute).mockImplementation(
         () =>
@@ -896,6 +1422,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -1011,9 +1538,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
       mockHookSystem = {
         fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
@@ -1193,9 +1721,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
       mockHookSystem = {
         fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
@@ -1526,9 +2055,10 @@ describe('AgentTool', () => {
         emitDuringExecute(capturedInvocation.eventEmitter);
       });
 
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
       const params: AgentParams = {
         description: 'Edit files',
@@ -1542,6 +2072,97 @@ describe('AgentTool', () => {
 
       return capturedInvocation;
     }
+
+    it('preserves subagent tool protocol payloads in non-interactive mode', async () => {
+      vi.mocked(config.isInteractive).mockReturnValue(false);
+      const responseParts: Part[] = [{ text: 'raw protocol result' }];
+      const snapshots: AgentResultDisplay[] = [];
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          args: { path: '/test.ts' },
+          description: 'Reading test.ts',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          success: true,
+          responseParts,
+          timestamp: Date.now(),
+        } satisfies AgentToolResultEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        snapshots.push(output as AgentResultDisplay);
+      });
+
+      const resultSnapshot = snapshots.find((snapshot) =>
+        snapshot.toolCalls?.some(
+          (toolCall) =>
+            toolCall.callId === 'call-read-1' && toolCall.status === 'success',
+        ),
+      );
+      const toolCall = resultSnapshot?.toolCalls?.find(
+        (entry) => entry.callId === 'call-read-1',
+      );
+      expect(toolCall?.args).toEqual({ path: '/test.ts' });
+      expect(toolCall?.responseParts).toBe(responseParts);
+    });
+
+    it('omits subagent protocol payloads from interactive display state', async () => {
+      vi.mocked(config.isInteractive).mockReturnValue(true);
+      const responseParts: Part[] = [{ text: 'raw protocol result' }];
+      const snapshots: AgentResultDisplay[] = [];
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          args: { path: '/test.ts' },
+          description: 'Reading test.ts',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          success: true,
+          responseParts,
+          resultDisplay: 'Rendered result',
+          timestamp: Date.now(),
+        } satisfies AgentToolResultEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        snapshots.push(output as AgentResultDisplay);
+      });
+
+      const resultSnapshot = snapshots.find((snapshot) =>
+        snapshot.toolCalls?.some(
+          (toolCall) =>
+            toolCall.callId === 'call-read-1' && toolCall.status === 'success',
+        ),
+      );
+      const toolCall = resultSnapshot?.toolCalls?.find(
+        (entry) => entry.callId === 'call-read-1',
+      );
+      expect(toolCall?.description).toBe('Reading test.ts');
+      expect(toolCall?.resultDisplay).toBe('Rendered result');
+      expect(toolCall).not.toHaveProperty('args');
+      expect(toolCall).not.toHaveProperty('responseParts');
+    });
 
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
       // Track whether pendingConfirmation was set then cleared, using
@@ -1839,9 +2460,10 @@ describe('AgentTool', () => {
       ] = vi.fn();
 
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
     });
 
     it('should run in background when agent definition has background: true', async () => {
@@ -2327,6 +2949,15 @@ describe('AgentTool', () => {
           status: 'running',
           agentType: 'file-search',
           description: 'Search files',
+          persistedCliFlags: expect.objectContaining({
+            approvalMode: 'auto-edit',
+            bare: false,
+            sandbox: null,
+            screenReader: false,
+            model: 'parent-model',
+            maxSessionTurns: -1,
+            maxToolCalls: -1,
+          }),
         }),
       );
       // Finally block patches the sidecar to the terminal status —
@@ -2445,6 +3076,31 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('keeps bubble-mode background agents on auto-deny in non-interactive mode', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        approvalMode: 'bubble',
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+
+      const createCalls = vi.mocked(mockSubagentManager.createAgentHeadless)
+        .mock.calls;
+      const createdConfig = createCalls[createCalls.length - 1][1] as Config;
+      expect(createdConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+    });
+
     it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
       const params: AgentParams = {
         description: 'Start monitor',
@@ -2534,9 +3190,14 @@ describe('AgentTool', () => {
     });
 
     it('persists fork capability snapshots in the bootstrap transcript', async () => {
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+
       const forkParams: AgentParams = {
         description: 'Fork task',
         prompt: 'Investigate issue',
+        subagent_type: 'fork',
         run_in_background: true,
       };
       const generationConfig = {
@@ -2657,5 +3318,29 @@ describe('resolveSubagentApprovalMode', () => {
     expect(
       resolveSubagentApprovalMode(ApprovalMode.DEFAULT, undefined, false),
     ).toBe(PermissionMode.Default);
+  });
+
+  it('should resolve the subagent-only "bubble" mode to Default (confirmation required)', () => {
+    // `bubble` is not a privileged mode — it requires confirmation like
+    // `default`, so it resolves to Default in both trusted and untrusted
+    // folders (the background launch path is what flips deny → surface).
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'bubble', true),
+    ).toBe(PermissionMode.Default);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'bubble', false),
+    ).toBe(PermissionMode.Default);
+  });
+
+  it('should let a permissive parent win over a "bubble" subagent mode', () => {
+    // Consistent with every other mode: a yolo/auto-edit parent wins, so a
+    // bubble agent under such a parent runs permissively (and never bubbles,
+    // since no confirmation is ever requested).
+    expect(resolveSubagentApprovalMode(ApprovalMode.YOLO, 'bubble', true)).toBe(
+      PermissionMode.Yolo,
+    );
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.AUTO_EDIT, 'bubble', true),
+    ).toBe(PermissionMode.AutoEdit);
   });
 });

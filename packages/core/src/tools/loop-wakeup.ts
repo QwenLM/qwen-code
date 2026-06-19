@@ -1,0 +1,180 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { ToolInvocation, ToolResult } from './tools.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import type { Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import {
+  WAKEUP_MAX_SECONDS,
+  WAKEUP_MIN_SECONDS,
+  clampWakeupSeconds,
+} from '../services/cronScheduler.js';
+import { getErrorMessage } from '../utils/errors.js';
+
+export interface LoopWakeupParams {
+  delaySeconds: number;
+  prompt: string;
+  reason?: string;
+}
+
+function formatRequested(delaySeconds: number): string {
+  return Number.isFinite(delaySeconds) ? `${delaySeconds}s` : `${delaySeconds}`;
+}
+
+class LoopWakeupInvocation extends BaseToolInvocation<
+  LoopWakeupParams,
+  ToolResult
+> {
+  constructor(
+    private readonly config: Config,
+    params: LoopWakeupParams,
+  ) {
+    super(params);
+  }
+
+  getDescription(): string {
+    const clamped = clampWakeupSeconds(this.params.delaySeconds);
+    const roundedDelaySeconds = Number.isFinite(this.params.delaySeconds)
+      ? Math.round(this.params.delaySeconds)
+      : this.params.delaySeconds;
+    const prefix =
+      clamped === roundedDelaySeconds
+        ? `${clamped}s`
+        : `${clamped}s (requested ${formatRequested(this.params.delaySeconds)})`;
+    return `${prefix}: ${this.params.prompt}`;
+  }
+
+  /**
+   * Scheduling future model input is side-effectful: the continuation runs
+   * against the agent with full tool access at fire time. Returning 'ask'
+   * (never 'allow') keeps it out of AUTO mode's L4 short-circuit so the
+   * classifier still vets it — same reasoning as CronCreate.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  async execute(): Promise<ToolResult> {
+    const prompt = this.params.prompt.trim();
+    if (!prompt) {
+      const message = 'Loop wakeup prompt must not be empty.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      };
+    }
+
+    try {
+      const scheduler = this.config.getCronScheduler();
+      if (scheduler.disabled) {
+        const message =
+          'Loop wakeups are disabled for the rest of this session ' +
+          '(token limit reached). Restart the session to re-enable.';
+        return {
+          llmContent: message,
+          returnDisplay: message,
+          error: { message },
+        };
+      }
+      const { id, scheduledFor, clampedDelaySeconds, wasClamped, replacedId } =
+        scheduler.scheduleWakeup(this.params.delaySeconds, prompt);
+      const reason = this.params.reason?.trim();
+
+      const llmContent = [
+        `Scheduled loop wakeup ${id}.`,
+        replacedId ? `Replaced pending wakeup ${replacedId}.` : null,
+        `Scheduled for: ${scheduledFor} (in ${clampedDelaySeconds}s).`,
+        wasClamped
+          ? `Requested ${formatRequested(this.params.delaySeconds)} was clamped to the [${WAKEUP_MIN_SECONDS}, ${WAKEUP_MAX_SECONDS}] s range.`
+          : null,
+        reason ? `Reason: ${reason}.` : null,
+        'Session-only one-shot; not persisted. Call LoopWakeup again before ' +
+          'ending the turn to keep the loop alive; omit it to end the loop.',
+      ]
+        .filter(Boolean)
+        .join('\n');
+      const returnDisplay = `Loop wakeup ${id} scheduled for ${scheduledFor}${
+        reason ? ` — ${reason}` : ''
+      }`;
+
+      return { llmContent, returnDisplay };
+    } catch (error) {
+      const message = getErrorMessage(error);
+      return {
+        llmContent: `Error scheduling loop wakeup: ${message}`,
+        returnDisplay: message,
+        error: { message },
+      };
+    }
+  }
+}
+
+export class LoopWakeupTool extends BaseDeclarativeTool<
+  LoopWakeupParams,
+  ToolResult
+> {
+  static readonly Name = ToolNames.LOOP_WAKEUP;
+
+  constructor(private readonly config: Config) {
+    super(
+      LoopWakeupTool.Name,
+      ToolDisplayNames.LOOP_WAKEUP,
+      'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. Session-only and one-shot — it does not persist or recur. A self-paced wakeup chain may run for at most 24h.',
+      Kind.Other,
+      {
+        type: 'object',
+        properties: {
+          delaySeconds: {
+            type: 'number',
+            description: `Seconds from now to wake up. Clamped to [${WAKEUP_MIN_SECONDS}, ${WAKEUP_MAX_SECONDS}]. Prefer 60-270s for fast-changing state, 1200s+ when there is no reason to check sooner.`,
+          },
+          prompt: {
+            type: 'string',
+            maxLength: 10000,
+            description:
+              'Continuation prompt to enqueue when the wakeup fires. Prefix with `/loop` so the next firing re-invokes the loop skill, e.g. `/loop check the deploy`.',
+          },
+          reason: {
+            type: 'string',
+            description:
+              'One short sentence explaining the chosen delay. Shown to the user. Be specific.',
+          },
+        },
+        required: ['delaySeconds', 'prompt'],
+        additionalProperties: false,
+      },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — scheduling is infrequent
+      false, // alwaysLoad
+      'loop wakeup continuation follow-up self-pace',
+    );
+  }
+
+  protected createInvocation(
+    params: LoopWakeupParams,
+  ): ToolInvocation<LoopWakeupParams, ToolResult> {
+    return new LoopWakeupInvocation(this.config, params);
+  }
+
+  /**
+   * Forward the continuation prompt and cadence to the AUTO classifier —
+   * it is enqueued and executed against the agent at fire time, so it
+   * needs the same scrutiny as a direct command (mirrors CronCreate).
+   */
+  override toAutoClassifierInput(
+    params: LoopWakeupParams,
+  ): Record<string, unknown> {
+    return {
+      delaySeconds: clampWakeupSeconds(params.delaySeconds),
+      prompt: params.prompt,
+      reason: params.reason ?? '',
+    };
+  }
+}

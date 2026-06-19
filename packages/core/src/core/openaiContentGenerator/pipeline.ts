@@ -11,6 +11,7 @@ import {
 } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
+import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -18,6 +19,7 @@ import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
+import { createChildAbortController } from '../../utils/abortController.js';
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -52,20 +54,32 @@ export class ContentGenerationPipeline {
       userPromptId,
       false,
       async (openaiRequest, context) => {
-        const openaiResponse = (await this.client.chat.completions.create(
-          openaiRequest,
-          {
-            signal: request.config?.abortSignal,
-          },
-        )) as OpenAI.Chat.ChatCompletion;
+        // Wrap in a per-request child so the OpenAI SDK's leaked abort
+        // listener (client.mjs fetchWithTimeout — no {once:true}, no
+        // removeEventListener) stays on a short-lived signal instead of
+        // accumulating on the caller's long-lived round signal.
+        const parentSignal = request.config?.abortSignal;
+        const perRequestAc = parentSignal
+          ? createChildAbortController(parentSignal)
+          : undefined;
+        try {
+          const openaiResponse = (await this.client.chat.completions.create(
+            openaiRequest,
+            {
+              signal: perRequestAc?.signal,
+            },
+          )) as OpenAI.Chat.ChatCompletion;
 
-        const geminiResponse =
-          OpenAIContentConverter.convertOpenAIResponseToGemini(
-            openaiResponse,
-            context,
-          );
+          const geminiResponse =
+            OpenAIContentConverter.convertOpenAIResponseToGemini(
+              openaiResponse,
+              context,
+            );
 
-        return geminiResponse;
+          return geminiResponse;
+        } finally {
+          perRequestAc?.abort();
+        }
       },
     );
   }
@@ -79,16 +93,48 @@ export class ContentGenerationPipeline {
       userPromptId,
       true,
       async (openaiRequest, context) => {
-        // Stage 1: Create OpenAI stream
-        const stream = (await this.client.chat.completions.create(
-          openaiRequest,
-          {
-            signal: request.config?.abortSignal,
-          },
-        )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        // Per-request child — same rationale as the non-streaming path.
+        const parentSignal = request.config?.abortSignal;
+        const perRequestAc = parentSignal
+          ? createChildAbortController(parentSignal)
+          : undefined;
+        let stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        try {
+          // Stage 1: Create OpenAI stream. Wrapped in try so a network /
+          // DNS / proxy error during the SDK call still cleans up the
+          // per-request child (same pattern as the non-streaming path).
+          stream = (await this.client.chat.completions.create(openaiRequest, {
+            signal: perRequestAc?.signal,
+          })) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        } catch (e) {
+          perRequestAc?.abort();
+          throw e;
+        }
 
-        // Stage 2: Process stream with conversion and logging
-        return this.processStreamWithLogging(stream, context, request);
+        // Stage 2: Process stream with conversion and logging.
+        // When a per-request controller exists, wrap in an async generator
+        // that aborts it once the stream is fully consumed or abandoned, so
+        // the child signal's reverse-cleanup fires and the parent listener
+        // is released.
+        if (!perRequestAc) {
+          return this.processStreamWithLogging(stream, context, request);
+        }
+        // Capture the narrowed controller so the closure below sees a non-
+        // nullable type (TS does not propagate narrowing into nested funcs).
+        const ac = perRequestAc;
+        const innerStream = this.processStreamWithLogging(
+          stream,
+          context,
+          request,
+        );
+        async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
+          try {
+            yield* innerStream;
+          } finally {
+            ac.abort();
+          }
+        }
+        return drainThenCleanup();
       },
     );
   }
@@ -305,12 +351,16 @@ export class ContentGenerationPipeline {
       ...this.buildGenerateContentConfig(request),
     };
 
-    // Add streaming options if present
     if (isStreaming) {
       (
         baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming
       ).stream = true;
       baseRequest.stream_options = { include_usage: true };
+    } else {
+      // Explicit false required: some gateways default to SSE when the field is absent.
+      (
+        baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming
+      ).stream = false;
     }
 
     // Add tools if present and non-empty.
@@ -341,7 +391,33 @@ export class ContentGenerationPipeline {
       this.contentGeneratorConfig.reasoning === false;
     if (reasoningDisabled) {
       const typed = providerRequest as unknown as Record<string, unknown>;
-      if ('enable_thinking' in typed) {
+      // Provider buildRequest doesn't auto-inject `enable_thinking`, so a
+      // guarded `in typed` check would never fire for default qwen3 configs.
+      // Hostname + model-name gate avoids leaking this qwen-specific field
+      // to non-qwen routings on the same DashScope hostname (GLM uses
+      // `extra_body.thinking.enabled`, DeepSeek-on-DashScope uses
+      // `thinking: { type: 'disabled' }`; sending `enable_thinking` to them
+      // is at best a no-op, at worst forwarded upstream and rejected).
+      //
+      // Gate on the *wire* model (`context.model`, i.e.
+      // `request.model || contentGeneratorConfig.model` — the same value
+      // baseRequest.model is built from above), not on the config model. A
+      // request-level model override would otherwise desync the gate from
+      // what actually ships: a qwen config with a non-qwen request model
+      // would leak the field, and a non-qwen config with a qwen request
+      // model would miss the disable signal (the regression).
+      //
+      // `coder-model` is the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
+      // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
+      // start with `qwen` but is the most common hybrid-thinking model
+      // for first-time users, so it must be covered.
+      const model = (context.model ?? '').toLowerCase();
+      if (
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+          this.contentGeneratorConfig,
+        ) &&
+        (model.startsWith('qwen') || model === 'coder-model')
+      ) {
         typed['enable_thinking'] = false;
       }
       // Strip reasoning config — extra_body could inject it, overriding
@@ -447,11 +523,12 @@ export class ContentGenerationPipeline {
     // Reasoning configuration for OpenAI-compatible endpoints is highly fragmented.
     // For example, across common providers and models:
     //
-    //   - deepseek-reasoner   — thinking is enabled by default and cannot be disabled
-    //   - glm-4.7             — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
-    //   - kimi-k2-thinking    — thinking is enabled by default and cannot be disabled
-    //   - gpt-5.x series      — thinking is enabled by default; can be disabled via `reasoning.effort`
-    //   - qwen3 series        — model-dependent; can be manually disabled via `extra_body.enable_thinking`
+    //   - deepseek-reasoner — thinking is enabled by default and cannot be disabled
+    //   - glm-4.7 — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
+    //   - kimi-k2-thinking — thinking is enabled by default and cannot be disabled
+    //   - gpt-5.x series — thinking is enabled by default; can be disabled via `reasoning.effort`
+    //   - qwen3 series — model-dependent; emitted as `enable_thinking: false`
+    //                           on DashScope endpoints when reasoning is disabled
     //
     // Given this inconsistency, we avoid mapping values and only pass through the
     // configured reasoning object when explicitly enabled. This keeps provider- and
@@ -545,7 +622,18 @@ export class ContentGenerationPipeline {
       splitToolMedia:
         providerOverrides.splitToolMedia ??
         this.contentGeneratorConfig.splitToolMedia ??
-        false,
+        // Default true: the OpenAI Chat Completions spec only permits text on
+        // `role: "tool"` messages, so tool-returned media (e.g. an image read
+        // by read_file) embedded there is silently dropped or rejected by
+        // strict providers (doubao / new-api / LM Studio) and the model never
+        // sees it (QwenLM/qwen-code#4876). Splitting it into a follow-up user
+        // message is spec-compliant and safe for permissive providers too.
+        // Opt out via generationConfig.splitToolMedia = false.
+        true,
+      toolResultContentFormat:
+        providerOverrides.toolResultContentFormat ??
+        this.contentGeneratorConfig.toolResultContentFormat ??
+        'parts',
       ...(toolCallParser ? { toolCallParser } : {}),
       ...(responseParsingOptions ? { responseParsingOptions } : {}),
       ...(taggedThinkingParser ? { taggedThinkingParser } : {}),
