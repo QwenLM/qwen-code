@@ -637,7 +637,11 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})\n`,
         );
         if (!this.isReconnecting) {
-          setTimeout(() => this.reconnectWithRetry(), delay);
+          this.reconnectTimer = setTimeout(
+            () => this.reconnectWithRetry(),
+            delay,
+          );
+          this.reconnectTimer.unref();
         }
       } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
         process.stderr.write(
