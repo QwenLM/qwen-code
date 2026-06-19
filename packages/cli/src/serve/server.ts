@@ -250,7 +250,7 @@ export async function listWorkspaceSessionsForResponse(
       workspaceCwd: item.cwd,
       createdAt: item.startTime,
       updatedAt: new Date(item.mtime).toISOString(),
-      title: item.customTitle ?? item.prompt,
+      displayName: item.customTitle || item.prompt,
       clientCount: 0,
       hasActivePrompt: false,
     });
@@ -264,7 +264,7 @@ export async function listWorkspaceSessionsForResponse(
         ...existing,
         ...live,
         createdAt: existing.createdAt,
-        title: live.title ?? existing.title,
+        displayName: live.displayName ?? existing.displayName,
         updatedAt: live.updatedAt ?? existing.updatedAt,
         clientCount: live.clientCount,
         hasActivePrompt: live.hasActivePrompt,
@@ -2599,18 +2599,6 @@ export function createServeApp(
         { displayName },
         clientId !== undefined ? { clientId } : undefined,
       );
-      if (displayName !== undefined) {
-        try {
-          await new SessionService(boundWorkspace).renameSession(
-            sessionId,
-            displayName,
-          );
-        } catch {
-          // Best-effort: session file may not exist yet (fresh session
-          // with no turns written). The in-memory update still applies
-          // for the lifetime of this daemon process.
-        }
-      }
       res.status(200).json({ sessionId, ...effective });
     } catch (err) {
       sendBridgeError(res, err, {

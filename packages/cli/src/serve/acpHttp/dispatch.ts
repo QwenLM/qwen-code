@@ -800,7 +800,7 @@ export class AcpDispatcher {
             sessions: result.sessions.map((s) => ({
               sessionId: s.sessionId,
               cwd: s.workspaceCwd,
-              title: s.title,
+              title: s.displayName,
               updatedAt: s.updatedAt,
             })),
             ...(result.nextCursor != null

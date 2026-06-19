@@ -5439,6 +5439,39 @@ class QwenAgent implements Agent {
           AbortSignal.timeout(5 * 60_000),
         )) as unknown as Record<string, unknown>;
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionTitle: {
+        const sessionId = params['sessionId'];
+        const displayName = params['displayName'];
+        const titleSource = params['titleSource'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (typeof displayName !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing displayName',
+          );
+        }
+        if (displayName.length > SESSION_TITLE_MAX_LENGTH) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Title too long (max ${SESSION_TITLE_MAX_LENGTH} chars)`,
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const source =
+          titleSource === 'auto' ? ('auto' as const) : ('manual' as const);
+        const recording = session.getConfig().getChatRecordingService();
+        let ok = false;
+        if (recording) {
+          ok = recording.recordCustomTitle(displayName, source);
+          await recording.flush();
+        }
+        return { sessionId, displayName, titleSource: source, persisted: ok };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -6329,7 +6362,7 @@ class QwenAgent implements Agent {
               throw err;
             }
 
-            return { newSessionId, title };
+            return { newSessionId, title, displayName: title };
           },
         );
       }

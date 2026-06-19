@@ -186,8 +186,8 @@ export interface BranchSessionRequest {
 }
 
 export interface DaemonBranchedSession extends DaemonRestoredSession {
-  title: string;
-  forkedFrom: { sessionId: string; title: string };
+  displayName: string;
+  forkedFrom: { sessionId: string; displayName: string };
 }
 
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */
@@ -196,7 +196,6 @@ export interface DaemonSessionSummary {
   workspaceCwd: string;
   createdAt?: string;
   updatedAt?: string;
-  title?: string;
   displayName?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
