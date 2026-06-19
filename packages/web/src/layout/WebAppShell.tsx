@@ -30,11 +30,34 @@ export function WebAppShell({
             <p>{active?.description}</p>
           </div>
           <div className="web-status-cluster">
-            <StatusPill label="Daemon" value={connection.status} />
-            <StatusPill label="Workspace" value={workspace.status} />
+            <StatusPill
+              label="Daemon"
+              value={connection.status}
+              details={toStatusDetails([
+                ['URL', workspace.baseUrl],
+                [
+                  'Workspace',
+                  connection.workspaceCwd ?? workspace.workspaceCwd,
+                ],
+                ['Session', connection.sessionId],
+                ['Model', connection.currentModel],
+                ['Error', connection.error],
+              ])}
+            />
+            <StatusPill
+              label="Workspace"
+              value={workspace.status}
+              details={toStatusDetails([
+                ['URL', workspace.baseUrl],
+                ['Workspace', workspace.workspaceCwd],
+                ['Error', workspace.error?.message],
+              ])}
+            />
           </div>
         </header>
-        <div className={showTaskRail ? 'web-workspace chat-mode' : 'web-workspace'}>
+        <div
+          className={showTaskRail ? 'web-workspace chat-mode' : 'web-workspace'}
+        >
           <section className="web-content">{children}</section>
           {showTaskRail ? (
             <TaskRail
@@ -48,13 +71,48 @@ export function WebAppShell({
   );
 }
 
-function StatusPill({ label, value }: { label: string; value: string }) {
+function StatusPill({
+  label,
+  value,
+  details,
+}: {
+  label: string;
+  value: string;
+  details: Array<[string, string]>;
+}) {
   return (
-    <span className={`web-status-pill ${value}`} title={`${label}: ${value}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </span>
+    <details className="web-status-menu">
+      <summary
+        className={`web-status-pill ${value}`}
+        title={`${label}: ${value}`}
+      >
+        <span>{label}</span>
+        <strong>{value}</strong>
+      </summary>
+      <div className="web-status-popover">
+        <h3>{label}</h3>
+        <dl>
+          <div>
+            <dt>Status</dt>
+            <dd>{value}</dd>
+          </div>
+          {details.map(([name, detail]) => (
+            <div key={name}>
+              <dt>{name}</dt>
+              <dd>{detail}</dd>
+            </div>
+          ))}
+        </dl>
+        <p>
+          建议使用 <code>npm run dev:web</code> 启动当前 workspace 的 Web 服务。
+        </p>
+      </div>
+    </details>
   );
+}
+
+function toStatusDetails(rows: Array<[string, string | undefined]>) {
+  return rows.filter((row): row is [string, string] => Boolean(row[1]));
 }
 
 function TaskRail({

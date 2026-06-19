@@ -308,6 +308,75 @@ pre {
   font-weight: 650;
 }
 
+.web-status-menu {
+  position: relative;
+}
+
+.web-status-menu summary {
+  list-style: none;
+}
+
+.web-status-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.web-status-popover {
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--web-border);
+  border-radius: 14px;
+  box-shadow: var(--web-shadow);
+  color: var(--web-text);
+  min-width: 280px;
+  padding: 12px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+}
+
+.web-status-popover h3,
+.web-status-popover p,
+.web-status-popover dl {
+  margin: 0;
+}
+
+.web-status-popover h3 {
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.web-status-popover dl {
+  display: grid;
+  gap: 8px;
+}
+
+.web-status-popover dl div {
+  display: grid;
+  gap: 3px;
+}
+
+.web-status-popover dt {
+  color: var(--web-subtle);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.web-status-popover dd {
+  color: var(--web-muted);
+  font-size: 11px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.web-status-popover p {
+  border-top: 1px solid rgba(31, 33, 29, 0.08);
+  color: var(--web-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
 .web-workspace {
   display: flex;
   flex: 1;
@@ -451,6 +520,76 @@ pre {
   border: 1px solid var(--web-border);
   border-radius: 999px;
   padding: 4px 8px;
+}
+
+.web-connection-diagnostics {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(181, 71, 71, 0.18);
+  border-radius: 16px;
+  box-shadow: var(--web-shadow-soft);
+  margin-top: 18px;
+  max-width: 620px;
+  padding: 14px;
+  text-align: left;
+  width: 100%;
+}
+
+.web-connection-diagnostics strong {
+  color: var(--web-text);
+  display: block;
+  font-size: 13px;
+}
+
+.web-connection-diagnostics p {
+  color: var(--web-muted);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 5px 0 0;
+  max-width: none;
+}
+
+.web-connection-diagnostics dl {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+}
+
+.web-connection-diagnostics dl div {
+  display: grid;
+  gap: 3px;
+}
+
+.web-connection-diagnostics dt {
+  color: var(--web-subtle);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.web-connection-diagnostics dd {
+  color: var(--web-muted);
+  font-size: 11px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.web-connection-command {
+  align-items: center;
+  background: var(--web-surface-soft);
+  border: 1px solid var(--web-border);
+  border-radius: 10px;
+  color: var(--web-muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 8px;
+}
+
+.web-connection-command code,
+.web-status-popover code {
+  color: var(--web-text);
+  font-size: 11px;
 }
 
 .web-task-rail {

@@ -22,6 +22,13 @@ const daemonProxy: ProxyOptions = {
     proxy.on('proxyReq', (proxyReq) => {
       proxyReq.removeHeader('origin');
       proxyReq.removeHeader('referer');
+      proxyReq.removeHeader('if-none-match');
+      proxyReq.removeHeader('if-modified-since');
+    });
+    proxy.on('proxyRes', (proxyRes) => {
+      proxyRes.headers['cache-control'] = 'no-store';
+      proxyRes.headers.pragma = 'no-cache';
+      proxyRes.headers.expires = '0';
     });
   },
 };

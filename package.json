@@ -25,6 +25,7 @@
   "scripts": {
     "start": "node scripts/start.js",
     "dev": "node scripts/dev.js",
+    "dev:web": "node scripts/web-dev.js",
     "dev:daemon": "node scripts/daemon-dev.js",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
