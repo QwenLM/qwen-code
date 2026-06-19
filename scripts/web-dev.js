@@ -5,8 +5,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import http from 'node:http';
+import net from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -171,6 +172,54 @@ function waitForDaemon(url) {
   });
 }
 
+function checkPortAvailable(hostname, port) {
+  const host = hostname === '[::1]' ? '::1' : hostname;
+  return new Promise((resolveCheck, reject) => {
+    const server = net.createServer();
+    server.once('error', (error) => {
+      if (error.code === 'EADDRINUSE') {
+        resolveCheck(false);
+        return;
+      }
+      reject(error);
+    });
+    server.once('listening', () => {
+      server.close(() => resolveCheck(true));
+    });
+    server.listen(Number(port), host);
+  });
+}
+
+function portOwnerHint(port) {
+  if (isWin) return '';
+  try {
+    return execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], {
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+async function assertPortAvailable({ label, hostname, port, url, retryFlag }) {
+  if (await checkPortAvailable(hostname, port)) return;
+  const owner = portOwnerHint(port);
+  const details = owner ? `\n\nCurrent listener:\n${indent(owner)}` : '';
+  throw new Error(
+    `${label} port ${port} is already in use.${details}\n\n` +
+      `Stop the stale process or choose another port:\n` +
+      `  npm run dev:web -- --${retryFlag} <free-port>\n\n` +
+      `Requested ${label} URL: ${url}`,
+  );
+}
+
+function indent(value) {
+  return value
+    .split('\n')
+    .map((line) => `  ${line}`)
+    .join('\n');
+}
+
 function killChild(child) {
   if (child.killed) return;
   try {
@@ -261,12 +310,29 @@ console.log('');
 process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
-spawnProcess('daemon', 'node', ['scripts/dev.js', ...serveArgs], {
-  cwd: root,
-  env: serveEnv,
-});
-
-waitForDaemon(daemonUrl)
+Promise.all([
+  assertPortAvailable({
+    label: 'daemon',
+    hostname: daemonHost,
+    port: daemonPort,
+    url: daemonUrl,
+    retryFlag: 'port',
+  }),
+  assertPortAvailable({
+    label: 'web',
+    hostname: webHost,
+    port: webPort,
+    url: webUrl,
+    retryFlag: 'web-port',
+  }),
+])
+  .then(() => {
+    spawnProcess('daemon', 'node', ['scripts/dev.js', ...serveArgs], {
+      cwd: root,
+      env: serveEnv,
+    });
+    return waitForDaemon(daemonUrl);
+  })
   .then(() => {
     spawnProcess(
       'web',
@@ -290,6 +356,6 @@ waitForDaemon(daemonUrl)
     );
   })
   .catch((err) => {
-    console.error(`[daemon] ${err.message}`);
+    console.error(`[web-dev] ${err.message}`);
     shutdown(1);
   });
