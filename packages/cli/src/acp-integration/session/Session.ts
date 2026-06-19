@@ -1866,8 +1866,8 @@ ${this.pendingWorktreeNotice}
           promptId,
           functionCalls,
         );
-        if (toolRun.stopAfterUserQuestionCancel) {
-          await this.#preserveCancelledAskUserQuestionToolRun(
+        if (toolRun.stopAfterPermissionCancel) {
+          await this.#preserveCancelledPermissionToolRun(
             toolRun,
             pendingSend.signal,
           );
