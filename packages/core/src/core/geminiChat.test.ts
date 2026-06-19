@@ -1473,7 +1473,9 @@ describe('GeminiChat', async () => {
               parts: [{ text: 'hello' }],
             },
           ],
-          config: {},
+          config: expect.objectContaining({
+            abortSignal: expect.any(AbortSignal),
+          }),
         },
         'prompt-id-1',
       );

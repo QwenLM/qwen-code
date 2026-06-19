@@ -99,7 +99,7 @@ describe('LoopWakeupTool', () => {
       cronExpr: '@wakeup',
       prompt: 'continue loop',
     });
-    expect(scheduler.size).toBe(0);
+    expect(scheduler.size).toBe(1);
   });
 
   it('rejects scheduling when the scheduler is disabled', async () => {

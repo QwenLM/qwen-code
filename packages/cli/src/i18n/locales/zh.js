@@ -24,7 +24,7 @@ export default {
   'toolDisplayName.Glob': 'Glob',
   'toolDisplayName.Shell': '运行命令',
   'toolDisplayName.Shell Command': 'Shell 命令',
-  'toolDisplayName.TodoWrite': '任务清单',
+  'toolDisplayName.TodoList': '任务清单',
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Skill': '技能',
@@ -544,6 +544,48 @@ export default {
   'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
+  'Show daily token usage statistics.': '显示每日 token 使用统计信息',
+  'Show monthly token usage statistics.': '显示每月 token 使用统计信息',
+  'Export token usage statistics to CSV or JSON.':
+    '将 token 使用统计信息导出为 CSV 或 JSON',
+  'No usage data.': '没有使用数据。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}：{{tokens}} 个 token（{{requests}} 个请求）',
+  'Daily token usage for {{value}}': '{{value}} 的每日 token 使用情况',
+  'Monthly token usage for {{value}}': '{{value}} 的每月 token 使用情况',
+  'Total: {{tokens}} tokens': '总计：{{tokens}} 个 token',
+  'Requests: {{requests}}': '请求数：{{requests}}',
+  'Breakdown:': '明细：',
+  'Input: {{tokens}}': '输入：{{tokens}}',
+  'Output: {{tokens}}': '输出：{{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    '缓存（已包含在输入中）：{{tokens}}',
+  'Thoughts: {{tokens}}': '思考：{{tokens}}',
+  'By model:': '按模型：',
+  'By auth type:': '按认证类型：',
+  'By model/auth type:': '按模型/认证类型：',
+  'By source:': '按来源：',
+  'Failed to load token usage stats: {{error}}':
+    '加载 token 使用统计信息失败：{{error}}',
+  'Expected --format csv or --format json.':
+    '应为 --format csv 或 --format json。',
+  'Expected a file path after --output.': '--output 后应提供文件路径。',
+  'Unexpected argument: {{argument}}': '意外参数：{{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '用法：/stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Token 使用导出路径必须位于项目工作目录内。',
+  'Export target does not exist: {{path}}': '导出目标不存在：{{path}}',
+  'Cannot resolve export path within the working directory.':
+    '无法在工作目录内解析导出路径。',
+  'Could not create a temporary export file.': '无法创建临时导出文件。',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token 使用情况已导出为 {{format}}：{{path}}',
+  'Failed to export token usage stats: {{error}}':
+    '导出 token 使用统计信息失败：{{error}}',
+  'Unclosed quote in arguments.': '参数中存在未闭合的引号。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注意：生成耗时（TTFT/TPS）归属于生成指标。',
   'exit the cli': '退出命令行界面',
   'Manage workspace directories': '管理工作区目录',
   'Add directories to the workspace. Use comma to separate multiple paths':

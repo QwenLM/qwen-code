@@ -101,6 +101,25 @@ describe('McpPromptLoader', () => {
       expect(result).toEqual({ named: 'value', pos: 'positional' });
     });
 
+    it('should preserve empty optional named arguments', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [{ name: 'trail', required: false }];
+      const userArgs = '--trail=""';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toEqual({ trail: '' });
+    });
+
+    it('should treat empty required named arguments as provided', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [
+        { name: 'name', required: true },
+        { name: 'age', required: true },
+      ];
+      const userArgs = '--name="" --age=""';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toEqual({ name: '', age: '' });
+    });
+
     it('should handle positional args followed by named args', () => {
       const loader = new McpPromptLoader(mockConfig);
       const promptArgs: PromptArgument[] = [

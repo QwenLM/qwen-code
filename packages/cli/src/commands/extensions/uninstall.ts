@@ -30,9 +30,8 @@ export async function handleUninstall(args: UninstallArgs) {
         null,
         requestConsentNonInteractive,
       ),
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(workspaceDir).merged,
-      ),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
     });
     await extensionManager.refreshCache();
     await extensionManager.uninstallExtension(args.name, false);

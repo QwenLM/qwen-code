@@ -28,6 +28,7 @@ import {
 } from './types.js';
 import { runGateAgent } from './gateReviewAgents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { delay } from '../utils/retry.js';
 
 const debugLogger = createDebugLogger('PLAN_APPROVAL_GATE');
 
@@ -141,11 +142,19 @@ async function runAgentWithRetry(
   bundle: EvidenceBundle,
   signal: AbortSignal,
 ): Promise<GateAgentResult | null> {
+  // Entry-time check: if the parent signal is already aborted before we start,
+  // respect it to avoid launching a 5-minute gate agent for an obvious cancellation.
+  // This is the only synchronous signal.aborted check before calling runGateAgent.
+  // The retry loop remains abort-aware via delay() which rejects on abort,
+  // providing a cancellation point between attempts without monitoring mid-flight.
+  if (signal.aborted) {
+    debugLogger.warn(
+      'Gate agent skipped: parent signal already aborted at entry',
+    );
+    return null;
+  }
+
   for (let attempt = 1; attempt <= MAX_AGENT_RETRIES; attempt++) {
-    if (signal.aborted) {
-      debugLogger.warn('Gate agent skipped: signal already aborted');
-      return null;
-    }
     try {
       return await runGateAgent(config, bundle, signal);
     } catch (error) {
@@ -156,6 +165,19 @@ async function runAgentWithRetry(
       if (attempt === MAX_AGENT_RETRIES) {
         debugLogger.error(
           `Gate agent exhausted all ${MAX_AGENT_RETRIES} retries`,
+        );
+        return null;
+      }
+      // Abort-aware delay: wait 1s between retries (not after the final attempt).
+      // Uses the existing `delay()` from utils/retry.ts, which rejects when the
+      // signal is aborted. A cancellation during the wait breaks the loop
+      // immediately rather than proceeding to another rapid-fire attempt.
+      try {
+        await delay(1000, signal);
+      } catch {
+        // Signal aborted during delay — stop retrying
+        debugLogger.warn(
+          `Gate agent retry loop cancelled during backoff delay (attempt ${attempt}/${MAX_AGENT_RETRIES})`,
         );
         return null;
       }

@@ -7,7 +7,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   save_memory: 'SaveMemory',
   agent: 'Agent',
   skill: 'Skill',
@@ -102,10 +102,17 @@ export function extractText(tool: ACPToolCall): string | null {
 export function getToolResultSummary(tool: ACPToolCall): string {
   if (tool.status !== 'completed' && tool.status !== 'failed') return '';
 
+  const name = tool.toolName.toLowerCase();
+  if (name === 'grep_search' || name === 'grep' || name === 'search') {
+    const rawSummary = parseGrepSummary(
+      (extractRawOutputText(tool.rawOutput) ?? '').trim(),
+    );
+    if (rawSummary) return rawSummary;
+  }
+
   const text = extractText(tool);
   if (!text) return '';
 
-  const name = tool.toolName.toLowerCase();
   const lines = text.split('\n');
   const lineCount = lines.length;
 
@@ -129,7 +136,10 @@ export function getToolResultSummary(tool: ACPToolCall): string {
     return truncateText(firstLine, 80);
   }
 
-  if (name === 'grep' || name === 'search') {
+  if (name === 'grep_search' || name === 'grep' || name === 'search') {
+    const summary = parseGrepSummary(text.trim());
+    if (summary) return summary;
+
     const matchCount = lines.filter((l) => l.trim()).length;
     return `${matchCount} result(s)`;
   }
@@ -184,6 +194,12 @@ function getDescriptionFromTitle(
   }
 
   return formatDescriptionPaths(title, workspaceCwd);
+}
+
+function parseGrepSummary(text: string): string | null {
+  if (text === 'No matches found') return text;
+  if (/^Found \d+ match(?:es)?(?: \(truncated\))?$/.test(text)) return text;
+  return null;
 }
 
 function getDescriptionFromArgs(

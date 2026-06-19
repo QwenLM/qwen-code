@@ -1288,7 +1288,11 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
   /** 'auto' = triggered by session turn; 'manual' = user-initiated */
   trigger: 'auto' | 'manual';
   status: 'completed' | 'skipped' | 'failed';
-  skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+  skipped_reason?:
+    | 'already_running'
+    | 'queued'
+    | 'memory_tool'
+    | 'memory_pressure';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1296,7 +1300,11 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
   constructor(params: {
     trigger: 'auto' | 'manual';
     status: 'completed' | 'skipped' | 'failed';
-    skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+    skipped_reason?:
+      | 'already_running'
+      | 'queued'
+      | 'memory_tool'
+      | 'memory_pressure';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;
