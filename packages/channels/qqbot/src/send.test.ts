@@ -60,6 +60,8 @@ vi.mock('@qwen-code/channel-base', () => ({
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
+type QQChannelOptions = ConstructorParameters<typeof QQChannel>[3];
+type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
 
 /** Create a mock Response-like object for sendQQMessage. */
 function mockResponse(
@@ -207,6 +209,51 @@ describe('splitText', () => {
 
   it('handles empty string', () => {
     expect(splitText('')).toEqual(['']);
+  });
+});
+
+describe('session persistence paths', () => {
+  function makeChannel(name: string, options?: QQChannelOptions): QQChannel {
+    return new QQChannel(
+      name,
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+      options,
+    );
+  }
+
+  function getGlobalSessionsPath(ch: QQChannel): string {
+    return (ch as unknown as { globalSessionsPath: string }).globalSessionsPath;
+  }
+
+  it('uses per-channel sessions files when QQChannel owns the router', () => {
+    expect(getGlobalSessionsPath(makeChannel('bot one'))).toBe(
+      '/tmp/test-qwen/channels/bot_one-sessions.json',
+    );
+    expect(getGlobalSessionsPath(makeChannel('bot/two'))).toBe(
+      '/tmp/test-qwen/channels/bot_two-sessions.json',
+    );
+  });
+
+  it('keeps the shared sessions file when start.ts provides the router', () => {
+    const externalRouter = {
+      restoreSessions: vi.fn(),
+    } as unknown as QQChannelRouter;
+
+    expect(
+      getGlobalSessionsPath(makeChannel('bot-one', { router: externalRouter })),
+    ).toBe('/tmp/test-qwen/channels/sessions.json');
   });
 });
 

@@ -140,8 +140,9 @@ export class QQChannel extends ChannelBase {
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
   private readonly qqStatePath: string;
   /**
-   * Path to the global sessions.json managed by start.ts.
-   * start.ts deletes it on shutdown, so we back it up.
+   * Path to the SessionRouter persistence file we back up before shutdown.
+   * start.ts passes a shared router; standalone QQChannel instances use a
+   * per-channel router file.
    */
   private readonly globalSessionsPath: string;
   /** Backup of sessions.json so conversations survive daemon restarts. */
@@ -158,6 +159,7 @@ export class QQChannel extends ChannelBase {
     mkdirSync(stateDir, { recursive: true });
     const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
 
+    const hasExternalRouter = Boolean(options?.router);
     const router =
       options?.router ??
       new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
@@ -165,7 +167,9 @@ export class QQChannel extends ChannelBase {
     super(name, config, bridge, { ...options, router });
     this.qqConfig = config as unknown as QQChannelConfig;
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
-    this.globalSessionsPath = join(stateDir, 'sessions.json');
+    this.globalSessionsPath = hasExternalRouter
+      ? join(stateDir, 'sessions.json')
+      : sessionsPath;
     this.sessionsBackupPath = join(
       stateDir,
       `${safeName}-sessions-backup.json`,
