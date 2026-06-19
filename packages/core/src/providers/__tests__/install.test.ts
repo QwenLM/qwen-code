@@ -173,6 +173,7 @@ describe('applyProviderInstallPlan', () => {
     expect(syncAuthState).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
       'new-model',
+      undefined,
     );
     expect(refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
     expect(adapter.cleanupBackup).toHaveBeenCalled();

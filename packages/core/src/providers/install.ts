@@ -243,15 +243,11 @@ export async function applyProviderInstallPlan(
     reloadModelProviders?.(updatedModelProviders);
     if (plan.modelSelection?.modelId) {
       currentStep = 'syncAuthState';
-      if (plan.modelSelection.baseUrl) {
-        syncAuthState?.(
-          plan.authType,
-          plan.modelSelection.modelId,
-          plan.modelSelection.baseUrl,
-        );
-      } else {
-        syncAuthState?.(plan.authType, plan.modelSelection.modelId);
-      }
+      syncAuthState?.(
+        plan.authType,
+        plan.modelSelection.modelId,
+        plan.modelSelection.baseUrl,
+      );
     }
     if (doRefreshAuth && refreshAuth) {
       currentStep = 'refreshAuth';

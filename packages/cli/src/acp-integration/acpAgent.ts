@@ -1514,18 +1514,10 @@ function readExistingProviderConfig(
 function resolveExistingProviderApiKey(
   config: ProviderConfig,
   settings: LoadedSettings,
+  protocol: ProviderConfig['protocol'],
+  baseUrl: string,
 ): string | undefined {
-  const existing = findExistingProviderModels(config, settings);
-  const firstModel = existing?.models[0];
-  const protocol = existing?.protocol ?? config.protocol;
-  const baseUrl =
-    typeof firstModel?.baseUrl === 'string'
-      ? firstModel.baseUrl
-      : resolveBaseUrl(config);
-  const envKey =
-    typeof firstModel?.envKey === 'string'
-      ? firstModel.envKey
-      : resolveProviderEnvKey(config, protocol, baseUrl);
+  const envKey = resolveProviderEnvKey(config, protocol, baseUrl);
   return readSettingsEnv(settings, envKey);
 }
 
@@ -1564,7 +1556,10 @@ function serializeProviderConfig(
 function readProviderSetupInputs(
   config: ProviderConfig,
   params: Record<string, unknown>,
-  existingApiKey?: string,
+  resolveExistingApiKey?: (
+    protocol: ProviderConfig['protocol'],
+    baseUrl: string,
+  ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
     | AuthType
@@ -1597,7 +1592,8 @@ function readProviderSetupInputs(
   // `apiKey` is optional on update: when the client omits it (e.g. it only
   // received `hasApiKey` from the list response), fall back to the stored key.
   const apiKey =
-    readOptionalString(params['apiKey'], 'apiKey') ?? existingApiKey;
+    readOptionalString(params['apiKey'], 'apiKey') ??
+    resolveExistingApiKey?.(protocol ?? config.protocol, baseUrl);
   if (!apiKey) {
     throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
   }
@@ -4853,7 +4849,13 @@ class QwenAgent implements Agent {
         const inputs = readProviderSetupInputs(
           providerConfig,
           params,
-          resolveExistingProviderApiKey(providerConfig, this.settings),
+          (protocol, baseUrl) =>
+            resolveExistingProviderApiKey(
+              providerConfig,
+              this.settings,
+              protocol,
+              baseUrl,
+            ),
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
