@@ -355,6 +355,31 @@ Skill body.
       expect(config.priority).toBeUndefined();
     });
 
+    it('should parse user-invocable from frontmatter', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-skill',
+        description: 'A test skill',
+        'user-invocable': false,
+      });
+
+      const markdown = `---
+name: test-skill
+description: A test skill
+user-invocable: false
+---
+
+Skill body.
+`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.userInvocable).toBe(false);
+    });
+
     it('should parse content with paths (conditional skill)', () => {
       const markdown = `---
 name: tsx-helper

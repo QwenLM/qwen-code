@@ -21,7 +21,7 @@ import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { isAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath } from '../memory/paths.js';
 import {
   FileEncoding,
   needsUtf8Bom,
@@ -359,7 +359,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    */
   async getDefaultPermission(): Promise<PermissionDecision> {
     const projectRoot = this.config.getProjectRoot();
-    if (isAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
+    if (isAnyAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
       return 'allow';
     }
     return 'ask';
@@ -427,17 +427,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       return `Create ${shortenPath(relativePath)}`;
     }
 
-    const oldStringSnippet =
-      this.params.old_string.split('\n')[0].substring(0, 30) +
-      (this.params.old_string.length > 30 ? '...' : '');
-    const newStringSnippet =
-      this.params.new_string.split('\n')[0].substring(0, 30) +
-      (this.params.new_string.length > 30 ? '...' : '');
-
     if (this.params.old_string === this.params.new_string) {
       return `No file changes to ${shortenPath(relativePath)}`;
     }
-    return `${shortenPath(relativePath)}: ${oldStringSnippet} => ${newStringSnippet}`;
+    return shortenPath(relativePath);
   }
 
   /**

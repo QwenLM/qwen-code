@@ -19,6 +19,10 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage
 | Stage 2 | Code review + test results (with screenshots) |
 | Stage 3 | Reflection + verdict                          |
 
+**Terminal gate exception:** if Stage 1a template check fails, submit exactly
+one `CHANGES_REQUESTED` review and stop. Do not also post or update a Stage 1
+issue comment, and do not continue to Stage 2, Stage 3, or approval.
+
 **Re-runs:** if the triage runs again on the same PR, update each comment in place:
 
 ```bash
@@ -49,7 +53,7 @@ This is the most important stage — catch problems before anyone spends time re
 
 **1a. Template check:**
 
-PR body missing required headings from `.github/pull_request_template.md` (read from worktree) → request changes, @mention author, link the template, stop.
+PR body missing required headings from `.github/pull_request_template.md` (read from worktree) → request changes, @mention author, link the template, stop. This is the only public output for this terminal gate.
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
@@ -79,8 +83,9 @@ curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.
 - If we cut 80% of the scope, would the remaining 20% already solve the problem?
 - Could we achieve the same goal by modifying something that already exists, instead of adding something new?
 - Can the complexity live outside the codebase (user config, external tool) instead of inside it?
+- **Minimal change:** is every edit in the diff needed for the stated goal, or does it carry unrelated changes, drive-by refactors, formatting churn, or scope creep that should be split into a separate PR? A focused PR that does one thing is easier to review, revert, and reason about.
 
-If you spot a materially simpler path, raise it — not as a blocker, but as a genuine question the contributor should think about before the code review.
+If you spot a materially simpler path, or changes that go beyond the minimal set needed for the stated goal, raise it — not as a blocker, but as a genuine question the contributor should think about before the code review.
 
 Implementation-level concerns (over-abstraction, code duplication, "10 lines vs 10 files") belong in Stage 2a code review — you need to see the code for those.
 
@@ -95,7 +100,7 @@ Template looks good ✓
 
 On direction: <state your honest assessment — aligned and why, or concerns and why>. CHANGELOG <reference if found, or "no direct reference but the area is relevant">.
 
-On approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity.">
+On approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
 
 <If passing:> Moving on to code review. 🔍
 <If concerns:> Flagging these for discussion before diving deeper.
@@ -109,7 +114,7 @@ On approach: <state your honest assessment — the scope feels right / feels lik
 
 方向：<直接说判断——对齐的原因/担心的原因>。
 
-方案：<范围合理 / 感觉可以大幅简化 / 建议砍掉的部分>。<如果看到更简路径，点名：有没有考虑过直接 X？可能用很小的复杂度覆盖大部分场景。>
+方案：<范围合理 / 感觉可以大幅简化 / 建议砍掉的部分>。<如果看到更简路径，点名：有没有考虑过直接 X？可能用很小的复杂度覆盖大部分场景。><如果 diff 夹带了无关改动或顺手重构，点名并建议拆成单独 PR。>
 
 <如果通过：> 进入代码审查 🔍
 <如果有顾虑：> 先提出来讨论，再深入看代码。
@@ -119,7 +124,8 @@ On approach: <state your honest assessment — the scope feels right / feels lik
 — _Qwen Code · qwen3.7-max_
 ```
 
-Save this comment's ID. If template fails or direction is escalated → stop here.
+Save this comment's ID. If direction is escalated → stop here. Template
+failures already stopped in Stage 1a.
 
 ### Stage 2: Review + Test
 
@@ -212,6 +218,7 @@ Step back and look at the whole picture — the motivation, the implementation, 
 - Does the PR's approach match or exceed my independent proposal? Or did I find a simpler path it missed?
 - Does this solve something users actually care about?
 - Is the code straightforward, or does it feel like it's trying too hard?
+- Is every change in the diff necessary, or did unrelated edits / drive-by refactors bloat it beyond the minimal change the goal needs?
 - After seeing it run, do the results match what the PR promised?
 - If I had to maintain this in six months, would I curse the author or thank them?
 - Am I approving this because it's genuinely good, or because I ran out of reasons to say no?

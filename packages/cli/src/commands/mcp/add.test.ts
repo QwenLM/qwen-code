@@ -29,10 +29,13 @@ vi.mock('fs/promises', async (importOriginal) => {
   };
 });
 
-vi.mock('os', () => {
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
   const homedir = vi.fn(() => '/home/user');
   return {
+    ...actual,
     default: {
+      ...actual,
       homedir,
     },
     homedir,
@@ -78,6 +81,17 @@ describe('mcp add command', () => {
         args: ['arg1', 'arg2'],
         env: { FOO: 'bar' },
       },
+    });
+  });
+
+  it('should preserve equals signs in env values', async () => {
+    await parser.parseAsync('add my-server /path/to/server -e TOKEN=a=b=c');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        command: '/path/to/server',
+        env: { TOKEN: 'a=b=c' },
+      }),
     });
   });
 
@@ -247,7 +261,7 @@ describe('mcp add command', () => {
           .spyOn(process, 'exit')
           .mockImplementation((() => {
             throw new Error('process.exit called');
-          }) as (code?: number) => never);
+          }) as typeof process.exit);
 
         await expect(
           parser.parseAsync(`add --scope project ${serverName} ${command}`),

@@ -1,5 +1,6 @@
 export * from './extensionManager.js';
 export * from './types.js';
+export * from './i18n.js';
 export * from './variables.js';
 export * from './github.js';
 export * from './extensionSettings.js';

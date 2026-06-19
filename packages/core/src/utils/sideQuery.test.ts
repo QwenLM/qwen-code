@@ -180,6 +180,39 @@ describe('runSideQuery', () => {
       }
     });
 
+    it('skips output language when skipOutputLanguagePreference is true', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'qwen-side-query-'));
+      try {
+        const outputLanguagePath = path.join(dir, 'output-language.md');
+        await writeFile(outputLanguagePath, '请始终用中文回答用户可见文本。');
+        vi.mocked(mockConfig.getOutputLanguageFilePath).mockReturnValue(
+          outputLanguagePath,
+        );
+        vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({
+          title: '测试标题',
+        });
+
+        await runSideQuery<{ title: string }>(mockConfig, {
+          purpose: 'permission_classifier_stage1',
+          contents: [{ role: 'user', parts: [{ text: 'classify' }] }],
+          schema: {
+            type: 'object',
+            properties: { title: { type: 'string' } },
+            required: ['title'],
+          },
+          abortSignal: abortController.signal,
+          systemInstruction: 'Classify this request.',
+          skipOutputLanguagePreference: true,
+        });
+
+        const callArg = vi.mocked(mockBaseLlmClient.generateJson).mock
+          .calls[0][0];
+        expect(callArg.systemInstruction).toBe('Classify this request.');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('throws when the response does not satisfy the schema', async () => {
       vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({
         status: 'ok',

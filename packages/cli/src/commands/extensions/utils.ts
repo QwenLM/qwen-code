@@ -8,6 +8,8 @@ import {
   ExtensionManager,
   ExtensionScope,
   redactUrlCredentials,
+  getExtensionDisplayName,
+  getExtensionDescription,
   type Extension,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
@@ -19,7 +21,8 @@ import {
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import * as os from 'node:os';
 import chalk from 'chalk';
-import { t } from '../../i18n/index.js';
+import stripAnsi from 'strip-ansi';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 /** The `--scope` choices accepted by extension install/uninstall/link. */
 export const EXTENSION_SCOPE_CHOICES = [
@@ -42,12 +45,14 @@ export async function getExtensionManager(): Promise<ExtensionManager> {
   const workspaceDir = process.cwd();
   const extensionManager = new ExtensionManager({
     workspaceDir,
+    locale: getCurrentLanguage(),
     requestConsent: requestConsentOrFail.bind(
       null,
       requestConsentNonInteractive,
     ),
     requestChoicePlugin: requestChoicePluginNonInteractive,
-    isWorkspaceTrusted: !!isWorkspaceTrusted(loadSettings(workspaceDir).merged),
+    isWorkspaceTrusted:
+      isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
   });
   await extensionManager.refreshCache();
   return extensionManager;
@@ -70,7 +75,13 @@ export function extensionToOutputString(
   );
 
   const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
-  let output = `${inline ? '' : status} ${extension.config.name} (${extension.config.version})`;
+  const locale = getCurrentLanguage();
+  const displayLabel = getExtensionDisplayName(extension, locale);
+  let output = `${inline ? '' : status} ${displayLabel} (${extension.config.version})`;
+  const desc = getExtensionDescription(extension, locale);
+  if (desc) {
+    output += `\n ${t('Description:')} ${stripAnsi(desc)}`;
+  }
   output += `\n ${t('Scope:')} ${extension.scope}`;
   output += `\n ${t('Path:')} ${extension.path}`;
   if (extension.installMetadata) {

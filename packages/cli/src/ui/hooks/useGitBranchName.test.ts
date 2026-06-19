@@ -7,9 +7,11 @@
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook } from '@testing-library/react';
 import { useGitBranchName } from './useGitBranchName.js';
 import { fs, vol } from 'memfs'; // For mocking fs
+import fsPromises from 'node:fs/promises';
+import path from 'node:path';
 import { isCommandAvailable, execCommand } from '@qwen-code/qwen-code-core';
 
 // Mock @qwen-code/qwen-code-core
@@ -42,7 +44,13 @@ vi.mock('node:fs/promises', async () => {
 });
 
 const CWD = '/test/project';
-const GIT_LOGS_HEAD_PATH = `${CWD}/.git/logs/HEAD`;
+const GIT_LOGS_HEAD_PATH = path.join(CWD, '.git', 'logs', 'HEAD');
+
+async function flushAsyncEffects() {
+  vi.runAllTimers();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
 describe('useGitBranchName', () => {
   beforeEach(() => {
@@ -128,8 +136,32 @@ describe('useGitBranchName', () => {
     expect(result.current).toBeUndefined();
   });
 
-  it('should update branch name when .git/HEAD changes', async ({ skip }) => {
-    skip(); // TODO: fix
+  it('should update branch name when .git/logs/HEAD changes', async () => {
+    let onWatchEvent: ((eventType: string) => void) | undefined;
+    const watchMock = vi
+      .spyOn(fs, 'watch')
+      .mockImplementation(
+        (_filename: unknown, options?: unknown, listener?: unknown) => {
+          const callback =
+            typeof options === 'function'
+              ? (options as (
+                  eventType: string,
+                  filename: string | Buffer | null,
+                ) => void)
+              : typeof listener === 'function'
+                ? (listener as (
+                    eventType: string,
+                    filename: string | Buffer | null,
+                  ) => void)
+                : undefined;
+          onWatchEvent = callback
+            ? (eventType: string) => callback(eventType, null)
+            : undefined;
+          return {
+            close: vi.fn(),
+          } as unknown as ReturnType<typeof fs.watch>;
+        },
+      );
     (execCommand as Mock)
       .mockResolvedValueOnce({
         stdout: 'main\n',
@@ -145,22 +177,24 @@ describe('useGitBranchName', () => {
     const { result, rerender } = renderHook(() => useGitBranchName(CWD));
 
     await act(async () => {
-      vi.runAllTimers();
+      await flushAsyncEffects();
       rerender();
     });
     expect(result.current).toBe('main');
+    expect(watchMock).toHaveBeenCalledWith(
+      GIT_LOGS_HEAD_PATH,
+      expect.any(Function),
+    );
 
-    // Simulate file change event
-    // Ensure the watcher is set up before triggering the change
+    // Simulate the watcher event after updating the reflog file.
     await act(async () => {
       fs.writeFileSync(GIT_LOGS_HEAD_PATH, 'ref: refs/heads/develop'); // Trigger watcher
-      vi.runAllTimers(); // Process timers for watcher and exec
+      onWatchEvent?.('change');
+      await flushAsyncEffects(); // Process timers for watcher and exec
       rerender();
     });
 
-    await waitFor(() => {
-      expect(result.current).toBe('develop');
-    });
+    expect(result.current).toBe('develop');
   });
 
   it('should handle watcher setup error silently', async () => {
@@ -205,8 +239,7 @@ describe('useGitBranchName', () => {
     expect(result.current).toBe('main');
   });
 
-  it('should cleanup watcher on unmount', async ({ skip }) => {
-    skip(); // TODO: fix
+  it('should cleanup watcher on unmount', async () => {
     const closeMock = vi.fn();
     const watchMock = vi.spyOn(fs, 'watch').mockReturnValue({
       close: closeMock,
@@ -221,9 +254,10 @@ describe('useGitBranchName', () => {
     const { unmount, rerender } = renderHook(() => useGitBranchName(CWD));
 
     await act(async () => {
-      vi.runAllTimers();
+      await flushAsyncEffects();
       rerender();
     });
+    expect(watchMock).toHaveBeenCalled();
 
     unmount();
     expect(watchMock).toHaveBeenCalledWith(
@@ -231,5 +265,36 @@ describe('useGitBranchName', () => {
       expect.any(Function),
     );
     expect(closeMock).toHaveBeenCalled();
+  });
+
+  it('should not create watcher if setup completes after unmount', async () => {
+    let resolveAccess!: () => void;
+    vi.spyOn(fsPromises, 'access').mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveAccess = resolve;
+      }),
+    );
+
+    const closeMock = vi.fn();
+    const watchMock = vi.spyOn(fs, 'watch').mockReturnValue({
+      close: closeMock,
+    } as unknown as ReturnType<typeof fs.watch>);
+
+    (execCommand as Mock).mockResolvedValue({
+      stdout: 'main\n',
+      stderr: '',
+      code: 0,
+    });
+
+    const { unmount } = renderHook(() => useGitBranchName(CWD));
+    unmount();
+
+    await act(async () => {
+      resolveAccess();
+      await Promise.resolve();
+    });
+
+    expect(watchMock).not.toHaveBeenCalled();
+    expect(closeMock).not.toHaveBeenCalled();
   });
 });

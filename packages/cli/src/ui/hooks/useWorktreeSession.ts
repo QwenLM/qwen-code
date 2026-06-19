@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
@@ -33,20 +33,22 @@ import { readWorktreeSession } from '@qwen-code/qwen-code-core';
 export function useWorktreeSession(config: Config): WorktreeSession | null {
   const [session, setSession] = useState<WorktreeSession | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const filePath = config
-        .getSessionService()
-        .getWorktreeSessionPath(config.getSessionId());
-      const ws = await readWorktreeSession(filePath);
-      setSession(ws);
-    } catch {
-      setSession(null);
-    }
-  }, [config]);
-
   useEffect(() => {
-    void load();
+    let cancelled = false;
+
+    const safeLoad = async () => {
+      try {
+        const filePath = config
+          .getSessionService()
+          .getWorktreeSessionPath(config.getSessionId());
+        const ws = await readWorktreeSession(filePath);
+        if (!cancelled) setSession(ws);
+      } catch {
+        if (!cancelled) setSession(null);
+      }
+    };
+
+    void safeLoad();
 
     const filePath = config
       .getSessionService()
@@ -55,35 +57,18 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
     const fileName = path.basename(filePath);
 
     let watcher: fs.FSWatcher | undefined;
-    let cancelled = false;
 
     const setupWatcher = async () => {
       try {
-        // Ensure the chats directory exists so fs.watch doesn't ENOENT
-        // when no session has ever been written for this project. The
-        // recursive mkdir is idempotent.
         await fsPromises.mkdir(dirPath, { recursive: true });
         if (cancelled) return;
-        // Watch the parent dir so create/delete/rename events on the
-        // sidecar (which may not exist at mount time) are caught.
-        //
-        // `filename` may come back as a Buffer on Linux when no
-        // encoding is configured at the libuv layer, so the previous
-        // `filename === fileName` (string) comparison silently never
-        // matched and the watcher fired but never reloaded. Normalize
-        // via toString() to cover both shapes. `filename` is also
-        // nullable on some platforms (e.g. recursive watchers without
-        // event payloads) — treat null as "unknown file, reload to be
-        // safe" since the worktree state is small and the load is cheap.
         watcher = fs.watch(dirPath, (_eventType, filename) => {
           if (filename === null || filename.toString() === fileName) {
-            void load();
+            void safeLoad();
           }
         });
       } catch {
-        // Watcher setup is best-effort: the hook still returns whatever
-        // load() resolved with on mount. Without a watcher, the UI just
-        // doesn't react to sidecar changes until the next re-mount.
+        // Watcher setup is best-effort
       }
     };
 
@@ -93,7 +78,7 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
       cancelled = true;
       watcher?.close();
     };
-  }, [config, load]);
+  }, [config]);
 
   return session;
 }

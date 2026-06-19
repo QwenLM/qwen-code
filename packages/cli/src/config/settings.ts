@@ -15,6 +15,11 @@ import {
   getErrorMessage,
   Storage,
   createDebugLogger,
+  stripRuntimeSnapshotPrefix,
+} from '@qwen-code/qwen-code-core';
+import type {
+  MCPServerConfig,
+  McpServerScope,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
@@ -86,9 +91,36 @@ export const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
 const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  'QWEN_CODE_MCP_APPROVALS_PATH',
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
 ];
+
+const RELOAD_EXCLUDED_KEYS = new Set([
+  ...PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  'QWEN_SERVER_TOKEN',
+  'QWEN_CLI_ENTRY',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
+  'LD_PRELOAD',
+  'LD_AUDIT',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'BASH_ENV',
+  'ENV',
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+]);
+
+const dotEnvSourcedKeys = new Set<string>();
+const settingsEnvSourcedKeys = new Set<string>();
+const lastReloadSnapshot = new Map<string, string>();
+let lastReloadSnapshotSeeded = false;
 
 // Settings version to track migration state
 export const SETTINGS_VERSION = 4;
@@ -372,6 +404,30 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   return [...warningSet];
 }
 
+/**
+ * Stamp every MCP server in a scope's settings with its provenance `scope`
+ * BEFORE the merge, so the winning entry of the shallow `mcpServers` merge
+ * carries the scope it actually came from. This drives both the approval gate
+ * (`'workspace'` is gated) and precedence (`'workspace'`/`'system'` outrank a
+ * `.mcp.json` server). User/default scopes are left unstamped (trusted, lower
+ * precedence than `.mcp.json`). Returns a shallow copy — never mutates input.
+ * See issue #4615.
+ */
+function tagMcpServerScope(
+  settings: Settings,
+  scope: McpServerScope,
+): Settings {
+  const servers = settings.mcpServers;
+  if (!servers || Object.keys(servers).length === 0) {
+    return settings;
+  }
+  const tagged: Record<string, MCPServerConfig> = {};
+  for (const [name, config] of Object.entries(servers)) {
+    tagged[name] = { ...config, scope };
+  }
+  return { ...settings, mcpServers: tagged };
+}
+
 function mergeSettings(
   system: Settings,
   systemDefaults: Settings,
@@ -379,7 +435,9 @@ function mergeSettings(
   workspace: Settings,
   isTrusted: boolean,
 ): Settings {
-  const safeWorkspace = isTrusted ? workspace : ({} as Settings);
+  const safeWorkspace = isTrusted
+    ? tagMcpServerScope(workspace, 'workspace')
+    : ({} as Settings);
 
   // Settings are merged with the following precedence (last one wins for
   // single values):
@@ -393,7 +451,7 @@ function mergeSettings(
     systemDefaults,
     user,
     safeWorkspace,
-    system,
+    tagMcpServerScope(system, 'system'),
   ) as Settings;
 }
 
@@ -408,6 +466,7 @@ export class LoadedSettings {
     migrationWarnings: string[] = [],
     corruptedPath: string | undefined = undefined,
     wasRecovered: boolean = false,
+    workspaceSettingsActive: boolean = true,
   ) {
     this.system = system;
     this.systemDefaults = systemDefaults;
@@ -418,6 +477,7 @@ export class LoadedSettings {
     this.migrationWarnings = migrationWarnings;
     this.corruptedPath = corruptedPath;
     this.wasRecovered = wasRecovered;
+    this.workspaceSettingsActive = workspaceSettingsActive;
     this._merged = this.computeMergedSettings();
   }
 
@@ -430,6 +490,7 @@ export class LoadedSettings {
   readonly migrationWarnings: string[];
   readonly corruptedPath: string | undefined;
   readonly wasRecovered: boolean;
+  readonly workspaceSettingsActive: boolean;
   corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
@@ -464,6 +525,10 @@ export class LoadedSettings {
   }
 
   setValue(scope: SettingScope, key: string, value: unknown): void {
+    // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
+    if (key === 'model.name' && typeof value === 'string') {
+      value = stripRuntimeSnapshotPrefix(value);
+    }
     const settingsFile = this.forScope(scope);
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
@@ -874,6 +939,12 @@ export function loadEnvironment(settings: Settings): void {
 
           if (!Object.hasOwn(process.env, key)) {
             process.env[key] = parsedEnv[key];
+            dotEnvSourcedKeys.add(key);
+          }
+          // Seed snapshot with ALL parsed keys (not just written ones)
+          // so child processes can detect deletions on first reload.
+          if (!lastReloadSnapshotSeeded) {
+            lastReloadSnapshot.set(key, parsedEnv[key]!);
           }
         }
       }
@@ -892,9 +963,158 @@ export function loadEnvironment(settings: Settings): void {
       }
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
+        settingsEnvSourcedKeys.add(key);
+      }
+      if (
+        !lastReloadSnapshotSeeded &&
+        typeof value === 'string' &&
+        !lastReloadSnapshot.has(key)
+      ) {
+        lastReloadSnapshot.set(key, value);
       }
     }
   }
+  lastReloadSnapshotSeeded = true;
+}
+
+export interface EnvReloadResult {
+  updatedKeys: string[];
+  removedKeys: string[];
+}
+
+/**
+ * Only keys previously set by loadEnvironment() are overwritten;
+ * shell-exported variables are never touched.
+ * Fully synchronous — no TOCTOU window between delete and re-add.
+ */
+export function reloadEnvironment(
+  settings: Settings,
+  workspaceCwd: string,
+): EnvReloadResult {
+  const userLevelPaths = getUserLevelEnvPaths();
+  const envFilePath = findEnvFile(settings, workspaceCwd, userLevelPaths);
+
+  if (process.env['CLOUD_SHELL'] === 'true') {
+    setUpCloudShellEnvironment(envFilePath);
+  }
+
+  // Build the set of new keys from .env (higher priority) + settings.env
+  let dotEnvReadFailed = false;
+  const newDotEnvKeys = new Map<string, string>();
+  const newSettingsEnvKeys = new Map<string, string>();
+
+  if (envFilePath) {
+    try {
+      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
+      const parsedEnv = dotenv.parse(envFileContent);
+      const excludedVars =
+        settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
+      const normalizedEnvFilePath = path.normalize(envFilePath);
+      const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
+      const isQwenScopedEnvFile =
+        isHomeScopedEnvFile ||
+        path.basename(path.dirname(normalizedEnvFilePath)) === QWEN_DIR;
+
+      for (const key in parsedEnv) {
+        if (!Object.hasOwn(parsedEnv, key)) continue;
+        if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
+        if (
+          !isHomeScopedEnvFile &&
+          PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
+        ) {
+          continue;
+        }
+        if (!isQwenScopedEnvFile && excludedVars.includes(key)) continue;
+        newDotEnvKeys.set(key, parsedEnv[key]!);
+      }
+    } catch {
+      dotEnvReadFailed = true;
+    }
+  }
+
+  if (settings.env) {
+    for (const [key, value] of Object.entries(settings.env)) {
+      if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
+      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
+      if (typeof value !== 'string') continue;
+      if (newDotEnvKeys.has(key)) continue;
+      // When .env read failed, use the snapshot as the shadow set so
+      // settings.env keys that were previously shadowed by .env don't
+      // accidentally overwrite the still-live .env values in process.env.
+      if (dotEnvReadFailed && lastReloadSnapshot.has(key)) continue;
+      newSettingsEnvKeys.set(key, value);
+    }
+  }
+
+  // Union of all new keys
+  const allNewKeys = new Set([
+    ...newDotEnvKeys.keys(),
+    ...newSettingsEnvKeys.keys(),
+  ]);
+
+  const updatedKeys: string[] = [];
+  const removedKeys: string[] = [];
+
+  // Delete keys previously known (from tracking Sets OR the boot snapshot)
+  // that are no longer in any source file. The snapshot covers keys that
+  // ACP children inherited from the daemon without tracking.
+  // Skip deletion entirely if the .env file became unreadable — treat as
+  // transient I/O failure rather than intentional key removal.
+  if (!dotEnvReadFailed) {
+    const previouslyKnown = new Set([
+      ...lastReloadSnapshot.keys(),
+      ...dotEnvSourcedKeys,
+      ...settingsEnvSourcedKeys,
+    ]);
+    for (const key of previouslyKnown) {
+      if (!allNewKeys.has(key) && !RELOAD_EXCLUDED_KEYS.has(key)) {
+        delete process.env[key];
+        removedKeys.push(key);
+      }
+    }
+  }
+
+  // Force-write all source keys. RELOAD_EXCLUDED_KEYS are already filtered
+  // at parse time so dangerous keys (PATH, HOME, etc.) never reach here.
+  // This unconditional write is necessary because ACP children inherit
+  // daemon env without tracking, so the tracking-based guard would miss them.
+  for (const [key, value] of newDotEnvKeys) {
+    if (process.env[key] !== value) {
+      updatedKeys.push(key);
+    }
+    process.env[key] = value;
+  }
+  for (const [key, value] of newSettingsEnvKeys) {
+    if (process.env[key] !== value) {
+      updatedKeys.push(key);
+    }
+    process.env[key] = value;
+  }
+
+  // Update tracking sets and snapshot only when the .env file was readable.
+  // A transient read failure must not wipe provenance — the stale tracking
+  // state is needed so the next successful reload can still detect deletions.
+  if (!dotEnvReadFailed) {
+    dotEnvSourcedKeys.clear();
+    for (const key of newDotEnvKeys.keys()) {
+      dotEnvSourcedKeys.add(key);
+    }
+    lastReloadSnapshot.clear();
+    for (const [key, value] of newDotEnvKeys) {
+      lastReloadSnapshot.set(key, value);
+    }
+    for (const [key, value] of newSettingsEnvKeys) {
+      lastReloadSnapshot.set(key, value);
+    }
+  }
+  // settings.env is always readable (from settings.json, not a file),
+  // so its tracking set is always updated.
+  settingsEnvSourcedKeys.clear();
+  for (const key of newSettingsEnvKeys.keys()) {
+    settingsEnvSourcedKeys.add(key);
+  }
+
+  return { updatedKeys, removedKeys };
 }
 
 export const CORRUPTED_SUFFIX = '.corrupted';
@@ -903,10 +1123,19 @@ export const CORRUPTED_SUFFIX = '.corrupted';
  * Load and merge settings from all scopes:
  * System Defaults → User (~/.qwen/settings.json) → Workspace → System.
  */
+export interface LoadSettingsOptions {
+  consumeCorruptionEnvVars?: boolean;
+  skipLoadEnvironment?: boolean;
+}
+
 export function loadSettings(
   workspaceDir: string = process.cwd(),
-  consumeCorruptionEnvVars: boolean = true,
+  consumeCorruptionEnvVars: boolean | LoadSettingsOptions = true,
 ): LoadedSettings {
+  const opts: LoadSettingsOptions =
+    typeof consumeCorruptionEnvVars === 'object'
+      ? consumeCorruptionEnvVars
+      : { consumeCorruptionEnvVars };
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
   // BEFORE any code reads a path derived from them. After this call, the
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
@@ -956,28 +1185,34 @@ export function loadSettings(
   } => {
     try {
       if (fs.existsSync(filePath)) {
-        let content = fs.readFileSync(filePath, 'utf-8');
+        const content = fs.readFileSync(filePath, 'utf-8');
         let rawSettings: unknown;
         // Carry corruption state through to the final return so it
         // can be attached after the migration pipeline runs.
         const corruptedPath = `${filePath}${CORRUPTED_SUFFIX}`;
         let corruptedSaved = false;
-        let recoveredFromBackup = false;
         let recoveredFromEnvVar: boolean | null = null;
 
         try {
           rawSettings = JSON.parse(stripJsonComments(content));
         } catch (parseError: unknown) {
           // ===== JSON parse failed — enter corruption recovery =====
-          // Strategy: save corrupted file as .corrupted → recover from .orig →
+          // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
+          //
+          // Note: there is no on-disk `.orig` backup to recover from. Writes go
+          // through `writeWithBackupSync`, which uses `.orig` only as an
+          // in-flight safety net and removes it on success — so it never
+          // lingers in the user's directory (see writeWithBackup.ts).
 
           // Step 1: copy corrupted file to .corrupted for reference
           // MUST guarantee .corrupted exists so onExit can restore it.
           // Use copy (not rename) — the file must stay on disk so that
           // child processes spawned by relaunchAppInChildProcess() can
-          // enter the existsSync block where env-var propagation is
-          // checked.  Step 2 will overwrite it with .orig if available.
+          // enter the existsSync block where env-var propagation is checked.
+          debugLogger.warn(
+            `Settings file ${filePath} has invalid JSON (${getErrorMessage(parseError)}). Resetting to empty settings.`,
+          );
 
           try {
             fs.copyFileSync(filePath, corruptedPath);
@@ -988,33 +1223,7 @@ export function loadSettings(
             );
           }
 
-          // Step 2: try recovering from .orig backup (created on each write)
-          const backupPath = `${filePath}.orig`;
-          if (fs.existsSync(backupPath)) {
-            debugLogger.warn(
-              `Settings file ${filePath} has invalid JSON (${getErrorMessage(parseError)}). Attempting recovery from backup ${backupPath}.`,
-            );
-            try {
-              const backupContent = fs.readFileSync(backupPath, 'utf-8');
-              const backupSettings = JSON.parse(
-                stripJsonComments(backupContent),
-              );
-              // Backup valid — overwrite with backup to restore last good state
-              fs.writeFileSync(filePath, backupContent, 'utf-8');
-              content = backupContent;
-              rawSettings = backupSettings;
-              const recoveryMsg = `Settings file ${filePath} had invalid JSON and was recovered from backup ${backupPath}. Some recent settings changes may have been lost.`;
-              debugLogger.warn(recoveryMsg);
-              recoveredFromBackup = true;
-            } catch (backupError) {
-              // Backup also corrupted — give up recovery
-              debugLogger.warn(
-                `Failed to recover from backup ${backupPath}: ${getErrorMessage(backupError)}. Falling back to empty settings.`,
-              );
-            }
-          }
-
-          // Step 3: no backup available — start with empty settings
+          // Step 2: no recoverable content — start with empty settings
           if (!rawSettings) {
             const warningMsg = `Settings file ${filePath} has invalid JSON. Your settings have been reset.`;
             debugLogger.warn(warningMsg);
@@ -1034,8 +1243,6 @@ export function loadSettings(
               wasRecovered: false,
             };
           }
-          // Fall through to migration pipeline — .orig backup may be in
-          // an older schema and needs to go through runMigrations.
         }
 
         // Propagate corruption state from parent process via env vars.
@@ -1047,7 +1254,7 @@ export function loadSettings(
         // don't re-trigger this path.
         const envCorruptedPath = process.env[ENV_CORRUPTED_PATH];
         if (
-          consumeCorruptionEnvVars &&
+          (opts.consumeCorruptionEnvVars ?? true) &&
           envCorruptedPath &&
           envCorruptedPath === corruptedPath &&
           scope === SettingScope.User
@@ -1138,7 +1345,7 @@ export function loadSettings(
           persistSettingsObject('Error normalizing settings version on disk');
         }
 
-        // Attach corruption state if settings were recovered from backup
+        // Attach corruption state propagated from the parent via env vars.
         const result: ReturnType<typeof loadAndMigrate> = {
           settings: settingsObject as Settings,
           rawJson: content,
@@ -1146,8 +1353,7 @@ export function loadSettings(
         };
         if (corruptedSaved) {
           result.corruptedPath = corruptedPath;
-          result.wasRecovered =
-            recoveredFromBackup || (recoveredFromEnvVar ?? false);
+          result.wasRecovered = recoveredFromEnvVar ?? false;
         }
         return result;
       }
@@ -1175,7 +1381,8 @@ export function loadSettings(
     settings: {} as Settings,
     rawJson: undefined,
   };
-  if (realWorkspaceDir !== realHomeDir) {
+  const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
+  if (workspaceSettingsActive) {
     workspaceResult = loadAndMigrate(
       workspaceSettingsPath,
       SettingScope.Workspace,
@@ -1242,7 +1449,9 @@ export function loadSettings(
 
   // loadEnviroment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
-  loadEnvironment(tempMergedSettings);
+  if (!opts.skipLoadEnvironment) {
+    loadEnvironment(tempMergedSettings);
+  }
 
   // Create LoadedSettings first
 
@@ -1294,6 +1503,7 @@ export function loadSettings(
     allMigrationWarnings,
     userResult.corruptedPath,
     userResult.wasRecovered ?? false,
+    workspaceSettingsActive,
   );
 }
 

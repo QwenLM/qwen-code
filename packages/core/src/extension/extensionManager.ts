@@ -57,6 +57,11 @@ import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
 import { ExtensionScope } from './types.js';
 import {
+  resolveExtensionConfigLocale,
+  type RawExtensionConfig,
+  type LocalizableString,
+} from './i18n.js';
+import {
   getEnvContents,
   maybePromptForSettings,
   promptForSetting,
@@ -109,6 +114,7 @@ export interface ExtensionChannelConfig {
 export interface Extension {
   id: string;
   name: string;
+  displayName?: string;
   version: string;
   isActive: boolean;
   path: string;
@@ -131,6 +137,13 @@ export interface Extension {
 export interface ExtensionConfig {
   name: string;
   version: string;
+  displayName?: string;
+  description?: string;
+  /** Original localizable values before resolution, for runtime re-resolution on language change. */
+  _rawLocalizable?: {
+    displayName?: LocalizableString;
+    description?: LocalizableString;
+  };
   mcpServers?: Record<string, MCPServerConfig>;
   lspServers?: string | Record<string, unknown>;
   contextFileName?: string | string[];
@@ -183,6 +196,8 @@ export interface ExtensionManagerOptions {
   /** Override list of enabled extension names (from CLI -e flag) */
   enabledExtensionOverrides?: string[];
   isWorkspaceTrusted: boolean;
+  /** Locale code for resolving localizable fields (e.g., 'en', 'zh'). Defaults to 'en'. */
+  locale?: string;
   telemetrySettings?: TelemetrySettings;
   config?: Config;
   requestConsent?: (options?: ExtensionRequestOptions) => Promise<void>;
@@ -245,19 +260,16 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
   };
 
   try {
-    const mdFiles = await glob('**/*.md', {
+    const allFiles = await glob('**/*.{md,toml}', {
       ...globOptions,
       cwd: dir,
     });
 
-    const commandNames = mdFiles.map((file) => {
-      const relativePathWithExt = path.relative(dir, path.join(dir, file));
-      const relativePath = relativePathWithExt.substring(
-        0,
-        relativePathWithExt.length - 3,
-      );
+    const commandNames = allFiles.map((file) => {
+      const ext = path.extname(file);
+      const relativePath = file.substring(0, file.length - ext.length);
       const commandName = relativePath
-        .split(path.sep)
+        .split(/[/\\]/)
         .map((segment) => segment.replaceAll(':', '_'))
         .join(':');
 
@@ -336,6 +348,7 @@ export class ExtensionManager {
   private config?: Config;
   private telemetrySettings?: TelemetrySettings;
   private isWorkspaceTrusted: boolean;
+  private readonly locale: string;
   private requestConsent: (options?: ExtensionRequestOptions) => Promise<void>;
   private requestSetting?: (setting: ExtensionSetting) => Promise<string>;
   private requestChoicePlugin: (
@@ -344,6 +357,7 @@ export class ExtensionManager {
 
   constructor(options: ExtensionManagerOptions) {
     this.workspaceDir = options.workspaceDir ?? process.cwd();
+    this.locale = options.locale ?? 'en';
     this.enabledExtensionNamesOverride =
       options.enabledExtensionOverrides?.map((name) => name.toLowerCase()) ??
       [];
@@ -803,6 +817,7 @@ export class ExtensionManager {
       const extension: Extension = {
         id: getExtensionId(config, installMetadata),
         name: config.name,
+        displayName: config.displayName,
         version:
           config.version ||
           installMetadata?.marketplaceConfig?.metadata?.version ||
@@ -946,13 +961,15 @@ export class ExtensionManager {
     }
     try {
       const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const config = recursivelyHydrateStrings(JSON.parse(configContent), {
+      const rawConfig = recursivelyHydrateStrings(JSON.parse(configContent), {
         extensionPath: extensionDir,
         CLAUDE_PLUGIN_ROOT: extensionDir,
         workspacePath: workspaceDir,
         '/': path.sep,
         pathSeparator: path.sep,
-      }) as unknown as ExtensionConfig;
+      }) as unknown as RawExtensionConfig;
+
+      const config = resolveExtensionConfigLocale(rawConfig, this.locale);
 
       if (!config.name) {
         throw new Error(

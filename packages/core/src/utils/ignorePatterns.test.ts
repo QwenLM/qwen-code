@@ -214,9 +214,12 @@ describe('BINARY_EXTENSIONS', () => {
   });
 
   it('should include additional binary extensions', () => {
-    expect(BINARY_EXTENSIONS).toContain('.dat');
     expect(BINARY_EXTENSIONS).toContain('.obj');
     expect(BINARY_EXTENSIONS).toContain('.wasm');
+  });
+
+  it('should not force generic data extensions to binary', () => {
+    expect(BINARY_EXTENSIONS).not.toContain('.dat');
   });
 
   it('should include media file extensions', () => {

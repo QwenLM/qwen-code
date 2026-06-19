@@ -88,8 +88,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ListFilesTool: 'list_directory',
   ReadFolder: 'list_directory', // legacy display name
 
-  // TodoWrite tool
+  // TodoList tool (wire name todo_write; class TodoWriteTool)
   todo_write: 'todo_write',
+  TodoList: 'todo_write',
+  // Legacy display name (renamed from "TodoWrite")
   TodoWrite: 'todo_write',
   TodoWriteTool: 'todo_write',
 
@@ -117,6 +119,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   exit_plan_mode: 'exit_plan_mode',
   ExitPlanMode: 'exit_plan_mode',
   ExitPlanModeTool: 'exit_plan_mode',
+
+  // EnterPlanMode tool
+  enter_plan_mode: 'enter_plan_mode',
+  EnterPlanMode: 'enter_plan_mode',
+  EnterPlanModeTool: 'enter_plan_mode',
 
   // LSP tool
   lsp: 'lsp',
@@ -336,9 +343,10 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   skill: 'Skill',
   // Others
   save_memory: 'SaveMemory',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   lsp: 'Lsp',
   exit_plan_mode: 'ExitPlanMode',
+  enter_plan_mode: 'EnterPlanMode',
 };
 
 /**
@@ -453,9 +461,10 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Agent: 'use agent',
   Skill: 'use skill',
   SaveMemory: 'save memory',
-  TodoWrite: 'write todos',
+  TodoList: 'write todos',
   Lsp: 'use LSP',
   ExitPlanMode: 'exit plan mode',
+  EnterPlanMode: 'enter plan mode',
 };
 
 /**
@@ -552,7 +561,7 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  * Shell operator tokens that act as command boundaries.
  * Ordered by length (longest first) for correct multi-char operator detection.
  */
-const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';'];
+const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '\n'];
 
 /**
  * Split a compound shell command into its individual simple commands

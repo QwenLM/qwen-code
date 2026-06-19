@@ -11,15 +11,17 @@ import {
   type SlashCommand,
   CommandKind,
 } from './types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import {
   ExtensionManager,
   ExtensionScope,
+  openBrowserSecurely,
   parseInstallSource,
   createDebugLogger,
   redactUrlCredentials,
+  getExtensionDisplayName,
+  getExtensionDescription,
 } from '@qwen-code/qwen-code-core';
-import open from 'open';
 
 const debugLogger = createDebugLogger('EXTENSIONS_COMMAND');
 const EXTENSION_EXPLORE_URL = {
@@ -30,6 +32,14 @@ const EXTENSION_EXPLORE_URL = {
 type ExtensionExploreSource = keyof typeof EXTENSION_EXPLORE_URL;
 
 async function exploreAction(context: CommandContext, args: string) {
+  const mode = context.executionMode ?? 'interactive';
+  if (mode !== 'interactive') {
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: t('/extensions explore is only available in interactive mode.'),
+    };
+  }
   const source = args.trim();
   const extensionsUrl = source
     ? EXTENSION_EXPLORE_URL[source as ExtensionExploreSource]
@@ -78,7 +88,7 @@ async function exploreAction(context: CommandContext, args: string) {
       Date.now(),
     );
     try {
-      await open(extensionsUrl);
+      await openBrowserSecurely(extensionsUrl);
     } catch (_error) {
       context.ui.addItem(
         {
@@ -92,9 +102,14 @@ async function exploreAction(context: CommandContext, args: string) {
       );
     }
   }
+  return undefined;
 }
 
-async function listAction(_context: CommandContext, _args: string) {
+async function listAction(context: CommandContext, args: string) {
+  const mode = context.executionMode ?? 'interactive';
+  if (mode !== 'interactive') {
+    return listTextAction(context, args);
+  }
   return {
     type: 'dialog' as const,
     dialog: 'extensions_manage' as const,
@@ -133,7 +148,90 @@ function parseInstallArgs(args: string): {
   return { source: rest.join(' '), scope };
 }
 
+async function listTextAction(context: CommandContext, _args: string) {
+  const config = context.services.config;
+  if (!config) {
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: t('Config not loaded.'),
+    };
+  }
+
+  let extensions;
+  try {
+    extensions = config.getExtensions();
+  } catch (error) {
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: t('Failed to read extensions: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    };
+  }
+  if (extensions.length === 0) {
+    return {
+      type: 'message' as const,
+      messageType: 'info' as const,
+      content: t('No extensions installed.'),
+    };
+  }
+
+  const active = extensions.filter((e) => e.isActive);
+  let output =
+    t('**Installed Extensions ({{total}} total, {{active}} active)**', {
+      total: String(extensions.length),
+      active: String(active.length),
+    }) + '\n\n';
+
+  const locale = getCurrentLanguage();
+  for (const ext of extensions) {
+    const status = ext.isActive ? '✓' : '✗';
+    const displayLabel = getExtensionDisplayName(ext, locale);
+    const description = getExtensionDescription(ext, locale);
+
+    const caps: string[] = [];
+    const mcpCount = ext.mcpServers ? Object.keys(ext.mcpServers).length : 0;
+    if (mcpCount > 0) {
+      caps.push(t('{{count}} MCP servers', { count: String(mcpCount) }));
+    }
+    if (ext.skills && ext.skills.length > 0) {
+      caps.push(t('{{count}} skills', { count: String(ext.skills.length) }));
+    }
+    if (ext.commands && ext.commands.length > 0) {
+      caps.push(
+        t('{{count}} commands', { count: String(ext.commands.length) }),
+      );
+    }
+    const capsStr = caps.length > 0 ? ` [${caps.join(', ')}]` : '';
+    output += `- [${status}] **${displayLabel}**${capsStr}\n`;
+    if (description) {
+      const maxLen = 80;
+      const truncated =
+        description.length > maxLen
+          ? description.slice(0, maxLen - 1) + '…'
+          : description;
+      output += `  ${truncated}\n`;
+    }
+  }
+
+  return {
+    type: 'message' as const,
+    messageType: 'info' as const,
+    content: output,
+  };
+}
+
 async function installAction(context: CommandContext, args: string) {
+  const mode = context.executionMode ?? 'interactive';
+  if (mode !== 'interactive') {
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: t('/extensions install is only available in interactive mode.'),
+    };
+  }
   const extensionManager = context.services.config?.getExtensionManager();
   if (!(extensionManager instanceof ExtensionManager)) {
     debugLogger.error(
@@ -203,6 +301,7 @@ async function installAction(context: CommandContext, args: string) {
     );
     return;
   }
+  return undefined;
 }
 
 export async function completeExtensions(
@@ -280,6 +379,16 @@ const manageExtensionsCommand: SlashCommand = {
   action: listAction,
 };
 
+const listExtensionsCommand: SlashCommand = {
+  name: 'list',
+  get description() {
+    return t('List installed extensions');
+  },
+  kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  action: listTextAction,
+};
+
 const installCommand: SlashCommand = {
   name: 'install',
   get description() {
@@ -296,13 +405,18 @@ export const extensionsCommand: SlashCommand = {
     return t('Manage extensions');
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   subCommands: [
+    listExtensionsCommand,
     manageExtensionsCommand,
     installCommand,
     exploreExtensionsCommand,
   ],
-  action: async (context, args) =>
-    // Default to list if no subcommand is provided
-    manageExtensionsCommand.action!(context, args),
+  action: async (context, args) => {
+    const executionMode = context.executionMode ?? 'interactive';
+    if (executionMode === 'interactive') {
+      return manageExtensionsCommand.action!(context, args);
+    }
+    return listTextAction(context, args);
+  },
 };

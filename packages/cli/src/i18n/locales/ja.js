@@ -360,10 +360,53 @@ export default {
   'Auto (detect from system)': '自動(システムから検出)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
   Auto: '自動',
-  'check session stats. Usage: /stats [model|tools]':
-    'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
+  'Show daily token usage statistics.': '日次 token 使用統計を表示',
+  'Show monthly token usage statistics.': '月次 token 使用統計を表示',
+  'Export token usage statistics to CSV or JSON.':
+    'token 使用統計を CSV または JSON にエクスポート',
+  'No usage data.': '使用データはありません。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens（{{requests}} リクエスト）',
+  'Daily token usage for {{value}}': '{{value}} の日次 token 使用量',
+  'Monthly token usage for {{value}}': '{{value}} の月次 token 使用量',
+  'Total: {{tokens}} tokens': '合計: {{tokens}} tokens',
+  'Requests: {{requests}}': 'リクエスト数: {{requests}}',
+  'Breakdown:': '内訳:',
+  'Input: {{tokens}}': '入力: {{tokens}}',
+  'Output: {{tokens}}': '出力: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'キャッシュ（入力に含まれる）: {{tokens}}',
+  'Thoughts: {{tokens}}': '思考: {{tokens}}',
+  'By model:': 'モデル別:',
+  'By auth type:': '認証タイプ別:',
+  'By model/auth type:': 'モデル/認証タイプ別:',
+  'By source:': 'ソース別:',
+  'Failed to load token usage stats: {{error}}':
+    'token 使用統計の読み込みに失敗しました: {{error}}',
+  'Expected --format csv or --format json.':
+    '--format csv または --format json を指定してください。',
+  'Expected a file path after --output.':
+    '--output の後にファイルパスを指定してください。',
+  'Unexpected argument: {{argument}}': '予期しない引数: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '使い方: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'token 使用量のエクスポート先はプロジェクト作業ディレクトリ内である必要があります。',
+  'Export target does not exist: {{path}}':
+    'エクスポート先が存在しません: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    '作業ディレクトリ内でエクスポートパスを解決できません。',
+  'Could not create a temporary export file.':
+    '一時エクスポートファイルを作成できませんでした。',
+  'Token usage exported to {{format}}: {{path}}':
+    'token 使用量を {{format}} にエクスポートしました: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'token 使用統計のエクスポートに失敗しました: {{error}}',
+  'Unclosed quote in arguments.': '引数の引用符が閉じられていません。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注: 生成時間（TTFT/TPS）は生成メトリクスに属します。',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'ワークスペースにディレクトリを追加。複数パスはカンマで区切ってください',
@@ -583,6 +626,21 @@ export default {
   'Resume a previous session': '前のセッションを再開する',
   'Fork the current conversation into a new session':
     '現在の会話を新しいセッションに分岐する',
+  'Spawn a background agent that inherits the full conversation':
+    '会話全体を引き継ぐバックグラウンドエージェントを起動する',
+  'Please provide a directive. Usage: /fork <directive>':
+    '指示を入力してください。使用法: /fork <指示>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '応答またはツール呼び出しの処理中はフォークできません。完了するか、保留中のツール呼び出しを解決してください。',
+  'Cannot fork before the first conversation turn.':
+    '最初の会話ターンの前にはフォークできません。',
+  'The agent tool is unavailable; cannot fork.':
+    'エージェントツールを利用できないため、フォークできません。',
+  'Failed to launch fork: {{error}}': 'フォークの起動に失敗しました: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'ユーザーが /fork でバックグラウンドフォークを起動しました: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'バックグラウンドエージェントにフォークしました。この会話を引き継ぎ、ブロックせずに実行されます — バックグラウンドタスクパネルで追跡でき、完了時に報告します。',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '応答またはツール呼び出しの処理中は分岐できません。完了するか、保留中のツール呼び出しを解決してください。',
   'No conversation to branch.': '分岐できる会話がありません。',
@@ -861,6 +919,28 @@ export default {
   ', {{inProgress}} in progress': '、{{inProgress}} 進行中',
   'Pending Tasks:': '保留中のタスク:',
   'Current tasks': '現在のタスク',
+  'Background tasks': 'バックグラウンドタスク',
+  'No tasks currently running': '現在実行中のタスクはありません',
+  'No entry to show.': '表示するエントリはありません。',
+  'needs approval': '承認待ち',
+  'Background agent needs approval':
+    'バックグラウンドエージェントが承認待ちです',
+  'Approve or deny the request above':
+    '上のリクエストを承認または拒否してください',
+  Running: '実行中',
+  Paused: '一時停止中',
+  Completed: '完了',
+  Failed: '失敗',
+  Stopped: '停止済み',
+  Shell: 'シェル',
+  Monitor: 'モニター',
+  Command: 'コマンド',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] メモリ統合',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
   '... and {{count}} more': '... 他 {{count}} 件',
   'What would you like to do?': '何をしますか?',
   'Choose how to proceed with your session:':
@@ -1124,6 +1204,21 @@ export default {
     'このセッションではツール呼び出しが行われていません',
   'Session start time is unavailable, cannot calculate stats.':
     'セッション開始時刻が利用できないため、統計を計算できません',
+  Activity: 'アクティビティ',
+  Efficiency: '効率',
+  Today: '今日',
+  'Token Trend': 'Token トレンド',
+  'Cache Hit Rate': 'キャッシュヒット率',
+  'Tool Success': 'ツール成功率',
+  'Tool Leaderboard': 'ツールランキング',
+  Time: '時間',
+  Success: '成功率',
+  Cache: 'キャッシュ',
+  Latency: 'レイテンシ',
+  'Code Impact': 'コード変更',
+  net: '純増',
+  streak: '連続',
+  best: '最長',
   // Loading
   'Waiting for user confirmation...': 'ユーザーの確認を待っています...',
   // Witty Loading Phrases
@@ -1709,4 +1804,40 @@ export default {
   'Attribution: commit': 'コミットの帰属表示',
   '中国 (China)': '中国',
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
+
+  // Stats Dashboard — Category 2 (missing from ja)
+  'Activity Heatmap': 'アクティビティヒートマップ',
+  Less: '少',
+  More: '多',
+  Sessions: 'セッション数',
+  Duration: '所要時間',
+  Projects: 'プロジェクト',
+  'Loading stats...': '統計を読み込み中...',
+  '(no data)': '(データなし)',
+  d: '日',
+  h: '時',
+  m: '分',
+  Input: '入力',
+  Models: 'モデル',
+  'All time': '全期間',
+  'Last 7 days': '過去 7 日間',
+  'Last 30 days': '過去 30 日間',
+  'Show usage statistics dashboard.': '使用統計ダッシュボードを表示する。',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'APIリクエスト',
+  'Tool Calls': 'ツール呼び出し',
+  'Success rate': '成功率',
+  'Code Changes': 'コード変更',
+  Tool: 'ツール',
+  reqs: 'リクエスト',
+  in: '入力',
+  out: '出力',
+  'In/Out': '入力/出力',
 };

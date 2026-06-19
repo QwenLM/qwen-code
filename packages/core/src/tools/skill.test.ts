@@ -14,6 +14,10 @@ import { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
 import type { ToolResult } from './tools.js';
 import { partToString } from '../utils/partUtils.js';
+import {
+  collectAvailableSkillEntries,
+  renderAvailableSkillsBlock,
+} from './skill-utils.js';
 
 // Type for accessing protected methods in tests
 type SkillToolWithProtectedMethods = SkillTool & {
@@ -50,6 +54,7 @@ describe('SkillTool', () => {
   let skillTool: SkillTool;
   let mockSkillManager: SkillManager;
   let changeListeners: Array<() => void>;
+  let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
 
   const mockSkills: SkillConfig[] = [
     {
@@ -73,6 +78,8 @@ describe('SkillTool', () => {
     // Setup fake timers
     vi.useFakeTimers();
 
+    mockAddSessionAllowRule = vi.fn();
+
     // Create mock config
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
@@ -81,6 +88,9 @@ describe('SkillTool', () => {
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
       getModelInvocableCommandsExecutor: vi.fn().mockReturnValue(null),
+      getPermissionManager: vi
+        .fn()
+        .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
       // SkillTool reads this in `refreshSkills`, `validateToolParams`, and
       // `SkillToolInvocation.execute` to apply the user-controlled
       // `skills.disabled` filter. Default empty so existing tests are
@@ -128,6 +138,18 @@ describe('SkillTool', () => {
     vi.clearAllMocks();
   });
 
+  // The skill listing moved out of the tool description into a system-reminder
+  // snapshot rendered by collectAvailableSkillEntries + renderAvailableSkillsBlock
+  // (see skill-utils). Tests that used to assert on `tool.description` now assert
+  // on this rendered block, which is derived from the SAME mock skillManager +
+  // config — preserving the original escaping / dedup / disabled-filter coverage.
+  async function renderListing(): Promise<string> {
+    const sm = config.getSkillManager();
+    if (!sm) return '';
+    const { entries } = await collectAvailableSkillEntries(sm, config);
+    return renderAvailableSkillsBlock(entries);
+  }
+
   describe('initialization', () => {
     it('should initialize with correct name and properties', () => {
       expect(skillTool.name).toBe('skill');
@@ -143,15 +165,23 @@ describe('SkillTool', () => {
       expect(mockSkillManager.addChangeListener).toHaveBeenCalledTimes(1);
     });
 
-    it('should update description with available skills', () => {
-      expect(skillTool.description).toContain('code-review');
-      expect(skillTool.description).toContain(
-        'Specialized skill for reviewing code quality',
-      );
-      expect(skillTool.description).toContain('testing');
-      expect(skillTool.description).toContain(
-        'Skill for writing and running tests',
-      );
+    it('keeps the tool description static (no per-skill listing)', () => {
+      // The listing moved out of the tool declaration into a system-reminder
+      // snapshot, so the description must not vary with the skill set — that is
+      // what keeps the tools cache prefix byte-stable across skill changes.
+      expect(skillTool.description).toContain('Execute a skill');
+      expect(skillTool.description).toContain('<system-reminder>');
+      expect(skillTool.description).not.toContain('code-review');
+      expect(skillTool.description).not.toContain('testing');
+      expect(skillTool.description).not.toContain('<available_skills>');
+    });
+
+    it('renders available skills in the <available_skills> snapshot block', async () => {
+      const listing = await renderListing();
+      expect(listing).toContain('code-review');
+      expect(listing).toContain('Specialized skill for reviewing code quality');
+      expect(listing).toContain('testing');
+      expect(listing).toContain('Skill for writing and running tests');
     });
 
     it('should XML-escape description and whenToUse fields', async () => {
@@ -167,18 +197,15 @@ describe('SkillTool', () => {
           body: 'Body text.',
         },
       ]);
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(tool.description).toContain(
-        'Skill &lt;b&gt;bold&lt;/b&gt; &amp; more',
-      );
-      expect(tool.description).toContain(
-        'When &lt;script&gt; tags &gt; nothing',
-      );
+      const listing = await renderListing();
+      expect(listing).toContain('Skill &lt;b&gt;bold&lt;/b&gt; &amp; more');
+      expect(listing).toContain('When &lt;script&gt; tags &gt; nothing');
       // Raw tags must not appear
-      expect(tool.description).not.toContain('<b>');
-      expect(tool.description).not.toContain('<script>');
+      expect(listing).not.toContain('<b>');
+      expect(listing).not.toContain('<script>');
     });
 
     it('should XML-escape skill.name (defends against extension-skill bypass)', async () => {
@@ -195,11 +222,12 @@ describe('SkillTool', () => {
           body: 'Body.',
         },
       ]);
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(tool.description).toContain('evil&lt;inject&gt;');
-      expect(tool.description).not.toContain('evil<inject>');
+      const listing = await renderListing();
+      expect(listing).toContain('evil&lt;inject&gt;');
+      expect(listing).not.toContain('evil<inject>');
     });
 
     it('should XML-escape modelInvocableCommands name (bypasses validateSkillName)', async () => {
@@ -212,11 +240,12 @@ describe('SkillTool', () => {
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
         () => [{ name: 'mcp<inject>', description: 'unrelated description' }],
       );
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(tool.description).toContain('mcp&lt;inject&gt;');
-      expect(tool.description).not.toContain('mcp<inject>');
+      const listing = await renderListing();
+      expect(listing).toContain('mcp&lt;inject&gt;');
+      expect(listing).not.toContain('mcp<inject>');
     });
 
     it('should XML-escape modelInvocableCommands description', async () => {
@@ -234,29 +263,31 @@ describe('SkillTool', () => {
           },
         ],
       );
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(tool.description).toContain(
+      const listing = await renderListing();
+      expect(listing).toContain(
         'MCP &lt;description&gt;fake&lt;/description&gt; &amp; &lt;/available_skills&gt;&lt;tag&gt;',
       );
       // The crafted closing tag must NOT escape the <available_skills>
       // block as a literal raw tag.
-      expect(tool.description).not.toContain('</available_skills><tag>');
+      expect(listing).not.toContain('</available_skills><tag>');
     });
 
-    it('should handle empty skills list gracefully', async () => {
+    it('renders an empty listing when there are no skills', async () => {
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
 
-      const emptySkillTool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(emptySkillTool.description).toContain(
-        'No skills are currently configured',
-      );
+      // No skills/commands → empty block. The "no skills configured" messaging
+      // is no longer baked into the tool description (which is now static); the
+      // snapshot builder simply omits the reminder when empty.
+      expect(await renderListing()).toBe('');
     });
 
-    it('should handle skill loading errors gracefully', async () => {
+    it('degrades gracefully when skill loading throws', async () => {
       vi.mocked(mockSkillManager.listSkills).mockRejectedValue(
         new Error('Loading failed'),
       );
@@ -264,9 +295,11 @@ describe('SkillTool', () => {
       const failedSkillTool = new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(failedSkillTool.description).toContain(
-        'No skills are currently configured',
-      );
+      // refreshSkills swallows the error and clears the runtime sets, so a
+      // previously-available skill no longer validates.
+      expect(
+        failedSkillTool.validateToolParams({ skill: 'code-review' }),
+      ).toMatch(/not found/);
     });
   });
 
@@ -498,11 +531,13 @@ describe('SkillTool', () => {
       listener?.();
       await vi.runAllTimersAsync();
 
-      expect(skillTool.description).toContain('new-skill');
-      expect(skillTool.description).toContain('A brand new skill');
+      // refreshSkills updates the in-memory runtime sets (not the static
+      // description). listSkills was a one-shot mock consumed by the refresh, so
+      // assert via the tool's runtime view rather than re-deriving the listing.
+      expect(skillTool.getAvailableSkillNames()).toContain('new-skill');
     });
 
-    it('should refresh available skills and update description', async () => {
+    it('should refresh available skills and update validation state', async () => {
       const newSkills: SkillConfig[] = [
         {
           name: 'test-skill',
@@ -517,8 +552,10 @@ describe('SkillTool', () => {
 
       await skillTool.refreshSkills();
 
-      expect(skillTool.description).toContain('test-skill');
-      expect(skillTool.description).toContain('A test skill');
+      expect(skillTool.getAvailableSkillNames()).toContain('test-skill');
+      const listing = await renderListing();
+      expect(listing).toContain('test-skill');
+      expect(listing).toContain('A test skill');
     });
   });
 
@@ -597,6 +634,36 @@ describe('SkillTool', () => {
       expect(llmText).toContain('Help write comprehensive tests.');
 
       expect(result.returnDisplay).toBe('Skill for writing and running tests');
+    });
+
+    it('grants allowedTools as session allow rules on invocation', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...mockSkills[1],
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'testing' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+    });
+
+    it('does not add allow rules when the skill declares no allowedTools', async () => {
+      // code-review (mockSkills[0]) has no allowedTools field.
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockSkills[0],
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
     });
 
     it('should handle skill not found error', async () => {
@@ -763,6 +830,29 @@ describe('SkillTool', () => {
       );
     });
 
+    it('returns the executor error from the disabled-skill delegation path', async () => {
+      // Disabled skill that shadows a same-named command whose executor fails:
+      // the { error } result must surface as the tool result, not fall through
+      // to the generic "skill is disabled" message.
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['blocked']),
+      );
+      const executor = vi
+        .fn()
+        .mockResolvedValue({ error: 'command failed: boom' });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'blocked' });
+      const result = await invocation.execute();
+
+      expect(result.llmContent).toBe('command failed: boom');
+      expect(result.returnDisplay).toBe('command failed: boom');
+    });
+
     it('propagates prompt_id through the not-found branch', async () => {
       // Both loadSkillForRuntime and commandExecutor return null → L399
       // branch in skill.ts logs a failed SkillLaunchEvent.
@@ -824,13 +914,15 @@ describe('SkillTool', () => {
         () => mockCommands,
       );
 
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(tool.description).not.toContain('<available_commands>');
-      expect(tool.description).toContain('<available_skills>');
-      expect(tool.description).toContain('review');
-      expect(tool.description).toContain('mcp-prompt-a');
+      const listing = await renderListing();
+      // Commands share the single <available_skills> listing — no separate
+      // <available_commands> block.
+      expect(listing).not.toContain('<available_commands>');
+      expect(listing).toContain('review');
+      expect(listing).toContain('mcp-prompt-a');
     });
 
     it('includes command args in the confirmation description', async () => {
@@ -895,15 +987,15 @@ describe('SkillTool', () => {
         () => commandsIncludingSkill,
       );
 
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
+      const listing = await renderListing();
       // 'code-review' is already in <available_skills> as a file skill, must NOT appear twice
-      const codeReviewMatches = (tool.description.match(/code-review/g) || [])
-        .length;
+      const codeReviewMatches = (listing.match(/code-review/g) || []).length;
       expect(codeReviewMatches).toBe(1);
       // 'mcp-prompt-a' is not a file-based skill, must appear in the unified list
-      expect(tool.description).toContain('mcp-prompt-a');
+      expect(listing).toContain('mcp-prompt-a');
     });
 
     it('should hide <available_commands> when all commands are already covered by skills', async () => {
@@ -916,12 +1008,17 @@ describe('SkillTool', () => {
         () => commandsAllOverlapping,
       );
 
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(tool.description).not.toContain('<available_commands>');
-      // All commands overlapped with file skills, so no extra entries added
-      expect(tool.description).toContain('<available_skills>');
+      const listing = await renderListing();
+      expect(listing).not.toContain('<available_commands>');
+      // Both commands overlapped with file skills, so no extra command entries
+      // are added (the command-form descriptions must not appear).
+      expect(listing).not.toContain('Bundled code-review');
+      expect(listing).not.toContain('Bundled testing');
+      expect(listing).toContain('code-review');
+      expect(listing).toContain('testing');
     });
 
     it('does not let a disable-model-invocation skill block an unrelated command of the same name', async () => {
@@ -945,13 +1042,14 @@ describe('SkillTool', () => {
         ],
       );
 
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
+      const listing = await renderListing();
       // The unrelated MCP prompt should still appear; the disabled file
       // skill must not have suppressed it.
-      expect(tool.description).toContain('mcp-prompt-a');
-      expect(tool.description).toContain('An unrelated MCP prompt');
+      expect(listing).toContain('mcp-prompt-a');
+      expect(listing).toContain('An unrelated MCP prompt');
     });
   });
 
@@ -1126,7 +1224,7 @@ describe('SkillTool', () => {
 
       // The guard skipped loadSkillForRuntime entirely.
       expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
-      expect(executor).toHaveBeenCalledWith('mytool');
+      expect(executor).toHaveBeenCalledWith('mytool', '');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('MCP prompt body');
       // "Delegated to" rather than "Executed" so telemetry/UX can
@@ -1170,10 +1268,33 @@ describe('SkillTool', () => {
       ).createInvocation({ skill: 'testing' });
       const result = await invocation.execute();
 
-      expect(executor).toHaveBeenCalledWith('testing');
+      expect(executor).toHaveBeenCalledWith('testing', '');
       expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
       const llmText = partToString(result.llmContent);
       expect(llmText).toMatch(/is disabled/);
+    });
+
+    it('returns command executor errors for disabled skill command alternatives', async () => {
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      const executor = vi
+        .fn()
+        .mockResolvedValue({ error: 'MCP prompt failed' });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mytool' });
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mytool', '');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('MCP prompt failed');
+      expect(result.returnDisplay).toBe('MCP prompt failed');
     });
 
     it('falls through to disabled-error when commandExecutor throws', async () => {
@@ -1190,10 +1311,28 @@ describe('SkillTool', () => {
       ).createInvocation({ skill: 'mytool' });
       const result = await invocation.execute();
 
-      expect(executor).toHaveBeenCalledWith('mytool');
+      expect(executor).toHaveBeenCalledWith('mytool', '');
       expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
       const llmText = partToString(result.llmContent);
       expect(llmText).toMatch(/is disabled/);
+    });
+
+    it('passes args to command alternatives for disabled skills', async () => {
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      const executor = vi.fn().mockResolvedValue('MCP prompt body');
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mytool', args: 'arg text' });
+      await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mytool', 'arg text');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
     });
 
     it('does not affect a skill that is not disabled', async () => {
@@ -1222,12 +1361,13 @@ describe('SkillTool', () => {
       vi.mocked(config.getDisabledSkillNames).mockReturnValue(
         new Set(['testing']),
       );
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
+      const listing = await renderListing();
       // `code-review` (project) still surfaces; `testing` (disabled) is gone.
-      expect(tool.description).toContain('code-review');
-      expect(tool.description).not.toMatch(/<name>\s*testing\s*<\/name>/);
+      expect(listing).toContain('code-review');
+      expect(listing).not.toMatch(/<name>\s*testing\s*<\/name>/);
     });
 
     it('lets a same-named MCP prompt surface in <available_skills> when its skill is disabled', async () => {
@@ -1249,15 +1389,16 @@ describe('SkillTool', () => {
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
         () => [{ name: 'mytool', description: 'MCP prompt for mytool' }],
       );
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
+      const listing = await renderListing();
       // The MCP prompt's description appears (would have been blocked by
       // fileBasedSkillNames before §3c excluded disabled skills from the
       // dedup set).
-      expect(tool.description).toContain('MCP prompt for mytool');
+      expect(listing).toContain('MCP prompt for mytool');
       // The skill-form description (with level project) does NOT.
-      expect(tool.description).not.toContain('A skill body');
+      expect(listing).not.toContain('A skill body');
     });
 
     it('does not block a non-skill command sharing a name with a disabled skill', async () => {
@@ -1278,11 +1419,12 @@ describe('SkillTool', () => {
           { name: 'unrelated', description: 'Unrelated command' },
         ],
       );
-      const tool = new SkillTool(config);
+      new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(tool.description).toContain('External (MCP) tool');
-      expect(tool.description).toContain('Unrelated command');
+      const listing = await renderListing();
+      expect(listing).toContain('External (MCP) tool');
+      expect(listing).toContain('Unrelated command');
     });
   });
 

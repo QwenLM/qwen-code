@@ -87,6 +87,8 @@ describe('languageCommand', () => {
       services: {
         config: {
           getModel: vi.fn().mockReturnValue('test-model'),
+          getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+          setOutputLanguageFilePath: vi.fn(),
         },
         settings: {
           merged: {},
@@ -438,6 +440,12 @@ describe('languageCommand', () => {
         'general.outputLanguage',
         'Chinese',
       );
+      // Verify path registration on first-time creation (getOutputLanguageFilePath returned undefined)
+      expect(
+        (mockContext.services.config as unknown as Record<string, unknown>)[
+          'setOutputLanguageFilePath'
+        ],
+      ).toHaveBeenCalledWith(expect.any(String));
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
@@ -461,6 +469,8 @@ describe('languageCommand', () => {
         }
       ).config = {
         getModel: vi.fn().mockReturnValue('test-model'),
+        getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+        setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
         getGeminiClient,
       };
@@ -502,6 +512,8 @@ describe('languageCommand', () => {
         }
       ).config = {
         getModel: vi.fn().mockReturnValue('test-model'),
+        getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+        setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
         // No getGeminiClient — refreshSystemInstruction must not be reached.
       };
@@ -534,6 +546,20 @@ describe('languageCommand', () => {
         expect.anything(),
         'general.outputLanguage',
         'Russian',
+      );
+    });
+
+    it('should normalize output language name "english" to "English"', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      await languageCommand.action(mockContext, 'output english');
+
+      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'general.outputLanguage',
+        'English',
       );
     });
 

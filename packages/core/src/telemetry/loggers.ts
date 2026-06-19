@@ -122,6 +122,7 @@ import type {
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
+import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -226,7 +227,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     'event.name': EVENT_TOOL_CALL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
@@ -396,7 +397,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
@@ -439,7 +440,7 @@ export function logApiCancel(config: Config, event: ApiCancelEvent): void {
     'event.name': EVENT_API_CANCEL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   QwenLogger.getInstance(config)?.logApiCancelEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -465,8 +466,11 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
+    if (config.getUsageStatisticsEnabled()) {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+    }
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
@@ -1018,7 +1022,7 @@ export function logUserFeedback(
     'event.name': EVENT_USER_FEEDBACK,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   QwenLogger.getInstance(config)?.logUserFeedbackEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -1139,6 +1143,9 @@ export function logPromptSuggestion(
   }
   if (event.accept_method) {
     attributes['accept_method'] = event.accept_method;
+  }
+  if (event.accept_source) {
+    attributes['accept_source'] = event.accept_source;
   }
   if (event.time_to_accept_ms !== undefined) {
     attributes['time_to_accept_ms'] = event.time_to_accept_ms;

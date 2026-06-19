@@ -17,7 +17,10 @@ import { cpSlice, cpLen } from '../utils/textUtils.js';
 import chalk from 'chalk';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
-import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import {
+  useCommandCompletion,
+  CompletionMode,
+} from '../hooks/useCommandCompletion.js';
 import { useExportCompletion } from '../hooks/useExportCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -53,6 +56,7 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from '../contexts/BackgroundTaskViewContext.js';
+import { isLiveAgentPanelVisibleEntry } from './background-view/liveAgentPanelVisibility.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
@@ -164,11 +168,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setSelectedIndex: setBgSelectedIndex,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
-  // Includes terminal entries — the pill stays open so users can reopen
-  // the dialog to inspect final state after the last agent finishes.
-  const hasBgAgents = bgEntries.length > 0;
-  const bgAgentCount = useMemo(
-    () => bgEntries.filter((e) => e.kind === 'agent').length,
+  const getVisibleBgAgents = useCallback(
+    () => bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
     [bgEntries],
   );
   const hasActiveToolConfirmation = useMemo(
@@ -290,6 +291,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   });
 
   const resetCompletionState = completion.resetCompletionState;
+  const dismissCompletion = completion.dismissCompletion;
   const resetReverseSearchCompletionState =
     reverseSearchCompletion.resetCompletionState;
   const resetCommandSearchCompletionState =
@@ -393,8 +395,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // entry rather than advancing from whatever index the user picked.
       resetHistoryNavRef.current();
 
-      // Dismiss follow-up suggestion after submit
+      // Dismiss follow-up suggestion after submit. `followup.dismiss()` only
+      // resets the controller; `onPromptSuggestionDismiss` also clears the
+      // persisted `promptSuggestion` prop so the placeholder doesn't leak a
+      // stale suggestion after synchronous commands (e.g. /clear, /help) that
+      // never trigger the streaming-transition effect in AppContainer.
       followup.dismiss();
+      onPromptSuggestionDismiss?.();
 
       // Clear attachments after submit
       setAttachments([]);
@@ -416,6 +423,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       config,
       pendingPastes,
       followup,
+      onPromptSuggestionDismiss,
     ],
   );
 
@@ -430,8 +438,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const inputHistory = useInputHistory({
     userMessages,
     onSubmit: handleSubmitAndClear,
-    // History navigation (Ctrl+P/N) now always works since completion navigation
-    // only uses arrow keys. Only disable in shell mode.
+    // History navigation still owns Ctrl+P/N when the completion menu is not
+    // handling them. Only disable in shell mode.
     isActive: !shellModeActive,
     currentQuery: buffer.text,
     onChange: customSetTextAndResetCompletionSignal,
@@ -516,6 +524,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     });
   }, []);
 
+  // Down from an empty composer (bottom edge, history exhausted), in visual
+  // top→bottom order: live agent panel (if bg sub-agents) → tab bar (if
+  // Arena) → stay put. Always consumes the key.
+  const descendFromComposer = useCallback((): boolean => {
+    if (getVisibleBgAgents().length > 0) {
+      setLivePanelFocused(true);
+    } else if (hasAgents) {
+      setAgentTabBarFocused(true);
+    }
+    return true;
+  }, [
+    getVisibleBgAgents,
+    hasAgents,
+    setLivePanelFocused,
+    setAgentTabBarFocused,
+  ]);
+
+  // Single source of truth for "is there a suggestion the user can accept right
+  // now": the live followup suggestion if visible, otherwise the persisted
+  // `promptSuggestion` prop (type-then-delete / pre-show-delay). Tab/Right/Enter
+  // accept, the typing-dismiss guards, and the placeholder all derive from this
+  // so they can never drift apart.
+  const availableSuggestion: string | null =
+    followup.state.isVisible || promptSuggestion
+      ? (followup.state.suggestion ?? promptSuggestion ?? null)
+      : null;
+
   const handleInput = useCallback(
     (key: Key): boolean => {
       // When the Arena tab bar or background pill has focus, block
@@ -527,10 +562,32 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Enter opens dialog for selected agent, Esc/↑-at-top returns
       // focus to composer. Printable chars type through (auto-unfocus).
       if (livePanelFocused) {
+        const visibleBgAgents = getVisibleBgAgents();
+        if (visibleBgAgents.length === 0) {
+          setLivePanelFocused(false);
+          if (
+            key.sequence &&
+            key.sequence.length === 1 &&
+            !key.ctrl &&
+            !key.meta
+          ) {
+            return false;
+          }
+          return descendFromComposer();
+        }
         if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
-          const maxIdx = bgAgentCount; // 0=main, 1..N=agents
+          const maxIdx = visibleBgAgents.length; // 0=main, 1..N=agents
           if (livePanelSelectedIndex < maxIdx) {
             setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
+          } else if (hasAgents) {
+            // Bottom of the panel → descend to the tab bar below it
+            // (only rendered when Arena agents exist).
+            setLivePanelFocused(false);
+            setAgentTabBarFocused(true);
+          } else {
+            // No tab bar below → release focus back to the composer instead
+            // of silently consuming the key.
+            setLivePanelFocused(false);
           }
           return true;
         }
@@ -547,8 +604,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             setLivePanelFocused(false);
           } else {
             const agentIdx = livePanelSelectedIndex - 1;
-            if (agentIdx < bgAgentCount) {
-              setBgSelectedIndex(agentIdx);
+            const entry = visibleBgAgents[agentIdx];
+            const entryIdx = entry
+              ? bgEntries.findIndex(
+                  (e) => e.kind === 'agent' && e.agentId === entry.agentId,
+                )
+              : -1;
+            if (entryIdx >= 0) {
+              setBgSelectedIndex(entryIdx);
               enterBgDetailFromPanel();
             }
             setLivePanelFocused(false);
@@ -603,7 +666,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (key.paste) {
         // Dismiss follow-up suggestion when user starts typing/pasting
-        if (buffer.text.length === 0 && followup.state.isVisible) {
+        if (buffer.text.length === 0 && availableSuggestion) {
           followup.dismiss();
           onPromptSuggestionDismiss?.();
         }
@@ -944,10 +1007,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !showCompletionSuggestions &&
         !reverseSearchActive &&
         !commandSearchActive &&
-        followup.state.isVisible &&
-        followup.state.suggestion
+        availableSuggestion
       ) {
-        followup.accept('tab');
+        // Use the normal accept path. When the followup controller has no live
+        // suggestion (e.g. after type-then-delete), `fallbackText` carries the
+        // still-available placeholder text so telemetry is logged either way.
+        followup.accept('tab', { fallbackText: promptSuggestion ?? undefined });
+        // Clear the persisted `promptSuggestion` prop too, otherwise it survives
+        // the accept and reappears as a ghost placeholder once the buffer is
+        // cleared without submitting (e.g. Ctrl+U).
+        onPromptSuggestionDismiss?.();
         return true;
       }
 
@@ -957,10 +1026,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.ctrl &&
         !key.meta &&
         buffer.text.length === 0 &&
-        followup.state.isVisible &&
-        followup.state.suggestion
+        availableSuggestion
       ) {
-        followup.accept('right');
+        followup.accept('right', {
+          fallbackText: promptSuggestion ?? undefined,
+        });
+        onPromptSuggestionDismiss?.();
         return true;
       }
 
@@ -1001,6 +1072,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               ? completion.suggestions[targetIndex]
               : undefined;
           acceptActiveCompletionSuggestion();
+          // On Enter for @folder paths, dismiss the completion so the
+          // dropdown stays closed. Folder paths don't append a trailing
+          // space by design, so the @ completion pattern re-matches and
+          // re-shows the dropdown. Gate on AT mode + isDirectory to avoid
+          // suppressing slash-command sub-suggestions.
+          if (
+            key.name === 'return' &&
+            accepted?.isDirectory &&
+            completion.completionMode === CompletionMode.AT
+          ) {
+            dismissCompletion();
+          }
           // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`
           // matches BOTH Tab and Enter (see keyBindings.ts and the
           // identical caveat at lines 861-862). Without the
@@ -1146,15 +1229,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (inputHistory.navigateDown()) {
             return true;
           }
-          if (hasAgents) {
-            setAgentTabBarFocused(true);
-            return true;
-          }
-          if (hasBgAgents) {
-            setLivePanelFocused(true);
-            return true;
-          }
-          return true;
+          return descendFromComposer();
         }
         // Handle arrow-up/down for history on single-line or at edges
         if (
@@ -1187,18 +1262,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (inputHistory.navigateDown()) {
             return true;
           }
-          // Focus order on Down from an empty composer:
-          // team tab bar (if any Arena agents) → Background tasks
-          // dialog (if any bg agents) → otherwise stay put.
-          if (hasAgents) {
-            setAgentTabBarFocused(true);
-            return true;
-          }
-          if (hasBgAgents) {
-            setLivePanelFocused(true);
-            return true;
-          }
-          return true;
+          return descendFromComposer();
         }
       } else {
         // Shell History Navigation
@@ -1215,19 +1279,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (keyMatchers[Command.SUBMIT](key)) {
-        // Accept and submit prompt suggestion on Enter when input is truly empty
-        if (
-          buffer.text.length === 0 &&
-          followup.state.isVisible &&
-          followup.state.suggestion
-        ) {
-          const text = followup.state.suggestion;
-          // Skip onAccept (buffer.insert) — we pass the text directly to
-          // handleSubmitAndClear which clears the buffer synchronously.
-          // Without skipOnAccept the microtask in accept() would re-insert
-          // the suggestion into the buffer after it was already cleared.
-          followup.accept('enter', { skipOnAccept: true });
-          handleSubmitAndClear(text);
+        // When buffer is empty and a suggestion is available, Enter fills the
+        // buffer instead of submitting — matching Tab/Right-arrow behavior.
+        // This prevents accidental execution of destructive slash commands
+        // (/clear, /quit) and aligns with Claude Code's design: suggestion
+        // acceptance requires explicit Tab or arrow-key action.
+        if (buffer.text.length === 0 && availableSuggestion) {
+          followup.accept('enter', {
+            fallbackText: promptSuggestion ?? undefined,
+          });
+          onPromptSuggestionDismiss?.();
           return true;
         }
         if (buffer.text.trim()) {
@@ -1320,7 +1381,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Dismiss follow-up suggestion only on printable character input
       if (
         buffer.text.length === 0 &&
-        followup.state.isVisible &&
+        availableSuggestion &&
         key.sequence &&
         key.sequence.length === 1 &&
         !key.ctrl &&
@@ -1362,6 +1423,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       reverseSearchCompletion,
       handleClipboardImage,
       resetCompletionState,
+      dismissCompletion,
       escPressCount,
       showEscapePrompt,
       resetEscapeState,
@@ -1389,18 +1451,21 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgDialogOpen,
       bgPillFocused,
       hasAgents,
-      hasBgAgents,
       hasActiveToolConfirmation,
       setAgentTabBarFocused,
       setLivePanelFocused,
       setLivePanelSelectedIndex,
       livePanelFocused,
       livePanelSelectedIndex,
-      bgAgentCount,
+      bgEntries,
+      getVisibleBgAgents,
+      descendFromComposer,
       enterBgDetailFromPanel,
       setBgSelectedIndex,
       followup,
+      availableSuggestion,
       onPromptSuggestionDismiss,
+      promptSuggestion,
       exportCompletion,
       isHistoryRestoredText,
       showCompletionSuggestions,
@@ -1553,9 +1618,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // consumed (ACCEPT_SUGGESTION_REVERSE_SEARCH). When they are active with no
   // matches, Tab is not consumed — so the bare `reverseSearchActive` /
   // `commandSearchActive` flags are intentionally NOT included here.
+  // Mirror exactly when the Tab/Right/Enter handlers actually consume the key:
+  // the buffer must be empty and a suggestion must be available (either from the
+  // followup controller or the `promptSuggestion` prop after type-then-delete).
+  // Tying this to `buffer.text.length === 0` — the same gate the handlers use —
+  // keeps Windows Tab approval-mode cycling correct: as soon as the user types,
+  // this drops to false; deleting back to empty restores it.
   const hasTabConsumer =
     shouldShowSuggestions ||
-    (followup.state.isVisible && Boolean(followup.state.suggestion)) ||
+    (buffer.text.length === 0 && Boolean(availableSuggestion)) ||
     Boolean(completion.midInputGhostText?.acceptText);
 
   // Narrow signal — autocomplete dropdown only. Composer hides Footer /
@@ -1636,7 +1707,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       : 2 // "! " = 2 chars
     : commandSearchActive
       ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
-      : 2; // "> " or "* " = 2 chars
+      : approvalMode === ApprovalMode.YOLO
+        ? 2 // "* " = 2 chars
+        : 2; // "> " = 2 chars
 
   return (
     <>
@@ -1662,11 +1735,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         onSubmit={handleSubmitAndClear}
         onKeypress={handleInput}
         showCursor={showCursor}
-        placeholder={
-          followup.state.isVisible && followup.state.suggestion
-            ? followup.state.suggestion
-            : placeholder
-        }
+        placeholder={availableSuggestion ?? placeholder}
         prefix={prefixNode}
         prefixWidth={prefixWidth}
         borderColor={borderColor}

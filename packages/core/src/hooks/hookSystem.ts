@@ -34,6 +34,8 @@ import type {
   StopFailureErrorType,
   TodoItem,
   TodoStatus,
+  InstructionMemoryType,
+  InstructionLoadReason,
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
@@ -152,6 +154,28 @@ export class HookSystem {
       : undefined;
   }
 
+  async fireInstructionsLoadedEvent(
+    filePath: string,
+    memoryType: InstructionMemoryType,
+    loadReason: InstructionLoadReason,
+    options: {
+      triggerFilePath?: string;
+      parentFilePath?: string;
+    } = {},
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireInstructionsLoadedEvent(
+      filePath,
+      memoryType,
+      loadReason,
+      options,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('InstructionsLoaded', result.finalOutput)
+      : undefined;
+  }
+
   /**
    * Fire a UserPromptExpansion event after a slash command returns a prompt and
    * before that expanded prompt is submitted to the model.
@@ -226,6 +250,7 @@ export class HookSystem {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePreToolUseEvent(
       toolName,
@@ -233,6 +258,7 @@ export class HookSystem {
       toolUseId,
       permissionMode,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PreToolUse', result.finalOutput)
@@ -249,6 +275,7 @@ export class HookSystem {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseEvent(
       toolName,
@@ -257,6 +284,7 @@ export class HookSystem {
       toolUseId,
       permissionMode,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUse', result.finalOutput)
@@ -274,6 +302,7 @@ export class HookSystem {
     isInterrupt?: boolean,
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseFailureEvent(
       toolUseId,
@@ -283,6 +312,7 @@ export class HookSystem {
       isInterrupt,
       permissionMode,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
@@ -458,6 +488,7 @@ export class HookSystem {
     toolUseId: string,
     reason: PermissionDeniedReason,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePermissionDeniedEvent(
       toolName,
@@ -465,6 +496,7 @@ export class HookSystem {
       toolUseId,
       reason,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PermissionDenied', result.finalOutput)

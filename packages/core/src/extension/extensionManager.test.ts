@@ -332,6 +332,176 @@ describe('extension tests', () => {
       expect(extensions).toHaveLength(1);
       expect(extensions[0].name).toBe('ext2');
     });
+
+    describe('command discovery', () => {
+      it('should discover .md command files', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'md-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'greet.md'), 'Hello!');
+        fs.writeFileSync(path.join(commandsDir, 'farewell.md'), 'Bye!');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find((e) => e.config.name === 'md-commands-ext');
+        expect(ext?.commands).toEqual(
+          expect.arrayContaining(['greet', 'farewell']),
+        );
+        expect(ext?.commands).toHaveLength(2);
+      });
+
+      it('should discover .toml command files', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'toml-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(commandsDir, 'caveman.toml'),
+          'prompt = "Talk like caveman"\ndescription = "Caveman mode"',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find(
+          (e) => e.config.name === 'toml-commands-ext',
+        );
+        expect(ext?.commands).toEqual(['caveman']);
+      });
+
+      it('should discover both .md and .toml command files', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'mixed-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'greet.md'), 'Hello!');
+        fs.writeFileSync(
+          path.join(commandsDir, 'caveman.toml'),
+          'prompt = "Talk like caveman"',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find(
+          (e) => e.config.name === 'mixed-commands-ext',
+        );
+        expect(ext?.commands).toEqual(
+          expect.arrayContaining(['greet', 'caveman']),
+        );
+        expect(ext?.commands).toHaveLength(2);
+      });
+
+      it('should list both entries when .md and .toml exist for same command name', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'dedup-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'greet.md'), 'Hello!');
+        fs.writeFileSync(
+          path.join(commandsDir, 'greet.toml'),
+          'prompt = "Hello!"',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find(
+          (e) => e.config.name === 'dedup-commands-ext',
+        );
+        // No dedup at discovery level — both entries surface so the consent
+        // UI shows the true count; downstream CommandService handles conflicts.
+        expect(ext?.commands).toEqual(['greet', 'greet']);
+      });
+
+      it('should discover nested .toml command files with colon-separated names', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'nested-toml-ext',
+          version: '1.0.0',
+        });
+        const nestedDir = path.join(extDir, 'commands', 'caveman');
+        fs.mkdirSync(nestedDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(nestedDir, 'intensity.toml'),
+          'prompt = "Switch intensity"',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find((e) => e.config.name === 'nested-toml-ext');
+        expect(ext?.commands).toEqual(['caveman:intensity']);
+      });
+
+      it('should replace colons in path segments with underscores', async () => {
+        if (process.platform !== 'linux') return; // colons forbidden in filenames on macOS/Windows
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'colon-name-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'foo:bar.md'), 'content');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+        const ext = extensions.find((e) => e.config.name === 'colon-name-ext');
+        expect(ext?.commands).toEqual(['foo_bar']);
+      });
+
+      it('should return empty commands when commands directory does not exist', async () => {
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'no-cmd-dir-ext',
+          version: '1.0.0',
+        });
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+        const ext = extensions.find((e) => e.config.name === 'no-cmd-dir-ext');
+        expect(ext?.commands).toEqual([]);
+      });
+
+      it('should return empty commands when no .md or .toml files exist', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'no-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'readme.txt'), 'not a cmd');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find((e) => e.config.name === 'no-commands-ext');
+        expect(ext?.commands).toEqual([]);
+      });
+    });
   });
 
   describe('project-level extensions', () => {

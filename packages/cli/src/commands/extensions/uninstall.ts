@@ -27,13 +27,13 @@ export async function handleUninstall(args: UninstallArgs) {
     const workspaceDir = process.cwd();
     const extensionManager = new ExtensionManager({
       workspaceDir,
+      locale: getCurrentLanguage(),
       requestConsent: requestConsentOrFail.bind(
         null,
         requestConsentNonInteractive,
       ),
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(workspaceDir).merged,
-      ),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
     });
     await extensionManager.refreshCache();
     // Only disambiguate by scope when the flag is explicitly provided;

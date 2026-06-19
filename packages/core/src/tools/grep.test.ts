@@ -14,6 +14,7 @@ import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
+import { FileReadCache } from '../services/fileReadCache.js';
 
 vi.mock('glob', { spy: true });
 
@@ -84,6 +85,7 @@ vi.mock('child_process', async (importOriginal) => {
 describe('GrepTool', () => {
   let tempRootDir: string;
   let grepTool: GrepTool;
+  let fileReadCache: FileReadCache;
   const abortSignal = new AbortController().signal;
 
   const mockConfig = {
@@ -99,6 +101,11 @@ describe('GrepTool', () => {
   beforeEach(async () => {
     Object.assign(mockConfig, {
       getTruncateToolOutputThreshold: () => 25000,
+    });
+    fileReadCache = new FileReadCache();
+    Object.assign(mockConfig, {
+      getFileReadCache: () => fileReadCache,
+      getFileReadCacheDisabled: () => false,
     });
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
     grepTool = new GrepTool(mockConfig);
@@ -145,6 +152,20 @@ describe('GrepTool', () => {
         glob: '*.txt',
       };
       expect(grepTool.validateToolParams(params)).toBeNull();
+    });
+
+    it('should return null for a positive integer limit', () => {
+      const params: GrepToolParams = { pattern: 'hello', limit: 2 };
+      expect(grepTool.validateToolParams(params)).toBeNull();
+    });
+
+    it.each([
+      [0, 'params/limit must be >= 1'],
+      [-1, 'params/limit must be >= 1'],
+      [1.5, 'params/limit must be integer'],
+    ])('should return error for invalid limit %s', (limit, expectedError) => {
+      const params: GrepToolParams = { pattern: 'hello', limit };
+      expect(grepTool.validateToolParams(params)).toBe(expectedError);
     });
 
     it('should return error if pattern is missing', () => {
@@ -214,6 +235,23 @@ describe('GrepTool', () => {
         path.join(tempRootDir, 'fileA.txt'),
         path.join(tempRootDir, 'sub', 'fileC.txt'),
       ]);
+
+      const fileAStats = await fs.stat(path.join(tempRootDir, 'fileA.txt'));
+      const fileCStats = await fs.stat(
+        path.join(tempRootDir, 'sub', 'fileC.txt'),
+      );
+      const fileARead = fileReadCache.check(fileAStats);
+      const fileCRead = fileReadCache.check(fileCStats);
+      expect(fileARead.state).toBe('fresh');
+      expect(fileCRead.state).toBe('fresh');
+      if (fileARead.state === 'fresh') {
+        expect(fileARead.entry.lastReadWasFull).toBe(false);
+        expect(fileARead.entry.lastReadCacheable).toBe(true);
+      }
+      if (fileCRead.state === 'fresh') {
+        expect(fileCRead.entry.lastReadWasFull).toBe(false);
+        expect(fileCRead.entry.lastReadCacheable).toBe(true);
+      }
     });
 
     it('normalizes CRLF fallback grep output without dropping result paths', () => {
@@ -228,13 +266,317 @@ describe('GrepTool', () => {
       const filePath = path.join(tempRootDir, 'crlf.txt');
 
       const matches = invocationForPrivateMethod.parseGrepOutput(
-        `crlf.txt:1:hello world\r${os.EOL}`,
+        'crlf.txt:1:hello world\r\n',
         tempRootDir,
       );
 
       expect(matches[0]).toMatchObject({
         absoluteFilePath: filePath,
         line: 'hello world',
+      });
+    });
+
+    it('parses plain grep output for paths containing colons', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+      const filePath = path.join('dir:name', 'file.txt');
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `${filePath}:1:hello: world\n`,
+        tempRootDir,
+      );
+
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, filePath),
+        filePath,
+        line: 'hello: world',
+        lineNumber: 1,
+      });
+    });
+
+    it('parses git grep -z output for paths containing colons', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+      const filePath = path.join('notes', '2026-06-19T09:20:00.txt');
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `${filePath}\0${12}\0hello: world\n`,
+        tempRootDir,
+      );
+
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, filePath),
+        filePath,
+        line: 'hello: world',
+        lineNumber: 12,
+      });
+    });
+
+    it('parses multiple git grep -z matches', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `first.txt\0${1}\0hello world\nsecond.txt\0${2}\0world again\n`,
+        tempRootDir,
+      );
+
+      expect(matches).toHaveLength(2);
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, 'first.txt'),
+        filePath: 'first.txt',
+        line: 'hello world',
+        lineNumber: 1,
+      });
+      expect(matches[1]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, 'second.txt'),
+        filePath: 'second.txt',
+        line: 'world again',
+        lineNumber: 2,
+      });
+    });
+
+    it('parses git grep -z output without a trailing newline', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `tail.txt\0${3}\0world at eof`,
+        tempRootDir,
+      );
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, 'tail.txt'),
+        filePath: 'tail.txt',
+        line: 'world at eof',
+        lineNumber: 3,
+      });
+    });
+
+    it('skips unframed binary notices in git grep -z output', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+      const filePath = 'normal.txt';
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `Binary file binary.bin matches\n${filePath}\0${7}\0hello world\n`,
+        tempRootDir,
+      );
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, filePath),
+        filePath,
+        line: 'hello world',
+        lineNumber: 7,
+      });
+    });
+
+    it('parses system grep --null output for paths containing colons', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+      const filePath = path.join('dir:123:file.txt');
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `${filePath}\0${12}:hello: world\n`,
+        tempRootDir,
+      );
+
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, filePath),
+        filePath,
+        line: 'hello: world',
+        lineNumber: 12,
+      });
+    });
+
+    it('parses multiple system grep --null matches', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `first.txt\0${1}:hello world\nsecond.txt\0${2}:world again\n`,
+        tempRootDir,
+      );
+
+      expect(matches).toHaveLength(2);
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, 'first.txt'),
+        filePath: 'first.txt',
+        line: 'hello world',
+        lineNumber: 1,
+      });
+      expect(matches[1]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, 'second.txt'),
+        filePath: 'second.txt',
+        line: 'world again',
+        lineNumber: 2,
+      });
+    });
+
+    it('parses system grep --null output without a trailing newline', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `tail.txt\0${3}:world at eof`,
+        tempRootDir,
+      );
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, 'tail.txt'),
+        filePath: 'tail.txt',
+        line: 'world at eof',
+        lineNumber: 3,
+      });
+    });
+
+    it('skips malformed system grep --null records and keeps following matches', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `broken.txt\0missing-separator\nvalid.txt\0${4}:world after malformed\n`,
+        tempRootDir,
+      );
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, 'valid.txt'),
+        filePath: 'valid.txt',
+        line: 'world after malformed',
+        lineNumber: 4,
+      });
+    });
+
+    it('skips unframed binary notices in system grep --null output', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{
+          absoluteFilePath: string;
+          filePath: string;
+          line: string;
+          lineNumber: number;
+        }>;
+      };
+      const filePath = 'normal.txt';
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `Binary file ./binary.bin matches\n${filePath}\0${7}:hello world\n`,
+        tempRootDir,
+      );
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: path.join(tempRootDir, filePath),
+        filePath,
+        line: 'hello world',
+        lineNumber: 7,
       });
     });
 
@@ -573,6 +915,25 @@ describe('GrepTool', () => {
     });
   });
 
+  describe('getDefaultPermission', () => {
+    it('should return allow for paths within workspace', async () => {
+      const params: GrepToolParams = { pattern: 'hello', path: 'sub' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for tilde paths outside workspace', async () => {
+      const params: GrepToolParams = {
+        pattern: 'hello',
+        path: '~/outside-workspace',
+      };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+  });
+
   describe('Result limiting', () => {
     beforeEach(async () => {
       // Create many test files with matches to test limiting
@@ -615,8 +976,7 @@ describe('GrepTool', () => {
       expect(result.returnDisplay).toBe('Found 30 matches');
     });
 
-    it('should not validate limit parameter', () => {
-      // limit parameter has no validation constraints in the new implementation
+    it('should validate a positive limit parameter', () => {
       const params = { pattern: 'test', limit: 5 };
       const error = grepTool.validateToolParams(params as GrepToolParams);
       expect(error).toBeNull();

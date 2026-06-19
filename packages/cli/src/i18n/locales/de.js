@@ -420,12 +420,58 @@ export default {
   'Auto Edit': 'Automatisch bearbeiten',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim-Modus ein-/ausschalten',
-  'check session stats. Usage: /stats [model|tools]':
-    'Sitzungsstatistiken prüfen. Verwendung: /stats [model|tools]',
   'Show model-specific usage statistics.':
     'Modellspezifische Nutzungsstatistiken anzeigen.',
   'Show tool-specific usage statistics.':
     'Werkzeugspezifische Nutzungsstatistiken anzeigen.',
+  'Show daily token usage statistics.':
+    'Tägliche Token-Nutzungsstatistiken anzeigen.',
+  'Show monthly token usage statistics.':
+    'Monatliche Token-Nutzungsstatistiken anzeigen.',
+  'Export token usage statistics to CSV or JSON.':
+    'Token-Nutzungsstatistiken als CSV oder JSON exportieren.',
+  'No usage data.': 'Keine Nutzungsdaten.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} Tokens ({{requests}} Anfragen)',
+  'Daily token usage for {{value}}': 'Tägliche Token-Nutzung für {{value}}',
+  'Monthly token usage for {{value}}': 'Monatliche Token-Nutzung für {{value}}',
+  'Total: {{tokens}} tokens': 'Gesamt: {{tokens}} Tokens',
+  'Requests: {{requests}}': 'Anfragen: {{requests}}',
+  'Breakdown:': 'Aufschlüsselung:',
+  'Input: {{tokens}}': 'Eingabe: {{tokens}}',
+  'Output: {{tokens}}': 'Ausgabe: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (in Eingabe enthalten): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Gedanken: {{tokens}}',
+  'By model:': 'Nach Modell:',
+  'By auth type:': 'Nach Authentifizierungstyp:',
+  'By model/auth type:': 'Nach Modell/Authentifizierungstyp:',
+  'By source:': 'Nach Quelle:',
+  'Failed to load token usage stats: {{error}}':
+    'Token-Nutzungsstatistiken konnten nicht geladen werden: {{error}}',
+  'Expected --format csv or --format json.':
+    '--format csv oder --format json erwartet.',
+  'Expected a file path after --output.':
+    'Nach --output wird ein Dateipfad erwartet.',
+  'Unexpected argument: {{argument}}': 'Unerwartetes Argument: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Verwendung: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Der Exportpfad für die Token-Nutzung muss im Arbeitsverzeichnis des Projekts liegen.',
+  'Export target does not exist: {{path}}':
+    'Exportziel existiert nicht: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    'Der Exportpfad kann nicht innerhalb des Arbeitsverzeichnisses aufgelöst werden.',
+  'Could not create a temporary export file.':
+    'Temporäre Exportdatei konnte nicht erstellt werden.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token-Nutzung nach {{format}} exportiert: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Token-Nutzungsstatistiken konnten nicht exportiert werden: {{error}}',
+  'Unclosed quote in arguments.':
+    'Nicht geschlossenes Anführungszeichen in Argumenten.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Hinweis: Generierungszeiten (TTFT/TPS) gehören zu den Generierungsmetriken.',
   'exit the cli': 'CLI beenden',
   'Manage workspace directories': 'Arbeitsbereichsverzeichnisse verwalten',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -796,6 +842,22 @@ export default {
   'Resume a previous session': 'Eine vorherige Sitzung fortsetzen',
   'Fork the current conversation into a new session':
     'Die aktuelle Unterhaltung in eine neue Sitzung verzweigen',
+  'Spawn a background agent that inherits the full conversation':
+    'Einen Hintergrund-Agenten starten, der die gesamte Unterhaltung übernimmt',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Bitte geben Sie eine Anweisung an. Verwendung: /fork <Anweisung>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Während eine Antwort oder ein Tool-Aufruf läuft, kann kein Hintergrund-Fork erstellt werden. Warten Sie, bis der Vorgang abgeschlossen ist, oder bearbeiten Sie den ausstehenden Tool-Aufruf.',
+  'Cannot fork before the first conversation turn.':
+    'Vor der ersten Gesprächsrunde kann kein Fork erstellt werden.',
+  'The agent tool is unavailable; cannot fork.':
+    'Das Agent-Tool ist nicht verfügbar; Fork kann nicht gestartet werden.',
+  'Failed to launch fork: {{error}}':
+    'Fork konnte nicht gestartet werden: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'Benutzer hat über /fork einen Hintergrund-Fork gestartet: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'In einen Hintergrund-Agenten verzweigt. Er übernimmt diese Unterhaltung und läuft ohne zu blockieren — verfolgen Sie ihn im Hintergrundaufgaben-Panel; er meldet sich nach Abschluss zurück.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Während eine Antwort oder ein Tool-Aufruf läuft, kann keine Verzweigung erstellt werden. Warten Sie, bis der Vorgang abgeschlossen ist, oder bearbeiten Sie den ausstehenden Tool-Aufruf.',
   'No conversation to branch.': 'Keine Unterhaltung zum Verzweigen vorhanden.',
@@ -1387,6 +1449,21 @@ export default {
     'In dieser Sitzung wurden keine Werkzeugaufrufe gemacht.',
   'Session start time is unavailable, cannot calculate stats.':
     'Sitzungsstartzeit nicht verfügbar, Statistiken können nicht berechnet werden.',
+  Activity: 'Aktivität',
+  Efficiency: 'Effizienz',
+  Today: 'Heute',
+  'Token Trend': 'Token-Trend',
+  'Cache Hit Rate': 'Cache-Trefferquote',
+  'Tool Success': 'Tool-Erfolgsrate',
+  'Tool Leaderboard': 'Tool-Rangliste',
+  Time: 'Zeit',
+  Success: 'Erfolg',
+  Cache: 'Cache',
+  Latency: 'Latenz',
+  'Code Impact': 'Code-Änderungen',
+  net: 'netto',
+  streak: 'Serie',
+  best: 'Rekord',
 
   // ============================================================================
   // Command Format Migration
@@ -1396,6 +1473,27 @@ export default {
   'Found {{count}} TOML command files:':
     '{{count}} TOML-Befehlsdateien gefunden:',
   'Current tasks': 'Aktuelle Aufgaben',
+  'Background tasks': 'Hintergrundaufgaben',
+  'No tasks currently running': 'Derzeit laufen keine Aufgaben',
+  'No entry to show.': 'Kein Eintrag zum Anzeigen.',
+  'needs approval': 'wartet auf Genehmigung',
+  'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
+  'Approve or deny the request above':
+    'Genehmigen oder lehnen Sie die obige Anfrage ab',
+  Running: 'Läuft',
+  Paused: 'Pausiert',
+  Completed: 'Abgeschlossen',
+  Failed: 'Fehlgeschlagen',
+  Stopped: 'Gestoppt',
+  Shell: 'Shell',
+  Monitor: 'Monitor',
+  Command: 'Befehl',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] Speicher-Konsolidierung',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] Speicher-Konsolidierung (prüft {{count}} Sitzung)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] Speicher-Konsolidierung (prüft {{count}} Sitzungen)',
   '... and {{count}} more': '... und {{count}} weitere',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Das TOML-Format ist veraltet. Möchten Sie sie ins Markdown-Format migrieren?',
@@ -1946,4 +2044,40 @@ export default {
   remote: 'entfernt',
   '中国 (China)': 'China',
   '中国 (China) - 阿里云百炼': 'China - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': 'Aktivitäts-Heatmap',
+  Less: 'Weniger',
+  More: 'Mehr',
+  Sessions: 'Sitzungen',
+  Duration: 'Dauer',
+  Projects: 'Projekte',
+  'Loading stats...': 'Statistiken werden geladen...',
+  '(no data)': '(keine Daten)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+  Input: 'Eingabe',
+  Models: 'Modelle',
+  'All time': 'Gesamtzeitraum',
+  'Last 7 days': 'Letzte 7 Tage',
+  'Last 30 days': 'Letzte 30 Tage',
+  'Show usage statistics dashboard.': 'Nutzungsstatistik-Dashboard anzeigen.',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API-Anfragen',
+  'Tool Calls': 'Tool-Aufrufe',
+  'Success rate': 'Erfolgsrate',
+  'Code Changes': 'Code-Änderungen',
+  Tool: 'Tool',
+  reqs: 'Anfr.',
+  in: 'ein',
+  out: 'aus',
+  'In/Out': 'Ein/Aus',
 };

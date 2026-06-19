@@ -7,6 +7,7 @@
 import type { Content, Part } from '@google/genai';
 
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
+import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames } from '../../tools/tool-names.js';
 
@@ -116,6 +117,10 @@ interface CollectedRefs {
   tool: PartRef[];
   media: PartRef[];
   nestedMedia: PartRef[];
+}
+
+function refKey(r: PartRef): string {
+  return `${r.contentIndex}:${r.partIndex}`;
 }
 
 function hasNestedMedia(part: Part): boolean {
@@ -236,11 +241,152 @@ function stripNestedMedia(
   return rest;
 }
 
+function getPart(history: Content[], ref: PartRef): Part | undefined {
+  return history[ref.contentIndex]?.parts?.[ref.partIndex];
+}
+
+function getToolOutputChars(part: Part | undefined): number {
+  if (
+    !part ||
+    !part.functionResponse?.name ||
+    !COMPACTABLE_TOOLS.has(part.functionResponse.name) ||
+    isErrorResponse(part) ||
+    isAlreadyCleared(part)
+  ) {
+    return 0;
+  }
+  const output = part.functionResponse.response?.['output'];
+  return typeof output === 'string' ? output.length : 0;
+}
+
+function normalizePendingContent(
+  pendingContent: Content | Content[] | undefined,
+): Content[] {
+  if (!pendingContent) return [];
+  return Array.isArray(pendingContent) ? pendingContent : [pendingContent];
+}
+
+function getToolResultsTotalCharsThreshold(
+  settings: ClearContextOnIdleSettings,
+): number {
+  if (settings.toolResultsTotalCharsThreshold !== undefined) {
+    return settings.toolResultsTotalCharsThreshold;
+  }
+  if ((settings.toolResultsThresholdMinutes ?? 0) < 0) {
+    return -1;
+  }
+  return DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD;
+}
+
+function buildKeepRefs(refs: PartRef[], keepRecent: number): Set<string> {
+  return new Set(refs.slice(-keepRecent).map(refKey));
+}
+
+function buildClearMap(
+  clearRefs: PartRef[],
+): Map<number, Map<number, PartKind>> {
+  const clearMap = new Map<number, Map<number, PartKind>>();
+  for (const ref of clearRefs) {
+    let parts = clearMap.get(ref.contentIndex);
+    if (!parts) {
+      parts = new Map();
+      clearMap.set(ref.contentIndex, parts);
+    }
+    parts.set(ref.partIndex, ref.kind);
+  }
+  return clearMap;
+}
+
+interface SizeClearPlan {
+  clearRefs: PartRef[];
+  toolRefs: PartRef[];
+  keepToolRefs: Set<string>;
+  toolResultCharsBefore: number;
+  toolResultCharsAfter: number;
+  pendingToolResultChars: number;
+  toolResultsTotalCharsThreshold: number;
+}
+
+function planSizeBasedClearing(
+  history: Content[],
+  settings: ClearContextOnIdleSettings,
+  keepRecent: number,
+  pendingContent: Content | Content[] | undefined,
+): SizeClearPlan | null {
+  const threshold = getToolResultsTotalCharsThreshold(settings);
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    return null;
+  }
+
+  const pending = normalizePendingContent(pendingContent);
+  const virtualHistory =
+    pending.length > 0 ? [...history, ...pending] : history;
+  const { tool } = collectCompactablePartRefs(virtualHistory);
+  const charsByRef = new Map<string, number>();
+  let totalChars = 0;
+  let pendingChars = 0;
+  for (const ref of tool) {
+    const chars = getToolOutputChars(getPart(virtualHistory, ref));
+    if (chars <= 0) continue;
+    charsByRef.set(refKey(ref), chars);
+    totalChars += chars;
+    if (ref.contentIndex >= history.length) {
+      pendingChars += chars;
+    }
+  }
+  if (totalChars <= threshold) {
+    return null;
+  }
+
+  const keepToolRefs = buildKeepRefs(tool, keepRecent);
+  const clearRefs: PartRef[] = [];
+  let remainingChars = totalChars;
+  for (const ref of tool) {
+    if (remainingChars <= threshold) break;
+
+    const key = refKey(ref);
+    const chars = charsByRef.get(key) ?? 0;
+    if (
+      chars <= 0 ||
+      ref.contentIndex >= history.length ||
+      keepToolRefs.has(key)
+    ) {
+      continue;
+    }
+
+    clearRefs.push(ref);
+    remainingChars -= chars;
+  }
+
+  return {
+    clearRefs,
+    toolRefs: tool,
+    keepToolRefs,
+    toolResultCharsBefore: totalChars,
+    toolResultCharsAfter: remainingChars - pendingChars,
+    pendingToolResultChars: pendingChars,
+    toolResultsTotalCharsThreshold: threshold,
+  };
+}
+
 // --- Main entry point ---
 
+export type MicrocompactTriggerReason = 'force' | 'idle' | 'size';
+
+export interface MicrocompactOptions {
+  force?: boolean;
+  sizeOnly?: boolean;
+  pendingContent?: Content | Content[];
+}
+
 export interface MicrocompactMeta {
+  triggerReason: MicrocompactTriggerReason;
   gapMinutes: number;
   thresholdMinutes: number;
+  toolResultCharsBefore?: number;
+  toolResultCharsAfter?: number;
+  pendingToolResultChars?: number;
+  toolResultsTotalCharsThreshold?: number;
   /** Count of `tool`-kind results cleared (compactable tool outputs). */
   toolsCleared: number;
   /** Count of media parts cleared (`media` top-level + `nested-media` under non-compactable tools). */
@@ -263,8 +409,13 @@ export interface MicrocompactMeta {
 }
 
 /**
- * Microcompact history: clear old compactable tool results when the
- * time-based trigger fires.
+ * Microcompact history: clear old compactable tool results and media when the
+ * idle/force trigger fires, or clear old compactable tool results only when
+ * the cumulative tool-result size trigger fires.
+ *
+ * Pass `opts.force: true` to skip trigger checks and always run the full
+ * clearing logic (used by `/compress-fast`). Pass `opts.sizeOnly: true` with
+ * optional `pendingContent` for ToolResult turns.
  *
  * Returns the (potentially modified) history and optional metadata
  * about what was cleared (for logging by the caller).
@@ -273,16 +424,8 @@ export function microcompactHistory(
   history: Content[],
   lastApiCompletionTimestamp: number | null,
   settings: ClearContextOnIdleSettings,
+  opts?: MicrocompactOptions,
 ): { history: Content[]; meta?: MicrocompactMeta } {
-  const trigger = evaluateTimeBasedTrigger(
-    lastApiCompletionTimestamp,
-    settings,
-  );
-  if (!trigger) {
-    return { history };
-  }
-  const { gapMs } = trigger;
-
   const envKeep = process.env['QWEN_MC_KEEP_RECENT'];
   const rawKeepRecent =
     envKeep !== undefined && Number.isFinite(Number(envKeep))
@@ -292,131 +435,179 @@ export function microcompactHistory(
     ? Math.max(1, rawKeepRecent)
     : 5;
 
-  const { tool, media, nestedMedia } = collectCompactablePartRefs(history);
-  // Each kind gets its own keepRecent budget: setting
-  // `toolResultsNumToKeep: 1` keeps 1 of each, not 1 total. This
-  // matches what users typically expect when they configure the
-  // threshold for "tool results".
-  const refKey = (r: PartRef) => `${r.contentIndex}:${r.partIndex}`;
-  const keepRefs = new Set([
-    ...tool.slice(-keepRecent).map(refKey),
-    ...media.slice(-keepRecent).map(refKey),
-    ...nestedMedia.slice(-keepRecent).map(refKey),
-  ]);
-  const allRefs: PartRef[] = [...tool, ...media, ...nestedMedia];
-  const clearRefs = allRefs.filter((r) => !keepRefs.has(refKey(r)));
+  let triggerReason: MicrocompactTriggerReason | undefined;
+  let gapMs = 0;
+  let tool: PartRef[] = [];
+  let media: PartRef[] = [];
+  let nestedMedia: PartRef[] = [];
+  let keepRefs = new Set<string>();
+  let clearRefs: PartRef[] = [];
+  let toolResultCharsBefore: number | undefined;
+  let toolResultCharsAfter: number | undefined;
+  let pendingToolResultChars: number | undefined;
+  let toolResultsTotalCharsThreshold: number | undefined;
 
-  if (clearRefs.length === 0) {
+  if (opts?.force) {
+    triggerReason = 'force';
+  } else if (!opts?.sizeOnly) {
+    const timeTrigger = evaluateTimeBasedTrigger(
+      lastApiCompletionTimestamp,
+      settings,
+    );
+    if (timeTrigger) {
+      triggerReason = 'idle';
+      gapMs = timeTrigger.gapMs;
+    }
+  }
+
+  if (triggerReason === 'force' || triggerReason === 'idle') {
+    ({ tool, media, nestedMedia } = collectCompactablePartRefs(history));
+    // Each kind gets its own keepRecent budget: setting
+    // `toolResultsNumToKeep: 1` keeps 1 of each, not 1 total. This
+    // matches what users typically expect when they configure the
+    // threshold for "tool results".
+    keepRefs = new Set([
+      ...tool.slice(-keepRecent).map(refKey),
+      ...media.slice(-keepRecent).map(refKey),
+      ...nestedMedia.slice(-keepRecent).map(refKey),
+    ]);
+    const allRefs: PartRef[] = [...tool, ...media, ...nestedMedia];
+    clearRefs = allRefs.filter((r) => !keepRefs.has(refKey(r)));
+  } else {
+    const sizePlan = planSizeBasedClearing(
+      history,
+      settings,
+      keepRecent,
+      opts?.pendingContent,
+    );
+    if (!sizePlan) {
+      return { history };
+    }
+    triggerReason = 'size';
+    tool = sizePlan.toolRefs.filter((r) => r.contentIndex < history.length);
+    keepRefs = sizePlan.keepToolRefs;
+    clearRefs = sizePlan.clearRefs;
+    toolResultCharsBefore = sizePlan.toolResultCharsBefore;
+    toolResultCharsAfter = sizePlan.toolResultCharsAfter;
+    pendingToolResultChars = sizePlan.pendingToolResultChars;
+    toolResultsTotalCharsThreshold = sizePlan.toolResultsTotalCharsThreshold;
+  }
+
+  if (clearRefs.length === 0 && triggerReason !== 'size') {
     return { history };
   }
 
-  // Build a lookup: contentIndex → Map of partIndex → kind
-  const clearMap = new Map<number, Map<number, PartKind>>();
-  for (const ref of clearRefs) {
-    let parts = clearMap.get(ref.contentIndex);
-    if (!parts) {
-      parts = new Map();
-      clearMap.set(ref.contentIndex, parts);
-    }
-    parts.set(ref.partIndex, ref.kind);
-  }
-
-  const callIdToFilePath = buildCallIdToFilePath(history);
   const evictedReadPaths = new Set<string>();
   let unresolvedEvictedReads = 0;
 
   let tokensSaved = 0;
   let toolsCleared = 0;
   let mediaCleared = 0;
+  let result = history;
 
-  const result: Content[] = history.map((content, ci) => {
-    const partsToClean = clearMap.get(ci);
-    if (!partsToClean || !content.parts) return content;
+  if (clearRefs.length > 0) {
+    const clearMap = buildClearMap(clearRefs);
+    const callIdToFilePath = buildCallIdToFilePath(history);
 
-    let touched = false;
-    const newParts = content.parts.map((part, pi) => {
-      const kind = partsToClean.get(pi);
-      if (kind === undefined) return part;
-      if (isAlreadyCleared(part)) return part;
+    result = history.map((content, ci) => {
+      const partsToClean = clearMap.get(ci);
+      if (!partsToClean || !content.parts) return content;
 
-      if (
-        kind === 'tool' &&
-        part.functionResponse?.name &&
-        COMPACTABLE_TOOLS.has(part.functionResponse.name) &&
-        !isErrorResponse(part)
-      ) {
-        tokensSaved += estimatePartTokens(part);
-        toolsCleared++;
-        touched = true;
-        // Record the blanked file's path so the caller disarms its
-        // fast-path; if unrecoverable, count it so the caller falls
-        // back to the blanket wipe (issue #4239).
-        if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
-          const filePaths = part.functionResponse.id
-            ? callIdToFilePath.get(part.functionResponse.id)
-            : undefined;
-          if (filePaths && filePaths.length > 0) {
-            for (const p of filePaths) evictedReadPaths.add(p);
-          } else {
-            unresolvedEvictedReads++;
+      let touched = false;
+      const newParts = content.parts.map((part, pi) => {
+        const kind = partsToClean.get(pi);
+        if (kind === undefined) return part;
+        if (isAlreadyCleared(part)) return part;
+
+        if (
+          kind === 'tool' &&
+          part.functionResponse?.name &&
+          COMPACTABLE_TOOLS.has(part.functionResponse.name) &&
+          !isErrorResponse(part)
+        ) {
+          tokensSaved += estimatePartTokens(part);
+          toolsCleared++;
+          touched = true;
+          // Record the blanked file's path so the caller disarms its
+          // fast-path; if unrecoverable, count it so the caller falls
+          // back to the blanket wipe (issue #4239).
+          if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
+            const filePaths = part.functionResponse.id
+              ? callIdToFilePath.get(part.functionResponse.id)
+              : undefined;
+            if (filePaths && filePaths.length > 0) {
+              for (const p of filePaths) evictedReadPaths.add(p);
+            } else {
+              unresolvedEvictedReads++;
+            }
           }
+          return {
+            functionResponse: {
+              ...stripNestedMedia(part.functionResponse),
+              response: { output: MICROCOMPACT_CLEARED_MESSAGE },
+            },
+          };
         }
-        return {
-          functionResponse: {
-            ...stripNestedMedia(part.functionResponse),
-            response: { output: MICROCOMPACT_CLEARED_MESSAGE },
-          },
-        };
-      }
 
-      if (
-        kind === 'nested-media' &&
-        part.functionResponse &&
-        !isErrorResponse(part)
-      ) {
-        // Non-compactable tool result: keep response.output, drop only
-        // the nested media on functionResponse.parts.
-        tokensSaved += estimatePartTokens(part);
-        mediaCleared++;
-        touched = true;
-        return {
-          functionResponse: stripNestedMedia(part.functionResponse),
-        };
-      }
+        if (
+          kind === 'nested-media' &&
+          part.functionResponse &&
+          !isErrorResponse(part)
+        ) {
+          // Non-compactable tool result: keep response.output, drop only
+          // the nested media on functionResponse.parts.
+          tokensSaved += estimatePartTokens(part);
+          mediaCleared++;
+          touched = true;
+          return {
+            functionResponse: stripNestedMedia(part.functionResponse),
+          };
+        }
 
-      if (kind === 'media' && (part.inlineData || part.fileData)) {
-        const mime =
-          part.inlineData?.mimeType ??
-          part.fileData?.mimeType ??
-          'application/octet-stream';
-        tokensSaved += estimatePartTokens(part);
-        mediaCleared++;
-        touched = true;
-        return {
-          text: `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${sanitizeMimeForPlaceholder(mime)}]`,
-        };
-      }
+        if (kind === 'media' && (part.inlineData || part.fileData)) {
+          const mime =
+            part.inlineData?.mimeType ??
+            part.fileData?.mimeType ??
+            'application/octet-stream';
+          tokensSaved += estimatePartTokens(part);
+          mediaCleared++;
+          touched = true;
+          return {
+            text: `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${sanitizeMimeForPlaceholder(mime)}]`,
+          };
+        }
 
-      return part;
+        return part;
+      });
+
+      if (!touched) return content;
+      return { ...content, parts: newParts };
     });
+  }
 
-    if (!touched) return content;
-    return { ...content, parts: newParts };
-  });
-
-  if (tokensSaved === 0) {
+  if (tokensSaved === 0 && triggerReason !== 'size') {
     return { history };
   }
 
   const thresholdMinutes = settings.toolResultsThresholdMinutes ?? 60;
-  const toolsKept = tool.length - toolsCleared;
-  const mediaKept = media.length + nestedMedia.length - mediaCleared;
+  // Only count items that were actually protected by keepRecent, not
+  // already-cleared items that were skipped during the clearing pass.
+  const toolsKept = tool.filter((r) => keepRefs.has(refKey(r))).length;
+  const mediaKept =
+    triggerReason === 'size'
+      ? 0
+      : Math.min(media.length + nestedMedia.length, keepRecent);
 
   return {
     history: result,
     meta: {
+      triggerReason,
       gapMinutes: Math.round(gapMs / 60_000),
       thresholdMinutes,
+      toolResultCharsBefore,
+      toolResultCharsAfter,
+      pendingToolResultChars,
+      toolResultsTotalCharsThreshold,
       toolsCleared,
       mediaCleared,
       toolsKept,

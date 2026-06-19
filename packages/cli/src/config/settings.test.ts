@@ -18,6 +18,15 @@ vi.mock('os', async (importOriginal) => {
   };
 });
 
+vi.mock('node:os', async (importOriginal) => {
+  const actualOs = await importOriginal<typeof osActual>();
+  return {
+    ...actualOs,
+    homedir: vi.fn(() => '/mock/home/user'),
+    platform: vi.fn(() => 'linux'),
+  };
+});
+
 // Mock trustedFolders
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi
@@ -113,7 +122,7 @@ vi.mock('node:fs', async (importOriginal) => {
     copyFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
-    realpathSync: (p: string) => p,
+    realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
   };
 });
 
@@ -132,7 +141,7 @@ vi.mock('fs', async (importOriginal) => {
     copyFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
-    realpathSync: (p: string) => p,
+    realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
   };
 });
 
@@ -177,6 +186,9 @@ describe('Settings Loading and Merging', () => {
     );
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}'); // Return valid empty JSON
+    (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) =>
+      p.toString(),
+    );
     (mockFsMkdirSync as Mock).mockImplementation(() => undefined);
     vi.mocked(isWorkspaceTrusted).mockReturnValue({
       isTrusted: true,
@@ -198,6 +210,37 @@ describe('Settings Loading and Merging', () => {
       expect(settings.user.settings).toEqual({});
       expect(settings.workspace.settings).toEqual({});
       expect(settings.merged).toEqual({});
+    });
+
+    describe('home directory workspace scope', () => {
+      it('should mark workspace settings inactive when workspace is the home directory', () => {
+        const homeDir = '/mock/home/user';
+        vi.mocked(osActual.homedir).mockReturnValue(homeDir);
+        const homeSettingsPath = pathActual.join(
+          homeDir,
+          SETTINGS_DIRECTORY_NAME,
+          'settings.json',
+        );
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p.toString() === homeSettingsPath,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() =>
+          JSON.stringify({ ui: { theme: 'Default' } }),
+        );
+        (fs.realpathSync as Mock).mockImplementation(() => homeDir);
+
+        const settings = loadSettings(homeDir);
+
+        expect(settings.workspaceSettingsActive).toBe(false);
+        expect(settings.user.settings.ui).toEqual({ theme: 'Default' });
+        expect(settings.workspace.settings).toEqual({});
+      });
+
+      it('should keep workspace settings active outside the home directory', () => {
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.workspaceSettingsActive).toBe(true);
+      });
     });
 
     it('should load system settings if only system file exists', () => {
@@ -1484,14 +1527,17 @@ describe('Settings Loading and Merging', () => {
           args: ['--user-arg'],
           description: 'User MCP server',
         },
+        // Workspace-sourced servers are stamped with provenance scope (#4615).
         'workspace-server': {
           command: 'workspace-command',
           args: ['--workspace-arg'],
           description: 'Workspace MCP server',
+          scope: 'workspace',
         },
         'shared-server': {
           command: 'workspace-shared-command',
           description: 'Workspace shared server config',
+          scope: 'workspace',
         },
       });
     });
@@ -1550,6 +1596,36 @@ describe('Settings Loading and Merging', () => {
         'workspace-only-server': {
           command: 'workspace-only-command',
           description: 'Workspace only server',
+          scope: 'workspace',
+        },
+      });
+    });
+
+    it('should force workspace MCP server scope even if settings declare another scope', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const workspaceSettingsContent = {
+        mcpServers: {
+          'workspace-server': {
+            command: 'workspace-command',
+            scope: 'system',
+          },
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.mcpServers).toEqual({
+        'workspace-server': {
+          command: 'workspace-command',
+          scope: 'workspace',
         },
       });
     });
@@ -1617,13 +1693,18 @@ describe('Settings Loading and Merging', () => {
         },
         'workspace-server': {
           command: 'workspace-command',
+          scope: 'workspace',
         },
+        // system-sourced servers are stamped 'system' (ungated, highest
+        // precedence) (#4615).
         'system-only-server': {
           command: 'system-only-command',
+          scope: 'system',
         },
         'shared-server': {
           command: 'system-command',
           args: ['--system-arg'],
+          scope: 'system',
         },
       });
     });
@@ -1894,9 +1975,11 @@ describe('Settings Loading and Merging', () => {
       vi.restoreAllMocks();
     });
 
-    it('should recover from .orig backup when settings.json is corrupted', () => {
+    it('should ignore a stale .orig backup and reset to empty when settings.json is corrupted', () => {
+      // `.orig` is no longer used for recovery — writeWithBackupSync removes it
+      // on success, so any leftover is stale and must not be restored from.
       const invalidJsonContent = 'invalid json';
-      const validBackupContent = JSON.stringify({
+      const staleBackupContent = JSON.stringify({
         $version: SETTINGS_VERSION,
         model: { id: 'backup-model' },
       });
@@ -1906,7 +1989,7 @@ describe('Settings Loading and Merging', () => {
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          if (p === `${USER_SETTINGS_PATH}.orig`) return validBackupContent;
+          if (p === `${USER_SETTINGS_PATH}.orig`) return staleBackupContent;
           return '{}';
         },
       );
@@ -1914,16 +1997,21 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the backup was written back to the original path
+      // The stale backup must NOT be written back to the original path.
       const writeCalls = (fs.writeFileSync as Mock).mock.calls;
       const restoreWrite = writeCalls.find(
         (call: unknown[]) =>
-          call[0] === USER_SETTINGS_PATH && call[1] === validBackupContent,
+          call[0] === USER_SETTINGS_PATH && call[1] === staleBackupContent,
       );
-      expect(restoreWrite).toBeDefined();
+      expect(restoreWrite).toBeUndefined();
 
-      // Recovery is communicated via wasRecovered flag, not migrationWarnings
-      expect(result.wasRecovered).toBe(true);
+      // Settings are reset to empty and corruption is reported, not recovered.
+      expect(result.wasRecovered).toBe(false);
+      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+      const resetWrites = writeCalls.filter(
+        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
+      );
+      expect(resetWrites.length).toBeGreaterThan(0);
 
       vi.restoreAllMocks();
     });
@@ -3271,6 +3359,38 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
+    it('strips a runtime snapshot prefix before persisting model.name', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      settings.setValue(
+        SettingScope.User,
+        'model.name',
+        '$runtime|openai|qwen3.6-27b-autoround',
+      );
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.model.name).toBe('qwen3.6-27b-autoround');
+    });
+
+    it('collapses stacked runtime snapshot prefixes before persisting model.name', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      settings.setValue(
+        SettingScope.User,
+        'model.name',
+        '$runtime|openai|$runtime|openai|qwen3.6-27b-autoround',
+      );
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.model.name).toBe('qwen3.6-27b-autoround');
+    });
+
     it('persists removed MCP servers when replacing the top-level mcpServers object', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
 
@@ -3791,9 +3911,10 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('hello');
       });
 
-      it('ignores QWEN_HOME and QWEN_RUNTIME_DIR set in a project .env', () => {
+      it('ignores global-state paths set in a project .env', () => {
         delete process.env['QWEN_HOME'];
         delete process.env['QWEN_RUNTIME_DIR'];
+        delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
 
         const cwdSpy = vi
           .spyOn(process, 'cwd')
@@ -3814,6 +3935,7 @@ describe('Settings Loading and Merging', () => {
               return [
                 'QWEN_HOME=/tmp/hijack',
                 'QWEN_RUNTIME_DIR=/tmp/hijack-runtime',
+                'QWEN_CODE_MCP_APPROVALS_PATH=/tmp/preapproved.json',
                 'OTHER_VAR=ok',
               ].join('\n');
             return '{}';
@@ -3825,6 +3947,7 @@ describe('Settings Loading and Merging', () => {
         // A project .env must never redirect global state.
         expect(process.env['QWEN_HOME']).toBeUndefined();
         expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
+        expect(process.env['QWEN_CODE_MCP_APPROVALS_PATH']).toBeUndefined();
         // Other vars from the same project .env still load.
         expect(process.env['OTHER_VAR']).toEqual('ok');
 

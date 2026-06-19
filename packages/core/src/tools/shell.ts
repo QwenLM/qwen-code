@@ -9,21 +9,28 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
-import type { Config } from '../config/config.js';
+import * as Diff from 'diff';
+import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
+  FileDiff,
   ToolInvocation,
   ToolResult,
   ToolResultDisplay,
   ToolCallConfirmationDetails,
+  ToolEditConfirmationDetails,
   ToolExecuteConfirmationDetails,
   ToolConfirmationPayload,
-  ToolConfirmationOutcome,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { getErrorMessage } from '../utils/errors.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+  ToolConfirmationOutcome,
+} from './tools.js';
+import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { truncateToolOutput } from '../utils/truncation.js';
 import {
   CommitAttributionService,
@@ -42,7 +49,7 @@ import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
-import { isSubpaths } from '../utils/paths.js';
+import { isSubpaths, makeRelative, shortenPath } from '../utils/paths.js';
 import {
   buildShellExecWarnings,
   getCommandRoot,
@@ -56,10 +63,21 @@ import {
 } from '../utils/shell-utils.js';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
   isShellCommandReadOnlyAST,
   extractCommandRules,
 } from '../utils/shellAstParser.js';
+import {
+  applySedSubstitution,
+  parseSedEditCommand,
+  type SedEditInfo,
+} from '../utils/sedEditParser.js';
+import {
+  detectLineEnding,
+  type ReadTextFileResponse,
+} from '../services/fileSystemService.js';
+import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
 
@@ -1022,17 +1040,31 @@ export function buildLongRunningForegroundHint(elapsedMs: number): string {
 /**
  * Detect standalone or leading `sleep N` patterns that should use Monitor
  * instead. Catches `sleep 5`, `sleep 2.5`, `sleep 2s`,
- * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` — but not sleep
+ * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` -- but not sleep
  * inside pipelines, subshells, backgrounded commands, or scripts (those are
  * fine).
  */
 export function detectBlockedSleepPattern(command: string): string | null {
+  return detectBlockedSleepPatternDetails(command)?.description ?? null;
+}
+
+type BlockedSleepPatternDetails = {
+  description: string;
+  isStandalone: boolean;
+  intentionalSleepRejection?: string;
+};
+
+function detectBlockedSleepPatternDetails(
+  command: string,
+): BlockedSleepPatternDetails | null {
   // Strip trailing shell comments first; otherwise `sleep 5 # wait` would
   // present `# wait` as the suffix, which `getSleepSequentialSeparator`
   // rejects (only &&/||/;/\n are recognized), letting the foreground sleep
   // bypass the guard. Shell ignores top-level trailing comments, so for the
   // purposes of detection they are equivalent to end-of-command.
-  const trimmed = trimTrailingShellComment(command).trim();
+  const { command: uncommentedCommand, comment } =
+    splitTrailingShellComment(command);
+  const trimmed = uncommentedCommand.trim();
   if (!trimmed.startsWith('sleep')) return null;
   const afterSleep = trimmed.slice('sleep'.length);
   if (!afterSleep || !/\s/.test(afterSleep[0]!)) return null;
@@ -1059,9 +1091,51 @@ export function detectBlockedSleepPattern(command: string): string | null {
   if (separator === null) return null;
 
   const rest = separator.rest.trim();
-  return rest
+  const isStandalone = !rest;
+  const description = rest
     ? `sleep ${durationToken} followed by: ${rest}`
     : `standalone sleep ${durationToken}`;
+  const trimmedComment = comment?.trim();
+  if (
+    isStandalone &&
+    trimmedComment?.startsWith(INTENTIONAL_SLEEP_COMMENT_PREFIX)
+  ) {
+    const reason = getIntentionalSleepReason(trimmedComment);
+    if (reason === null) {
+      return {
+        description,
+        isStandalone,
+        intentionalSleepRejection:
+          'The intentional-sleep comment was recognized, but the reason is too short; explain why the delay is needed after `intentional-sleep:`.',
+      };
+    }
+    if (secs > MAX_INTENTIONAL_SLEEP_SECONDS) {
+      return {
+        description,
+        isStandalone,
+        intentionalSleepRejection:
+          'The intentional-sleep comment was recognized, but foreground sleeps over 10 minutes are not allowed; use is_background: true or Monitor for longer waits.',
+      };
+    }
+    debugLogger.debug('intentional sleep allowed', {
+      durationSeconds: secs,
+      reason,
+    });
+    return null;
+  }
+  return { description, isStandalone };
+}
+
+const INTENTIONAL_SLEEP_COMMENT_PREFIX = 'intentional-sleep:';
+const MAX_INTENTIONAL_SLEEP_SECONDS = 10 * 60;
+// Require a real reason, not a trivial opt-out like "wait".
+const MIN_INTENTIONAL_SLEEP_REASON_LENGTH = 8;
+
+function getIntentionalSleepReason(trimmedComment: string): string | null {
+  const reason = trimmedComment
+    .slice(INTENTIONAL_SLEEP_COMMENT_PREFIX.length)
+    .trim();
+  return reason.length >= MIN_INTENTIONAL_SLEEP_REASON_LENGTH ? reason : null;
 }
 
 function parseSleepDurationToSeconds(token: string): number | null {
@@ -1130,7 +1204,13 @@ function getSleepSequentialSeparator(suffix: string): { rest: string } | null {
   return null;
 }
 
-function trimTrailingShellComment(command: string): string {
+function splitTrailingShellComment(
+  command: string,
+  keepCommandsAfterCommentNewline = true,
+): {
+  command: string;
+  comment: string | null;
+} {
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let inBacktick = false;
@@ -1216,11 +1296,25 @@ function trimTrailingShellComment(command: string): string {
       commandSubstitutionDepth === 0 &&
       (i === 0 || /\s/.test(command[i - 1]!))
     ) {
-      return command.slice(0, i);
+      const newlineIndex = command.indexOf('\n', i + 1);
+      return {
+        command:
+          newlineIndex === -1 || !keepCommandsAfterCommentNewline
+            ? command.slice(0, i)
+            : command.slice(0, i) + command.slice(newlineIndex),
+        comment:
+          newlineIndex === -1
+            ? command.slice(i + 1)
+            : command.slice(i + 1, newlineIndex),
+      };
     }
   }
 
-  return command;
+  return { command, comment: null };
+}
+
+function trimTrailingShellComment(command: string): string {
+  return splitTrailingShellComment(command, false).command;
 }
 
 function hasTopLevelTrailingBackgroundOperator(command: string): boolean {
@@ -1345,15 +1439,372 @@ export interface ShellToolParams {
   directory?: string;
 }
 
+interface PreparedSedEdit {
+  filePath: string;
+  fileName: string;
+  originalContent: string;
+  newContent: string;
+  meta: ReadTextFileResponse['_meta'];
+}
+
+class SedEditSimulationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SedEditSimulationError';
+  }
+}
+
+class SedEditCancelledError extends Error {
+  constructor() {
+    super('Command was cancelled by user before it could complete.');
+    this.name = 'SedEditCancelledError';
+  }
+}
+
+function getAbortReasonName(signal: AbortSignal): string | undefined {
+  const reason = signal.reason as unknown;
+  if (
+    typeof reason === 'object' &&
+    reason !== null &&
+    'name' in reason &&
+    typeof reason.name === 'string'
+  ) {
+    return reason.name;
+  }
+  return undefined;
+}
+
+const LEADING_ENV_ASSIGNMENT_RE = /^\s*[A-Za-z_][A-Za-z0-9_]*=/;
+
 export class ShellToolInvocation extends BaseToolInvocation<
   ShellToolParams,
   ToolResult
 > {
+  private preparedSedEdit: PreparedSedEdit | undefined;
+  private confirmedSedNewContent: string | undefined;
+  private sedEditPreviewFailed = false;
+
   constructor(
     private readonly config: Config,
     params: ShellToolParams,
   ) {
     super(params);
+  }
+
+  private getSedEditInfo(): SedEditInfo | null {
+    if (
+      this.params.is_background ||
+      LEADING_ENV_ASSIGNMENT_RE.test(this.params.command)
+    ) {
+      return null;
+    }
+    const strippedCommand = stripShellWrapper(this.params.command);
+    if (LEADING_ENV_ASSIGNMENT_RE.test(strippedCommand)) {
+      return null;
+    }
+    return parseSedEditCommand(strippedCommand);
+  }
+
+  private resolveSedFilePath(filePath: string): string {
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+    const cwd = this.params.directory || this.config.getTargetDir();
+    return path.resolve(cwd, filePath);
+  }
+
+  private async checkSedPriorRead(filePath: string): Promise<void> {
+    if (this.config.getFileReadCacheDisabled()) {
+      return;
+    }
+    const priorReadResult = await checkPriorRead(
+      this.config.getFileReadCache(),
+      filePath,
+      'editing',
+    );
+    if (!priorReadResult.ok) {
+      throw new StructuredToolError(
+        priorReadResult.rawMessage,
+        priorReadResult.type,
+      );
+    }
+  }
+
+  private async prepareSedEdit(sedInfo: SedEditInfo): Promise<PreparedSedEdit> {
+    const filePath = this.resolveSedFilePath(sedInfo.filePath);
+    if (fs.lstatSync(filePath).isSymbolicLink()) {
+      throw new Error(
+        `sed edit target '${filePath}' is a symlink; falling back to shell execution`,
+      );
+    }
+    await this.checkSedPriorRead(filePath);
+    const { content, _meta } = await this.config
+      .getFileSystemService()
+      .readTextFile({ path: filePath });
+    let newContent: string;
+    try {
+      newContent = applySedSubstitution(content, sedInfo);
+    } catch (err) {
+      throw new SedEditSimulationError(getErrorMessage(err));
+    }
+
+    return {
+      filePath,
+      fileName: path.basename(filePath),
+      originalContent: content,
+      newContent,
+      meta: {
+        ..._meta,
+        lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
+      },
+    };
+  }
+
+  private makeSedEditDisplay(edit: PreparedSedEdit): FileDiff {
+    const diffStat = getDiffStat(
+      edit.fileName,
+      edit.originalContent,
+      edit.newContent,
+      edit.newContent,
+    );
+    return {
+      fileDiff: Diff.createPatch(
+        edit.fileName,
+        edit.originalContent,
+        edit.newContent,
+        'Current',
+        'Proposed',
+        DEFAULT_DIFF_OPTIONS,
+      ),
+      fileName: edit.fileName,
+      originalContent: edit.originalContent,
+      newContent: edit.newContent,
+      diffStat,
+    };
+  }
+
+  private sedEditError(
+    message: string,
+    type = ToolErrorType.FILE_WRITE_FAILURE,
+  ): ToolResult {
+    return {
+      llmContent: message,
+      returnDisplay: message,
+      error: {
+        message,
+        type,
+      },
+    };
+  }
+
+  private sedEditCancelledResult(
+    signal: AbortSignal,
+    effectiveTimeout: number,
+  ): ToolResult {
+    if (getAbortReasonName(signal) === 'TimeoutError') {
+      const message = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
+      return {
+        llmContent: message,
+        returnDisplay: message,
+      };
+    }
+    return {
+      llmContent: 'Command was cancelled by user before it could complete.',
+      returnDisplay: 'Command cancelled by user.',
+    };
+  }
+
+  private waitForSedOperation<T>(
+    operation: () => Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    if (signal.aborted) {
+      return Promise.reject(new SedEditCancelledError());
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        reject(new SedEditCancelledError());
+      };
+      const removeAbortListener = () => {
+        signal.removeEventListener('abort', onAbort);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      let operationPromise: Promise<T>;
+      try {
+        operationPromise = operation();
+      } catch (err) {
+        removeAbortListener();
+        reject(err);
+        return;
+      }
+      operationPromise.then(
+        (value) => {
+          removeAbortListener();
+          resolve(value);
+        },
+        (err: unknown) => {
+          removeAbortListener();
+          reject(err);
+        },
+      );
+    });
+  }
+
+  private async executeSedEdit(
+    sedInfo: SedEditInfo,
+    signal: AbortSignal,
+    effectiveTimeout: number,
+  ): Promise<ToolResult> {
+    let edit: PreparedSedEdit;
+    try {
+      edit = await this.waitForSedOperation(
+        () => this.prepareSedEdit(sedInfo),
+        signal,
+      );
+    } catch (err) {
+      const filePath = this.resolveSedFilePath(sedInfo.filePath);
+      if (err instanceof SedEditCancelledError) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      if (err instanceof SedEditSimulationError) {
+        const message = `Error simulating sed edit for file '${filePath}': ${err.message}`;
+        return this.sedEditError(
+          message,
+          ToolErrorType.EDIT_PREPARATION_FAILURE,
+        );
+      }
+      if (err instanceof StructuredToolError) {
+        return this.sedEditError(err.message, err.errorType);
+      }
+      const message = `Error reading file for sed edit '${filePath}': ${getErrorMessage(err)}`;
+      return this.sedEditError(
+        message,
+        isNodeError(err) && err.code === 'ENOENT'
+          ? ToolErrorType.FILE_NOT_FOUND
+          : ToolErrorType.READ_CONTENT_FAILURE,
+      );
+    }
+
+    if (
+      this.preparedSedEdit?.filePath === edit.filePath &&
+      this.preparedSedEdit.originalContent !== edit.originalContent
+    ) {
+      return this.sedEditError(
+        `File changed since sed edit confirmation: ${edit.filePath}. Please re-read the file and retry.`,
+        ToolErrorType.FILE_CHANGED_SINCE_READ,
+      );
+    }
+
+    if (
+      this.preparedSedEdit?.filePath === edit.filePath &&
+      this.confirmedSedNewContent !== undefined
+    ) {
+      edit = {
+        ...edit,
+        newContent: this.confirmedSedNewContent,
+      };
+    }
+
+    if (edit.originalContent === edit.newContent) {
+      const message = `sed edit made no changes to ${edit.filePath}.`;
+      return {
+        llmContent: message,
+        returnDisplay: message,
+      };
+    }
+
+    const display = this.makeSedEditDisplay(edit);
+    let fileHistoryBackupRecorded = false;
+    const userModifiedSedContent = this.confirmedSedNewContent !== undefined;
+
+    try {
+      if (signal.aborted) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      try {
+        await this.waitForSedOperation(
+          () => this.config.getFileHistoryService().trackEdit(edit.filePath),
+          signal,
+        );
+        fileHistoryBackupRecorded = true;
+      } catch (err) {
+        if (err instanceof SedEditCancelledError) {
+          return this.sedEditCancelledResult(signal, effectiveTimeout);
+        }
+        debugLogger.warn(
+          `file history trackEdit failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
+        // File history is best-effort; never block shell-compatible edits.
+      }
+
+      if (signal.aborted) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      // writeTextFile is not cancellation-aware; once the write starts, await
+      // it so the result reflects the on-disk state instead of a stale cancel.
+      await this.config.getFileSystemService().writeTextFile({
+        path: edit.filePath,
+        content: edit.newContent,
+        _meta: edit.meta,
+      });
+
+      if (!userModifiedSedContent) {
+        try {
+          CommitAttributionService.getInstance().recordEdit(
+            edit.filePath,
+            edit.originalContent,
+            edit.newContent,
+          );
+        } catch (err) {
+          debugLogger.warn(
+            `commit attribution recordEdit failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+          );
+          // Attribution is diagnostic metadata; the sed edit already succeeded.
+        }
+      }
+
+      try {
+        const postWriteStats = fs.statSync(edit.filePath);
+        this.config
+          .getFileReadCache()
+          .recordWrite(edit.filePath, postWriteStats);
+      } catch (err) {
+        debugLogger.warn(
+          `file read cache recordWrite failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
+        // Non-fatal: a future read can refresh the cache from disk.
+      }
+
+      return {
+        llmContent: `sed edit applied to ${edit.filePath}.`,
+        returnDisplay: display,
+      };
+    } catch (err) {
+      if (err instanceof SedEditCancelledError) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      if (fileHistoryBackupRecorded) {
+        debugLogger.warn(
+          `sed edit write failed after file history backup was recorded for ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
+      }
+      let type = ToolErrorType.FILE_WRITE_FAILURE;
+      let message = `Error writing sed edit to file '${edit.filePath}': ${getErrorMessage(err)}`;
+      if (isNodeError(err)) {
+        if (err.code === 'EACCES') {
+          type = ToolErrorType.PERMISSION_DENIED;
+          message = `Permission denied writing sed edit to file: ${edit.filePath} (${err.code})`;
+        } else if (err.code === 'ENOSPC') {
+          type = ToolErrorType.NO_SPACE_LEFT;
+          message = `No space left on device while writing sed edit to file: ${edit.filePath} (${err.code})`;
+        } else if (err.code === 'EISDIR') {
+          type = ToolErrorType.TARGET_IS_DIRECTORY;
+          message = `Sed edit target is a directory, not a file: ${edit.filePath} (${err.code})`;
+        }
+      }
+      return this.sedEditError(message, type);
+    }
   }
 
   getDescription(): string {
@@ -1423,6 +1874,50 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const command = stripShellWrapper(this.params.command);
     const pm = this.config.getPermissionManager?.();
     const cwd = this.params.directory || this.config.getTargetDir();
+    const sedInfo = this.getSedEditInfo();
+    let sedEditPreviewWarning: string | undefined;
+
+    if (sedInfo) {
+      try {
+        const edit = await this.prepareSedEdit(sedInfo);
+        this.preparedSedEdit = edit;
+        this.confirmedSedNewContent = undefined;
+        this.sedEditPreviewFailed = false;
+        const display = this.makeSedEditDisplay(edit);
+        const confirmationDetails: ToolEditConfirmationDetails = {
+          type: 'edit',
+          title: `Confirm Sed Edit: ${shortenPath(makeRelative(edit.filePath, this.config.getTargetDir()))}`,
+          fileName: edit.fileName,
+          filePath: edit.filePath,
+          fileDiff: display.fileDiff,
+          originalContent: edit.originalContent,
+          newContent: edit.newContent,
+          hideModify: true,
+          onConfirm: async (
+            outcome: ToolConfirmationOutcome,
+            payload?: ToolConfirmationPayload,
+          ) => {
+            if (payload?.newContent !== undefined) {
+              this.confirmedSedNewContent = payload.newContent;
+            }
+            if (outcome === ToolConfirmationOutcome.ProceedAlways) {
+              this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+            }
+          },
+        };
+        return confirmationDetails;
+      } catch (err) {
+        if (err instanceof StructuredToolError) {
+          throw err;
+        }
+        this.sedEditPreviewFailed = true;
+        sedEditPreviewWarning =
+          'Sed edit preview unavailable; showing raw shell command confirmation.';
+        debugLogger.warn(
+          `sed edit preview failed, falling back to exec confirmation: ${getErrorMessage(err)}`,
+        );
+      }
+    }
 
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
@@ -1486,7 +1981,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // (see issue #4093). Substitution is detected on both the stripped
     // and original command so wrappers like `bash -c "..."` are checked
     // along with their inner contents.
-    const warnings = buildShellExecWarnings(command, this.params.command);
+    const warnings = [
+      ...(buildShellExecWarnings(command, this.params.command) ?? []),
+      ...(sedEditPreviewWarning ? [sedEditPreviewWarning] : []),
+    ];
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
@@ -1501,7 +1999,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
-    if (warnings) {
+    if (warnings.length > 0) {
       confirmationDetails.warnings = warnings;
     }
     return confirmationDetails;
@@ -1550,6 +2048,28 @@ export class ShellToolInvocation extends BaseToolInvocation<
         timeoutSignal,
         promoteAbortController.signal,
       ]);
+    }
+
+    const sedInfo = this.getSedEditInfo();
+    if (sedInfo && !this.sedEditPreviewFailed) {
+      if (this.preparedSedEdit) {
+        debugLogger.debug('executing simulated sed edit', {
+          command: this.params.command,
+        });
+        return this.executeSedEdit(sedInfo, combinedSignal, effectiveTimeout);
+      }
+      try {
+        await this.checkSedPriorRead(this.resolveSedFilePath(sedInfo.filePath));
+      } catch (err) {
+        if (err instanceof StructuredToolError) {
+          return this.sedEditError(err.message, err.errorType);
+        }
+        throw err;
+      }
+      debugLogger.debug(
+        'falling back to shell execution for sed edit without prepared preview',
+        { command: this.params.command },
+      );
     }
 
     // Add co-author to git commit commands and Qwen Code attribution to
@@ -2090,6 +2610,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
         this.config,
         ShellTool.Name,
         llmContent,
+        // Per-tool char budget; mirrors ShellTool.maxOutputChars. keep='both'
+        // preserves the command's start AND its trailing exit/error summary
+        // (where shell failures report). Kept in-tool (not deferred to the
+        // scheduler) so the long-run hint below is appended OUTSIDE the
+        // truncation envelope; the scheduler's sentinel makes its later pass a
+        // no-op here. lines: Infinity keeps this char-only so the global line
+        // cap can't undercut the declared 30k char budget — many short lines
+        // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
+        { threshold: 30_000, keep: 'both', lines: Number.POSITIVE_INFINITY },
       );
 
       if (truncatedResult.outputFile) {
@@ -4182,6 +4711,10 @@ export class ShellTool extends BaseDeclarativeTool<
 > {
   static Name: string = ToolNames.SHELL;
 
+  override get maxOutputChars(): number {
+    return 30_000;
+  }
+
   constructor(private readonly config: Config) {
     super(
       ShellTool.Name,
@@ -4285,15 +4818,19 @@ export class ShellTool extends BaseDeclarativeTool<
     // `-c` script. This matches every other sensitive check in this file
     // (directory, read-only, command-root extraction, etc.).
     if (!params.is_background) {
-      const sleepPattern = detectBlockedSleepPattern(
-        stripShellWrapper(params.command),
-      );
+      const sleepPattern = detectBlockedSleepPatternDetails(strippedCommand);
       if (sleepPattern !== null) {
+        const intentionalSleepGuidance =
+          sleepPattern.intentionalSleepRejection ??
+          (sleepPattern.isStandalone
+            ? 'If you genuinely need a standalone delay (rate limiting, deliberate pacing), ' +
+              'add a trailing comment like `# intentional-sleep: wait for MCP rate limit reset` (up to 10 minutes).'
+            : 'Split into two calls: first `sleep N # intentional-sleep: <reason>` (standalone), then the follow-up command.');
         return (
-          `Blocked: ${sleepPattern}. ` +
+          `Blocked: ${sleepPattern.description}. ` +
           'Run blocking commands in the background with is_background: true. ' +
           'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
-          'If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds.'
+          intentionalSleepGuidance
         );
       }
     }

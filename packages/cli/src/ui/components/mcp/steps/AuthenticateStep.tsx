@@ -38,6 +38,11 @@ const COPY_FEEDBACK_MS = 2000;
  * some terminals disable OSC 52 by default.
  */
 function copyToClipboardViaOsc52(text: string): boolean {
+  // Prevent multi-megabyte escape sequences that can crash/hang terminals.
+  const MAX_OSC52_BYTES = 75_000;
+  if (Buffer.byteLength(text, 'utf-8') > MAX_OSC52_BYTES) {
+    return false;
+  }
   const base64 = Buffer.from(text, 'utf8').toString('base64');
   const seq = wrapForMultiplexer(`\x1b]52;c;${base64}\x07`);
   const stream = process.stderr.isTTY
@@ -47,7 +52,13 @@ function copyToClipboardViaOsc52(text: string): boolean {
       : null;
   if (!stream) return false;
   try {
-    stream.write(seq);
+    stream.write(seq, (err) => {
+      if (err) {
+        // Async write failure - log but don't change return value
+        // eslint-disable-next-line no-console
+        console.warn('copyToClipboardViaOsc52: async write failed:', err);
+      }
+    });
     return true;
   } catch {
     return false;

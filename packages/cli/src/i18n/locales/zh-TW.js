@@ -9,6 +9,50 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  // ============================================================================
+  // Tool display names (chat-stream badge labels)
+  // ----------------------------------------------------------------------------
+  // Keyed by `toolDisplayName.<English display name>` (from core
+  // `ToolDisplayNames`); a missing key falls back to the English display name
+  // via `localizeToolDisplayName`. A product name (e.g. `Notebook`) is kept
+  // verbatim inside an otherwise-translated label.
+  // ============================================================================
+  'toolDisplayName.Edit': '編輯',
+  'toolDisplayName.WriteFile': '寫入檔案',
+  'toolDisplayName.ReadFile': '讀取檔案',
+  'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.Glob': 'Glob',
+  'toolDisplayName.Shell': '運行命令',
+  'toolDisplayName.Shell Command': 'Shell 命令',
+  'toolDisplayName.TodoList': '任務清單',
+  'toolDisplayName.SaveMemory': '儲存記憶',
+  'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Skill': '技能',
+  'toolDisplayName.EnterPlanMode': '進入計畫模式',
+  'toolDisplayName.ExitPlanMode': '退出計畫模式',
+  'toolDisplayName.WebFetch': '網路擷取',
+  'toolDisplayName.WebSearch': '網路搜尋',
+  'toolDisplayName.ListFiles': '列出檔案',
+  'toolDisplayName.Lsp': 'LSP',
+  'toolDisplayName.AskUserQuestion': '詢問使用者',
+  'toolDisplayName.CronCreate': '建立定時任務',
+  'toolDisplayName.CronList': '定時任務清單',
+  'toolDisplayName.CronDelete': '刪除定時任務',
+  'toolDisplayName.LoopWakeup': '循環喚醒',
+  'toolDisplayName.TaskCreate': '建立任務',
+  'toolDisplayName.TaskUpdate': '更新任務',
+  'toolDisplayName.TaskList': '任務列表',
+  'toolDisplayName.TaskStop': '停止任務',
+  'toolDisplayName.TeamCreate': '建立團隊',
+  'toolDisplayName.TeamDelete': '刪除團隊',
+  'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.StructuredOutput': '結構化輸出',
+  'toolDisplayName.Monitor': '監控',
+  'toolDisplayName.NotebookEdit': '編輯 Notebook',
+  'toolDisplayName.ToolSearch': '工具搜尋',
+  'toolDisplayName.EnterWorktree': '進入 Worktree',
+  'toolDisplayName.ExitWorktree': '退出 Worktree',
+  'toolDisplayName.Workflow': '工作流程',
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
   'Attachments: ': '附件：',
@@ -100,6 +144,7 @@ export default {
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
   'Open the skills panel (browse, search, toggle, pick).':
     '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
+  'Move this session to a new working directory': '將此會話移動到新的工作目錄',
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能設定已儲存。',
   'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
@@ -202,12 +247,14 @@ export default {
   'Clear conversation history and free up context': '清除對話歷史並釋放上下文',
   'Compresses the context by replacing it with a summary.':
     '通過摘要替換來壓縮上下文',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    '無需 AI 的快速上下文壓縮。清理舊工具輸出並剝離思考過程。',
   'open full Qwen Code documentation in your browser':
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
   'Connect an LLM provider': '連接 LLM 提供商',
-  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
-    '將最近的 AI 回應複製到剪貼簿（/copy N 複製倒數第 N 則）',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    '複製到剪貼簿：AI 回應、程式碼區塊（可依語言篩選）、LaTeX 或 Mermaid。N 為倒數第 N 則訊息，index 為程式碼區塊序號',
   'Show working-tree change stats versus HEAD':
     '顯示工作區相對 HEAD 的變更統計',
   'Could not determine current working directory.': '無法確定當前工作目錄。',
@@ -451,10 +498,50 @@ export default {
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
-  'check session stats. Usage: /stats [model|tools]':
-    '檢查會話統計信息。用法：/stats [model|tools]',
-  'Show model-specific usage statistics.': '顯示模型相關的使用統計信息',
-  'Show tool-specific usage statistics.': '顯示工具相關的使用統計信息',
+  'Show model-specific usage statistics.': '顯示模型相關的使用統計資訊',
+  'Show tool-specific usage statistics.': '顯示工具相關的使用統計資訊',
+  'Show daily token usage statistics.': '顯示每日 token 使用統計資訊',
+  'Show monthly token usage statistics.': '顯示每月 token 使用統計資訊',
+  'Export token usage statistics to CSV or JSON.':
+    '將 token 使用統計資訊匯出為 CSV 或 JSON',
+  'No usage data.': '沒有使用資料。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}：{{tokens}} 個 token（{{requests}} 個請求）',
+  'Daily token usage for {{value}}': '{{value}} 的每日 token 使用情況',
+  'Monthly token usage for {{value}}': '{{value}} 的每月 token 使用情況',
+  'Total: {{tokens}} tokens': '總計：{{tokens}} 個 token',
+  'Requests: {{requests}}': '請求數：{{requests}}',
+  'Breakdown:': '明細：',
+  'Input: {{tokens}}': '輸入：{{tokens}}',
+  'Output: {{tokens}}': '輸出：{{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    '快取（已包含在輸入中）：{{tokens}}',
+  'Thoughts: {{tokens}}': '思考：{{tokens}}',
+  'By model:': '按模型：',
+  'By auth type:': '按認證類型：',
+  'By model/auth type:': '按模型/認證類型：',
+  'By source:': '按來源：',
+  'Failed to load token usage stats: {{error}}':
+    '載入 token 使用統計資訊失敗：{{error}}',
+  'Expected --format csv or --format json.':
+    '應為 --format csv 或 --format json。',
+  'Expected a file path after --output.': '--output 後應提供檔案路徑。',
+  'Unexpected argument: {{argument}}': '未預期的參數：{{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '用法：/stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Token 使用匯出路徑必須位於專案工作目錄內。',
+  'Export target does not exist: {{path}}': '匯出目標不存在：{{path}}',
+  'Cannot resolve export path within the working directory.':
+    '無法在工作目錄內解析匯出路徑。',
+  'Could not create a temporary export file.': '無法建立臨時匯出檔案。',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token 使用情況已匯出為 {{format}}：{{path}}',
+  'Failed to export token usage stats: {{error}}':
+    '匯出 token 使用統計資訊失敗：{{error}}',
+  'Unclosed quote in arguments.': '參數中有未閉合的引號。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注意：生成耗時（TTFT/TPS）屬於生成指標。',
   'exit the cli': '退出命令行界面',
   'Manage workspace directories': '管理工作區目錄',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -559,6 +646,7 @@ export default {
   'The name of the extension to update.': '要更新的擴展名稱。',
   'Either an extension name or --all must be provided':
     '必須提供擴展名稱或 --all',
+  'List installed extensions': '列出已安裝的擴展',
   'Lists installed extensions.': '列出已安裝的擴展。',
   'Path:': '路徑：',
   'Source:': '來源：',
@@ -768,6 +856,20 @@ export default {
     '根據你的聊天記錄生成個性化編程洞察',
   'Resume a previous session': '恢復先前會話',
   'Fork the current conversation into a new session': '將目前對話分支到新會話',
+  'Spawn a background agent that inherits the full conversation':
+    '啟動繼承完整對話的背景智能體',
+  'Please provide a directive. Usage: /fork <directive>':
+    '請提供指令。用法：/fork <指令>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
+  'Cannot fork before the first conversation turn.': '首次對話輪次前無法分支。',
+  'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；無法分支。',
+  'Failed to launch fork: {{error}}': '啟動分支失敗：{{error}}',
+  'the background agent could not be started.': '背景智能體無法啟動。',
+  'User launched a background fork via /fork: {{directive}}':
+    '使用者透過 /fork 啟動了背景分支：{{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    '已分支到背景智能體。它會繼承此對話並以非阻塞方式執行，可在背景任務面板中追蹤；完成後會回報結果。',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
   'No conversation to branch.': '沒有可分支的對話。',
@@ -829,6 +931,7 @@ export default {
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
   'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
+  'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',
   'Could not retrieve tool registry.': '無法檢索工具註冊表',
   "Successfully authenticated and refreshed tools for '{{name}}'.":
@@ -1060,7 +1163,7 @@ export default {
   'Time remaining:': '剩餘時間：',
   'Qwen OAuth Authentication Timeout': 'Qwen OAuth 認證超時',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
-    'OAuth 令牌已過期（超過 {{seconds}} 秒）。請重新選擇認證方法',
+    'OAuth token 已過期（超過 {{seconds}} 秒）。請重新選擇認證方法',
   'Press any key to return to authentication type selection.':
     '按任意鍵返回認證類型選擇',
   'Waiting for Qwen OAuth authentication...': '正在等待 Qwen OAuth 認證...',
@@ -1259,22 +1362,41 @@ export default {
   'Tool Time:': '工具時間：',
   'Session Stats': '會話統計',
   'Model Usage': '模型使用情況',
-  Reqs: '請求數',
   'Input Tokens': '輸入 token 數',
   'Output Tokens': '輸出 token 數',
   'Savings Highlight:': '節省亮點：',
   'of input tokens were served from the cache, reducing costs.':
     '從緩存載入 token ，降低了成本',
   'Tip: For a full token breakdown, run `/stats model`.':
-    '提示：要查看完整的令牌明細，請運行 `/stats model`',
+    '提示：要查看完整的 token 明細，請運行 `/stats model`',
   'Model Stats For Nerds': '模型統計（技術細節）',
   'Tool Stats For Nerds': '工具統計（技術細節）',
   Metric: '指標',
   API: 'API',
+  Session: '會話',
+  Activity: '概覽',
+  Efficiency: '性能',
+  Success: '成功率',
+  Today: '今天',
+  'Token Trend': 'Token 趨勢',
+  'Cache Hit Rate': '緩存命中率',
+  'Tool Success': '工具成功率',
+  'Tool Leaderboard': '工具排行',
+  Calls: '調用次數',
+  Time: '耗時',
+  Reqs: '請求',
+  Cache: '緩存',
+  Latency: '延遲',
+  'In/Out': '輸入/輸出',
+  'Code Impact': '代碼變更',
+  'Failed to load stats. Press r to retry.': '載入統計失敗，按 r 重試。',
+  net: '淨增',
+  streak: '連續',
+  best: '最長',
   Requests: '請求數',
   Errors: '錯誤數',
   'Avg Latency': '平均延遲',
-  Tokens: '令牌',
+  Tokens: 'Token',
   Total: '總計',
   Prompt: '提示',
   Cached: '緩存',
@@ -1283,7 +1405,6 @@ export default {
   'No API calls have been made in this session.':
     '本次會話中未進行任何 API 調用',
   'Tool Name': '工具名稱',
-  Calls: '調用次數',
   'Success Rate': '成功率',
   'Avg Duration': '平均耗時',
   'User Decision Summary': '用戶決策摘要',
@@ -1603,6 +1724,9 @@ export default {
   'Background tasks': '背景任務',
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
+  'needs approval': '待審批',
+  'Background agent needs approval': '背景 agent 等待審批',
+  'Approve or deny the request above': '請核准或拒絕上方的請求',
   Running: '執行中',
   Paused: '已暫停',
   Completed: '已完成',
@@ -1643,7 +1767,68 @@ export default {
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     '排程門控未看到本次記憶整理的時間戳；下一輪記憶整理可能會比平時更早重新觸發。',
 
+  // Stats Dashboard — Category 2 (missing from zh-TW)
+  'Activity Heatmap': '活動熱力圖',
+  Less: '少',
+  More: '多',
+  Sessions: '會話數',
+  Duration: '時長',
+  Projects: '專案統計',
+  'Loading stats...': '載入統計...',
+  '(no data)': '（暫無資料）',
+  d: '天',
+  h: '時',
+  m: '分',
+  Input: '輸入',
+  Models: '模型',
+  'All time': '所有時間',
+  'Last 7 days': '最近 7 天',
+  'Last 30 days': '最近 30 天',
+  'Show usage statistics dashboard.': '顯示使用統計面板。',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API 請求',
+  'Tool Calls': '工具呼叫',
+  'Success rate': '成功率',
+  'Code Changes': '程式碼變更',
+  Tool: '工具',
+  reqs: '請求',
+  in: '輸入',
+  out: '輸出',
+
+  // statsCommand non-interactive output
+  'API requests: {{count}}': 'API 請求：{{count}}',
+  'Code changes': '程式碼變更',
+  Cost: '費用',
+  'Estimated cost: ${{cost}}': '預估費用：${{cost}}',
+  'Files: +{{added}} / -{{removed}} lines':
+    '檔案：+{{added}} / -{{removed}} 行',
+  'N/A': 'N/A',
+  Name: '名稱',
+  'No model usage data yet.': '尚無模型使用資料。',
+  'No tool usage data yet.': '尚無工具使用資料。',
+  'Prompts: {{count}}': '提示：{{count}}',
+  'Session duration: {{duration}}': '會話時長：{{duration}}',
+  'Tokens \u2014 prompt: {{prompt}}, output: {{output}}':
+    'Token — 輸入：{{prompt}}，輸出：{{output}}',
+  'Tool calls': '工具呼叫',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    '工具呼叫：{{total}}（{{success}} 成功，{{fail}} 失敗）',
+  cached: '快取',
+  days: '天',
+  output: '輸出',
+  prompt: '輸入',
+  '\u2191 tabs \u00B7 r to cycle dates \u00B7 esc to close':
+    '\u2191 tab 切換標籤 \u00B7 r 切換時間範圍 \u00B7 esc 關閉',
+
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型註冊表中）',
   'start server': '啟動伺服器',
+  'No compression needed.': '無需壓縮。',
 };

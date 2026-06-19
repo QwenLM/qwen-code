@@ -153,6 +153,9 @@ describe('applyProviderInstallPlan', () => {
       AuthType.USE_OPENAI,
     );
     expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'new-model');
+    // Id-only model selection must clear any stale baseUrl disambiguator
+    // (empty-string tombstone overrides a lower-scope value on merge).
+    expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', '');
     expect(adapter.persist).toHaveBeenCalled();
     expect(reloadModelProviders).toHaveBeenCalledWith({
       [AuthType.USE_OPENAI]: [

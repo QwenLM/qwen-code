@@ -33,16 +33,21 @@ describe('BundledSkillLoader', () => {
   let mockSkillManager: {
     listSkills: ReturnType<typeof vi.fn>;
   };
+  let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
+    mockAddSessionAllowRule = vi.fn();
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue(undefined),
+      getPermissionManager: vi
+        .fn()
+        .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
       // BundledSkillLoader filters via this. Default empty so existing
       // assertions about bundled skills surfacing stay true; per-test
       // cases override.
@@ -89,6 +94,27 @@ describe('BundledSkillLoader', () => {
     const commands = await loader.loadCommands(signal);
 
     expect(commands[0]?.argumentHint).toBe('[topic]');
+  });
+
+  it('should default bundled skills to user-invocable slash commands', async () => {
+    const skill = makeSkill();
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(true);
+  });
+
+  it('should propagate userInvocable from bundled skills to slash commands', async () => {
+    const skill = makeSkill({ userInvocable: false });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(false);
+    expect(commands[0]?.modelInvocable).toBe(true);
   });
 
   it('should load bundled skills as slash commands', async () => {
@@ -156,6 +182,38 @@ describe('BundledSkillLoader', () => {
           text: `${makeSkillPrompt('You are an expert code reviewer.')}\n\n/review 123`,
         },
       ],
+    });
+  });
+
+  describe('allowedTools grant', () => {
+    it('grants allowedTools as session allow rules when the command runs', async () => {
+      const skill = makeSkill({ allowedTools: ['Bash(git *)', 'Edit'] });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+    });
+
+    it('does not grant when the bundled skill declares no allowedTools', async () => {
+      const skill = makeSkill(); // no allowedTools
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
     });
   });
 

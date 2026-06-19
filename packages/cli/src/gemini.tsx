@@ -17,6 +17,8 @@ import {
   type Config,
   createDebugLogger,
   writeRuntimeStatus,
+  persistSessionUsage,
+  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
@@ -40,11 +42,16 @@ import {
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
+import { SettingsWatcher } from './config/settingsWatcher.js';
 import {
   initializeApp,
   type InitializationResult,
 } from './core/initializer.js';
 import { handleList as handleListExtensions } from './commands/extensions/list.js';
+import {
+  initializeI18n,
+  resolveLanguageSetting,
+} from './i18n/index.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import {
   setupStartupWorktree,
@@ -94,7 +101,7 @@ import { getCliVersion } from './utils/version.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
-import { computeWindowTitle } from './utils/windowTitle.js';
+import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
 import {
   startEarlyInputCapture,
   stopAndGetCapturedInput,
@@ -240,7 +247,7 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
 ) {
   const version = await getCliVersion();
-  setWindowTitle(basename(workspaceRoot), settings);
+  setWindowTitle(settings, basename(workspaceRoot));
 
   // Write a small runtime.json sidecar next to the chat log so external
   // tools (terminal multiplexers, IDE integrations, status daemons) can
@@ -472,6 +479,9 @@ export async function main() {
   }
 
   if (argv.listExtensions) {
+    await initializeI18n(
+      resolveLanguageSetting(settings.merged.general?.language as string),
+    );
     await handleListExtensions();
     process.exit(0);
   }
@@ -775,6 +785,12 @@ export async function main() {
   }
 
   {
+    // Start settings file watcher (skip in bare mode)
+    const settingsWatcher = isBareMode(argv.bare)
+      ? undefined
+      : new SettingsWatcher(settings);
+    settingsWatcher?.startWatching();
+
     const config = await loadCliConfig(
       settings.merged,
       argv,
@@ -786,6 +802,8 @@ export async function main() {
         projectHooks: settings.getProjectHooks(),
       },
       buildDisabledSkillNamesProvider(settings),
+      undefined,
+      settingsWatcher,
     );
     profileCheckpoint('after_load_cli_config');
 
@@ -833,6 +851,29 @@ export async function main() {
         );
       }
     }
+
+    // Persist session usage for cross-session reports (must run before
+    // config.shutdown() which clears telemetry state).
+    // sessionStartTime is read from uiTelemetryService so it stays correct
+    // after /clear resets the session (reset() updates the internal timestamp).
+    registerCleanup(() => {
+      try {
+        const metrics = uiTelemetryService.getMetrics();
+        const hasActivity = Object.values(metrics.models).some(
+          (m) => m.api.totalRequests > 0,
+        );
+        if (!hasActivity) return;
+        persistSessionUsage({
+          sessionId: config.getSessionId(),
+          startTime: uiTelemetryService.getSessionStartTime(),
+          endTime: new Date(),
+          project: config.getProjectRoot(),
+          metrics,
+        });
+      } catch {
+        // Best-effort — don't block shutdown
+      }
+    });
 
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
@@ -951,6 +992,7 @@ export async function main() {
           : []),
       ]),
     ];
+    const emittedStartupWarnings = new Set(startupWarnings);
 
     // Surface critical startup warnings (corrupted settings, recovery, etc.)
     // to stderr so they are visible regardless of UI mode. In interactive
@@ -1049,6 +1091,11 @@ export async function main() {
     if (inputFormat !== InputFormat.STREAM_JSON) {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
+      for (const warning of config.getWarnings()) {
+        if (emittedStartupWarnings.has(warning)) continue;
+        emittedStartupWarnings.add(warning);
+        writeStderrLine(warning);
+      }
       profileCheckpoint('config_initialize_end');
 
       // Non-interactive paths feed a prompt to the model immediately after
@@ -1173,13 +1220,22 @@ export function createNonInteractivePromptId(sessionId: string): string {
   return `${sessionId}########0`;
 }
 
-function setWindowTitle(title: string, settings: LoadedSettings) {
-  if (!settings.merged.ui?.hideWindowTitle) {
-    const windowTitle = computeWindowTitle(title);
-    process.stdout.write(`\x1b]2;${windowTitle}\x07`);
-
-    process.on('exit', () => {
-      process.stdout.write(`\x1b]2;\x07`);
-    });
+function setWindowTitle(settings: LoadedSettings, folderName?: string) {
+  if (
+    settings.merged.ui?.hideWindowTitle ||
+    settings.merged.ui?.showStatusInTitle === false
+  ) {
+    return;
   }
+  const windowTitle = computeWindowTitle(folderName);
+  writeTerminalTitle((value) => process.stdout.write(value), windowTitle);
+
+  process.on('exit', () => {
+    try {
+      writeTerminalTitle((value) => process.stdout.write(value), '');
+    } catch {
+      // Best-effort: clearing the title during exit must not produce
+      // a visible error (e.g. EPIPE if stdout is already closed).
+    }
+  });
 }

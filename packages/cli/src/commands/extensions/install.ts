@@ -73,9 +73,9 @@ export async function handleInstall(args: InstallArgs) {
     const workspaceDir = process.cwd();
     const extensionManager = new ExtensionManager({
       workspaceDir,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(workspaceDir).merged,
-      ),
+      locale: getCurrentLanguage(),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
       requestConsent,
       requestChoicePlugin: requestChoicePluginNonInteractive,
     });

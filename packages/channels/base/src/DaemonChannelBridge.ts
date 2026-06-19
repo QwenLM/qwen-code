@@ -37,6 +37,10 @@ export interface DaemonChannelSessionClient {
     requestId: string,
     response: RequestPermissionResponse,
   ): Promise<boolean>;
+  shellCommand?(
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
 }
 
 export interface DaemonChannelSessionFactoryRequest {
@@ -313,6 +317,18 @@ export class DaemonChannelBridge extends EventEmitter {
     }
   }
 
+  async shellCommand(
+    sessionId: string,
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<{ exitCode: number | null; output: string; aborted: boolean }> {
+    const session = this.ensureSession(sessionId);
+    if (!session.shellCommand) {
+      throw new Error('Shell command not supported by this session client');
+    }
+    return session.shellCommand(command, signal);
+  }
+
   async cancelSession(sessionId: string): Promise<void> {
     const session = this.ensureSession(sessionId);
     await session.cancel();
@@ -459,13 +475,13 @@ export class DaemonChannelBridge extends EventEmitter {
       case 'client_evicted':
         this.dropSession(
           session.sessionId,
-          this.getReason(event.data, 'client_evicted'),
+          this.getStringField(event.data, 'reason', 'client_evicted'),
         );
         break;
       case 'stream_error':
         this.dropSession(
           session.sessionId,
-          this.getError(event.data, 'stream_error'),
+          this.getStringField(event.data, 'error', 'stream_error'),
         );
         break;
       default:
@@ -643,7 +659,10 @@ export class DaemonChannelBridge extends EventEmitter {
   }
 
   private handleSessionDied(sessionId: string, data: unknown): void {
-    this.dropSession(sessionId, this.getReason(data, 'session_died'));
+    this.dropSession(
+      sessionId,
+      this.getStringField(data, 'reason', 'session_died'),
+    );
   }
 
   private dropSession(sessionId: string, reason: string): void {
@@ -674,15 +693,13 @@ export class DaemonChannelBridge extends EventEmitter {
     this.emit('sessionDied', { sessionId, reason });
   }
 
-  private getReason(data: unknown, fallback: string): string {
-    return isRecord(data) && typeof data['reason'] === 'string'
-      ? data['reason']
-      : fallback;
-  }
-
-  private getError(data: unknown, fallback: string): string {
-    return isRecord(data) && typeof data['error'] === 'string'
-      ? data['error']
+  private getStringField(
+    data: unknown,
+    field: string,
+    fallback: string,
+  ): string {
+    return isRecord(data) && typeof data[field] === 'string'
+      ? (data[field] as string)
       : fallback;
   }
 

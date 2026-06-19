@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.17.1",
+  "version": "0.18.3",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -12,18 +12,21 @@
     "packages/channels/weixin",
     "packages/channels/dingtalk",
     "packages/channels/feishu",
-    "packages/channels/plugin-example"
+    "packages/channels/qqbot",
+    "packages/channels/plugin-example",
+    "!packages/desktop"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.18.3"
   },
   "scripts": {
-    "start": "cross-env node scripts/start.js",
+    "start": "node scripts/start.js",
     "dev": "node scripts/dev.js",
+    "dev:daemon": "node scripts/daemon-dev.js",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",
@@ -72,8 +75,11 @@
     "package:standalone:release": "node scripts/build-standalone-release.js",
     "verify:installation-release": "node scripts/verify-installation-release.js",
     "release:version": "node scripts/version.js",
+    "changelog": "node scripts/generate-changelog.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
+    "check:desktop-isolation": "node scripts/check-desktop-isolation.js",
+    "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
   },
@@ -90,10 +96,11 @@
     "@types/react-dom": "^19.2.0"
   },
   "bin": {
-    "qwen": "dist/cli.js"
+    "qwen": "scripts/cli-entry.js"
   },
   "files": [
     "dist/",
+    "scripts/cli-entry.js",
     "README.md",
     "LICENSE"
   ],
@@ -102,6 +109,7 @@
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
     "@types/mock-fs": "^4.13.4",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/shell-quote": "^1.7.5",
     "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^3.1.1",

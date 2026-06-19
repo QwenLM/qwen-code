@@ -6,7 +6,21 @@
 
 import { describe, it, expect } from 'vitest';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
-import { getPillLabel } from './BackgroundTasksPill.js';
+import { getPillLabel, hasPendingApproval } from './BackgroundTasksPill.js';
+import type { BackgroundApproval } from '@qwen-code/qwen-code-core';
+
+function approval(callId: string): BackgroundApproval {
+  return {
+    callId,
+    name: 'Shell',
+    description: `run ${callId}`,
+    confirmationDetails: {
+      type: 'exec',
+    } as BackgroundApproval['confirmationDetails'],
+    respond: async () => {},
+    at: 0,
+  };
+}
 
 function agentEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
   return {
@@ -203,5 +217,31 @@ describe('getPillLabel', () => {
         dreamEntry({ dreamId: 'd-c', status: 'failed' }),
       ]),
     ).toBe('1 dream');
+  });
+});
+
+describe('hasPendingApproval', () => {
+  it('is false when no agent has a parked approval', () => {
+    expect(hasPendingApproval([])).toBe(false);
+    expect(hasPendingApproval([agentEntry({ agentId: 'a' })])).toBe(false);
+    expect(hasPendingApproval([agentEntry({ pendingApprovals: [] })])).toBe(
+      false,
+    );
+  });
+
+  it('is true when an agent has at least one parked approval', () => {
+    expect(
+      hasPendingApproval([agentEntry({ pendingApprovals: [approval('c1')] })]),
+    ).toBe(true);
+  });
+
+  it('ignores non-agent kinds', () => {
+    // Only agent entries carry pendingApprovals; shells/dreams never do.
+    expect(
+      hasPendingApproval([
+        shellEntry({ shellId: 'bg_a' }),
+        dreamEntry({ dreamId: 'd-a' }),
+      ]),
+    ).toBe(false);
   });
 });
