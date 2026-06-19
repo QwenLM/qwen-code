@@ -2737,6 +2737,30 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           .finally(() => {
             delete entry.activePromptOriginatorClientId;
           });
+        // Broadcast turn completion to the SSE bus when the turn ends. A REMOTE
+        // watcher (a client that didn't call prompt(), e.g. the terminal
+        // watching a phone-typed turn) never receives the HTTP stopReason, and
+        // 0.17.x emits no turn_complete SSE frame natively — so without this it
+        // spins forever. Published AFTER the agent's frames (prompt() resolves
+        // once the turn's notifications have all arrived). The originator also
+        // receives it, but its client already finalized on the HTTP response, so
+        // the duplicate is an idempotent no-op. Cancel resolves with
+        // stopReason:'cancelled' (success branch); a hard transport failure
+        // surfaces via session_died, so the rejection branch stays silent.
+        void promptPromise.then(
+          (res) => {
+            entry.events.publish({
+              type: 'turn_complete',
+              data: {
+                sessionId,
+                stopReason: (res as { stopReason?: unknown } | undefined)
+                  ?.stopReason,
+              },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          },
+          () => {},
+        );
 
         // Race against channel termination: if the underlying transport
         // dies (child crashed, stream torn down) WHILE the prompt is in

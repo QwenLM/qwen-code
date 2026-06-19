@@ -2559,18 +2559,81 @@ describe('createHttpAcpBridge', () => {
         { clientId: session.clientId },
       );
 
-      // The default fake agent emits no frames; with no echo published, the
-      // subscription stays quiet. Race against a short timeout and assert the
-      // timeout wins (nothing was published).
-      let timer: NodeJS.Timeout | undefined;
-      const race = await Promise.race([
-        it.next().then((r) => ({ kind: 'event' as const, r })),
-        new Promise<{ kind: 'timeout' }>((res) => {
-          timer = setTimeout(() => res({ kind: 'timeout' }), 200);
-        }),
-      ]);
-      if (timer) clearTimeout(timer);
-      expect(race.kind).toBe('timeout');
+      // No user_message_chunk echo for an empty prompt. The turn still
+      // completes, so the first (and only) published frame is the
+      // turn_complete — NOT a user_message_chunk.
+      const first = (await it.next()).value!;
+      expect(first.type).toBe('turn_complete');
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('broadcasts a turn_complete when the turn ends so remote watchers finalize', async () => {
+      // A REMOTE client (one that didn't call prompt()) gets no HTTP stopReason,
+      // and 0.17.x sends no turn_complete SSE frame — so without this it spins
+      // forever. The bridge publishes turn_complete (after the agent frames)
+      // when the turn ends, carrying the stopReason + submitter's originator.
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          promptImpl: async (p) => {
+            await capturedConn!.sessionUpdate({
+              sessionId: p.sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'reply' },
+              },
+            });
+            return { stopReason: 'end_turn' };
+          },
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const subAbort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: subAbort.signal })
+        [Symbol.asyncIterator]();
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'hi' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      // Order: user echo → agent reply → turn_complete (last).
+      const e1 = (await it.next()).value!;
+      expect(e1.data).toMatchObject({
+        update: { sessionUpdate: 'user_message_chunk' },
+      });
+      const e2 = (await it.next()).value!;
+      expect(e2.data).toMatchObject({
+        update: { sessionUpdate: 'agent_message_chunk' },
+      });
+      const e3 = (await it.next()).value!;
+      expect(e3.type).toBe('turn_complete');
+      expect(e3.data).toMatchObject({
+        sessionId: session.sessionId,
+        stopReason: 'end_turn',
+      });
+      expect(e3.originatorClientId).toBe(session.clientId);
 
       subAbort.abort();
       await bridge.shutdown();
