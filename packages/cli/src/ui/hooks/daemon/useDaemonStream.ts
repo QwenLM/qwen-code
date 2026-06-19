@@ -150,8 +150,18 @@ export function useDaemonStream(
     const su = (frame.data as { update?: { sessionUpdate?: string } })?.update
       ?.sessionUpdate;
     dbg(
-      `frame type=${frame.type}${su ? `/${su}` : ''} oc=${frame.originatorClientId ?? '∅'} -> state=${state.streamingState} committed=${committed.length}`,
+      `frame type=${frame.type}${su ? `/${su}` : ''} oc=${frame.originatorClientId ?? '∅'} -> state=${state.streamingState} tools=${state.tools.length} pending=${pendingHistoryItemsOf(state).length} committed=${committed.length}`,
     );
+    if (frame.type === 'permission_request') {
+      const tc = (frame.data as { toolCall?: Record<string, unknown> })
+        ?.toolCall;
+      const opts =
+        (frame.data as { options?: Array<Record<string, unknown>> })?.options ??
+        [];
+      dbg(
+        `  perm toolCall keys=[${Object.keys(tc ?? {}).join(',')}] toolCallId=${String(tc?.['toolCallId'])} options=${opts.map((o) => `${o['kind']}:${o['optionId']}`).join('|')}`,
+      );
+    }
     stateRef.current = state;
     for (const item of committed) addItemRef.current(item, now());
     streamingResponseLengthRef.current = state.pendingText.length;
