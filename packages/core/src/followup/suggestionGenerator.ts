@@ -274,6 +274,15 @@ export function getFilterReason(suggestion: string): string | null {
   const lower = suggestion.toLowerCase();
   const wordCount = suggestion.trim().split(/\s+/).length;
 
+  // Reject C0/C1 control bytes and ANSI escapes first. The suggestion is
+  // influenceable through conversation history (tool/file/web output) and is
+  // rendered verbatim in the input placeholder, so raw control chars (CR,
+  // ESC/CSI, etc.) could be injected into the terminal. Rejecting here keeps the
+  // displayed and inserted text consistent, since the accept path strips them on
+  // buffer.insert.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(suggestion)) return 'control_chars';
+
   if (lower === 'done') return 'done';
 
   if (

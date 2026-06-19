@@ -8256,6 +8256,23 @@ describe('Session', () => {
       ).toBeUndefined();
     });
 
+    it('emits when the setting is unset (on by default)', async () => {
+      // Regression for #5145 review: the schema default isn't applied by
+      // mergeSettings, so an unset value must be treated as enabled — only an
+      // explicit `false` opts out.
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {};
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(generateMock).toHaveBeenCalled();
+      });
+    });
+
     it('does not emit in PLAN approval mode', async () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       generateMock.mockResolvedValue({ suggestion: 'something' });
