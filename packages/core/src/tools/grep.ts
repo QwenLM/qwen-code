@@ -15,6 +15,7 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   resolveAndValidatePath,
+  resolvePath,
   isSubpath,
   unescapePath,
 } from '../utils/paths.js';
@@ -91,7 +92,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       return 'allow'; // Default workspace directory
     }
     const workspaceContext = this.config.getWorkspaceContext();
-    const resolvedPath = path.resolve(
+    const resolvedPath = resolvePath(
       this.config.getTargetDir(),
       this.params.path,
     );

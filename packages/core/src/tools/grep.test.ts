@@ -611,6 +611,25 @@ describe('GrepTool', () => {
     });
   });
 
+  describe('getDefaultPermission', () => {
+    it('should return allow for paths within workspace', async () => {
+      const params: GrepToolParams = { pattern: 'hello', path: 'sub' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for tilde paths outside workspace', async () => {
+      const params: GrepToolParams = {
+        pattern: 'hello',
+        path: '~/outside-workspace',
+      };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+  });
+
   describe('Result limiting', () => {
     beforeEach(async () => {
       // Create many test files with matches to test limiting
