@@ -444,7 +444,17 @@ export function activePermissionOf(
 export function pendingHistoryItemsOf(
   state: DaemonProjectionState,
 ): HistoryItemWithoutId[] {
-  return state.pendingText ? [{ type: 'gemini', text: state.pendingText }] : [];
+  // Mirror the `turn_complete` commit order (`[tool_group, gemini]`) so the live
+  // view matches the committed history exactly: tools render above the streaming
+  // assistant text, both updating in place as frames arrive.
+  const items: HistoryItemWithoutId[] = [];
+  if (state.tools.length > 0) {
+    items.push({ type: 'tool_group', tools: state.tools });
+  }
+  if (state.pendingText) {
+    items.push({ type: 'gemini', text: state.pendingText });
+  }
+  return items;
 }
 
 /**

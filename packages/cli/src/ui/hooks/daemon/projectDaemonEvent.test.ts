@@ -338,6 +338,43 @@ describe('projectDaemonEvent', () => {
     expect(r.state.streamingState).toBe(StreamingState.Idle);
   });
 
+  it('renders tools LIVE via pendingHistoryItems (tool_group above streaming text)', () => {
+    let s = initialDaemonProjectionState(SELF);
+    s = projectDaemonEvent(s, TOOL_CALL).state;
+    // Mid-turn, before any assistant text: just the live tool group.
+    expect(pendingHistoryItemsOf(s)).toEqual([
+      {
+        type: 'tool_group',
+        tools: [
+          expect.objectContaining({
+            callId: 'call_1',
+            status: ToolCallStatus.Executing,
+          }),
+        ],
+      },
+    ]);
+
+    // Once the assistant starts streaming, text appears BELOW the tool group —
+    // the same order the turn_complete commit uses (`[tool_group, gemini]`).
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate(
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Listing…' },
+        },
+        SELF,
+      ),
+    ).state;
+    expect(pendingHistoryItemsOf(s)).toEqual([
+      {
+        type: 'tool_group',
+        tools: [expect.objectContaining({ callId: 'call_1' })],
+      },
+      { type: 'gemini', text: 'Listing…' },
+    ]);
+  });
+
   it('commits tool_group AND the assistant message together at turn end', () => {
     const frames: DaemonFrame[] = [
       TOOL_CALL,
