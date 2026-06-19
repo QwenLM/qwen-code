@@ -1483,6 +1483,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.history,
     historyManager.addItem,
     config,
+    isConfigInitialized,
     settings,
     onDebugMessage,
     handleSlashCommand,

@@ -349,6 +349,7 @@ export const useGeminiStream = (
   history: HistoryItem[],
   addItem: UseHistoryManagerReturn['addItem'],
   config: Config,
+  isConfigInitialized: boolean,
   settings: LoadedSettings,
   onDebugMessage: (message: string) => void,
   handleSlashCommand: (
@@ -2924,44 +2925,68 @@ export const useGeminiStream = (
   const cronSessionIdRef = useRef(sessionStates.sessionId);
   cronSessionIdRef.current = sessionStates.sessionId;
 
-  // Start the cron scheduler on mount, stop on unmount.
+  // Start the cron scheduler once config is initialized, stop on unmount.
   // Cron fires enqueue onto the shared notification queue.
+  // Gated on isConfigInitialized: without this gate, enableDurable() runs
+  // before config.initialize() completes, and overdue-task fires delivered
+  // through the notification drain reach a chat client whose startChat() has
+  // not yet run — producing "Chat not initialized" on every fresh launch
+  // that has pending durable work (#5022). This matches the ordering the
+  // ACP (Session.ts) and headless (nonInteractiveCli.ts) paths already use.
   useEffect(() => {
+    if (!isConfigInitialized) return;
     if (!config.isCronEnabled()) return;
     const scheduler = config.getCronScheduler();
 
-    // Enable durable (file-backed) cron support (loads tasks from the
-    // user's per-project runtime dir, acquires the lock). The tasks file
-    // lives under ~/.qwen, not the working tree, so it's user-owned rather
-    // than project-controlled — no folder-trust gate needed; the user's
-    // own loops run regardless of how the folder is trusted.
-    // Missed one-shots arrive as late fires through the start() callback.
-    void scheduler.enableDurable(cronSessionIdRef.current).catch((err) => {
-      debugLogger.warn(
-        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+    let stopped = false;
+    // Await enableDurable before start so overdue fires buffer into
+    // pendingFires (onFire is still null) and flush through start()'s
+    // buffer-drain — matching the ACP and headless startup order.
+    void (async () => {
+      try {
+        // Enable durable (file-backed) cron support (loads tasks from the
+        // user's per-project runtime dir, acquires the lock). The tasks file
+        // lives under ~/.qwen, not the working tree, so it's user-owned
+        // rather than project-controlled — no folder-trust gate needed; the
+        // user's own loops run regardless of how the folder is trusted.
+        // Missed one-shots arrive as late fires through the start() callback.
+        await scheduler.enableDurable(cronSessionIdRef.current);
+      } catch (err) {
+        // Fall through (no `return`): a failed enableDurable must NOT skip
+        // start(), or session-only cron tasks (created via cron_create during
+        // this session) would silently never fire. Only durable/persistent
+        // tasks are lost when enableDurable fails. Pre-#5022 the unconditional
+        // start() preserved this; keep that behavior.
+        debugLogger.warn(
+          `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+        );
+      }
+      // Unmount may have happened during the await above; the cleanup below
+      // already ran scheduler.stop(), so do not (re)install onFire.
+      if (stopped) return;
+      scheduler.start(
+        (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+          const label = job.prompt.slice(0, 40);
+          const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+          notificationQueueRef.current.push({
+            displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+            modelText: job.prompt,
+            sendMessageType: SendMessageType.Cron,
+          });
+          setNotificationTrigger((n) => n + 1);
+        },
       );
-    });
+    })();
 
-    scheduler.start(
-      (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
-        const label = job.prompt.slice(0, 40);
-        const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
-        notificationQueueRef.current.push({
-          displayText: `${job.missed ? 'Missed' : source}: ${label}`,
-          modelText: job.prompt,
-          sendMessageType: SendMessageType.Cron,
-        });
-        setNotificationTrigger((n) => n + 1);
-      },
-    );
     return () => {
+      stopped = true;
       const summary = scheduler.getExitSummary();
       scheduler.stop();
       if (summary) {
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config]);
+  }, [config, isConfigInitialized]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
