@@ -173,7 +173,9 @@ export function metricsToUsageRecord(
   };
 }
 
-async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
+async function rebuildFromSessionJsonl(
+  skipSessionInRebuild?: string,
+): Promise<UsageSummaryRecord[]> {
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
   try {
     if (!fs.existsSync(projectsDir)) return [];
@@ -261,6 +263,11 @@ async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
   if (results.length > 0) {
     const usagePath = getUsageHistoryPath();
     for (const record of results) {
+      // Skip the in-progress current session: persistSessionUsage() will write
+      // its authoritative record on /clear or exit. Writing here would create
+      // a permanent duplicate in usage_record.jsonl (issue #4994).
+      if (skipSessionInRebuild && record.sessionId === skipSessionInRebuild)
+        continue;
       jsonl.writeLineSync(usagePath, record);
     }
   }
@@ -268,16 +275,32 @@ async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
   return results;
 }
 
-export async function loadUsageHistory(): Promise<UsageSummaryRecord[]> {
+function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
+  // Last-wins by sessionId. Protects existing users whose usage_record.jsonl
+  // already contains duplicates produced by the bug fixed in this change
+  // (issue #4994) — without this, every aggregate stays inflated forever.
+  const map = new Map<string, UsageSummaryRecord>();
+  for (const r of records) map.set(r.sessionId, r);
+  if (map.size < records.length) {
+    debugLogger.debug(
+      `dedupBySessionId: removed ${records.length - map.size} duplicate record(s)`,
+    );
+  }
+  return [...map.values()];
+}
+
+export async function loadUsageHistory(
+  skipSessionInRebuild?: string,
+): Promise<UsageSummaryRecord[]> {
   try {
     const records = await jsonl.read<UsageSummaryRecord>(getUsageHistoryPath());
     const filtered = records.filter((r) => r.version === 1);
-    if (filtered.length > 0) return filtered;
+    if (filtered.length > 0) return dedupBySessionId(filtered);
   } catch (e) {
     debugLogger.debug(`loadUsageHistory: failed to read usage file: ${e}`);
   }
 
-  return rebuildFromSessionJsonl();
+  return dedupBySessionId(await rebuildFromSessionJsonl(skipSessionInRebuild));
 }
 
 export function getTimeRangeBounds(range: TimeRange): {

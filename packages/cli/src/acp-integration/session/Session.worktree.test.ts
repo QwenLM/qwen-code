@@ -113,6 +113,7 @@ describe('Session.pendingWorktreeNotice', () => {
         recordToolResult: vi.fn(),
         recordSlashCommand: vi.fn(),
         rewindRecording: vi.fn(),
+        setTitleRecordedCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),

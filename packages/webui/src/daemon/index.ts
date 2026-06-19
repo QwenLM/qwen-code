@@ -46,6 +46,7 @@ export type {
   DaemonSessionContextValue,
   DaemonSessionNotice,
   DaemonSessionProviderProps,
+  DaemonTokenUsage,
   DaemonTodoItem,
   DaemonTodoList,
   DaemonTodoPriority,
@@ -93,6 +94,8 @@ export {
   useDaemonFollowupSuggestion,
   type UseDaemonFollowupSuggestionReturn,
 } from './useDaemonFollowupSuggestion.js';
+
+export { useDaemonMidTurnInjected } from './useDaemonMidTurnInjected.js';
 
 // ── Re-exported SDK types/constants for UI consumers ──────────────
 // These allow web-shell and other UI packages to depend only on

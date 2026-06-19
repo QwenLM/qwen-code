@@ -13,6 +13,154 @@ import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
 import { microcompactHistory } from './microcompaction/microcompact.js';
+import {
+  recordMemoryUsage,
+  recordCpuUsage,
+  isPerformanceMonitoringActive,
+  MemoryMetricType,
+} from '../telemetry/metrics.js';
+
+// ─── Runtime Samples Ring Buffer ─────────────────────────────────────────────
+
+/** A single runtime sample capturing memory and CPU at a point in time. */
+export interface RuntimeSample {
+  ts: number;
+  rss: number;
+  heapUsed: number;
+  heapTotal: number;
+  external: number;
+  /** CPU usage as a percentage of total system capacity (0–100, normalized by core count). */
+  cpuPercent: number;
+}
+
+const RING_BUFFER_SIZE = 60;
+
+let cpuCoreCount: number | undefined;
+
+/**
+ * Effective CPU core count, resolved lazily and memoized.
+ *
+ * Resolved on first use (not at import time) so that test files which
+ * `vi.mock('node:os')` without a `cpus`/`availableParallelism` export don't
+ * crash at module-collection time — this module is transitively imported by
+ * `config.ts`, i.e. by almost everything.
+ *
+ * Prefers `os.availableParallelism()` (Node ≥18.14), which honors cgroup CPU
+ * quotas, so a 2-core container on a 64-core host isn't normalized by 64.
+ * Falls back to `os.cpus().length`, then to 1 if both are unavailable or throw.
+ */
+function getCpuCoreCount(): number {
+  if (cpuCoreCount === undefined) {
+    try {
+      cpuCoreCount = os.availableParallelism?.() ?? os.cpus().length ?? 1;
+    } catch {
+      cpuCoreCount = 1;
+    }
+    if (!cpuCoreCount || cpuCoreCount < 1) {
+      cpuCoreCount = 1;
+    }
+  }
+  return cpuCoreCount;
+}
+
+/**
+ * `process.cpuUsage()` can throw in restricted containers that lack
+ * `/proc/self/stat`. CPU sampling is an optional observability feature, so a
+ * failure here must never break the surrounding memory-pressure system —
+ * return a zero baseline instead. The next successful call computes its delta
+ * against this zero, which at worst over-reports a single sample; far better
+ * than the constructor or `reset()` throwing and disabling pressure cleanup.
+ */
+function safeCpuUsage(): NodeJS.CpuUsage {
+  try {
+    return process.cpuUsage();
+  } catch {
+    return { user: 0, system: 0 };
+  }
+}
+
+/**
+ * Ring buffer that holds the most recent N runtime samples.
+ * Always active for local diagnostics dumps; OTel metric reporting is
+ * gated separately by `isPerformanceMonitoringActive()`.
+ */
+export class RuntimeSampleRing {
+  private readonly samples: RuntimeSample[] = [];
+  private prevCpuUsage = safeCpuUsage();
+  private prevSampleTime = Date.now();
+
+  /**
+   * Record a sample. Accepts a pre-fetched memoryUsage snapshot to avoid
+   * a redundant syscall when the caller already has one.
+   */
+  record(mem: NodeJS.MemoryUsage): RuntimeSample {
+    const now = Date.now();
+    const elapsed = now - this.prevSampleTime;
+    const absCpu = safeCpuUsage();
+    const deltaUser = absCpu.user - this.prevCpuUsage.user;
+    const deltaSystem = absCpu.system - this.prevCpuUsage.system;
+    const cpuTotalUs = deltaUser + deltaSystem;
+
+    // When elapsed is 0 (two checks in the same ms tick) the CPU delta can't be
+    // computed yet, so reuse the previous sample's cpuPercent (stale) while still
+    // capturing the fresh memory snapshot from `mem`. The sample is still pushed
+    // — so the ring is never empty after a recorded check, even on the very first
+    // call — and prevCpuUsage/prevSampleTime are left untouched so the CPU delta
+    // accumulates into the next sample instead of being permanently lost.
+    if (elapsed <= 0) {
+      const last = this.samples[this.samples.length - 1];
+      return this.push({
+        ts: now,
+        rss: mem.rss,
+        heapUsed: mem.heapUsed,
+        heapTotal: mem.heapTotal,
+        external: mem.external,
+        cpuPercent: last?.cpuPercent ?? 0,
+      });
+    }
+
+    // process.cpuUsage() aggregates CPU time across all cores, so normalize by
+    // the core count to keep cpuPercent within the documented 0–100 range.
+    // Both clamps guard against cgroup accounting quirks: the lower bound
+    // because cpuUsage() isn't strictly monotonic in some containers/VMs (a
+    // delta can come back negative), the upper bound because CPU bursting can
+    // transiently spend more CPU-time than wall-clock × core count.
+    const cpuPercent = Math.min(
+      100,
+      Math.max(0, ((cpuTotalUs / (elapsed * 1000)) * 100) / getCpuCoreCount()),
+    );
+
+    this.prevCpuUsage = absCpu;
+    this.prevSampleTime = now;
+    return this.push({
+      ts: now,
+      rss: mem.rss,
+      heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      external: mem.external,
+      cpuPercent: Math.round(cpuPercent * 100) / 100,
+    });
+  }
+
+  /** Append a sample to the ring, evicting the oldest if over capacity. */
+  private push(sample: RuntimeSample): RuntimeSample {
+    this.samples.push(sample);
+    if (this.samples.length > RING_BUFFER_SIZE) {
+      this.samples.shift();
+    }
+    return sample;
+  }
+
+  getAll(): RuntimeSample[] {
+    return [...this.samples];
+  }
+
+  reset(): void {
+    this.samples.length = 0;
+    this.prevCpuUsage = safeCpuUsage();
+    this.prevSampleTime = Date.now();
+  }
+}
 
 // Types
 
@@ -61,7 +209,7 @@ export const DEFAULT_PRESSURE_CONFIG: MemoryPressureConfig = {
   hardPressureRatio: 0.65,
   criticalRatio: 0.8,
   cleanupCooldownMs: 5_000,
-  enableExplicitGC: false,
+  enableExplicitGC: true,
 };
 
 // Validation
@@ -98,6 +246,11 @@ export class MemoryPressureMonitor extends EventEmitter {
 
   private pendingCheck = false;
   private cleanupInProgress = false;
+  // Sampling runs every pressure check, so a persistent failure would spam the
+  // logs. Surface the first failure at error level (so operators can tell
+  // "metrics enabled but every sample threw" from "never enabled"), then drop
+  // to debug for the repeats.
+  private hasLoggedSamplingError = false;
   private activeCleanupAction: CleanupRecommendation['action'] = 'none';
   private lastCleanupAction: CleanupRecommendation['action'] = 'none';
   private queuedCleanupRecommendation?: CleanupRecommendation;
@@ -108,6 +261,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   private cleanupGeneration = 0;
   private readonly effectiveMemoryLimit: number;
   private readonly diagnosticsDumper: MemoryDiagnosticsDumper;
+  private readonly runtimeSamples = new RuntimeSampleRing();
 
   constructor(coreConfig: Config, pressureConfig?: MemoryPressureConfig) {
     super();
@@ -148,6 +302,7 @@ export class MemoryPressureMonitor extends EventEmitter {
     this.cleanupGeneration++;
     this.resetConsecutiveFailures();
     this.diagnosticsDumper.resetForNewSession();
+    this.runtimeSamples.reset();
     this.cleanupInProgress = false;
     this.activeCleanupAction = 'none';
     this.queuedCleanupRecommendation = undefined;
@@ -184,10 +339,44 @@ export class MemoryPressureMonitor extends EventEmitter {
   }
 
   private performCheckInternal(): void {
-    const pressure = this.getPressureLevel();
+    // One memoryUsage snapshot per check cycle, shared by pressure-level
+    // determination and runtime sampling to avoid a redundant syscall
+    // (process.memoryUsage() reads /proc/self/status on Linux).
+    const mem = this.readMemoryUsage();
+    // Guard on `mem`: passing undefined into getPressureLevel() would make it
+    // call readMemoryUsage() a second time (its memSnapshot fallback), firing a
+    // redundant failing syscall and logging the same error twice on this cycle.
+    const pressure = mem ? this.getPressureLevel(mem) : 'normal';
     if (pressure !== 'critical') {
       this.consecutiveIneffectiveAggressiveCleanups = 0;
     }
+
+    // Always record a runtime sample so the ring buffer has history for
+    // local diagnostics dumps, regardless of telemetry state.
+    // Telemetry metric reporting is gated separately by isPerformanceMonitoringActive.
+    if (mem) {
+      try {
+        const sample = this.runtimeSamples.record(mem);
+        if (isPerformanceMonitoringActive()) {
+          recordMemoryUsage(this.coreConfig, sample.rss, {
+            memory_type: MemoryMetricType.RSS,
+          });
+          recordMemoryUsage(this.coreConfig, sample.heapUsed, {
+            memory_type: MemoryMetricType.HEAP_USED,
+          });
+          recordCpuUsage(this.coreConfig, sample.cpuPercent, {});
+        }
+      } catch (err) {
+        const msg = `Runtime sampling failed: ${getErrorMessage(err)}`;
+        if (this.hasLoggedSamplingError) {
+          debugLogger.debug(msg);
+        } else {
+          this.hasLoggedSamplingError = true;
+          debugLogger.error(msg);
+        }
+      }
+    }
+
     if (pressure === 'normal') return;
 
     const recommendation = this.recommendCleanup(pressure);
@@ -209,27 +398,40 @@ export class MemoryPressureMonitor extends EventEmitter {
     // the file asynchronously in the background; if it fails the minimal file
     // still survives for debugging.
     if (pressure === 'hard' || pressure === 'critical') {
-      void this.diagnosticsDumper.dump(pressure);
+      void this.diagnosticsDumper.dump(pressure, this.runtimeSamples.getAll());
     }
 
     this.executeCleanup(recommendation);
   }
 
   /**
-   * Determine the current memory pressure level from the stronger of:
-   *  - RSS as a fraction of the effective memory limit (cgroup-aware).
-   *  - V8 heap usage as a fraction of V8's heap size limit.
+   * Read the current process memory usage, returning undefined (and logging)
+   * if the syscall fails. Lets callers share one snapshot per check cycle.
    */
-  getPressureLevel(): 'normal' | 'soft' | 'hard' | 'critical' {
-    let mem: ReturnType<typeof process.memoryUsage>;
+  private readMemoryUsage(): NodeJS.MemoryUsage | undefined {
     try {
-      mem = process.memoryUsage();
+      return process.memoryUsage();
     } catch (err) {
       debugLogger.error(
         `Failed to read memory usage for pressure check: ${getErrorMessage(err)}`,
       );
-      return 'normal';
+      return undefined;
     }
+  }
+
+  /**
+   * Determine the current memory pressure level from the stronger of:
+   *  - RSS as a fraction of the effective memory limit (cgroup-aware).
+   *  - V8 heap usage as a fraction of V8's heap size limit.
+   *
+   * @param memSnapshot Optional pre-fetched memoryUsage snapshot; when
+   *   provided, avoids a redundant process.memoryUsage() syscall.
+   */
+  getPressureLevel(
+    memSnapshot?: NodeJS.MemoryUsage,
+  ): 'normal' | 'soft' | 'hard' | 'critical' {
+    const mem = memSnapshot ?? this.readMemoryUsage();
+    if (!mem) return 'normal';
 
     const rssRatio =
       this.effectiveMemoryLimit > 0 ? mem.rss / this.effectiveMemoryLimit : 0;

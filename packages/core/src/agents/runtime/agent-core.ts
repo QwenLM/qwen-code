@@ -28,7 +28,10 @@ import {
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
-import { type ToolCallRequestInfo } from '../../core/turn.js';
+import {
+  createDuplicateProviderToolCallResponse,
+  type ToolCallRequestInfo,
+} from '../../core/turn.js';
 import {
   CoreToolScheduler,
   type ToolCall,
@@ -51,6 +54,10 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../../core/geminiChat.js';
+import {
+  dedupeToolCallsById,
+  getProviderToolCallId,
+} from '../../core/toolCallIdUtils.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -370,10 +377,12 @@ export class AgentCore {
     const hasInitialMessages =
       !!this.promptConfig.initialMessages &&
       this.promptConfig.initialMessages.length > 0;
-    const envHistory = hasInitialMessages
-      ? []
+    const hasSkillTool = this.willHaveSkillTool();
+    const [envHistory] = hasInitialMessages
+      ? [[]]
       : await getInitialChatHistory(this.runtimeContext, undefined, {
           includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: hasSkillTool,
         });
 
     const startHistory = [
@@ -424,6 +433,25 @@ export class AgentCore {
   }
 
   // ─── Tool Preparation ─────────────────────────────────────
+
+  /**
+   * Returns true if this agent's effective tool surface will include the Skill
+   * tool. Used before `prepareTools()` to decide whether to inject the
+   * `<available_skills>` snapshot.
+   */
+  private willHaveSkillTool(): boolean {
+    if (!this.toolConfig) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    const asStrings = this.toolConfig.tools.filter(
+      (t): t is string => typeof t === 'string',
+    );
+    const hasWildcard = asStrings.includes('*');
+    if (hasWildcard || asStrings.length === 0) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    return asStrings.includes(ToolNames.SKILL);
+  }
 
   /**
    * Prepares the list of tools available to this agent.
@@ -633,6 +661,8 @@ export class AgentCore {
     let turnCounter = 0;
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
+    const handledProviderToolCallIds = chat.getHistoryFunctionResponseIds();
+    let stickyMaxOutputTokens: number | undefined;
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -668,6 +698,9 @@ export class AgentCore {
           config: {
             abortSignal: roundAbortController.signal,
             tools: [{ functionDeclarations: toolsList }],
+            ...(stickyMaxOutputTokens !== undefined
+              ? { maxOutputTokens: stickyMaxOutputTokens }
+              : {}),
           },
         };
 
@@ -707,6 +740,9 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            if (streamEvent.maxOutputTokensEscalated !== undefined) {
+              stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
+            }
             functionCalls.length = 0;
             roundText = '';
             roundThoughtText = '';
@@ -794,6 +830,7 @@ export class AgentCore {
             toolsList,
             currentResponseId,
             wasOutputTruncated,
+            handledProviderToolCallIds,
           );
 
           const externalInputs = this.drainExternalInputs(options);
@@ -1053,6 +1090,48 @@ export class AgentCore {
 
   // ─── Tool Execution ───────────────────────────────────────
 
+  private emitSyntheticToolError(params: {
+    callId: string;
+    name: string;
+    args: Record<string, unknown>;
+    errorMessage: string;
+    responseParts: Part[];
+    resultDisplay: ToolResultDisplay | undefined;
+    currentRound: number;
+    durationMs?: number;
+  }): void {
+    this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
+      subagentId: this.subagentId,
+      round: params.currentRound,
+      callId: params.callId,
+      name: params.name,
+      args: params.args,
+      description: params.errorMessage,
+      isOutputMarkdown: false,
+      timestamp: Date.now(),
+    } as AgentToolCallEvent);
+
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
+      subagentId: this.subagentId,
+      round: params.currentRound,
+      callId: params.callId,
+      name: params.name,
+      success: false,
+      error: params.errorMessage,
+      responseParts: params.responseParts,
+      resultDisplay: params.resultDisplay,
+      durationMs: params.durationMs ?? 0,
+      timestamp: Date.now(),
+    } as AgentToolResultEvent);
+
+    this.recordToolCallStats(
+      params.name,
+      false,
+      params.durationMs ?? 0,
+      params.errorMessage,
+    );
+  }
+
   /**
    * Processes a list of function calls via CoreToolScheduler.
    *
@@ -1069,34 +1148,25 @@ export class AgentCore {
     toolsList: FunctionDeclaration[],
     responseId?: string,
     wasOutputTruncated = false,
+    handledProviderToolCallIds = new Set<string>(),
   ): Promise<Content[]> {
     const toolResponseParts: Part[] = [];
+    const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
 
     // Filter unauthorized tool calls before scheduling
     const authorizedCalls: FunctionCall[] = [];
-    for (const fc of functionCalls) {
+    let duplicateEventIndex = 0;
+    for (const fc of uniqueFunctionCalls) {
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      const toolName = String(fc.name);
+      const args = (fc.args ?? {}) as Record<string, unknown>;
 
       if (!allowedToolNames.has(fc.name)) {
-        const toolName = String(fc.name);
         const errorMessage = `Tool "${toolName}" not found. Tools must use the exact names provided.`;
-
-        // Emit TOOL_CALL event for visibility
-        this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
-          subagentId: this.subagentId,
-          round: currentRound,
-          callId,
-          name: toolName,
-          args: fc.args ?? {},
-          description: `Tool "${toolName}" not found`,
-          isOutputMarkdown: false,
-          timestamp: Date.now(),
-        } as AgentToolCallEvent);
-
-        // Build function response part (used for both event and LLM)
         const functionResponsePart = {
           functionResponse: {
             id: callId,
@@ -1105,26 +1175,58 @@ export class AgentCore {
           },
         };
 
-        // Emit TOOL_RESULT event with error
-        this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
-          subagentId: this.subagentId,
-          round: currentRound,
+        this.emitSyntheticToolError({
           callId,
           name: toolName,
-          success: false,
-          error: errorMessage,
+          args,
+          errorMessage,
           responseParts: [functionResponsePart],
           resultDisplay: errorMessage,
-          durationMs: 0,
-          timestamp: Date.now(),
-        } as AgentToolResultEvent);
+          currentRound,
+        });
 
-        // Record blocked tool call in stats
-        this.recordToolCallStats(toolName, false, 0, errorMessage);
-
-        // Add function response for LLM
         toolResponseParts.push(functionResponsePart);
         continue;
+      }
+
+      if (providerCallId) {
+        if (handledProviderToolCallIds.has(providerCallId)) {
+          const request: ToolCallRequestInfo = {
+            callId,
+            providerCallId,
+            name: toolName,
+            args,
+            isClientInitiated: true,
+            prompt_id: promptId,
+            response_id: responseId,
+            wasOutputTruncated,
+          };
+          const response = createDuplicateProviderToolCallResponse(request);
+          const errorMessage =
+            response.error?.message ??
+            'Duplicate provider tool call was ignored.';
+          const eventCallId = `${callId}:duplicate:${currentRound}:${duplicateEventIndex++}`;
+
+          this.runtimeContext
+            .getDebugLogger()
+            ?.debug(
+              `[processFunctionCalls] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${toolName}, round: ${currentRound})`,
+            );
+
+          this.emitSyntheticToolError({
+            callId: eventCallId,
+            name: toolName,
+            args,
+            errorMessage,
+            responseParts: response.responseParts,
+            resultDisplay: response.resultDisplay,
+            currentRound,
+          });
+
+          toolResponseParts.push(...response.responseParts);
+          continue;
+        }
+        handledProviderToolCallIds.add(providerCallId);
       }
       authorizedCalls.push(fc);
     }
@@ -1314,9 +1416,11 @@ export class AgentCore {
     const requests: ToolCallRequestInfo[] = authorizedCalls.map((fc) => {
       const toolName = String(fc.name || 'unknown');
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       const args = (fc.args ?? {}) as Record<string, unknown>;
       const request: ToolCallRequestInfo = {
         callId,
+        ...(providerCallId ? { providerCallId } : {}),
         name: toolName,
         args,
         isClientInitiated: true,

@@ -16,8 +16,8 @@ describe('registerComputerUseTools', () => {
 
     await registerComputerUseTools(registerLazy as never);
 
-    expect(registerLazy).toHaveBeenCalledTimes(9);
-    expect(registered).toHaveLength(9);
+    expect(registerLazy).toHaveBeenCalledTimes(COMPUTER_USE_TOOL_NAMES.length);
+    expect(registered).toHaveLength(COMPUTER_USE_TOOL_NAMES.length);
     for (const name of COMPUTER_USE_TOOL_NAMES) {
       expect(registered).toContain(`computer_use__${name}`);
     }
@@ -37,10 +37,10 @@ describe('registerComputerUseTools', () => {
 
     await registerComputerUseTools(registerLazy as never);
 
-    // registerLazy IS called for all 9 (the gate runs inside it), but only
-    // 7 land in `registered` because click + drag were denied.
-    expect(registerLazy).toHaveBeenCalledTimes(9);
-    expect(registered).toHaveLength(7);
+    // registerLazy IS called for every curated tool (the gate runs inside
+    // it), but click + drag are denied so they don't land in `registered`.
+    expect(registerLazy).toHaveBeenCalledTimes(COMPUTER_USE_TOOL_NAMES.length);
+    expect(registered).toHaveLength(COMPUTER_USE_TOOL_NAMES.length - 2);
     expect(registered).not.toContain('computer_use__click');
     expect(registered).not.toContain('computer_use__drag');
   });

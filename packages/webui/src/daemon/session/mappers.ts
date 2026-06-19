@@ -16,6 +16,7 @@ import type {
   DaemonCommandInfo,
   DaemonConnectionState,
   DaemonModelInfo,
+  DaemonTokenUsage,
 } from './types.js';
 
 export function mapProviderStatus(
@@ -130,9 +131,13 @@ export function updateConnectionFromDaemonEvent(
 ): void {
   if (event.type === 'session_update') {
     const update = getRecord(getRecord(event.data)?.['update']);
-    const tokenCount = getUsageTokenCount(update);
-    if (tokenCount !== undefined) {
-      setConnection((current) => ({ ...current, tokenCount }));
+    const tokenUsage = getUsageTokenUsage(update);
+    if (tokenUsage) {
+      setConnection((current) => ({
+        ...current,
+        tokenUsage,
+        tokenCount: getTokenCountFromUsage(tokenUsage),
+      }));
     }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
       const { commands, skills } = mapAvailableCommandsUpdate(update);
@@ -200,13 +205,32 @@ export function getCurrentMode(
 export function getReplayTokenCount(
   events: readonly DaemonEvent[],
 ): number | undefined {
+  return getTokenCountFromUsage(getReplayTokenUsage(events));
+}
+
+export function getTokenCountFromUsage(
+  usage: DaemonTokenUsage | undefined,
+): number | undefined {
+  const preferred = usage?.inputTokens ?? usage?.totalTokens;
+  if (preferred !== undefined && preferred > 0) return preferred;
+  if (!usage) return undefined;
+  const total = Object.values(usage).reduce(
+    (sum, value) => sum + (typeof value === 'number' ? value : 0),
+    0,
+  );
+  return total > 0 ? total : undefined;
+}
+
+export function getReplayTokenUsage(
+  events: readonly DaemonEvent[],
+): DaemonTokenUsage | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     try {
       const event = events[i];
       if (event.type !== 'session_update') continue;
       const update = getRecord(getRecord(event.data)?.['update']);
-      const tokenCount = getUsageTokenCount(update);
-      if (tokenCount !== undefined) return tokenCount;
+      const tokenUsage = getUsageTokenUsage(update);
+      if (tokenUsage) return tokenUsage;
     } catch {
       // Malformed replay events are skipped, mirroring the replay
       // injection loop — a usage scan must not fail the whole attach.
@@ -217,15 +241,30 @@ export function getReplayTokenCount(
 
 // Sub-agent usage events carry `parentToolCallId` in `_meta`; skip them
 // so the status bar only reflects the main conversation's context usage.
-function getUsageTokenCount(
+function getUsageTokenUsage(
   update: Record<string, unknown> | undefined,
-): number | undefined {
+): DaemonTokenUsage | undefined {
   const meta = getRecord(update?.['_meta']);
   if (meta?.['parentToolCallId'] !== undefined) return undefined;
   const usage = getRecord(meta?.['usage']);
-  const count =
-    getNumber(usage, 'inputTokens') ?? getNumber(usage, 'totalTokens');
-  return count !== undefined && count > 0 ? count : undefined;
+  const tokenUsage: DaemonTokenUsage = {
+    ...mapTokenUsageNumber(usage, 'inputTokens'),
+    ...mapTokenUsageNumber(usage, 'outputTokens'),
+    ...mapTokenUsageNumber(usage, 'totalTokens'),
+    ...mapTokenUsageNumber(usage, 'thoughtTokens'),
+    ...mapTokenUsageNumber(usage, 'cachedReadTokens'),
+  };
+  return getTokenCountFromUsage(tokenUsage) !== undefined
+    ? tokenUsage
+    : undefined;
+}
+
+function mapTokenUsageNumber(
+  usage: Record<string, unknown> | undefined,
+  key: keyof DaemonTokenUsage,
+): Partial<DaemonTokenUsage> {
+  const value = getNumber(usage, key);
+  return value !== undefined && value >= 0 ? { [key]: value } : {};
 }
 
 function mapAvailableCommandsUpdate(

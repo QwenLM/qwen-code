@@ -26,8 +26,10 @@ export function getAcpMemoryArgs(): string[] {
   const currentLimitMB = Math.floor(
     getHeapStatistics().heap_size_limit / (1024 * 1024),
   );
-  cachedMemoryArgs =
-    targetMB > currentLimitMB ? [`--max-old-space-size=${targetMB}`] : [];
+  cachedMemoryArgs = [
+    ...(targetMB > currentLimitMB ? [`--max-old-space-size=${targetMB}`] : []),
+    '--expose-gc',
+  ];
   return cachedMemoryArgs;
 }
 
@@ -123,11 +125,18 @@ export function createSpawnChannelFactory(
     childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
 
     const memoryArgs = getAcpMemoryArgs();
-    const child = spawn(process.execPath, [...memoryArgs, cliEntry, '--acp'], {
-      cwd: workspaceCwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: childEnv,
-    });
+    const execArgs = process.execArgv.filter(
+      (a) => !/^--inspect(-brk)?($|=)/.test(a),
+    );
+    const child = spawn(
+      process.execPath,
+      [...execArgs, ...memoryArgs, cliEntry, '--acp'],
+      {
+        cwd: workspaceCwd,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: childEnv,
+      },
+    );
 
     // Forward child stderr to the daemon's stderr line-by-line, with a
     // `[serve pid=… cwd=…]` prefix on each line so operators can
@@ -221,11 +230,15 @@ const KILL_HARD_DEADLINE_MS = 10_000;
  * environment. Everything else is passed through — see the
  * threat-model rationale at the call site in `defaultSpawnChannelFactory`.
  *
- * Currently just `QWEN_SERVER_TOKEN`: the daemon's own bearer token,
- * which the agent doesn't need (it speaks to the daemon over stdio,
- * not HTTP). Leaving it in the child's env would let prompt injection
- * turn the agent into an authenticated client of its own daemon — an
- * escalation the agent doesn't otherwise have.
+ * `QWEN_SERVER_TOKEN`: the daemon's own bearer token, which the agent
+ * doesn't need (it speaks to the daemon over stdio, not HTTP). Leaving
+ * it in the child's env would let prompt injection turn the agent into
+ * an authenticated client of its own daemon — an escalation the agent
+ * doesn't otherwise have.
+ *
+ * `QWEN_CODE_SIMPLE`: an invocation-level bare-mode override. Letting a
+ * daemon or IDE environment leak it into per-session `qwen --acp`
+ * children silently disables skills in those children.
  *
  * **WARNING**: this denylist is correct *only because the agent
  * already has unrestricted shell-tool access* — anything in the env
@@ -241,6 +254,7 @@ const KILL_HARD_DEADLINE_MS = 10_000;
  */
 const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
   'QWEN_SERVER_TOKEN',
+  'QWEN_CODE_SIMPLE',
 ]);
 
 /**
@@ -250,9 +264,8 @@ const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
  *
  *   1. Start from a shallow clone of `source` (no aliasing into the
  *      daemon's `process.env`).
- *   2. Delete every key listed in `scrubbed` (the daemon-internal secret
- *      denylist — currently just `QWEN_SERVER_TOKEN`, see security
- *      rationale on the constant).
+ *   2. Delete every key listed in `scrubbed` (the daemon-internal
+ *      child-env denylist; see the rationale on the constant).
  *   3. Apply `overrides` per-handle. `undefined` value deletes the key
  *      (lets an embedded caller scrub a stale inherited var without
  *      mutating the daemon's global `process.env`). Anything else

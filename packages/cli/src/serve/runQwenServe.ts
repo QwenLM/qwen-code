@@ -51,6 +51,7 @@ import {
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
+import { resolveWebShellDir } from './webShellStatic.js';
 import { parseAllowOriginPatterns } from './auth.js';
 import {
   createPermissionAuditPublisher,
@@ -84,6 +85,13 @@ const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 
 function isPositiveIntegerMs(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value) && value > 0;
+}
+
+function isNonNegativeIntegerOrInfinity(value: number): boolean {
+  return (
+    value === Number.POSITIVE_INFINITY ||
+    (Number.isFinite(value) && Number.isInteger(value) && value >= 0)
+  );
 }
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -339,6 +347,19 @@ export interface RunHandle {
   server: Server;
   url: string;
   bridge: AcpSessionBridge;
+  /**
+   * Whether the Web Shell UI was actually mounted (assets resolved and
+   * `serveWebShell !== false`). The `--open` launcher checks this so it never
+   * points a browser at an API-only daemon.
+   */
+  webShellMounted: boolean;
+  /**
+   * The bearer token the daemon actually authenticates against (already
+   * trimmed), or undefined when none is configured. `--open` reads this so the
+   * URL it hands the browser always matches the server's value instead of
+   * re-deriving it from argv/env.
+   */
+  resolvedToken?: string;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
@@ -440,6 +461,15 @@ export async function runQwenServe(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
+  const sessionShellCommandEnabled =
+    optsIn.enableSessionShell === true && token !== undefined;
+  if (optsIn.enableSessionShell === true && token === undefined) {
+    writeStderrLine(
+      `qwen serve: --enable-session-shell ignored because no bearer token ` +
+        `is configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token to ` +
+        `enable direct session shell.`,
+    );
+  }
   // Env-var fallback for the deadline options. Explicit option
   // beats the env beats unset (= unlimited). `parseDeadlineEnv` throws
   // on malformed values so an `export QWEN_SERVE_PROMPT_DEADLINE_MS=abc`
@@ -644,6 +674,13 @@ export async function runQwenServe(
     }
     assertTimerDelayInRange('promptDeadlineMs', opts.promptDeadlineMs);
   }
+  if (opts.maxPendingPromptsPerSession !== undefined) {
+    if (!isNonNegativeIntegerOrInfinity(opts.maxPendingPromptsPerSession)) {
+      throw new TypeError(
+        `Invalid maxPendingPromptsPerSession: ${opts.maxPendingPromptsPerSession}. Must be a non-negative integer (0 / Infinity = unlimited).`,
+      );
+    }
+  }
   if (opts.writerIdleTimeoutMs !== undefined) {
     if (!isPositiveIntegerMs(opts.writerIdleTimeoutMs)) {
       throw new TypeError(
@@ -659,6 +696,22 @@ export async function runQwenServe(
     ) {
       throw new TypeError(
         `Invalid channelIdleTimeoutMs: ${opts.channelIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = immediate kill).`,
+      );
+    }
+  }
+  // Validate here (not just in the yargs handler) so embedded callers of
+  // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
+  // bridge treats a non-finite / negative value as the "disabled"
+  // sentinel, which would silently drop the permission deadline. Mirrors
+  // `channelIdleTimeoutMs`; out-of-range values are clamped by the bridge.
+  if (opts.permissionResponseTimeoutMs !== undefined) {
+    if (
+      !Number.isFinite(opts.permissionResponseTimeoutMs) ||
+      !Number.isInteger(opts.permissionResponseTimeoutMs) ||
+      opts.permissionResponseTimeoutMs < 0
+    ) {
+      throw new TypeError(
+        `Invalid permissionResponseTimeoutMs: ${opts.permissionResponseTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = disabled / wait forever).`,
       );
     }
   }
@@ -839,6 +892,9 @@ export async function runQwenServe(
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
+      ...(opts.maxPendingPromptsPerSession !== undefined
+        ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
+        : {}),
       ...(opts.eventRingSize !== undefined
         ? { eventRingSize: opts.eventRingSize }
         : {}),
@@ -851,7 +907,11 @@ export async function runQwenServe(
       ...(opts.sessionIdleTimeoutMs !== undefined
         ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
         : {}),
+      ...(opts.permissionResponseTimeoutMs !== undefined
+        ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
+        : {}),
       boundWorkspace,
+      sessionShellCommandEnabled,
       childEnvOverrides,
       channelFactory,
       onDiagnosticLine: diagnosticSink,
@@ -933,6 +993,49 @@ export async function runQwenServe(
   });
 
   let actualPort = opts.port;
+
+  // Resolve the built Web Shell SPA so createServeApp can mount the UI at the
+  // daemon root. --no-web (serveWebShell=false) skips it. Absent assets (e.g.
+  // a --cli-only build that omits packages/web-shell) degrade to API-only
+  // with a breadcrumb rather than failing the boot.
+  const webShellDir =
+    opts.serveWebShell === false ? undefined : resolveWebShellDir();
+  if (opts.serveWebShell !== false) {
+    if (!webShellDir) {
+      writeStderrLine(
+        'qwen serve: Web Shell assets not found; serving API only. ' +
+          'Build the web-shell workspace (npm run build) or pass --no-web to silence this.',
+      );
+    } else {
+      // Positive happy-path breadcrumb so operators can confirm the UI is live
+      // (the only other lines are negative-path warnings).
+      writeStderrLine(`qwen serve: Web Shell UI served from ${webShellDir}`);
+      if (!isLoopbackBind(opts.hostname)) {
+        writeStderrLine(
+          'qwen serve: Web Shell UI is served WITHOUT auth on a non-loopback ' +
+            'bind (the static shell has no secrets; the API stays token-gated). ' +
+            'Pass --no-web to disable the UI.',
+        );
+        // The shell HTML/JS loads (GET carries no Origin), but its same-origin
+        // POSTs (create session, prompt, permission vote) send an Origin the
+        // daemon's CORS wall rejects with 403 unless allow-listed — so without
+        // --allow-origin the UI is effectively read-only on a non-loopback
+        // bind. Front the daemon with a same-origin reverse proxy, or pass
+        // --allow-origin <origin>, to make mutations work.
+        if (!opts.allowOrigins || opts.allowOrigins.length === 0) {
+          writeStderrLine(
+            'qwen serve: without --allow-origin the Web Shell is read-only on a ' +
+              'non-loopback bind — same-origin POSTs are blocked by CORS (403). ' +
+              'Pass --allow-origin <origin> or front it with a same-origin proxy.',
+          );
+        }
+      }
+    }
+  }
+  // webShellDir is already undefined whenever serveWebShell === false, so this
+  // collapses to "did we resolve real assets".
+  const webShellMounted = !!webShellDir;
+
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
   // via `deps.boundWorkspace`. That field is the pre-canonicalized
   // fast-path: createServeApp skips its own `canonicalizeWorkspace`
@@ -946,6 +1049,7 @@ export async function runQwenServe(
   // routes and ACP fs calls share the same factory instance.
   const app = createServeApp(opts, () => actualPort, {
     bridge,
+    webShellDir,
     boundWorkspace,
     qwenCodeVersion: cliVersion,
     fsFactory,
@@ -1157,6 +1261,8 @@ export async function runQwenServe(
         server,
         url,
         bridge,
+        webShellMounted,
+        resolvedToken: token,
         close: () => {
           // Idempotent: cache the in-flight (or settled) close promise so
           // overlapping calls (e.g. test harness + signal handler firing

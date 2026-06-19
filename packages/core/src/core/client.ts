@@ -5,6 +5,7 @@
  */
 
 // External dependencies
+import { createUserContent } from '@google/genai';
 import type {
   Content,
   GenerateContentConfig,
@@ -17,8 +18,14 @@ import process from 'node:process';
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
+import { Storage } from '../config/storage.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
-import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+import {
+  microcompactHistory,
+  type MicrocompactMeta,
+  type MicrocompactOptions,
+} from '../services/microcompaction/microcompact.js';
 import {
   activeGoalEquals,
   getActiveGoal,
@@ -81,10 +88,15 @@ import {
 import {
   formatDateForContext,
   buildAddedMcpToolsReminder,
+  buildAddedSkillsReminder,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
 } from '../utils/environmentContext.js';
+import {
+  collectAvailableSkillEntries,
+  type AvailableSkillEntry,
+} from '../tools/skill-utils.js';
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
@@ -101,7 +113,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
-import { ApiRetryEvent } from '../telemetry/types.js';
+import { ApiRetryEvent, LoopType } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 
 // Hook types and utilities
@@ -120,6 +132,7 @@ import { type File, type IdeContext } from '../ide/types.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
+const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -198,16 +211,47 @@ export class GeminiClient {
   private skillsModifiedInSession = false;
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
+  private shutdownRequested = false;
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
+  private recentCompletedToolNames: string[] = [];
   private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
   private announcedDeferredToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
+  // Dedup state for the per-turn skill/command "now available" delta reminders
+  // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
+  // set is seeded on the first drain from the current skills (the startup
+  // snapshot already listed them) and reset whenever the startup prelude is
+  // rebuilt (startChat), so a resumed/compacted session re-seeds from its fresh
+  // snapshot instead of re-announcing — mirrors Claude Code's
+  // suppressNextSkillListing / "don't re-inject on compact".
+  private announcedSkillReminderKeys = new Set<string>();
+  private skillRemindersInitialized = false;
+
+  private static skillEntryKey(e: AvailableSkillEntry): string {
+    return e.level !== undefined ? `skill:${e.name}` : `cmd:${e.name}`;
+  }
+
+  /**
+   * Seeds skill-reminder dedup from the entries actually rendered into the
+   * startup snapshot. Mirrors `rememberAnnouncedDeferredTools`: the dedup is
+   * seeded from what the model actually SAW, not from whatever happens to be
+   * current at the first drain (which may include late-registered MCP
+   * prompts/commands the snapshot never listed).
+   */
+  private seedSkillReminderDedupFromSnapshot(
+    snapshotEntries: AvailableSkillEntry[],
+  ): void {
+    this.announcedSkillReminderKeys = new Set(
+      snapshotEntries.map(GeminiClient.skillEntryKey),
+    );
+    this.skillRemindersInitialized = true;
+  }
 
   /**
    * Tracks the most recently injected date string to prevent injecting
@@ -249,19 +293,31 @@ export class GeminiClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
-      replayUiTelemetryFromConversation(resumedSessionData.conversation, this.config.getSessionId());
+      const resumeTokenCounts = replayUiTelemetryFromConversation(
+        resumedSessionData.conversation,
+        this.config.getSessionId(),
+      );
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
       const resumedHistory = buildApiHistoryFromConversation(
         resumedSessionData.conversation,
       );
+      this.seedRecentCompletedToolNamesFromHistory(resumedHistory);
       await this.startChat(
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
-      this.getChat().setLastPromptTokenCount(
-        uiTelemetryService.getLastPromptTokenCount(),
-      );
+      const chat = this.getChat();
+      if (resumeTokenCounts) {
+        chat.seedResumeTokenCounts(
+          resumeTokenCounts.promptTokenCount,
+          resumeTokenCounts.outputTokenCount,
+        );
+      } else {
+        chat.setLastPromptTokenCount(
+          uiTelemetryService.getLastPromptTokenCount(),
+        );
+      }
 
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
@@ -274,6 +330,9 @@ export class GeminiClient {
     }
 
     this.initializedSessionId = sessionId;
+
+    // Clean up stale tool result files from previous sessions (fire-and-forget)
+    void cleanupOldToolResults(Storage.getGlobalTempDir(), 24 * 60 * 60 * 1000);
   }
 
   /**
@@ -539,6 +598,15 @@ export class GeminiClient {
   }
 
   /**
+   * Signal that shutdown is imminent. Subsequent calls to background memory
+   * tasks (extract, dream, skill review) will be skipped so the process can
+   * exit cleanly without spawning new work.
+   */
+  requestShutdown(): void {
+    this.shutdownRequested = true;
+  }
+
+  /**
    * Abort and release the pending auto-memory prefetch in one step.
    * Safe to call when no prefetch is pending — does nothing. Centralises
    * the abort-then-clear idiom so every cleanup path (resetChat, early
@@ -599,12 +667,15 @@ export class GeminiClient {
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
     this.lastHookMicrocompactionTimestamp = null;
+    this.recentCompletedToolNames = [];
     // startChat() rewrites the chat to its initial state. Any prior
     // read_file tool results the FileReadCache still tracks are no
     // longer in history, so a follow-up Read would serve a placeholder
     // pointing at content the model can no longer retrieve.
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
+    // Clean up old tool result overflow files on /clear
+    void cleanupOldToolResults(Storage.getGlobalTempDir(), 24 * 60 * 60 * 1000);
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
@@ -645,6 +716,29 @@ export class GeminiClient {
       role: 'user',
       parts: [{ text: await getDirectoryContextString(this.config) }],
     });
+  }
+
+  async addWorkingDirectoryChangedContext(
+    oldDir: string,
+    newDir: string,
+  ): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    this.cachedGitStatus = undefined;
+    await this.refreshSystemInstruction();
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [
+        {
+          text:
+            `The session's working directory has changed from ${oldDir} to ${newDir} via /cd. ` +
+            `The startup directory context above is stale. All tool calls and relative paths now resolve from ${newDir}.`,
+        },
+      ],
+    });
+    await this.addDirectoryContext();
   }
 
   private getCachedGitStatus(): string | null {
@@ -696,7 +790,10 @@ export class GeminiClient {
     // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
     // the orphaned model-ack entry behind when re-prepending the prelude.
     const remaining = currentHistory.slice(startupLength);
-    const [startupContext] = await getInitialChatHistory(this.config);
+    const [[startupContext], snapshotEntries] = await getInitialChatHistory(
+      this.config,
+    );
+    this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
     );
@@ -727,7 +824,10 @@ export class GeminiClient {
       return;
     }
 
-    const [startupContext] = await getInitialChatHistory(this.config);
+    const [[startupContext], snapshotEntries] = await getInitialChatHistory(
+      this.config,
+    );
+    this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     if (startupContext) {
       this.getChat().setHistory([startupContext, ...currentHistory]);
     }
@@ -850,6 +950,103 @@ export class GeminiClient {
     });
   }
 
+  /**
+   * Per-turn delta for skills/commands that became invocable after session start
+   * — skills enabled mid-session (e.g. via `/skills`) and MCP prompts added after
+   * startup. Emitted as a tail `<system-reminder>` only, so it never mutates the
+   * cached tools/system/messages prefix. Deduped via `announcedSkillReminderKeys`.
+   *
+   * The first call after a (re)built startup prelude seeds the announced set from
+   * the current skills and emits nothing — the startup snapshot already listed
+   * them (mirrors Claude Code's `suppressNextSkillListing` and its decision not
+   * to re-inject the listing after compaction). Conditional path-activations are
+   * announced inline on the tool result by `coreToolScheduler`, so they are
+   * recorded here as announced (not re-queued) to avoid a double announcement.
+   */
+  private async drainSkillAndCommandReminders(): Promise<void> {
+    const toolRegistry = this.config.getToolRegistry();
+    // Only relevant when the model can actually invoke skills (subagents often
+    // run without the Skill tool).
+    if (!toolRegistry?.getTool(ToolNames.SKILL)) {
+      return;
+    }
+    const skillManager = this.config.getSkillManager();
+    if (!skillManager) {
+      return;
+    }
+
+    let entries: AvailableSkillEntry[];
+    try {
+      ({ entries } = await collectAvailableSkillEntries(
+        skillManager,
+        this.config,
+      ));
+    } catch (error) {
+      debugLogger.warn(
+        'drainSkillAndCommandReminders: collectAvailableSkillEntries failed',
+        error,
+      );
+      return;
+    }
+
+    const currentKeys = new Set(entries.map(GeminiClient.skillEntryKey));
+
+    // Prune announced keys no longer present so a later re-enable / reconnect
+    // re-announces (mirrors the MCP added-tools prune above).
+    for (const key of this.announcedSkillReminderKeys) {
+      if (!currentKeys.has(key)) {
+        this.announcedSkillReminderKeys.delete(key);
+      }
+    }
+
+    // Safety net: if seedSkillReminderDedupFromSnapshot was never called (e.g.
+    // edge-case construction path), mark initialized but do NOT seed from
+    // current entries — no startup snapshot was shown to the model, so all
+    // entries are genuinely new and should be announced by the code below.
+    // Seeding here used to silently swallow late registrations (cmd:* keys
+    // and MCP prompts discovered after startChat) by marking them as
+    // "already announced" when the model had never seen them.
+    if (!this.skillRemindersInitialized) {
+      this.skillRemindersInitialized = true;
+    }
+
+    // Consume skill keys that coreToolScheduler announced inline on a tool
+    // result this turn (e.g. path-activated conditional skills). Mark them as
+    // announced so the drain below does not re-announce them. This fixes the
+    // subagent shared-SkillManager case: the inline reminder lands in the
+    // subagent's discarded transcript, but the parent's drain now skips those
+    // keys because the scheduler recorded them on the shared Config.
+    const inlineKeys = this.config.consumeInlineAnnouncedSkillKeys();
+    for (const key of inlineKeys) {
+      this.announcedSkillReminderKeys.add(key);
+    }
+
+    // Announce every genuinely new skill/command that was not already
+    // announced — either in the startup snapshot, a prior drain, or inline
+    // by coreToolScheduler above.
+    const newEntries: AvailableSkillEntry[] = [];
+    for (const entry of entries) {
+      const key = GeminiClient.skillEntryKey(entry);
+      if (this.announcedSkillReminderKeys.has(key)) {
+        continue;
+      }
+      this.announcedSkillReminderKeys.add(key);
+      newEntries.push(entry);
+    }
+
+    if (newEntries.length === 0) {
+      return;
+    }
+    const reminder = buildAddedSkillsReminder(newEntries);
+    if (!reminder) {
+      return;
+    }
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
+  }
+
   private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
     switch (approvalMode) {
       case ApprovalMode.DEFAULT:
@@ -937,7 +1134,12 @@ export class GeminiClient {
       }
       const deferredTools = this.resolveDeferredToolsForReminder();
       this.rememberAnnouncedDeferredTools(deferredTools);
-      history = await getInitialChatHistory(this.config, extraHistory);
+      let snapshotEntries: AvailableSkillEntry[];
+      [history, snapshotEntries] = await getInitialChatHistory(
+        this.config,
+        extraHistory,
+      );
+      this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
       const systemInstruction = this.getMainSessionSystemInstruction();
 
       this.chat = new GeminiChat(
@@ -1188,6 +1390,15 @@ export class GeminiClient {
   private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
   ): void {
+    // During shutdown, skip all background memory tasks so the process
+    // can exit cleanly without spawning new work.
+    if (this.shutdownRequested) {
+      debugLogger.debug(
+        'Skipping background memory tasks: shutdown requested.',
+      );
+      return;
+    }
+
     // autoSkill counts tool calls and can trigger on both UserQuery and
     // ToolResult turns so the threshold can fire mid-session.
     if (
@@ -1326,6 +1537,8 @@ export class GeminiClient {
     toolName: string,
     args?: Record<string, unknown>,
   ): void {
+    this.rememberCompletedToolName(toolName);
+
     if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
       const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
       if (
@@ -1338,73 +1551,89 @@ export class GeminiClient {
     this.toolCallCount += 1;
   }
 
-  private async microcompactIdleHistory(
+  private rememberCompletedToolName(toolName: string): void {
+    const normalizedToolName = toolName.trim();
+    if (!normalizedToolName) {
+      return;
+    }
+    this.recentCompletedToolNames = [
+      ...this.recentCompletedToolNames.filter(
+        (name) => name !== normalizedToolName,
+      ),
+      normalizedToolName,
+    ].slice(-MAX_RECENT_TOOL_NAMES_FOR_MEMORY);
+  }
+
+  private seedRecentCompletedToolNamesFromHistory(history: Content[]): void {
+    const completedCallIds = new Set<string>();
+    for (const message of history) {
+      for (const part of message.parts ?? []) {
+        const responseId = part.functionResponse?.id;
+        if (responseId) {
+          completedCallIds.add(responseId);
+        }
+      }
+    }
+
+    this.recentCompletedToolNames = [];
+    for (const message of history) {
+      for (const part of message.parts ?? []) {
+        const call = part.functionCall;
+        if (!call?.name) {
+          continue;
+        }
+        if (call.id && !completedCallIds.has(call.id)) {
+          continue;
+        }
+        this.rememberCompletedToolName(call.name);
+      }
+    }
+  }
+
+  private async microcompactHistoryBeforeSend(
     lastCompletionTimestamp: number | null,
+    opts?: MicrocompactOptions,
   ): Promise<boolean> {
     try {
       const mcResult = microcompactHistory(
         this.getHistoryShallow(),
         lastCompletionTimestamp,
         this.config.getClearContextOnIdle(),
+        opts,
       );
       if (!mcResult.meta) {
         return false;
       }
 
       const m = mcResult.meta;
-      this.getChat().setHistory(mcResult.history);
-      // Disarm only the blanked files' fast-path, keeping
-      // read-before-write state intact (issue #4239; rationale on
-      // FileReadEntry.readResidentInHistory). Any blanked read we
-      // can't disarm surgically forces the old blanket wipe so a
-      // later Read can't get a dangling file_unchanged placeholder.
-      const fileReadCache = this.config.getFileReadCache();
-      if (m.unresolvedEvictedReads > 0) {
-        debugLogger.debug(
-          `[FILE_READ_CACHE] clear after microcompaction ` +
-            `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
-        );
-        fileReadCache.clear();
-      } else {
-        // Concurrent stats — don't serialize N FS round-trips
-        // before the next turn.
-        const statResults = await Promise.all(
-          m.evictedReadPaths.map((p) =>
-            fsPromises.stat(p).catch(() => undefined),
-          ),
-        );
-        // A path is surgically disarmed only if it stats AND its
-        // inode matches the recorded entry. A failed stat or inode
-        // miss could leave a stale entry armed, so fall back to the
-        // blanket wipe if any path is unresolvable.
-        let fullyDisarmed = true;
-        for (const stats of statResults) {
-          if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
-            fullyDisarmed = false;
-          }
-        }
-        if (fullyDisarmed) {
-          debugLogger.debug(
-            `[FILE_READ_CACHE] disarmed fast-path for ` +
-              `${m.evictedReadPaths.length} file(s) after microcompaction`,
-          );
-        } else {
-          debugLogger.debug(
-            '[FILE_READ_CACHE] clear after microcompaction ' +
-              '(an evicted path was unresolvable)',
-          );
-          fileReadCache.clear();
-        }
+      const changed = m.tokensSaved > 0;
+      if (changed) {
+        this.getChat().setHistory(mcResult.history);
+        await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
-      debugLogger.debug(
-        `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-          `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
-          `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
-      );
-      return true;
+      if (m.triggerReason === 'size') {
+        const pendingNote =
+          m.pendingToolResultChars && m.pendingToolResultChars > 0
+            ? ` (+${m.pendingToolResultChars} pending)`
+            : '';
+        debugLogger.info(
+          `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
+            `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
+            `tool result(s) (~${m.tokensSaved} tokens), history now ` +
+            `${m.toolResultCharsAfter}${pendingNote}, kept ${m.toolsKept} ` +
+            `tool result(s)`,
+        );
+      } else {
+        debugLogger.info(
+          `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+            `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
+            `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
+        );
+      }
+      return changed;
     } catch (err) {
       debugLogger.error(
-        `[TIME-BASED MC] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
+        `[MICROCOMPACTION] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
     }
@@ -1566,6 +1795,7 @@ export class GeminiClient {
             .recall(this.config.getProjectRoot(), partToString(request), {
               config: this.config,
               excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+              recentTools: [...this.recentCompletedToolNames],
               abortSignal: controller.signal,
             })
             .catch((error: unknown) => {
@@ -1627,10 +1857,11 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        // Idle cleanup: clear old tool results when idle > threshold.
-        // Runs on user and cron messages. ToolResult and Retry are
-        // excluded; Hook continuations use a separate checkpoint below.
-        const compacted = await this.microcompactIdleHistory(
+        // Pre-send microcompaction: user and cron turns can trigger both
+        // idle-based and cumulative-size cleanup. ToolResult and Retry are
+        // excluded here; ToolResult runs a size-only checkpoint after its
+        // pending content is assembled.
+        const compacted = await this.microcompactHistoryBeforeSend(
           this.lastApiCompletionTimestamp,
         );
         if (messageType === SendMessageType.UserQuery || compacted) {
@@ -1640,16 +1871,15 @@ export class GeminiClient {
         this.lastHookMicrocompactionTimestamp ??=
           this.lastApiCompletionTimestamp ?? Date.now();
         const checkpoint = this.lastHookMicrocompactionTimestamp;
-        if (await this.microcompactIdleHistory(checkpoint)) {
+        if (await this.microcompactHistoryBeforeSend(checkpoint)) {
           this.lastHookMicrocompactionTimestamp = Date.now();
         }
       }
 
       if (messageType !== SendMessageType.Retry) {
-        // Snapshot on every non-retry turn. ToolResult turns run right after
-        // tool execution, so their snapshot captures edits that a prior
-        // UserQuery turn scheduled. Without this, a resumed session only sees
-        // the UserQuery-time snapshot (empty) and loses tool-driven edits.
+        // Attribution snapshots are recorded on every non-retry turn. File
+        // history snapshots are created only at UserQuery boundaries; later
+        // tool edits update that latest snapshot through trackEdit().
         this.config
           .getChatRecordingService()
           ?.recordAttributionSnapshot(
@@ -1661,6 +1891,19 @@ export class GeminiClient {
         if (messageType === SendMessageType.UserQuery) {
           try {
             await this.config.getFileHistoryService().makeSnapshot(prompt_id);
+            try {
+              const latestSnapshot = this.config
+                .getFileHistoryService()
+                .getSnapshots()
+                .at(-1);
+              if (latestSnapshot) {
+                this.config
+                  .getChatRecordingService()
+                  ?.recordFileHistorySnapshot(latestSnapshot);
+              }
+            } catch (e) {
+              debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+            }
           } catch (e) {
             debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
           }
@@ -1769,6 +2012,7 @@ export class GeminiClient {
           messageType === SendMessageType.Cron)
       ) {
         this.drainPendingAddedMcpToolsReminder();
+        await this.drainSkillAndCommandReminders();
       }
 
       const turn = new Turn(this.getChat(), prompt_id);
@@ -1860,6 +2104,10 @@ export class GeminiClient {
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
         }
+        await this.microcompactHistoryBeforeSend(null, {
+          sizeOnly: true,
+          pendingContent: createUserContent(requestToSend),
+        });
       }
 
       const activeGoalAtTurnStart = getActiveGoal(this.config.getSessionId());
@@ -1894,24 +2142,74 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
-        if (!this.config.getSkipLoopDetection()) {
-          if (this.loopDetector.addAndCheck(event)) {
-            const loopType = this.loopDetector.getLastLoopType();
-            yield {
-              type: GeminiEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
-            };
-            if (arenaAgentClient) {
-              await arenaAgentClient.reportError('Loop detected');
-            }
-            this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction)
-              endInteractionSpan('error', { errorMessage: 'loop detected' });
-            // finally cleanup catches this, but cancel explicitly to match
-            // the cleanup pattern at other early-return sites.
-            this.cancelPendingMemoryPrefetch();
-            return turn;
+        // Always-on safety checks (turn tool-call cap). These fire before
+        // the skipLoopDetection gate so they cannot be bypassed by
+        // configuration.
+        const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
+        if (alwaysOnLoop) {
+          // The tripping response may carry several tool calls collected
+          // before the cap fired. Drop them so the run halts here instead of
+          // executing them, spawning a continuation, and re-tripping the cap
+          // (which would double-print the halt message and waste a request).
+          turn.pendingToolCalls.length = 0;
+          const loopType = this.loopDetector.getLastLoopType();
+          yield {
+            type: GeminiEventType.LoopDetected,
+            ...(loopType && { value: { loopType } }),
+          };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
           }
+          this.lastApiCompletionTimestamp = Date.now();
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', { errorMessage: 'loop detected' });
+          this.cancelPendingMemoryPrefetch();
+          return turn;
+        }
+
+        // Loop detection is opt-in: `model.skipLoopDetection` defaults to true
+        // (see settingsSchema) to avoid false-positive interruptions. Keep BOTH
+        // the deterministic identical-tool-call check and the heuristic checks
+        // behind this single flag so the documented `model.skipLoopDetection`
+        // escape hatch stays honest (including the non-interactive hint in
+        // nonInteractiveCli.ts). The deterministic split, retry-reset, and
+        // pending-call splice below still apply once detection is enabled.
+        const skipLoopDetection = this.config.getSkipLoopDetection();
+        const deterministicToolCallLoop =
+          !skipLoopDetection &&
+          this.loopDetector.addAndCheckDeterministicToolCallLoop(event);
+        const heuristicLoop =
+          !deterministicToolCallLoop &&
+          !skipLoopDetection &&
+          this.loopDetector.addAndCheckHeuristicLoops(event);
+        if (deterministicToolCallLoop || heuristicLoop) {
+          const loopType = this.loopDetector.getLastLoopType();
+          if (
+            event.type === GeminiEventType.ToolCallRequest &&
+            loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS
+          ) {
+            const repeatedCount =
+              this.loopDetector.getConsecutiveToolCallCount();
+            const repeatedStartIndex = Math.max(
+              0,
+              turn.pendingToolCalls.length - repeatedCount,
+            );
+            turn.pendingToolCalls.splice(repeatedStartIndex);
+          }
+          yield {
+            type: GeminiEventType.LoopDetected,
+            ...(loopType && { value: { loopType } }),
+          };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
+          }
+          this.lastApiCompletionTimestamp = Date.now();
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', { errorMessage: 'loop detected' });
+          // finally cleanup catches this, but cancel explicitly to match
+          // the cleanup pattern at other early-return sites.
+          this.cancelPendingMemoryPrefetch();
+          return turn;
         }
         // Update arena status on Finished events — stats are derived
         // automatically from uiTelemetryService by the reporter.
@@ -2284,6 +2582,7 @@ export class GeminiClient {
       const {
         contentGenerator,
         retryAuthType,
+        retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
 
@@ -2301,6 +2600,7 @@ export class GeminiClient {
       };
       const result = await retryWithBackoff(apiCall, {
         authType: retryAuthType,
+        extraRetryErrorCodes: retryErrorCodes,
         persistentMode: isUnattendedMode(),
         signal: abortSignal,
         heartbeatFn: (info) => {
@@ -2395,6 +2695,83 @@ export class GeminiClient {
       // that lived inside the previous user prompt.
       this.forceFullIdeContext = true;
     }
+    return info;
+  }
+
+  /**
+   * Surgically disarm FileReadCache entries for files evicted by
+   * microcompaction. Falls back to a blanket clear() only when a blanked read
+   * cannot be linked to any path; path-level resolution failures are targeted
+   * to that path so one ghost file does not wipe unrelated cache entries.
+   *
+   * Shared by pre-send microcompaction and /compress-fast.
+   */
+  private async disarmFileReadCacheAfterEviction(
+    meta: MicrocompactMeta,
+    logTag: string,
+  ): Promise<void> {
+    const fileReadCache = this.config.getFileReadCache();
+    if (meta.unresolvedEvictedReads > 0) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after ${logTag} ` +
+          `(${meta.unresolvedEvictedReads} unresolved blanked read(s))`,
+      );
+      fileReadCache.clear();
+      return;
+    }
+    if (meta.evictedReadPaths.length === 0) {
+      return;
+    }
+    const statResults = await Promise.all(
+      meta.evictedReadPaths.map((p) =>
+        fsPromises.stat(p).catch(() => undefined),
+      ),
+    );
+    let usedPathFallback = false;
+    for (let i = 0; i < meta.evictedReadPaths.length; i++) {
+      const stats = statResults[i];
+      if (stats && fileReadCache.markReadEvictedFromHistory(stats)) {
+        continue;
+      }
+      const evictedPath = meta.evictedReadPaths[i];
+      if (evictedPath) {
+        fileReadCache.invalidateByPath(evictedPath);
+        usedPathFallback = true;
+      }
+    }
+    if (usedPathFallback) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] disarmed fast-path by path for ` +
+          `${meta.evictedReadPaths.length} file(s) after ${logTag}`,
+      );
+    } else {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] disarmed fast-path for ` +
+          `${meta.evictedReadPaths.length} file(s) after ${logTag}`,
+      );
+    }
+  }
+
+  /**
+   * Fast, rule-based compression without any LLM side-query.
+   * Delegates to {@link GeminiChat.compressFast} and handles post-compression
+   * FileReadCache disarming.
+   */
+  async tryCompressChatFast(): Promise<ChatCompressionInfo> {
+    const { info, microcompactMeta } = this.getChat().compressFast();
+
+    if (info.compressionStatus !== CompressionStatus.COMPRESSED) {
+      return info;
+    }
+
+    if (microcompactMeta) {
+      await this.disarmFileReadCacheAfterEviction(
+        microcompactMeta,
+        'compress-fast',
+      );
+    }
+    this.forceFullIdeContext = true;
+
     return info;
   }
 }

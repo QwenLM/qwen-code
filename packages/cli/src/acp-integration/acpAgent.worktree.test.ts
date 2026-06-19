@@ -101,6 +101,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
+  DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 500_000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 1000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 25_000,
   ApprovalMode: {
@@ -130,6 +131,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   })),
   SessionService: vi.fn(),
   SESSION_TITLE_MAX_LENGTH: 200,
+  DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 200_000,
   tokenLimit: vi.fn(),
   getMCPDiscoveryState: vi.fn(() => 'not_started'),
   getMCPServerStatus: vi.fn(() => 'disconnected'),
@@ -395,6 +397,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,
       };

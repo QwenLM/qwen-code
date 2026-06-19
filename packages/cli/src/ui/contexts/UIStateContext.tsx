@@ -30,6 +30,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import type { ExtensionUpdateState } from '../state/extensions.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 
@@ -93,6 +94,10 @@ export interface UIState {
   shouldShowCommandMigrationNudge: boolean;
   commandMigrationTomlFiles: string[];
   isFolderTrustDialogOpen: boolean;
+  isMcpApprovalDialogOpen: boolean;
+  currentMcpApproval: PendingMcpServer | undefined;
+  pendingMcpApprovals: PendingMcpServer[];
+  mcpApprovalRemaining: number;
   isTrustedFolder: boolean | undefined;
   constrainHeight: boolean;
   ideContextState: IdeContext | undefined;
@@ -172,6 +177,8 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  taskStartStreamingChars: number;
+  responseCandidateTokens: number;
   // Real-time token display: ref to streaming output char length (polled, not state)
   streamingResponseLengthRef: React.RefObject<number>;
   // True = receiving content (↓), false = waiting for API response (↑)
@@ -181,8 +188,12 @@ export interface UIState {
   setSessionName: (name: string | null) => void;
   // Prompt suggestion
   promptSuggestion: string | null;
-  /** Dismiss prompt suggestion (clears state, aborts speculation) */
-  dismissPromptSuggestion: () => void;
+  /**
+   * Abort in-flight suggestion generation/speculation; intentionally preserves
+   * `promptSuggestion` so the placeholder can restore it when the buffer is
+   * emptied again.
+   */
+  abortPromptSuggestion: () => void;
   // Rewind selector
   isRewindSelectorOpen: boolean;
   rewindEscPending: boolean;

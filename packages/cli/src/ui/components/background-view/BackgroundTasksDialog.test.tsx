@@ -37,6 +37,8 @@ vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
         return entry.shellId;
       case 'monitor':
         return entry.monitorId;
+      case 'workflow':
+        return entry.runId;
       case 'dream':
         return entry.dreamId;
       default: {
@@ -119,6 +121,11 @@ interface Harness {
   dreamCancelTask: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string; ctrl?: boolean }) => void;
+  pressKeyBroadcast: (key: {
+    name?: string;
+    sequence?: string;
+    ctrl?: boolean;
+  }) => void;
   call: (fn: () => void) => void;
   lastFrame: () => string | undefined;
   probe: { current: ProbeHandle | null };
@@ -143,6 +150,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
+      resolvePendingApproval: vi.fn(),
       setActivityChangeCallback: vi.fn(),
       get: (id: string) => {
         const match = currentEntries.find(
@@ -226,7 +234,15 @@ function setup(initial: readonly DialogEntry[]): Harness {
         if (latest) latest(key);
       });
     },
+    pressKeyBroadcast(key) {
+      act(() => {
+        for (const handler of [...handlers]) {
+          handler(key);
+        }
+      });
+    },
     call(fn) {
+      handlers.length = 0;
       act(() => fn());
     },
     lastFrame,
@@ -428,6 +444,59 @@ describe('BackgroundTasksDialog', () => {
     // a stale armed state inherited from detail mode.
     h.pressKey({ sequence: 'x' });
     expect(h.cancel).not.toHaveBeenCalled();
+  });
+
+  it('lets ask-user-question approvals own all keyboard input in detail mode', () => {
+    const questionApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'ask-1',
+      name: 'ask_user_question',
+      description: 'choose',
+      confirmationDetails: {
+        type: 'ask_user_question',
+        title: 'Need input',
+        questions: [
+          {
+            question: 'Pick one',
+            header: 'Choice',
+            options: [
+              {
+                label: 'Alpha',
+                description: 'Use alpha.',
+              },
+              {
+                label: 'Beta',
+                description: 'Use beta.',
+              },
+            ],
+          },
+        ],
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+    };
+    const bg = entry({
+      agentId: 'bg-question',
+      pendingApprovals: [questionApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.probe.current!.state.dialogOpen).toBe(true);
+
+    h.pressKeyBroadcast({ sequence: 'x' });
+    h.pressKeyBroadcast({ name: 'left' });
+    h.pressKeyBroadcast({ name: 'space' });
+
+    expect(h.cancel).not.toHaveBeenCalled();
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.probe.current!.state.dialogOpen).toBe(true);
   });
 
   it('Esc backs out of an armed foreground cancel without closing the dialog', () => {
@@ -755,6 +824,105 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('+4 more');
       // Header still reflects the full count, not the capped slice.
       expect(f).toContain('Topics touched (12)');
+    });
+  });
+
+  // ── R2 #15: WorkflowDetailBody budget chip rendering ────────────────
+
+  function workflowEntry(
+    overrides: Partial<DialogEntry> = {},
+  ): DialogEntry {
+    const base = {
+      id: 'wf_test1234',
+      kind: 'workflow' as const,
+      runId: 'wf_test1234',
+      description: 'demo',
+      meta: null,
+      status: 'completed' as const,
+      startTime: 0,
+      endTime: 5_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: false,
+      abortController: new AbortController(),
+      currentPhase: null,
+      phases: ['Plan'] as string[],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [] as string[],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map<string | null, number>(),
+    };
+    return { ...base, ...overrides } as unknown as DialogEntry;
+  }
+
+  describe('WorkflowDetailBody budget chip (R2 #15)', () => {
+    function openWorkflowDetail(entries: readonly DialogEntry[]) {
+      const h = setup(entries);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      return h;
+    }
+
+    it('renders the M/N token chip and capped per-phase totals', () => {
+      const perPhase = new Map<string | null, number>([['Plan', 3_500]]);
+      const wf = workflowEntry({
+        tokensSpent: 3_500,
+        tokenBudgetTotal: 10_000,
+        perPhaseTokens: perPhase,
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = h.lastFrame() ?? '';
+      // R1 #7: formatTokenCount renders 3500 as `3.5k`, 10000 as `10k`.
+      expect(f).toContain('3.5k/10k tokens');
+      expect(f).toContain('Plan');
+      expect(f).toContain('3.5kt');
+    });
+
+    it('renders plain spent (no cap) when uncapped and zero per-phase chips suppressed', () => {
+      const wf = workflowEntry({
+        tokensSpent: 850,
+        tokenBudgetTotal: null,
+        perPhaseTokens: new Map<string | null, number>([['Plan', 0]]),
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = h.lastFrame() ?? '';
+      expect(f).toContain('850 tokens');
+      // Uncapped: no slash form on the budget chip.
+      expect(f).not.toMatch(/\d+\/\d+ tokens/);
+      // Zero per-phase tally: no `· 0t` chip noise on the Plan row.
+      expect(f).not.toMatch(/Plan.*0t/);
+    });
+
+    it('hides the token chip entirely when both spend and cap are zero/null', () => {
+      const wf = workflowEntry({
+        tokensSpent: 0,
+        tokenBudgetTotal: null,
+        perPhaseTokens: new Map<string | null, number>(),
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = h.lastFrame() ?? '';
+      // Subtitle has elapsed + phase count, but no `tokens` chip.
+      expect(f).not.toMatch(/tokens/);
+    });
+
+    it('R1 #6 + R2 #15: surfaces null-sentinel per-phase tokens as `(no phase)` row', () => {
+      const perPhase = new Map<string | null, number>([
+        [null, 420], // pre-phase spend
+        ['Plan', 1_100],
+      ]);
+      const wf = workflowEntry({
+        tokensSpent: 1_520,
+        tokenBudgetTotal: 5_000,
+        perPhaseTokens: perPhase,
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = h.lastFrame() ?? '';
+      // formatTokenCount: 1520 → "1.5k", 5000 → "5.0k" (< 10000 keeps one decimal).
+      expect(f).toContain('1.5k/5.0k tokens');
+      expect(f).toContain('(no phase)');
+      expect(f).toContain('420t');
     });
   });
 });

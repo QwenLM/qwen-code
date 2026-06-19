@@ -155,6 +155,26 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
+    it('renders expanded tool entries without blank separator rows', () => {
+      const toolCalls = [
+        createToolCall({ callId: 'tool-1', name: 'first-tool' }),
+        createToolCall({ callId: 'tool-2', name: 'second-tool' }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={100}
+          toolCalls={toolCalls}
+        />,
+      );
+      const lines = (lastFrame() ?? '').split('\n');
+      const firstLine = lines.findIndex((line) => line.includes('tool-1'));
+      const secondLine = lines.findIndex((line) => line.includes('tool-2'));
+
+      expect(firstLine).toBeGreaterThanOrEqual(0);
+      expect(secondLine).toBe(firstLine + 1);
+    });
+
     it('renders tool call awaiting confirmation', () => {
       const toolCalls = [
         createToolCall({

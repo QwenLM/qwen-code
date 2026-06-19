@@ -36,6 +36,7 @@ import {
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
@@ -82,12 +83,14 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
+import { type PlanGateState, createPlanGateState } from '../plan-gate/state.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
@@ -144,9 +147,11 @@ import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 } from './constants.js';
+import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
   clearRuntimeStatus,
   writeRuntimeStatus,
@@ -173,6 +178,8 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
+
+const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
 import {
   ModelsConfig,
@@ -356,15 +363,23 @@ export interface ChatCompressionSettings {
   screenshotTriggerThreshold?: number;
 }
 
+export { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
+
 /**
- * Settings for clearing stale context after idle periods.
+ * Settings for clearing stale or oversized tool-result context.
  * Threshold values of -1 mean "never clear" (disabled).
  */
+
 export interface ClearContextOnIdleSettings {
   /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
   toolResultsThresholdMinutes?: number;
   /** Number of most-recent tool results to preserve. Default 5. */
   toolResultsNumToKeep?: number;
+  /**
+   * Total compactable tool result output chars before clearing old results.
+   * Default 500000. Use -1 to disable.
+   */
+  toolResultsTotalCharsThreshold?: number;
 }
 
 export interface TelemetrySettings {
@@ -537,6 +552,39 @@ export interface ExtensionInstallMetadata {
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
+/**
+ * Per-message budget (chars) for the combined model-facing output of one
+ * batch of tool calls. When a batch's total output exceeds this, the largest
+ * results are offloaded to disk (with a recoverable pointer). `<= 0` disables.
+ */
+export const DEFAULT_TOOL_OUTPUT_BATCH_BUDGET = 200_000;
+
+/**
+ * Provenance of an MCP server config. Two purposes (see issue #4615):
+ *
+ * - **Approval gating**: `'project'` (a workspace `.mcp.json`) and `'workspace'`
+ *   (a workspace `.qwen/settings.json`) are checked-in / shareable and therefore
+ *   untrusted — both are held behind the pending-approval gate. See
+ *   {@link isGatedMcpScope}.
+ * - **Precedence**: `'workspace'` and `'system'` rank ABOVE a `.mcp.json`
+ *   server, while user/default-scoped servers (left `scope` unset) rank below it
+ *   — so `.mcp.json` overrides user settings but never enterprise-enforced
+ *   `'system'` settings.
+ *
+ * Configs from user/default settings, extensions, and `--mcp-config` leave
+ * `scope` unset.
+ */
+export type McpServerScope = 'project' | 'workspace' | 'system';
+
+/**
+ * Scopes whose servers are checked-in / shareable and therefore untrusted: they
+ * must be approved before the discovery layer connects them. `'system'`
+ * (enterprise-enforced) and unset (user/default/CLI/extension) scopes are
+ * trusted and never gated. See issue #4615.
+ */
+export function isGatedMcpScope(scope: McpServerScope | undefined): boolean {
+  return scope === 'project' || scope === 'workspace';
+}
 
 export class MCPServerConfig {
   constructor(
@@ -580,6 +628,15 @@ export class MCPServerConfig {
      * call sites.
      */
     readonly discoveryTimeoutMs?: number,
+    /**
+     * Provenance of this server config (see {@link McpServerScope}). Gated
+     * scopes (`'project'`, `'workspace'`) are held behind the pending-approval
+     * gate; `'system'` and unset scopes connect as before. Also drives
+     * precedence in `assembleMcpServers`. Appended at the end of the parameter
+     * list to avoid shifting positional arguments at the many
+     * `new MCPServerConfig(...)` call sites. See issue #4615.
+     */
+    readonly scope?: McpServerScope,
   ) {}
 }
 
@@ -717,6 +774,7 @@ export interface ConfigParameters {
   approvalMode?: ApprovalMode;
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
+  showResponseTokensPerSecond?: boolean;
   telemetry?: TelemetrySettings;
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
@@ -764,14 +822,30 @@ export interface ConfigParameters {
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
   agentTeamEnabled?: boolean;
-  forkSubagentEnabled?: boolean;
   workflowsEnabled?: boolean;
+  /**
+   * P5 T7: suppress the one-time `Workflow` tool usage-warning banner.
+   * When `true`, the registry-side warning latch is bypassed and the
+   * banner is not prepended to the run's display payload. Defaults to
+   * `false`. The banner itself is per-session (registry-scoped), so
+   * even when unset it fires at most once per process.
+   */
+  skipWorkflowUsageWarning?: boolean;
   computerUseEnabled?: boolean;
+  computerUseMaxImageDimension?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
+  /** Locale code for resolving localizable extension fields (e.g., 'en', 'zh'). */
+  locale?: string;
   allowedMcpServers?: string[];
   excludedMcpServers?: string[];
+  /**
+   * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
+   * (pending or rejected). These are loaded so they can be listed, but the
+   * discovery layer must not connect them. See issue #4615.
+   */
+  pendingMcpServers?: string[];
   noBrowser?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
@@ -801,6 +875,7 @@ export interface ConfigParameters {
   skipLoopDetection?: boolean;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
+  toolOutputBatchBudget?: number;
   eventEmitter?: EventEmitter;
   output?: OutputSettings;
   inputFormat?: InputFormat;
@@ -901,6 +976,8 @@ export interface ConfigParameters {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+  /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
+  settingsWatcher?: { stopWatching(): void };
 }
 
 function normalizeConfigOutputFormat(
@@ -939,8 +1016,12 @@ function loadMemoryPressureConfig(): MemoryPressureConfig {
       config.criticalRatio,
     );
 
-    if (process.env['QWEN_MEMORY_ENABLE_GC'] === '1') {
-      config.enableExplicitGC = true;
+    const enableGC = process.env['QWEN_MEMORY_ENABLE_GC'];
+    if (
+      enableGC &&
+      ['0', 'false', 'off', 'no'].includes(enableGC.trim().toLowerCase())
+    ) {
+      config.enableExplicitGC = false;
     }
 
     validateMemoryPressureConfig(config);
@@ -1059,6 +1140,7 @@ export class Config {
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  private readonly workflowRunRegistry = new WorkflowRunRegistry();
   // Field initializer runs once on the parent Config; child Configs
   // built via Object.create(parent) intentionally do NOT pick this up
   // — see getFileReadCache() for the per-instance lazy initialization
@@ -1076,6 +1158,10 @@ export class Config {
         args?: string,
       ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null = null;
+  // Skill keys (e.g. "skill:foo") that coreToolScheduler announced inline on a
+  // tool result. The client's drain consumes this set so it can mark them as
+  // announced and avoid double-announcing in the same turn's tail reminder.
+  private pendingInlineAnnouncedSkillKeys = new Set<string>();
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -1085,7 +1171,7 @@ export class Config {
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly sandbox: SandboxConfig | undefined;
-  private readonly targetDir: string;
+  private targetDir: string;
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly inputFormat: InputFormat;
@@ -1124,6 +1210,7 @@ export class Config {
   private lspInitializationError?: string;
   private readonly allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
+  private pendingMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -1132,8 +1219,11 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
+  private planGateState?: PlanGateState;
+  private planGateEntryCounter = 0;
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
+  private readonly showResponseTokensPerSecond: boolean;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
@@ -1151,10 +1241,13 @@ export class Config {
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly fileCheckpointingEnabled: boolean;
+  private fileCheckpointingEnabled: boolean;
+  // Object (not primitive) so sub-agents via Object.create(parentConfig)
+  // share the same budget instance through prototype lookup.
+  private readonly toolResultBudget = { bytesWritten: 0 };
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
-  private readonly cwd: string;
+  private cwd: string;
   private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
   private outputLanguageFilePath?: string;
@@ -1176,9 +1269,10 @@ export class Config {
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = true;
   private readonly agentTeamEnabled: boolean = false;
-  private readonly forkSubagentEnabled: boolean = false;
   private workflowsEnabled = false;
+  private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
+  private readonly computerUseMaxImageDimension?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1215,10 +1309,12 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
-  readonly storage: Storage;
+  storage: Storage;
+  private runtimeStatusWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputLines: number;
+  private readonly toolOutputBatchBudget: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly jsonFd: number | undefined;
@@ -1244,6 +1340,7 @@ export class Config {
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -1303,6 +1400,7 @@ export class Config {
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
     this.excludedMcpServers = params.excludedMcpServers;
+    this.pendingMcpServers = params.pendingMcpServers;
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -1310,6 +1408,8 @@ export class Config {
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.accessibility = params.accessibility ?? {};
+    this.showResponseTokensPerSecond =
+      params.showResponseTokensPerSecond ?? false;
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
@@ -1356,20 +1456,27 @@ export class Config {
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
+    const clearContextOnIdle = params.clearContextOnIdle;
+    const toolResultsThresholdMinutes =
+      clearContextOnIdle?.toolResultsThresholdMinutes ?? 60;
     this.clearContextOnIdle = {
-      toolResultsThresholdMinutes:
-        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
-      toolResultsNumToKeep:
-        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsThresholdMinutes,
+      toolResultsNumToKeep: clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsTotalCharsThreshold:
+        clearContextOnIdle?.toolResultsTotalCharsThreshold ??
+        ((clearContextOnIdle?.toolResultsThresholdMinutes ?? 0) < 0
+          ? -1
+          : DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD),
     };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? true;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
-    this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
+    this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -1408,12 +1515,16 @@ export class Config {
       terminalHeight: params.shellExecutionConfig?.terminalHeight ?? 24,
       showColor: params.shellExecutionConfig?.showColor ?? false,
       pager: params.shellExecutionConfig?.pager ?? 'cat',
+      maxBufferedOutputBytes:
+        params.shellExecutionConfig?.maxBufferedOutputBytes,
     };
     this.truncateToolOutputThreshold =
       params.truncateToolOutputThreshold ??
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
+    this.toolOutputBatchBudget =
+      params.toolOutputBatchBudget ?? DEFAULT_TOOL_OUTPUT_BATCH_BUDGET;
     this.channel = params.channel;
     this.jsonFd = params.jsonFd;
     this.jsonFile = params.jsonFile;
@@ -1463,6 +1574,7 @@ export class Config {
       workspaceDir: this.targetDir,
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
+      locale: params.locale,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
@@ -1477,6 +1589,7 @@ export class Config {
     this.projectHooks = params.projectHooks;
     // Legacy: fall back to merged hooks if new fields are not provided
     this.hooks = params.hooks;
+    this.settingsWatcher = params.settingsWatcher;
     this.memoryManager = new MemoryManager();
   }
 
@@ -1581,6 +1694,7 @@ export class Config {
                   (input['permission_mode'] as PermissionMode | undefined) ??
                     PermissionMode.Default,
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               }
@@ -1592,6 +1706,7 @@ export class Config {
                   (input['tool_use_id'] as string) || '',
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -1603,6 +1718,7 @@ export class Config {
                   input['is_interrupt'] as boolean | undefined,
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolBatch':
@@ -1641,6 +1757,7 @@ export class Config {
                   (input['reason'] as PermissionDeniedReason) ||
                     'classifier_blocked',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'SubagentStart':
@@ -1990,6 +2107,9 @@ export class Config {
       if (this.isMcpServerDisabled(name)) {
         continue;
       }
+      if (this.isMcpServerPendingApproval(name)) {
+        continue;
+      }
       if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
         failed.push(name);
       }
@@ -2049,6 +2169,33 @@ export class Config {
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
       conditionalRules,
       projectRoot,
+    );
+  }
+
+  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+    const contextWindowSize =
+      this.getContentGeneratorConfig()?.contextWindowSize ??
+      this.modelsConfig.getGenerationConfig().contextWindowSize ??
+      tokenLimit(this.getModel(), 'input');
+    if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
+      return undefined;
+    }
+
+    const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
+    const thresholdTokens = Math.floor(
+      contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
+    );
+    if (estimatedTokens <= thresholdTokens) {
+      return undefined;
+    }
+
+    return (
+      `Warning: Loaded QWEN.md/context instructions use about ` +
+      `${estimatedTokens.toLocaleString()} tokens, more than ` +
+      `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
+      `model's ${contextWindowSize.toLocaleString()} token context window. ` +
+      `Consider trimming long always-loaded context or moving details into ` +
+      `on-demand files.`
     );
   }
 
@@ -2206,7 +2353,12 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    return this.warnings;
+    const memoryContextWarning = this.buildMemoryContextWarning(
+      this.getUserMemory(),
+    );
+    return memoryContextWarning
+      ? [...this.warnings, memoryContextWarning]
+      : this.warnings;
   }
 
   getDebugLogger(): DebugLogger {
@@ -2221,11 +2373,15 @@ export class Config {
     sessionData?: ResumedSessionData,
   ): string {
     // Finalize the outgoing session before switching.
+    const outgoingChatRecordingService = this.chatRecordingService;
     try {
-      this.chatRecordingService?.finalize();
+      outgoingChatRecordingService?.finalize();
     } catch {
       // Best-effort — don't block session switch
     }
+    void outgoingChatRecordingService?.flush().catch(() => {
+      // Best-effort — don't block session switch
+    });
 
     const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
@@ -2251,6 +2407,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
@@ -2283,18 +2440,14 @@ export class Config {
       const cliVersion = this.cliVersion ?? null;
       const workDir = this.targetDir;
       const newSessionId = this.sessionId;
-      void (async () => {
-        try {
-          await clearRuntimeStatus(oldPath);
-          await writeRuntimeStatus(newPath, {
-            sessionId: newSessionId,
-            workDir,
-            qwenVersion: cliVersion,
-          });
-        } catch {
-          // ignored: best-effort cleanup
-        }
-      })();
+      this.queueRuntimeStatusWrite(async () => {
+        await clearRuntimeStatus(oldPath);
+        await writeRuntimeStatus(newPath, {
+          sessionId: newSessionId,
+          workDir,
+          qwenVersion: cliVersion,
+        });
+      });
     }
 
     return this.sessionId;
@@ -2311,6 +2464,40 @@ export class Config {
    */
   markRuntimeStatusEnabled(): void {
     this.runtimeStatusEnabled = true;
+  }
+
+  private queueRuntimeStatusWrite(write: () => Promise<void>): void {
+    this.runtimeStatusWrite = this.runtimeStatusWrite
+      .catch(() => {
+        // Keep later writes alive after a best-effort sidecar failure.
+      })
+      .then(write)
+      .catch(() => {
+        // ignored: runtime status must not disrupt session control flow.
+      });
+  }
+
+  private async flushRuntimeStatusWrites(): Promise<void> {
+    await this.runtimeStatusWrite.catch(() => {
+      // ignored: runtime status is best-effort.
+    });
+  }
+
+  private async refreshCurrentRuntimeStatus(workDir: string): Promise<void> {
+    if (!this.runtimeStatusEnabled) {
+      return;
+    }
+    this.queueRuntimeStatusWrite(async () => {
+      await writeRuntimeStatus(
+        this.storage.getRuntimeStatusPath(this.sessionId),
+        {
+          sessionId: this.sessionId,
+          workDir,
+          qwenVersion: this.cliVersion ?? null,
+        },
+      );
+    });
+    await this.flushRuntimeStatusWrites();
   }
 
   /**
@@ -2477,6 +2664,8 @@ export class Config {
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
+      this.contentGeneratorConfig.toolResultContentFormat =
+        config.toolResultContentFormat;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -2496,6 +2685,10 @@ export class Config {
       if ('splitToolMedia' in sources) {
         this.contentGeneratorConfigSources['splitToolMedia'] =
           sources['splitToolMedia'];
+      }
+      if ('toolResultContentFormat' in sources) {
+        this.contentGeneratorConfigSources['toolResultContentFormat'] =
+          sources['toolResultContentFormat'];
       }
       return;
     }
@@ -2600,6 +2793,152 @@ export class Config {
     return this.targetDir;
   }
 
+  private getCurrentSessionArtifactMoves(
+    oldStorage: Storage,
+    newStorage: Storage,
+  ): Array<{ from: string; to: string }> {
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    return [
+      `${this.sessionId}.jsonl`,
+      `${this.sessionId}.runtime.json`,
+      `${this.sessionId}.worktree.json`,
+    ].map((fileName) => ({
+      from: path.join(oldChatsDir, fileName),
+      to: path.join(newChatsDir, fileName),
+    }));
+  }
+
+  private moveFile(from: string, to: string): void {
+    try {
+      fs.renameSync(from, to);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') {
+        throw error;
+      }
+      let copied = false;
+      try {
+        fs.copyFileSync(from, to);
+        copied = true;
+        fs.unlinkSync(from);
+      } catch (fallbackError) {
+        if (copied) {
+          try {
+            fs.unlinkSync(to);
+          } catch {
+            // Best-effort cleanup; surface the original fallback failure.
+          }
+        }
+        throw fallbackError;
+      }
+    }
+  }
+
+  private moveCurrentSessionArtifacts(
+    oldStorage: Storage,
+    newStorage: Storage,
+  ): void {
+    const moved: Array<{ from: string; to: string }> = [];
+    for (const { from, to } of this.getCurrentSessionArtifactMoves(
+      oldStorage,
+      newStorage,
+    )) {
+      if (!fs.existsSync(from)) {
+        continue;
+      }
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      try {
+        this.moveFile(from, to);
+        moved.push({ from, to });
+      } catch (error) {
+        for (const movedArtifact of moved.reverse()) {
+          try {
+            fs.mkdirSync(path.dirname(movedArtifact.from), {
+              recursive: true,
+            });
+            this.moveFile(movedArtifact.to, movedArtifact.from);
+          } catch (rollbackError) {
+            this.debugLogger.warn(
+              'Failed to roll back moved session artifact',
+              rollbackError,
+            );
+          }
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async prepareSessionArtifactMigration(
+    oldStorage: Storage,
+    newStorage: Storage,
+    oldDir: string,
+  ): Promise<void> {
+    this.chatRecordingService?.finalize();
+    await this.chatRecordingService?.flush();
+    await this.flushRuntimeStatusWrites();
+    try {
+      this.moveCurrentSessionArtifacts(oldStorage, newStorage);
+    } catch (error) {
+      try {
+        process.chdir(oldDir);
+      } catch (rollbackError) {
+        this.debugLogger.warn(
+          'Failed to roll back working directory after session artifact migration failed',
+          rollbackError,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async relocateWorkingDirectory(
+    newDir: string,
+    expectedCanonicalDir?: string,
+  ): Promise<{ memoryRefreshError?: unknown }> {
+    const oldDir = fs.realpathSync(process.cwd());
+    const targetPath = path.resolve(newDir);
+    const expected = expectedCanonicalDir ?? fs.realpathSync(targetPath);
+    if (!fs.statSync(targetPath).isDirectory()) {
+      throw new Error(`Path is not a directory: ${targetPath}`);
+    }
+    const workspaceDirectories = WorkspaceContext.resolveRootDirectories(
+      expected,
+      this.explicitIncludeDirectories,
+    );
+
+    process.chdir(targetPath);
+    const actualCwd = fs.realpathSync(process.cwd());
+    if (actualCwd !== expected) {
+      process.chdir(oldDir);
+      throw new Error(
+        `Changed directory to ${actualCwd}, expected ${expected}.`,
+      );
+    }
+
+    const oldStorage = this.storage;
+    const newStorage = new Storage(expected);
+    await this.prepareSessionArtifactMigration(oldStorage, newStorage, oldDir);
+
+    this.targetDir = expected;
+    this.cwd = expected;
+    this.storage = newStorage;
+    this.chatRecordingService?.resetStoragePaths();
+    await this.refreshCurrentRuntimeStatus(expected);
+    this.workspaceContext.applyRootDirectories(workspaceDirectories);
+    this.fileDiscoveryService = null;
+    this.sessionService = undefined;
+    this.fileHistoryService = undefined;
+    this.getFileReadCache().clear();
+
+    try {
+      await this.refreshHierarchicalMemory();
+      return {};
+    } catch (error) {
+      return { memoryRefreshError: error };
+    }
+  }
+
   /**
    * Stashes a one-shot context message that the next user prompt will
    * inject into the model (see {@link pendingStartupWorktreeNotice}). Called
@@ -2646,6 +2985,10 @@ export class Config {
    */
   async shutdown(): Promise<void> {
     try {
+      // Stop the settings watcher regardless of initialization state —
+      // it is started before Config.initialize() and would leak otherwise.
+      this.settingsWatcher?.stopWatching();
+
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
         return;
@@ -2920,6 +3263,31 @@ export class Config {
 
   isMcpServerDisabled(serverName: string): boolean {
     return this.excludedMcpServers?.includes(serverName) ?? false;
+  }
+
+  /**
+   * True for a project-scoped (`.mcp.json`) server that the user has not
+   * approved (pending or rejected). The discovery layer skips these BEFORE any
+   * stdio spawn / transport / health check, so inspecting an untrusted
+   * `.mcp.json` has no side effects. See issue #4615.
+   */
+  isMcpServerPendingApproval(serverName: string): boolean {
+    return this.pendingMcpServers?.includes(serverName) ?? false;
+  }
+
+  /**
+   * Drop a project server from the pending-approval set after the user approves
+   * it mid-session (via the startup dialog), so a subsequent
+   * `discoverToolsForServer` connects it instead of skipping it. See issue
+   * #4615. No-op for servers that were never pending.
+   */
+  approveMcpServerForSession(serverName: string): void {
+    if (!this.pendingMcpServers) {
+      return;
+    }
+    this.pendingMcpServers = this.pendingMcpServers.filter(
+      (name) => name !== serverName,
+    );
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
@@ -3207,6 +3575,15 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
+  /**
+   * Returns the Plan Approval Gate state for the current Plan Mode Entry, or
+   * undefined when not in plan mode. The returned object is mutable; callers
+   * may update its fields directly (e.g. review count, gate mode).
+   */
+  getPlanGateState(): PlanGateState | undefined {
+    return this.planGateState;
+  }
+
   setApprovalMode(mode: ApprovalMode): void {
     if (
       !this.isTrustedFolder() &&
@@ -3220,11 +3597,16 @@ export class Config {
     // Track the mode before entering plan mode so it can be restored later
     if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
       this.prePlanMode = this.approvalMode;
+      // Begin a fresh Plan Mode Entry for the Plan Approval Gate.
+      this.planGateState = createPlanGateState(++this.planGateEntryCounter);
     } else if (
       mode !== ApprovalMode.PLAN &&
       this.approvalMode === ApprovalMode.PLAN
     ) {
       this.prePlanMode = undefined;
+      // Successfully leaving PLAN clears all gate state (including any
+      // user_takeover marker, which only lives for the duration of PLAN).
+      this.planGateState = undefined;
     }
     // Strip over-broad allow rules (Bash interpreter wildcards, any Agent /
     // Skill allow) on AUTO entry; restore them on AUTO exit. Settings on
@@ -3412,6 +3794,10 @@ export class Config {
     return this.accessibility;
   }
 
+  getShowResponseTokensPerSecond(): boolean {
+    return this.showResponseTokensPerSecond;
+  }
+
   getTelemetryEnabled(): boolean {
     return this.telemetrySettings.enabled ?? false;
   }
@@ -3510,7 +3896,7 @@ export class Config {
 
   getCronScheduler(): CronScheduler {
     if (!this.cronScheduler) {
-      this.cronScheduler = new CronScheduler();
+      this.cronScheduler = new CronScheduler(this.getProjectRoot());
     }
     return this.cronScheduler;
   }
@@ -3526,11 +3912,6 @@ export class Config {
     return this.agentTeamEnabled;
   }
 
-  isForkSubagentEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
-    return this.forkSubagentEnabled;
-  }
-
   isWorkflowsEnabled(): boolean {
     // Workflows are experimental and opt-in: enabled via settings or env var
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
@@ -3543,8 +3924,30 @@ export class Config {
     this.workflowsEnabled = enabled;
   }
 
+  /**
+   * P5 T7: read the `skipWorkflowUsageWarning` setting. When `true`, the
+   * `Workflow` tool suppresses the one-time banner that announces the
+   * `QWEN_CODE_MAX_TOKENS_PER_WORKFLOW` env knob. The registry-side
+   * `shouldShowUsageWarning()` latch is still session-scoped, so even
+   * when this returns `false` the banner fires at most once per
+   * process.
+   */
+  getSkipWorkflowUsageWarning(): boolean {
+    return this.skipWorkflowUsageWarning;
+  }
+
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
+  }
+
+  /**
+   * Configured screenshot longest-edge cap for Computer Use, or `undefined`
+   * to leave cua-driver's built-in default (1568) in place. Resolved together
+   * with the `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION` env override at the point
+   * the driver connects (see `resolveMaxImageDimension`).
+   */
+  getComputerUseMaxImageDimension(): number | undefined {
+    return this.computerUseMaxImageDimension;
   }
 
   /**
@@ -3604,13 +4007,32 @@ export class Config {
     return this.fileCheckpointingEnabled;
   }
 
+  enableFileCheckpointing(): void {
+    this.fileCheckpointingEnabled = true;
+    this.fileHistoryService = undefined;
+  }
+
   getFileHistoryService(): FileHistoryService {
     if (!this.fileHistoryService) {
-      this.fileHistoryService = new FileHistoryService(
+      const service = new FileHistoryService(
         this.sessionId,
         this.fileCheckpointingEnabled,
         this.cwd,
+        (snapshot) => {
+          if (this.fileHistoryService !== service) return;
+          this.getChatRecordingService()?.recordFileHistorySnapshot(snapshot);
+        },
       );
+      this.fileHistoryService = service;
+      const snapshots = this.sessionData?.fileHistorySnapshots;
+      if (snapshots?.length && service.isEnabled()) {
+        service.restoreFromSnapshots(snapshots);
+        void service.validateRestoredSnapshots().catch((e) => {
+          this.debugLogger.error(
+            `FileHistory: validateRestoredSnapshots failed: ${e}`,
+          );
+        });
+      }
     }
     return this.fileHistoryService;
   }
@@ -3981,6 +4403,9 @@ export class Config {
         config.terminalHeight ?? this.shellExecutionConfig.terminalHeight,
       showColor: config.showColor ?? this.shellExecutionConfig.showColor,
       pager: config.pager ?? this.shellExecutionConfig.pager,
+      maxBufferedOutputBytes:
+        config.maxBufferedOutputBytes ??
+        this.shellExecutionConfig.maxBufferedOutputBytes,
     };
   }
   getScreenReader(): boolean {
@@ -4013,6 +4438,22 @@ export class Config {
     }
 
     return this.truncateToolOutputLines;
+  }
+
+  getToolOutputBatchBudget(): number {
+    if (this.toolOutputBatchBudget <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+
+    return this.toolOutputBatchBudget;
+  }
+
+  trackToolResultBytes(n: number): void {
+    this.toolResultBudget.bytesWritten += n;
+  }
+
+  getToolResultBytesWritten(): number {
+    return this.toolResultBudget.bytesWritten;
   }
 
   getOutputFormat(): OutputFormat {
@@ -4110,6 +4551,10 @@ export class Config {
     return this.backgroundShellRegistry;
   }
 
+  getWorkflowRunRegistry(): WorkflowRunRegistry {
+    return this.workflowRunRegistry;
+  }
+
   /**
    * Session-scoped cache that tracks Read / Edit / WriteFile operations
    * on files. The cache must be **per-Config-instance** so that each
@@ -4167,8 +4612,8 @@ export class Config {
   /**
    * Registers a provider that returns model-invocable commands (e.g., bundled
    * skills, user/project file commands, MCP prompts). Called by the CLI's
-   * CommandService after initialisation so that SkillTool can merge these into
-   * its tool description.
+   * CommandService after initialisation so that the startup snapshot and
+   * per-turn drain can include these in the `<available_skills>` listing.
    */
   setModelInvocableCommandsProvider(
     provider: () => ReadonlyArray<{ name: string; description: string }>,
@@ -4211,6 +4656,31 @@ export class Config {
       ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null {
     return this.modelInvocableCommandsExecutor;
+  }
+
+  /**
+   * Records skill keys that were announced inline on a tool result by
+   * `coreToolScheduler` (e.g. path-activated conditional skills). The
+   * client's `drainSkillAndCommandReminders` consumes these to mark them as
+   * announced and avoid a duplicate announcement in the same turn's tail
+   * reminder. Keys use the `"skill:<name>"` format matching
+   * `GeminiClient.skillEntryKey`.
+   */
+  addInlineAnnouncedSkillKeys(keys: Iterable<string>): void {
+    for (const k of keys) {
+      this.pendingInlineAnnouncedSkillKeys.add(k);
+    }
+  }
+
+  /**
+   * Returns and clears the set of skill keys announced inline since the last
+   * consumption. Idempotent — a second call returns an empty set until new
+   * keys are added.
+   */
+  consumeInlineAnnouncedSkillKeys(): Set<string> {
+    const result = this.pendingInlineAnnouncedSkillKeys;
+    this.pendingInlineAnnouncedSkillKeys = new Set();
+    return result;
   }
 
   getPermissionManager(): PermissionManager | null {
@@ -4422,6 +4892,10 @@ export class Config {
         const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
         return new ExitPlanModeTool(this);
       });
+      await registerLazy(ToolNames.ENTER_PLAN_MODE, async () => {
+        const { EnterPlanModeTool } = await import('../tools/enterPlanMode.js');
+        return new EnterPlanModeTool(this);
+      });
     }
     await registerLazy(ToolNames.ENTER_WORKTREE, async () => {
       const { EnterWorktreeTool } = await import('../tools/enter-worktree.js');
@@ -4462,6 +4936,12 @@ export class Config {
       await registerLazy(ToolNames.CRON_DELETE, async () => {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
+      });
+      // Reuses the cron scheduler's session-only one-shot path, so it is
+      // gated on the same flag as the cron tools.
+      await registerLazy(ToolNames.LOOP_WAKEUP, async () => {
+        const { LoopWakeupTool } = await import('../tools/loop-wakeup.js');
+        return new LoopWakeupTool(this);
       });
     }
 

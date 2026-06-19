@@ -17,6 +17,7 @@ import type {
   ShellExecutionResult,
 } from '@qwen-code/qwen-code-core';
 import {
+  compactToolResultDisplayForHistory,
   createDebugLogger,
   isBinary,
   ShellExecutionService,
@@ -35,6 +36,10 @@ export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const MAX_OUTPUT_LENGTH = 10000;
 const debugLogger = createDebugLogger('SHELL_COMMAND_PROCESSOR');
 
+function copyString(value: string): string {
+  return value.split('').join('');
+}
+
 function addShellCommandToGeminiHistory(
   geminiClient: GeminiClient,
   rawQuery: string,
@@ -42,7 +47,8 @@ function addShellCommandToGeminiHistory(
 ) {
   const modelContent =
     resultText.length > MAX_OUTPUT_LENGTH
-      ? resultText.substring(0, MAX_OUTPUT_LENGTH) + '\n... (truncated)'
+      ? copyString(resultText.substring(0, MAX_OUTPUT_LENGTH)) +
+        '\n... (truncated)'
       : resultText;
 
   geminiClient.addHistory({
@@ -220,8 +226,12 @@ export const useShellCommandProcessor = (
                               ...tool,
                               resultDisplay:
                                 typeof currentDisplayOutput === 'string'
-                                  ? currentDisplayOutput
-                                  : { ansiOutput: currentDisplayOutput },
+                                  ? compactToolResultDisplayForHistory(
+                                      currentDisplayOutput,
+                                    )
+                                  : compactToolResultDisplayForHistory({
+                                      ansiOutput: currentDisplayOutput,
+                                    }),
                             }
                           : tool,
                       ),
@@ -297,10 +307,10 @@ export const useShellCommandProcessor = (
               const finalToolDisplay: IndividualToolCallDisplay = {
                 ...initialToolDisplay,
                 status: finalStatus,
-                resultDisplay: finalOutput,
+                resultDisplay: compactToolResultDisplayForHistory(finalOutput),
               };
 
-              // Add the complete, contextual result to the local UI history.
+              // Add the compacted, contextual result to the local UI history.
               addItemToHistory(
                 {
                   type: 'tool_group',
@@ -310,7 +320,7 @@ export const useShellCommandProcessor = (
                 userMessageTimestamp,
               );
 
-              // Add the same complete, contextual result to the LLM's history.
+              // Keep the existing LLM history behavior unchanged.
               addShellCommandToGeminiHistory(
                 geminiClient,
                 rawQuery,

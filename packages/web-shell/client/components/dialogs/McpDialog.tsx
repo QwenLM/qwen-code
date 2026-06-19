@@ -22,6 +22,29 @@ interface ServerAction {
   run: () => void;
 }
 
+interface RestartEntry {
+  entryIndex: number;
+  restarted: boolean;
+  durationMs?: number;
+  reason?: string;
+}
+
+interface RestartEntriesResult {
+  serverName: string;
+  entries: RestartEntry[];
+}
+
+function isRestartEntriesResult(
+  result: unknown,
+): result is RestartEntriesResult {
+  return (
+    typeof result === 'object' &&
+    result !== null &&
+    'entries' in result &&
+    Array.isArray((result as { entries?: unknown }).entries)
+  );
+}
+
 function getServerStatus(server: DaemonWorkspaceMcpServerStatus): string {
   if (server.disabled) {
     return server.disabledReason
@@ -225,7 +248,25 @@ export function McpDialog({ onClose }: McpDialogProps) {
       setMessage(null);
       restartServer(serverName)
         .then((result) => {
-          if (result.restarted) {
+          if (isRestartEntriesResult(result)) {
+            const restartedCount = result.entries.filter(
+              (entry) => entry.restarted,
+            ).length;
+            const failedReasons = result.entries
+              .filter((entry) => !entry.restarted)
+              .map(
+                (entry) => `#${entry.entryIndex}: ${entry.reason ?? 'unknown'}`,
+              )
+              .join(', ');
+            setMessage(
+              t('mcp.restartEntries', {
+                name: result.serverName,
+                restarted: restartedCount,
+                total: result.entries.length,
+                failedReasons,
+              }),
+            );
+          } else if (result.restarted) {
             setMessage(
               t('mcp.restarted', {
                 name: result.serverName,
@@ -423,7 +464,7 @@ export function McpDialog({ onClose }: McpDialogProps) {
         <button
           className={dp('resume-picker-close')}
           onClick={onClose}
-          title="Close"
+          title={t('common.close')}
         >
           ESC
         </button>

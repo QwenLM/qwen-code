@@ -149,9 +149,9 @@ import {
   resolveOutputLanguage,
   isAutoLanguage,
   OUTPUT_LANGUAGE_AUTO,
-
   getOutputLanguageFilePath,
-  writeOutputLanguageAndRegisterPath} from '../utils/languageUtils.js';
+  writeOutputLanguageAndRegisterPath,
+} from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -214,6 +214,24 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 // Must be less than SESSION_BTW_TIMEOUT_MS (60s) in bridge.ts so the child
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
+
+function sanitizeProviderBaseUrl(baseUrl: string): string {
+  const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
+  if (!scheme) {
+    return baseUrl;
+  }
+
+  const authorityStart = scheme[0].length;
+  const rest = baseUrl.slice(authorityStart);
+  const authorityEnd = rest.search(/[/?#]/);
+  const authority = authorityEnd === -1 ? rest : rest.slice(0, authorityEnd);
+  const at = authority.lastIndexOf('@');
+  if (at === -1) {
+    return baseUrl;
+  }
+
+  return `${baseUrl.slice(0, authorityStart)}${authority.slice(at + 1)}${rest.slice(authority.length)}`;
+}
 
 /**
  * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
@@ -1481,7 +1499,7 @@ function readExistingProviderConfig(
 
   return {
     protocol,
-    baseUrl,
+    baseUrl: sanitizeProviderBaseUrl(baseUrl),
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
     ...(apiKey ? { hasApiKey: true } : {}),
@@ -1496,18 +1514,10 @@ function readExistingProviderConfig(
 function resolveExistingProviderApiKey(
   config: ProviderConfig,
   settings: LoadedSettings,
+  protocol: ProviderConfig['protocol'],
+  baseUrl: string,
 ): string | undefined {
-  const existing = findExistingProviderModels(config, settings);
-  const firstModel = existing?.models[0];
-  const protocol = existing?.protocol ?? config.protocol;
-  const baseUrl =
-    typeof firstModel?.baseUrl === 'string'
-      ? firstModel.baseUrl
-      : resolveBaseUrl(config);
-  const envKey =
-    typeof firstModel?.envKey === 'string'
-      ? firstModel.envKey
-      : resolveProviderEnvKey(config, protocol, baseUrl);
+  const envKey = resolveProviderEnvKey(config, protocol, baseUrl);
   return readSettingsEnv(settings, envKey);
 }
 
@@ -1546,7 +1556,10 @@ function serializeProviderConfig(
 function readProviderSetupInputs(
   config: ProviderConfig,
   params: Record<string, unknown>,
-  existingApiKey?: string,
+  resolveExistingApiKey?: (
+    protocol: ProviderConfig['protocol'],
+    baseUrl: string,
+  ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
     | AuthType
@@ -1579,7 +1592,8 @@ function readProviderSetupInputs(
   // `apiKey` is optional on update: when the client omits it (e.g. it only
   // received `hasApiKey` from the list response), fall back to the stored key.
   const apiKey =
-    readOptionalString(params['apiKey'], 'apiKey') ?? existingApiKey;
+    readOptionalString(params['apiKey'], 'apiKey') ??
+    resolveExistingApiKey?.(protocol ?? config.protocol, baseUrl);
   if (!apiKey) {
     throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
   }
@@ -1739,10 +1753,17 @@ function normalizeStringRecord(
 
 function normalizeOptionalNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
-  const numberValue =
-    typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (!Number.isFinite(numberValue) || numberValue <= 0) {
-    throw RequestError.invalidParams(undefined, 'Expected a positive number');
+  let numberValue: number;
+  if (typeof value === 'number') {
+    numberValue = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    numberValue = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  } else {
+    numberValue = Number.NaN;
+  }
+  if (!Number.isInteger(numberValue) || numberValue <= 0) {
+    throw RequestError.invalidParams(undefined, 'Expected a positive integer');
   }
   return numberValue;
 }
@@ -2241,30 +2262,13 @@ export async function runAcpAgent(
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
-  // Skip MCP discovery in the BOOTSTRAP config. Bootstrap MCP clients
-  // are never used to serve a session (each session runs its own
-  // discovery), so skipping here avoids spawning every server twice.
-  const bootstrapSkipsMcpDiscovery = true;
   await config.initialize({
     skipGeminiInitialization: true,
-    skipMcpDiscovery: bootstrapSkipsMcpDiscovery,
+    // Bootstrap skips MCP discovery — each session runs its own
+    // pool-routed discovery, so bootstrap-level spawns would be
+    // redundant subprocess leaks (W119).
+    skipMcpDiscovery: true,
   });
-  // Skip the MCP failure warning when discovery was intentionally
-  // bypassed — per-session paths surface real failures through their
-  // own status routes / events.
-  if (!bootstrapSkipsMcpDiscovery) {
-    await config.waitForMcpReady();
-    const failedMcpServers =
-      typeof config.getFailedMcpServerNames === 'function'
-        ? config.getFailedMcpServerNames()
-        : [];
-    if (failedMcpServers.length > 0) {
-      process.stderr.write(
-        `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
-          `Continuing with built-in tools and any servers that did connect.\n`,
-      );
-    }
-  }
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
   const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -3025,6 +3029,7 @@ class QwenAgent implements Agent {
       const extensionManager = new ExtensionManager({
         workspaceDir: cwd,
         isWorkspaceTrusted: settings.isTrusted,
+        locale: getCurrentLanguage(),
       });
       await extensionManager.refreshCache();
       extensions = extensionManager.getLoadedExtensions();
@@ -3051,6 +3056,7 @@ class QwenAgent implements Agent {
         return {
           id: extension.id,
           name: extension.name,
+          displayName: extension.displayName,
           version: extension.version,
           isActive: extension.isActive,
           path: extension.path,
@@ -3096,11 +3102,18 @@ class QwenAgent implements Agent {
         'extension',
       ).map((entry) => ({
         ...entry,
-        server: { ...entry.server, extensionName: extension.name },
+        server: {
+          ...entry.server,
+          extensionName: extension.displayName ?? extension.name,
+        },
       })),
     );
     const extensionHooks = activeExtensions.flatMap((extension) =>
-      readHooks({ hooks: extension.hooks ?? {} }, 'extension', extension.name),
+      readHooks(
+        { hooks: extension.hooks ?? {} },
+        'extension',
+        extension.displayName ?? extension.name,
+      ),
     );
 
     // Build the merged MCP/hook lists from the user and workspace settings
@@ -3741,7 +3754,9 @@ class QwenAgent implements Agent {
           ...(model.modalities !== undefined
             ? { modalities: model.modalities }
             : {}),
-          ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
+          ...(model.baseUrl !== undefined
+            ? { baseUrl: sanitizeProviderBaseUrl(model.baseUrl) }
+            : {}),
           ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
           isCurrent,
           isRuntime: model.isRuntimeModel === true,
@@ -3763,7 +3778,9 @@ class QwenAgent implements Agent {
               current: {
                 ...(currentAuth ? { authType: String(currentAuth) } : {}),
                 ...(currentAcpModelId ? { modelId: currentAcpModelId } : {}),
-                ...(baseUrl ? { baseUrl } : {}),
+                ...(baseUrl
+                  ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) }
+                  : {}),
                 ...(fastModelId ? { fastModelId } : {}),
               },
             }
@@ -4508,6 +4525,7 @@ class QwenAgent implements Agent {
             kind: 'extension',
             id: ext.id,
             name: ext.name,
+            displayName: ext.displayName,
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
@@ -4831,7 +4849,13 @@ class QwenAgent implements Agent {
         const inputs = readProviderSetupInputs(
           providerConfig,
           params,
-          resolveExistingProviderApiKey(providerConfig, this.settings),
+          (protocol, baseUrl) =>
+            resolveExistingProviderApiKey(
+              providerConfig,
+              this.settings,
+              protocol,
+              baseUrl,
+            ),
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
@@ -4839,10 +4863,10 @@ class QwenAgent implements Agent {
           settings: createLoadedSettingsAdapter(this.settings, persistScope),
           reloadModelProviders: (modelProviders) =>
             this.config.reloadModelProvidersConfig(modelProviders),
-          syncAuthState: (authType, modelId) =>
+          syncAuthState: (authType, modelId, baseUrl) =>
             this.config
               .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId),
+              .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => this.config.refreshAuth(authType),
         });
 
@@ -4852,6 +4876,9 @@ class QwenAgent implements Agent {
           providerLabel: providerConfig.label,
           authType: plan.authType,
           modelId: plan.modelSelection?.modelId,
+          ...(plan.modelSelection?.baseUrl
+            ? { baseUrl: plan.modelSelection.baseUrl }
+            : {}),
         };
       }
       case 'qwen/skills/install': {
@@ -5794,6 +5821,14 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const cleared = unregisterGoalHook(config, sessionId);
+        if (cleared) {
+          session.emitGoalStatus({
+            kind: 'cleared',
+            condition: cleared.condition,
+            iterations: cleared.iterations,
+            durationMs: Date.now() - cleared.setAt,
+          });
+        }
         debugLogger.info(
           `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
         );
@@ -6140,6 +6175,16 @@ class QwenAgent implements Agent {
           sendUpdate: async (update) => {
             updates.push(update);
           },
+          // Fresh accumulator for this replay: MessageEmitter advances it from
+          // replayed usage metadata (tokens only — no per-turn durations) and
+          // PlanEmitter snapshots it onto each todo update, so resumed sessions
+          // recover per-task token spend (API time stays live-only).
+          cumulativeUsage: {
+            promptTokens: 0,
+            cachedTokens: 0,
+            candidateTokens: 0,
+            apiTimeMs: 0,
+          },
         };
         let replayError: string | undefined;
         try {
@@ -6210,7 +6255,7 @@ class QwenAgent implements Agent {
         return {
           authType: cfg?.authType ?? config.getAuthType() ?? null,
           model: cfg?.model ?? config.getModel() ?? null,
-          baseUrl: cfg?.baseUrl ?? null,
+          baseUrl: cfg?.baseUrl ? sanitizeProviderBaseUrl(cfg.baseUrl) : null,
           apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
         };
       }
@@ -6312,6 +6357,13 @@ class QwenAgent implements Agent {
         );
         const scope = toSettingsScope(params['scope']);
         settings.setValue(scope, key, normalizedValue);
+        if (settingKey === 'model.name') {
+          // Selecting a model by id here can't disambiguate providers that
+          // share that id, so clear the paired baseUrl disambiguator left by a
+          // previous model-picker selection. Empty-string tombstone overrides a
+          // lower-scope value on merge (undefined would be dropped from JSON).
+          settings.setValue(scope, 'model.baseUrl', '');
+        }
         if (
           settingKey === 'general.outputLanguage' &&
           typeof normalizedValue === 'string' &&
@@ -6481,7 +6533,9 @@ class QwenAgent implements Agent {
         const settings = loadSettings(cwd);
         const extensionManager = new ExtensionManager({
           workspaceDir: cwd,
-          isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+          isWorkspaceTrusted:
+            isWorkspaceTrusted(settings.merged).isTrusted ?? true,
+          locale: getCurrentLanguage(),
         });
         await extensionManager.refreshCache();
         const extension = extensionManager
@@ -6683,7 +6737,12 @@ class QwenAgent implements Agent {
     resume?: boolean,
   ): Promise<Config> {
     this.settings = loadSettings(cwd);
-    const mergedMcpServers = { ...this.settings.merged.mcpServers };
+    // ACP/IDE-injected servers are session-level: they must outrank a project
+    // `.mcp.json` and stay un-gated. Collect them separately and pass them as
+    // `sessionMcpServers` (top precedence tier) rather than merging into
+    // `settings.mcpServers`, where `assembleMcpServers` would demote them below
+    // `.mcp.json` (#4615).
+    const sessionMcpServers: Record<string, MCPServerConfig> = {};
 
     for (const server of mcpServers) {
       const stdioServer = toStdioServer(server);
@@ -6692,7 +6751,7 @@ class QwenAgent implements Agent {
         for (const { name: envName, value } of stdioServer.env) {
           env[envName] = value;
         }
-        mergedMcpServers[stdioServer.name] = new MCPServerConfig(
+        sessionMcpServers[stdioServer.name] = new MCPServerConfig(
           stdioServer.command,
           stdioServer.args,
           env,
@@ -6707,7 +6766,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of sseServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[sseServer.name] = new MCPServerConfig(
+        sessionMcpServers[sseServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6725,7 +6784,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of httpServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[httpServer.name] = new MCPServerConfig(
+        sessionMcpServers[httpServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6738,7 +6797,7 @@ class QwenAgent implements Agent {
       }
     }
 
-    const settings = { ...this.settings.merged, mcpServers: mergedMcpServers };
+    const settings = this.settings.merged;
     const argvForSession = {
       ...this.argv,
       ...(resume ? { resume: sessionId } : { sessionId }),
@@ -6749,7 +6808,10 @@ class QwenAgent implements Agent {
       settings,
       argvForSession,
       cwd,
-      [],
+      // ACP sessions do not provide an extension override. Passing [] is a
+      // truthy override and prevents default/argv extension commands from
+      // loading, so leave it unset to preserve normal CLI behavior.
+      undefined,
       // Pass separated hooks for proper source attribution
       {
         userHooks: this.settings.getUserHooks(),
@@ -6762,7 +6824,14 @@ class QwenAgent implements Agent {
       // sessions otherwise leak persisted disabled skills into the first
       // <available_skills> at cold start.
       buildDisabledSkillNamesProvider(this.settings),
+      sessionMcpServers,
     );
+    // ACP sessions run with piped stdio (non-TTY), so the default
+    // interactive-based gating disables file checkpointing. Enable it
+    // explicitly so /rewind works across daemon session resume.
+    if (typeof config.enableFileCheckpointing === 'function') {
+      config.enableFileCheckpointing();
+    }
     // Inject the workspace-shared MCP transport pool BEFORE
     // `config.initialize()` so the ToolRegistry picks it up.
     if (
@@ -6895,6 +6964,9 @@ class QwenAgent implements Agent {
 
     // Install rewriter AFTER history replay to avoid rewriting historical messages
     session.installRewriter();
+
+    // After replay so a durable cron fire can't interleave with it.
+    session.startCronScheduler();
 
     return session;
   }

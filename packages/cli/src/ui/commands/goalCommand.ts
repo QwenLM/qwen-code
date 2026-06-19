@@ -208,6 +208,7 @@ export const goalCommand: SlashCommand = {
       type: MessageType.GOAL_STATUS,
       kind: 'set',
       condition: registered.condition,
+      setAt: registered.setAt,
     };
     context.ui.addItem(setItem, Date.now());
 

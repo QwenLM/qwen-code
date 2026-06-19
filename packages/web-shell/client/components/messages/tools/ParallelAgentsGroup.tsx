@@ -96,8 +96,6 @@ export function ParallelAgentsGroup({
       <div className={styles.header}>
         <span>{t('parallelAgents.title')}</span>
         <span className={styles.headerDot}>·</span>
-        <span className={styles.headerTotal}>{total}</span>
-        <span className={styles.headerDot}>·</span>
         <span className={styles.headerCount}>
           {t('parallelAgents.done', { done: doneCount, total })}
         </span>
@@ -106,7 +104,7 @@ export function ParallelAgentsGroup({
         {agents.map((agent) => {
           const agentType = getAgentType(agent);
           const desc = getAgentDescription(agent);
-          const toolHint = getAgentCurrentToolHint(agent);
+          const toolHint = getAgentCurrentToolHint(agent, t);
           const stats = getAgentStats(agent, now);
           const status = getAgentDisplayStatus(agent);
           const isExpanded = expandedId === agent.callId;

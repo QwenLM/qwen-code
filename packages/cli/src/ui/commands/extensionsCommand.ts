@@ -11,14 +11,16 @@ import {
   type SlashCommand,
   CommandKind,
 } from './types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import {
   ExtensionManager,
+  openBrowserSecurely,
   parseInstallSource,
   createDebugLogger,
   redactUrlCredentials,
+  getExtensionDisplayName,
+  getExtensionDescription,
 } from '@qwen-code/qwen-code-core';
-import open from 'open';
 
 const debugLogger = createDebugLogger('EXTENSIONS_COMMAND');
 const EXTENSION_EXPLORE_URL = {
@@ -85,7 +87,7 @@ async function exploreAction(context: CommandContext, args: string) {
       Date.now(),
     );
     try {
-      await open(extensionsUrl);
+      await openBrowserSecurely(extensionsUrl);
     } catch (_error) {
       context.ui.addItem(
         {
@@ -144,20 +146,20 @@ async function listTextAction(context: CommandContext, _args: string) {
   }
 
   const active = extensions.filter((e) => e.isActive);
-  let output = t('**Installed Extensions ({{total}} total, {{active}} active)**', {
-    total: String(extensions.length),
-    active: String(active.length),
-  }) + '\n\n';
+  let output =
+    t('**Installed Extensions ({{total}} total, {{active}} active)**', {
+      total: String(extensions.length),
+      active: String(active.length),
+    }) + '\n\n';
 
+  const locale = getCurrentLanguage();
   for (const ext of extensions) {
     const status = ext.isActive ? '✓' : '✗';
-    const source = ext.installMetadata?.source
-      ? ` (${redactUrlCredentials(ext.installMetadata.source)})`
-      : '';
+    const displayLabel = getExtensionDisplayName(ext, locale);
+    const description = getExtensionDescription(ext, locale);
+
     const caps: string[] = [];
-    const mcpCount = ext.mcpServers
-      ? Object.keys(ext.mcpServers).length
-      : 0;
+    const mcpCount = ext.mcpServers ? Object.keys(ext.mcpServers).length : 0;
     if (mcpCount > 0) {
       caps.push(t('{{count}} MCP servers', { count: String(mcpCount) }));
     }
@@ -165,10 +167,20 @@ async function listTextAction(context: CommandContext, _args: string) {
       caps.push(t('{{count}} skills', { count: String(ext.skills.length) }));
     }
     if (ext.commands && ext.commands.length > 0) {
-      caps.push(t('{{count}} commands', { count: String(ext.commands.length) }));
+      caps.push(
+        t('{{count}} commands', { count: String(ext.commands.length) }),
+      );
     }
     const capsStr = caps.length > 0 ? ` [${caps.join(', ')}]` : '';
-    output += `- [${status}] **${ext.name}** v${ext.version}${source}${capsStr}\n`;
+    output += `- [${status}] **${displayLabel}**${capsStr}\n`;
+    if (description) {
+      const maxLen = 80;
+      const truncated =
+        description.length > maxLen
+          ? description.slice(0, maxLen - 1) + '…'
+          : description;
+      output += `  ${truncated}\n`;
+    }
   }
 
   return {

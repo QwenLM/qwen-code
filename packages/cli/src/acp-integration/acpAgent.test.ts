@@ -139,22 +139,45 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
       uiGroup: 'third-party',
     },
   ],
-  findProviderById: vi.fn((id: string) =>
-    id === 'deepseek'
-      ? {
-          id: 'deepseek',
-          label: 'DeepSeek API Key',
-          description: 'Quick setup for DeepSeek',
-          protocol: 'openai',
-          baseUrl: 'https://api.deepseek.com',
-          envKey: 'DEEPSEEK_API_KEY',
-          models: [{ id: 'deepseek-chat' }],
-          modelsEditable: true,
-          modelNamePrefix: 'DeepSeek',
-          uiGroup: 'third-party',
-        }
-      : undefined,
-  ),
+  findProviderById: vi.fn((id: string) => {
+    if (id === 'deepseek') {
+      return {
+        id: 'deepseek',
+        label: 'DeepSeek API Key',
+        description: 'Quick setup for DeepSeek',
+        protocol: 'openai',
+        baseUrl: 'https://api.deepseek.com',
+        envKey: 'DEEPSEEK_API_KEY',
+        models: [{ id: 'deepseek-chat' }],
+        modelsEditable: true,
+        modelNamePrefix: 'DeepSeek',
+        uiGroup: 'third-party',
+      };
+    }
+    if (id === 'custom-openai-compatible') {
+      return {
+        id: 'custom-openai-compatible',
+        label: 'Custom Provider',
+        description: 'Manually connect a custom provider',
+        protocol: 'openai',
+        protocolOptions: ['openai', 'anthropic', 'gemini'],
+        baseUrl: undefined,
+        envKey: (protocol: string, baseUrl: string) =>
+          `QWEN_CUSTOM_API_KEY_${protocol}_${baseUrl.replace(
+            /[^A-Za-z0-9]/g,
+            '_',
+          )}`,
+        models: undefined,
+        modelsEditable: true,
+        modelNamePrefix: '',
+        uiGroup: 'third-party',
+        ownsModel: (model: { envKey?: string }) =>
+          typeof model.envKey === 'string' &&
+          model.envKey.startsWith('QWEN_CUSTOM_API_KEY_'),
+      };
+    }
+    return undefined;
+  }),
   getDefaultBaseUrlForProtocol: vi.fn(() => 'https://api.openai.com/v1'),
   getDefaultModelIds: vi.fn(
     (provider: { models?: Array<{ id: string }> }) =>
@@ -172,8 +195,12 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
           : (selectedBaseUrl ?? ''),
   ),
   resolveOwnsModel: vi.fn(
-    (provider: { envKey: string }) => (model: { envKey?: string }) =>
-      model.envKey === provider.envKey,
+    (provider: {
+      envKey: string;
+      ownsModel?: (model: { envKey?: string }) => boolean;
+    }) =>
+      provider.ownsModel ??
+      ((model: { envKey?: string }) => model.envKey === provider.envKey),
   ),
   ExtensionManager: vi.fn().mockImplementation(() => ({
     refreshCache: mockExtensionManagerState.refreshCache,
@@ -206,12 +233,19 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     TodoCreated: 'TodoCreated',
     TodoCompleted: 'TodoCompleted',
   },
-  buildInstallPlan: vi.fn((provider, inputs) => ({
-    providerId: provider.id,
-    authType: inputs.protocol ?? provider.protocol,
-    env: { [provider.envKey]: inputs.apiKey },
-    modelSelection: { modelId: inputs.modelIds[0] },
-  })),
+  buildInstallPlan: vi.fn((provider, inputs) => {
+    const authType = inputs.protocol ?? provider.protocol;
+    const envKey =
+      typeof provider.envKey === 'function'
+        ? provider.envKey(authType, inputs.baseUrl)
+        : provider.envKey;
+    return {
+      providerId: provider.id,
+      authType,
+      env: { [envKey]: inputs.apiKey },
+      modelSelection: { modelId: inputs.modelIds[0] },
+    };
+  }),
   applyProviderInstallPlan: vi.fn().mockResolvedValue({
     updatedModelProviders: {},
   }),
@@ -1015,6 +1049,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   let lastSessionMock:
     | {
         captureHistorySnapshot: ReturnType<typeof vi.fn>;
+        emitGoalStatus: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
       }
@@ -1138,6 +1173,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -1162,6 +1198,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
       ],
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('getAccountInfo sanitizes credentials from baseUrl', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getAuthType: vi.fn().mockReturnValue('openai'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        authType: 'openai',
+        model: 'qwen-plus',
+        baseUrl: 'https://user:sk-secret@api.example.com/v1',
+        apiKeyEnvKey: 'OPENAI_API_KEY',
+      }),
+    } as unknown as Config;
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const accountInfo = await agent.extMethod('getAccountInfo', {});
+
+    expect(accountInfo).toEqual({
+      authType: 'openai',
+      model: 'qwen-plus',
+      baseUrl: 'https://api.example.com/v1',
+      apiKeyEnvKey: 'OPENAI_API_KEY',
+    });
+    expect(JSON.stringify(accountInfo)).not.toContain('sk-secret');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -1278,7 +1351,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        emitGoalStatus: vi.fn(),
         captureHistorySnapshot: vi
           .fn()
           .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
@@ -1352,7 +1427,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           description: 'General coding model',
           authType: 'qwen',
           contextWindowSize: 65_536,
-          baseUrl: 'https://secret.example.com',
+          baseUrl: 'https://user:sk-secret@api.example.com',
           envKey: 'DASHSCOPE_API_KEY',
         },
       ]),
@@ -1470,7 +1545,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               name: 'Qwen Plus',
               description: 'General coding model',
               contextLimit: 65_536,
-              baseUrl: 'https://secret.example.com',
+              baseUrl: 'https://api.example.com',
               envKey: 'DASHSCOPE_API_KEY',
               isCurrent: true,
               isRuntime: false,
@@ -1479,7 +1554,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
     });
-
+    expect(JSON.stringify(providers)).not.toContain('sk-secret');
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -2260,6 +2335,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).resolves.toEqual({ cleared: true, condition: 'ship it' });
     expect(unregisterGoalHook).toHaveBeenCalledWith(innerConfig, sessionId);
+    expect(lastSessionMock?.emitGoalStatus).toHaveBeenCalledWith({
+      kind: 'cleared',
+      condition: 'ship it',
+      iterations: 1,
+      durationMs: expect.any(Number),
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2468,6 +2549,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       workspace: expect.objectContaining({ values: expect.anything() }),
       merged: expect.objectContaining({ values: expect.anything() }),
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setCoreValue clears model.baseUrl when setting model.name', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/settings/setCoreValue', {
+      scope: 'user',
+      key: 'model.name',
+      value: 'qwen3.7-max',
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'model.name',
+      'qwen3.7-max',
+    );
+    // Id-only selection must clear the paired baseUrl disambiguator (tombstone).
+    expect(settings.setValue).toHaveBeenCalledWith('User', 'model.baseUrl', '');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2780,6 +2883,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings/setMcpServer rejects malformed timeout strings', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setMcpServer', {
+        scope: 'user',
+        name: 'bad-timeout',
+        server: { transport: 'stdio', command: 'node', timeout: '10ms' },
+      }),
+    ).rejects.toThrowError(/Expected a positive integer/);
+
+    await expect(
+      agent.extMethod('qwen/settings/setMcpServer', {
+        scope: 'user',
+        name: 'fractional-timeout',
+        server: { transport: 'stdio', command: 'node', timeout: '1.5' },
+      }),
+    ).rejects.toThrowError(/Expected a positive integer/);
+
+    await agent.extMethod('qwen/settings/setMcpServer', {
+      scope: 'user',
+      name: 'valid-timeout',
+      server: { transport: 'stdio', command: 'node', timeout: '1500' },
+    });
+
+    const persisted = vi
+      .mocked(settings.setValue)
+      .mock.calls.find((call) => call[1] === 'mcpServers')?.[2] as {
+      'valid-timeout': { timeout: number };
+    };
+    expect(persisted['valid-timeout'].timeout).toBe(1500);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings/removeMcpServer drops the named server and rejects a missing name', async () => {
     const settings = makeCoreSettings();
     (settings.user.settings as Record<string, unknown>)['mcpServers'] = {
@@ -2873,6 +3013,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       .mock.calls.filter((call) => call[1] === 'hooks');
     expect(hookWrites.at(-2)?.[2]).toHaveProperty('PostToolBatch');
     expect(hookWrites.at(-1)?.[2]).toHaveProperty('UserPromptExpansion');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setHook rejects malformed timeout strings', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setHook', {
+        scope: 'user',
+        event: 'PreToolUse',
+        hook: {
+          hooks: [{ type: 'command', command: 'echo hi', timeout: '10ms' }],
+        },
+      }),
+    ).rejects.toThrowError(/Expected a positive integer/);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3211,7 +3369,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           openai: [
             {
               id: 'deepseek-chat',
-              baseUrl: 'https://api.deepseek.com',
+              baseUrl: 'https://user:sk-provider@api.deepseek.com/v1',
               envKey: 'DEEPSEEK_API_KEY',
             },
             {
@@ -3233,19 +3391,21 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     }) as AgentLike;
 
-    await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual({
+    const providers = await agent.extMethod('qwen/providers/list', {});
+    expect(providers).toEqual({
       providers: [
         expect.objectContaining({
           id: 'deepseek',
           existingConfig: {
             protocol: 'openai',
-            baseUrl: 'https://api.deepseek.com',
+            baseUrl: 'https://api.deepseek.com/v1',
             hasApiKey: true,
             modelIds: ['deepseek-chat'],
           },
         }),
       ],
     });
+    expect(JSON.stringify(providers)).not.toContain('sk-provider');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3720,6 +3880,78 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/connect reuses the custom apiKey for the requested baseUrl only', async () => {
+    const customEnvKey = (protocol: string, baseUrl: string) =>
+      `QWEN_CUSTOM_API_KEY_${protocol}_${baseUrl.replace(
+        /[^A-Za-z0-9]/g,
+        '_',
+      )}`;
+    const firstBaseUrl = 'https://api.first.example/v1';
+    const secondBaseUrl = 'https://api.second.example/v1';
+    const firstEnvKey = customEnvKey('openai', firstBaseUrl);
+    const secondEnvKey = customEnvKey('openai', secondBaseUrl);
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: {
+          [firstEnvKey]: 'sk-first',
+          [secondEnvKey]: 'sk-second',
+        },
+        modelProviders: {
+          openai: [
+            {
+              id: 'custom-model',
+              baseUrl: firstBaseUrl,
+              envKey: firstEnvKey,
+            },
+            {
+              id: 'custom-model',
+              baseUrl: secondBaseUrl,
+              envKey: secondEnvKey,
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        baseUrl: secondBaseUrl,
+        modelIds: ['custom-model'],
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'custom-openai-compatible',
+    });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        apiKey: 'sk-second',
+        baseUrl: secondBaseUrl,
+      }),
+    );
+    expect(buildInstallPlan).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ apiKey: 'sk-first' }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/skills setEnabled resolves user and project skill files through ACP', async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
     const tempProject = await fs.mkdtemp(
@@ -4155,6 +4387,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
     });
@@ -4746,6 +4979,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it('passes undefined (not []) as the extension override to loadCliConfig', async () => {
+    await setupSessionMocks('session-ext-override');
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // [] is truthy and silently blocks all extension commands (#5216).
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[3]).toBeUndefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 });
 
 // Regression coverage for the MR-review finding that ACP renameSession
@@ -4865,6 +5122,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
     );
@@ -5124,6 +5382,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       };
       lastSessionMock = sessionMock;
@@ -5836,6 +6095,7 @@ describe('sessionLanguage multi-session propagation', () => {
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       };
       sessionIdx++;
@@ -5935,6 +6195,7 @@ describe('sessionLanguage multi-session propagation', () => {
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
     });

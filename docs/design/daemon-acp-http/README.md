@@ -17,7 +17,7 @@ over the standard protocol — no qwen-specific REST knowledge required.
 
 **Decision: dual-transport, additive.** The new `/acp` endpoint is mounted
 alongside the existing REST surface, reusing the same `HttpAcpBridge` +
-`EventBus` underneath. The REST API is *not* removed. Rationale in §6.
+`EventBus` underneath. The REST API is _not_ removed. Rationale in §6.
 
 **Decision: extension namespace = `_qwen/…`** (single-underscore prefix, the
 ACP-spec-reserved form for custom methods) for daemon features that have no
@@ -85,11 +85,11 @@ Not yet normative; not yet in any SDK. We implement against the RFD wire design.
 
 ### 2.1 Endpoint & verbs (single `/acp`)
 
-| Verb | Behavior |
-|------|----------|
-| `POST /acp` | Send JSON-RPC. `initialize` → **`200`** + JSON body (capabilities) and sets `Acp-Connection-Id`. All other requests/notifications → **`202 Accepted`**, empty body; the *response* (if any) is delivered on the matching long-lived SSE stream. |
-| `GET /acp` | Open a long-lived **SSE** stream. (`Upgrade: websocket` → WebSocket; **deferred**, see §7.) |
-| `DELETE /acp` | Terminate the connection → `202`. |
+| Verb          | Behavior                                                                                                                                                                                                                                        |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /acp`   | Send JSON-RPC. `initialize` → **`200`** + JSON body (capabilities) and sets `Acp-Connection-Id`. All other requests/notifications → **`202 Accepted`**, empty body; the _response_ (if any) is delivered on the matching long-lived SSE stream. |
+| `GET /acp`    | Open a long-lived **SSE** stream. (`Upgrade: websocket` → WebSocket; **deferred**, see §7.)                                                                                                                                                     |
+| `DELETE /acp` | Terminate the connection → `202`.                                                                                                                                                                                                               |
 
 ### 2.2 Two-tier long-lived streams
 
@@ -153,13 +153,13 @@ client  ────────────────────────
 
 ### 3.1 New module layout (`packages/cli/src/serve/acpHttp/`)
 
-| File | Responsibility |
-|------|----------------|
-| `index.ts` | `mountAcpHttp(app, bridge, opts)` — registers `/acp` routes on the existing Express app. |
+| File                    | Responsibility                                                                                                                                                                              |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `index.ts`              | `mountAcpHttp(app, bridge, opts)` — registers `/acp` routes on the existing Express app.                                                                                                    |
 | `connectionRegistry.ts` | `Acp-Connection-Id` → `AcpConnection` (connection SSE writer, `Map<sessionId, SessionStream>`, pending agent→client requests by JSON-RPC id, monotonic id allocator). TTL + DELETE cleanup. |
-| `jsonRpc.ts` | JSON-RPC 2.0 parse/validate/serialize helpers; error codes (`-32600` etc.); `_qwen/` namespace guard. |
-| `dispatch.ts` | Maps inbound JSON-RPC methods → `HttpAcpBridge` calls. Maps `BridgeEvent`s → outbound JSON-RPC frames. The translation table (§4). |
-| `sseStream.ts` | Long-lived SSE writer (reuses the backpressure/heartbeat pattern from `server.ts`). Distinct from REST `/events` (different framing: full JSON-RPC objects, not qwen event envelopes). |
+| `jsonRpc.ts`            | JSON-RPC 2.0 parse/validate/serialize helpers; error codes (`-32600` etc.); `_qwen/` namespace guard.                                                                                       |
+| `dispatch.ts`           | Maps inbound JSON-RPC methods → `HttpAcpBridge` calls. Maps `BridgeEvent`s → outbound JSON-RPC frames. The translation table (§4).                                                          |
+| `sseStream.ts`          | Long-lived SSE writer (reuses the backpressure/heartbeat pattern from `server.ts`). Distinct from REST `/events` (different framing: full JSON-RPC objects, not qwen event envelopes).      |
 
 No change to `bridge.ts` / `eventBus.ts` (additive consumer only).
 
@@ -186,30 +186,30 @@ No change to `bridge.ts` / `eventBus.ts` (additive consumer only).
 
 ### 4.1 Inbound (client POST → bridge)
 
-| ACP method | Bridge call | Response routed to |
-|------------|-------------|--------------------|
-| `initialize` | (none; capabilities from `capabilities.ts`) | inline `200` |
-| `authenticate` | existing auth provider (`serve/auth/*`) | connection stream |
-| `session/new` | `bridge.createSession` | connection stream |
-| `session/load` / `session/resume` | `bridge.restoreSession('load'|'resume')` | connection stream |
-| `session/prompt` | `bridge.sendPrompt` | session stream (deferred until settle) |
-| `session/cancel` (notif) | `bridge.cancel` | — |
-| `session/list` | `bridge.listSessions` (`unstable_listSessions`) | connection stream |
-| `session/set_mode` | approval-mode route logic | session stream |
-| JSON-RPC **response** (to agent→client req) | resolve pending (`§4.3`) | — |
-| `_qwen/session/set_model` | `bridge.setSessionModel` (`unstable_setSessionModel`) | session stream |
-| `_qwen/workspace/list` etc. | workspace introspection routes | connection stream |
-| `_qwen/session/heartbeat` | `bridge.heartbeat` | connection stream |
+| ACP method                                  | Bridge call                                           | Response routed to                     |
+| ------------------------------------------- | ----------------------------------------------------- | -------------------------------------- | ----------------- |
+| `initialize`                                | (none; capabilities from `capabilities.ts`)           | inline `200`                           |
+| `authenticate`                              | existing auth provider (`serve/auth/*`)               | connection stream                      |
+| `session/new`                               | `bridge.createSession`                                | connection stream                      |
+| `session/load` / `session/resume`           | `bridge.restoreSession('load'                         | 'resume')`                             | connection stream |
+| `session/prompt`                            | `bridge.sendPrompt`                                   | session stream (deferred until settle) |
+| `session/cancel` (notif)                    | `bridge.cancel`                                       | —                                      |
+| `session/list`                              | `bridge.listSessions` (`unstable_listSessions`)       | connection stream                      |
+| `session/set_mode`                          | approval-mode route logic                             | session stream                         |
+| JSON-RPC **response** (to agent→client req) | resolve pending (`§4.3`)                              | —                                      |
+| `_qwen/session/set_model`                   | `bridge.setSessionModel` (`unstable_setSessionModel`) | session stream                         |
+| `_qwen/workspace/list` etc.                 | workspace introspection routes                        | connection stream                      |
+| `_qwen/session/heartbeat`                   | `bridge.heartbeat`                                    | connection stream                      |
 
 ### 4.2 Outbound (BridgeEvent → JSON-RPC on session stream)
 
-| BridgeEvent.type | Emitted as |
-|------------------|-----------|
-| `session_update` | `{method:"session/update", params:<data>}` notification |
-| permission request | `{id:<n>, method:"session/request_permission", params}` request |
-| `client_evicted` / `slow_client_warning` / `state_resync_required` | `{method:"_qwen/notify", params:{kind,…}}` notification |
-| `stream_error` | JSON-RPC error response on the active prompt id (or `_qwen/notify`) |
-| prompt settle | `{id:<promptId>, result:{stopReason}}` |
+| BridgeEvent.type                                                   | Emitted as                                                          |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `session_update`                                                   | `{method:"session/update", params:<data>}` notification             |
+| permission request                                                 | `{id:<n>, method:"session/request_permission", params}` request     |
+| `client_evicted` / `slow_client_warning` / `state_resync_required` | `{method:"_qwen/notify", params:{kind,…}}` notification             |
+| `stream_error`                                                     | JSON-RPC error response on the active prompt id (or `_qwen/notify`) |
+| prompt settle                                                      | `{id:<promptId>, result:{stopReason}}`                              |
 
 ### 4.3 Pending agent→client requests
 
@@ -236,14 +236,14 @@ on every type. The codebase's southbound leg already uses `unstable_*` method na
 (spec-compliant `_` prefix). Capabilities advertised under
 `agentCapabilities._meta.qwen` at `initialize` so clients feature-detect before use.
 
-| Need | No standard ACP method? | Extension |
-|------|------------------------|-----------|
-| Model switch | yes | `_qwen/session/set_model` |
-| Workspace MCP/skills/providers/env introspection | yes | `_qwen/workspace/list`, `_qwen/workspace/<area>` |
-| Heartbeat / last-seen | yes | `_qwen/session/heartbeat` |
-| Multi-client permission policy (consensus/designated) | partial | `session/request_permission` + `_meta.qwen.policy` |
-| SSE backpressure tuning (`maxQueued`) | yes | `Acp-Qwen-Max-Queued` header on session GET |
-| Resume cursor (ring `Last-Event-ID`) | RFD Phase 4 | `Last-Event-ID` header + `_meta.qwen.eventId` on frames |
+| Need                                                  | No standard ACP method? | Extension                                               |
+| ----------------------------------------------------- | ----------------------- | ------------------------------------------------------- |
+| Model switch                                          | yes                     | `_qwen/session/set_model`                               |
+| Workspace MCP/skills/providers/env introspection      | yes                     | `_qwen/workspace/list`, `_qwen/workspace/<area>`        |
+| Heartbeat / last-seen                                 | yes                     | `_qwen/session/heartbeat`                               |
+| Multi-client permission policy (consensus/designated) | partial                 | `session/request_permission` + `_meta.qwen.policy`      |
+| SSE backpressure tuning (`maxQueued`)                 | yes                     | `Acp-Qwen-Max-Queued` header on session GET             |
+| Resume cursor (ring `Last-Event-ID`)                  | RFD Phase 4             | `Last-Event-ID` header + `_meta.qwen.eventId` on frames |
 
 Standard methods are **never** renamed; extensions are strictly additive and ignorable.
 
@@ -276,6 +276,7 @@ thin compat shim over `/acp` (separate, later PR).
 ## 7. Scope of the implementation PR
 
 **In scope (runnable + verified locally):**
+
 - `POST /acp` dispatch for `initialize`, `session/new`, `session/prompt`,
   `session/cancel`, `session/load`, JSON-RPC response handling.
 - Connection-scoped + session-scoped `GET /acp` SSE streams with JSON-RPC framing.
@@ -286,6 +287,7 @@ thin compat shim over `/acp` (separate, later PR).
 - Unit tests (`acpHttp/*.test.ts`) + a black-box smoke script driving a real daemon.
 
 **Deferred (documented, not built now):**
+
 - WebSocket upgrade path (RFD-required client cap; SSE suffices for local verify).
 - HTTP/2 multiplexing (we run HTTP/1.1; POST and long-lived GET use separate sockets,
   which works for CLI/Node clients and ≤6-connection browsers). Documented divergence.
@@ -313,12 +315,12 @@ thin compat shim over `/acp` (separate, later PR).
 
 ## 9. Risks
 
-| Risk | Mitigation |
-|------|-----------|
-| RFD changes before ratification | Behind capability tag + `_qwen` namespace; isolated module; easy to revise. |
-| HTTP/1.1 vs required HTTP/2 | Localhost/CLI clients unaffected; documented; h2 is a transport swap later. |
-| Two transports on one bridge race | Bridge already supports multi-client; reuse its locking. |
-| `fs/*` forwarding vs daemon-local FS | Capability-gated: forward when client declares `fs`, else local. |
+| Risk                                 | Mitigation                                                                  |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| RFD changes before ratification      | Behind capability tag + `_qwen` namespace; isolated module; easy to revise. |
+| HTTP/1.1 vs required HTTP/2          | Localhost/CLI clients unaffected; documented; h2 is a transport swap later. |
+| Two transports on one bridge race    | Bridge already supports multi-client; reuse its locking.                    |
+| `fs/*` forwarding vs daemon-local FS | Capability-gated: forward when client declares `fs`, else local.            |
 
 ---
 
@@ -359,8 +361,8 @@ stream (`{"id":2,"error":{"code":-32603,…}}`), proving id-correlation + the
 
 ### Review fold-in — bridge-issued clientId (found in live verify)
 
-First live run failed `session/prompt` with *"client id … is not registered for
-session"*. Root cause: `spawnOrAttach`/`loadSession` **ignore** a caller-supplied
+First live run failed `session/prompt` with _"client id … is not registered for
+session"_. Root cause: `spawnOrAttach`/`loadSession` **ignore** a caller-supplied
 clientId the bridge has never issued and stamp a fresh one (returned in
 `BridgeSession.clientId`); the dispatcher was echoing the connection's own
 (unregistered) id on `sendPrompt`. Fix: persist the bridge-stamped id on the
@@ -375,17 +377,17 @@ Two independent reviews (correctness/concurrency + protocol-conformance/security
 All fixes verified by the expanded vitest suite (**18 tests**) + a fresh live smoke run
 (21 `session/update` frames → `stopReason=end_turn`).
 
-| # | Severity | Finding | Fix |
-|---|----------|---------|-----|
-| R1 | **P0** | Session-stream **reconnect was permanently dead**: `SessionBinding.abort` was created once and reused; on stream close it was aborted forever, so a reconnect's `subscribeEvents(signal)` got an already-aborted signal and received zero events. | `attachSessionStream` now installs a **fresh** `AbortController` per stream (and closes any prior stream); `index.ts` pumps on that fresh signal. |
-| R2 | **P0** | `await dispatcher.handle()` ran **after** `res.end(202)`; a throwing bridge call (notably the un-try/caught `isResponse` path) would reject and surface as an unhandled rejection → possible daemon crash. | Wrapped the `isResponse` path in try/catch; `.catch()` on the awaited `handle(...)` and on `pumpSessionEvents(...)`. |
-| R3 | **P1** | **No connection→session ownership**: any authenticated connection could open the session SSE for, or prompt, *any* sessionId in the workspace (read-eavesdrop; prompt was only blocked incidentally by the unregistered-clientId error). | `AcpConnection.ownedSessions` populated by `session/new`/`load`/`resume`; session stream returns `403` and per-session POSTs return `INVALID_PARAMS` for unowned ids (`requireOwned`). |
-| R4 | **P1** | `mountAcpHttp` handle was discarded → TTL sweep timer + live SSE streams leaked on shutdown. | Handle parked on `app.locals`; `runQwenServe` close hook calls `dispose()` before `bridge.shutdown()` (mirrors the device-flow registry). |
-| R5 | **P1** | **Pending permission leak**: closing a session/connection with a permission outstanding left the bridge blocked awaiting a vote. | `closeSessionStream`/`destroy` cancel matching pending requests via an injected `onAbandonPending` → `cancelAbandonedPermission`. |
-| R6 | **P1** | Pre-attach frame buffers (`connBuffer`/`binding.buffer`) were unbounded. | Capped at 256 frames (drop-oldest), matching the EventBus `maxQueued`. |
-| R7 | **P2** | `initialize` ignored the client's requested `protocolVersion`. | Negotiates `min(requested, 1)`. |
-| R8 | **P2** | No `Acp-Session-Id` ↔ `params.sessionId` cross-check (RFD §2.3). | POST asserts they agree; mismatch → `INVALID_PARAMS`. |
-| R9 | **P2** | `session/cancel` request-form (with id) never answered; duplicate top-level `_meta.qwen`. | Reply when an id is present; single `agentCapabilities._meta.qwen`. |
+| #   | Severity | Finding                                                                                                                                                                                                                                           | Fix                                                                                                                                                                                    |
+| --- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | **P0**   | Session-stream **reconnect was permanently dead**: `SessionBinding.abort` was created once and reused; on stream close it was aborted forever, so a reconnect's `subscribeEvents(signal)` got an already-aborted signal and received zero events. | `attachSessionStream` now installs a **fresh** `AbortController` per stream (and closes any prior stream); `index.ts` pumps on that fresh signal.                                      |
+| R2  | **P0**   | `await dispatcher.handle()` ran **after** `res.end(202)`; a throwing bridge call (notably the un-try/caught `isResponse` path) would reject and surface as an unhandled rejection → possible daemon crash.                                        | Wrapped the `isResponse` path in try/catch; `.catch()` on the awaited `handle(...)` and on `pumpSessionEvents(...)`.                                                                   |
+| R3  | **P1**   | **No connection→session ownership**: any authenticated connection could open the session SSE for, or prompt, _any_ sessionId in the workspace (read-eavesdrop; prompt was only blocked incidentally by the unregistered-clientId error).          | `AcpConnection.ownedSessions` populated by `session/new`/`load`/`resume`; session stream returns `403` and per-session POSTs return `INVALID_PARAMS` for unowned ids (`requireOwned`). |
+| R4  | **P1**   | `mountAcpHttp` handle was discarded → TTL sweep timer + live SSE streams leaked on shutdown.                                                                                                                                                      | Handle parked on `app.locals`; `runQwenServe` close hook calls `dispose()` before `bridge.shutdown()` (mirrors the device-flow registry).                                              |
+| R5  | **P1**   | **Pending permission leak**: closing a session/connection with a permission outstanding left the bridge blocked awaiting a vote.                                                                                                                  | `closeSessionStream`/`destroy` cancel matching pending requests via an injected `onAbandonPending` → `cancelAbandonedPermission`.                                                      |
+| R6  | **P1**   | Pre-attach frame buffers (`connBuffer`/`binding.buffer`) were unbounded.                                                                                                                                                                          | Capped at 256 frames (drop-oldest), matching the EventBus `maxQueued`.                                                                                                                 |
+| R7  | **P2**   | `initialize` ignored the client's requested `protocolVersion`.                                                                                                                                                                                    | Negotiates `min(requested, 1)`.                                                                                                                                                        |
+| R8  | **P2**   | No `Acp-Session-Id` ↔ `params.sessionId` cross-check (RFD §2.3).                                                                                                                                                                                 | POST asserts they agree; mismatch → `INVALID_PARAMS`.                                                                                                                                  |
+| R9  | **P2**   | `session/cancel` request-form (with id) never answered; duplicate top-level `_meta.qwen`.                                                                                                                                                         | Reply when an id is present; single `agentCapabilities._meta.qwen`.                                                                                                                    |
 
 ### Accepted / documented (not fixed in v1)
 
@@ -406,18 +408,18 @@ All fixes verified by the expanded vitest suite (**18 tests**) + a fresh live sm
 Two automated PR reviewers plus the summary bot.
 All fixes verified by the suite (now **22 tests**) + a fresh live run (16 `session/update` → `end_turn`).
 
-| # | Severity | Finding | Fix |
-|---|----------|---------|-----|
-| B1 | **P0** | `handlePrompt`'s `AbortController` was never aborted — a disconnecting/cancelling client left the agent running (burned model quota, blocked the session FIFO). Flagged by both bots + 5 sub-agents. | `promptAbort` parked on `SessionBinding`; aborted by `session/cancel` and by session/connection teardown (`closeSessionStream`/`destroy`). |
-| B2 | **P0** | `sessionCtx` missing `fromLoopback` → every ACP permission vote treated as remote; `local-only` policy would reject loopback clients. | Capture loopback at `initialize` (kernel `remoteAddress`, not forgeable headers) → `AcpConnection.fromLoopback` → threaded through `sessionCtx`. |
-| B3 | **P0** | SSE write failures silently swallowed → zombie streams (heartbeats fire, zero events delivered, no logs). | First write failure logs + closes the stream. |
-| B4 | **P0** | Idle sweep destroyed connections with no log + no connection cap (initialize-flood). | Sweep logs each reap; `pumpSessionEvents` calls `touch()` (long quiet prompts aren't reaped); `maxConnections` cap (64) → `503`. |
-| B5 | **P1** | `sessionCtx` silently fell back to the connection's unregistered clientId when the binding lacked one (untested, always-fired in `FakeBridge`). | Throw on missing stamped clientId (invariant violation); `FakeBridge` now stamps one. |
-| B6 | **P1** | `session/new|load|resume` accepted `cwd` unvalidated (REST validates string/length/absolute — amplification DoS). | Shared `parseOptionalWorkspaceCwd` (string, ≤4096, absolute). |
-| B7 | **P1** | `session/prompt` forwarded an unvalidated `prompt` to the bridge. | `validatePrompt` (non-empty array of objects), mirroring REST. |
-| B8 | **P1** | Raw bridge error messages echoed to the client. | `toRpcError` maps known bridge errors to coded, client-safe shapes; unknown → generic `Internal error` (full detail still to stderr). |
-| B9 | **P1** | `nextId` used sequential negatives — a client legally using negative ids could collide in `pending`. | Daemon-originated ids are now strings (`_qwen_perm_N`), disjoint from any client id. |
-| B10 | **P2** | `resolveClientResponse` param type excluded `JsonRpcError`; conn-scoped SSE stream had no `onClose`; `DELETE` with no header was a silent 202; `SseStream.close` ran `onClose` outside try/catch; `session/load`·`resume`·`close` untested. | Widened param to `JsonRpcResponse`; conn stream logs on close; `DELETE` missing header → `400`; `onClose` wrapped in try/catch; added load/resume/close + DELETE-400 tests. |
+| #   | Severity | Finding                                                                                                                                                                                                                                     | Fix                                                                                                                                                                         |
+| --- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| B1  | **P0**   | `handlePrompt`'s `AbortController` was never aborted — a disconnecting/cancelling client left the agent running (burned model quota, blocked the session FIFO). Flagged by both bots + 5 sub-agents.                                        | `promptAbort` parked on `SessionBinding`; aborted by `session/cancel` and by session/connection teardown (`closeSessionStream`/`destroy`).                                  |
+| B2  | **P0**   | `sessionCtx` missing `fromLoopback` → every ACP permission vote treated as remote; `local-only` policy would reject loopback clients.                                                                                                       | Capture loopback at `initialize` (kernel `remoteAddress`, not forgeable headers) → `AcpConnection.fromLoopback` → threaded through `sessionCtx`.                            |
+| B3  | **P0**   | SSE write failures silently swallowed → zombie streams (heartbeats fire, zero events delivered, no logs).                                                                                                                                   | First write failure logs + closes the stream.                                                                                                                               |
+| B4  | **P0**   | Idle sweep destroyed connections with no log + no connection cap (initialize-flood).                                                                                                                                                        | Sweep logs each reap; `pumpSessionEvents` calls `touch()` (long quiet prompts aren't reaped); `maxConnections` cap (64) → `503`.                                            |
+| B5  | **P1**   | `sessionCtx` silently fell back to the connection's unregistered clientId when the binding lacked one (untested, always-fired in `FakeBridge`).                                                                                             | Throw on missing stamped clientId (invariant violation); `FakeBridge` now stamps one.                                                                                       |
+| B6  | **P1**   | `session/new                                                                                                                                                                                                                                | load                                                                                                                                                                        | resume`accepted`cwd` unvalidated (REST validates string/length/absolute — amplification DoS). | Shared `parseOptionalWorkspaceCwd` (string, ≤4096, absolute). |
+| B7  | **P1**   | `session/prompt` forwarded an unvalidated `prompt` to the bridge.                                                                                                                                                                           | `validatePrompt` (non-empty array of objects), mirroring REST.                                                                                                              |
+| B8  | **P1**   | Raw bridge error messages echoed to the client.                                                                                                                                                                                             | `toRpcError` maps known bridge errors to coded, client-safe shapes; unknown → generic `Internal error` (full detail still to stderr).                                       |
+| B9  | **P1**   | `nextId` used sequential negatives — a client legally using negative ids could collide in `pending`.                                                                                                                                        | Daemon-originated ids are now strings (`_qwen_perm_N`), disjoint from any client id.                                                                                        |
+| B10 | **P2**   | `resolveClientResponse` param type excluded `JsonRpcError`; conn-scoped SSE stream had no `onClose`; `DELETE` with no header was a silent 202; `SseStream.close` ran `onClose` outside try/catch; `session/load`·`resume`·`close` untested. | Widened param to `JsonRpcResponse`; conn stream logs on close; `DELETE` missing header → `400`; `onClose` wrapped in try/catch; added load/resume/close + DELETE-400 tests. |
 
 **Out of scope (base-branch `daemon_mode_b_main`, not this diff)** — the second reviewer flagged
 typecheck errors in `acpAgent.ts` (`entryCount`/`entrySummary`/`sessionClose`) and other pre-existing
@@ -435,20 +437,20 @@ Branch rebased onto `daemon_mode_b_main` (#4353 + #4469) — **clean, no conflic
 reviewers (GPT-5 + qwen3.7-max). Suite now **25 tests**; live re-verified (125 `session/update`
 → `end_turn`).
 
-| # | Severity | Finding | Fix |
-|---|----------|---------|-----|
-| C1 | **P0** | Round-3 "SSE write-failure handling" was documented but NOT implemented — `SseStream` still left it to discarding callers (zombie streams). | `writeRaw` now owns it: first write rejection logs once + `close()`s; `doWrite` also listens for `'error'` (rejects promptly instead of hanging to `'close'`); `onClose` wrapped in try/catch. |
-| C2 | **P1** | `fromLoopback` captured only at `initialize` + helper narrower than REST → `local-only` votes from a later POST misjudged. | Per-request loopback threaded through `handle`→`sessionCtx`/`resolveClientResponse`; `isLoopbackReq` widened to `127.0.0.0/8` + `::ffff:127.*` + `::1` (matches REST). |
-| C3 | **P1** | Error routing inferred stream from `params.sessionId` → conn-scoped method failures (`session/load`/`resume`/`close`/`heartbeat`) misrouted to a non-existent session stream (silent loss). | `CONN_ROUTED_METHODS` set; errors route the same way as the success path. |
-| C4 | **P1** | `bridge.detachClient` never called on teardown → stale bridge-stamped client ids linger in `knownClientIds()`/voter sets. | Registry takes a `DetachSessionFn`; `closeSessionStream`/`destroy` detach each owned session (best-effort). |
-| C5 | **P1** | `session/close` skipped local cleanup if `bridge.closeSession` threw. | `closeSessionStream` moved into a `finally`. |
-| C6 | **P2** | Windows `cwd` (`C:\…`) rejected by `startsWith('/')`. | `path.isAbsolute` (platform-aware), matching REST. |
-| C7 | **P2** | `protocolVersion` could negotiate `0`/negative. | Clamp `Math.max(1, Math.min(requested, 1))`; tests for 0/neg/huge/invalid. |
-| C8 | **P2** | `session/load`/`resume` accepted empty `sessionId`. | Reject empty with `INVALID_PARAMS`. |
-| C9 | **P2** | Notification-form `session/prompt` errors vanished silently. | Log on the no-id path. |
-| C10 | **P2** | Session SSE flushed buffered frames before headers/`retry:`. | `open()` before `attachSessionStream`. |
-| C11 | **P2** | Duplicate local `logStderr`. | Shared `writeStderrLine` from `utils/stdioHelpers`. |
-| C12 | **P2** | Docs advertised `--no-acp-http` flag, `acp_http` capability tag, and `fs/*` forwarding not in v1. | Doc aligned to shipped surface (env-var toggle only; `fs/*`+`terminal/*` + flag + tag marked deferred). |
+| #   | Severity | Finding                                                                                                                                                                                     | Fix                                                                                                                                                                                            |
+| --- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C1  | **P0**   | Round-3 "SSE write-failure handling" was documented but NOT implemented — `SseStream` still left it to discarding callers (zombie streams).                                                 | `writeRaw` now owns it: first write rejection logs once + `close()`s; `doWrite` also listens for `'error'` (rejects promptly instead of hanging to `'close'`); `onClose` wrapped in try/catch. |
+| C2  | **P1**   | `fromLoopback` captured only at `initialize` + helper narrower than REST → `local-only` votes from a later POST misjudged.                                                                  | Per-request loopback threaded through `handle`→`sessionCtx`/`resolveClientResponse`; `isLoopbackReq` widened to `127.0.0.0/8` + `::ffff:127.*` + `::1` (matches REST).                         |
+| C3  | **P1**   | Error routing inferred stream from `params.sessionId` → conn-scoped method failures (`session/load`/`resume`/`close`/`heartbeat`) misrouted to a non-existent session stream (silent loss). | `CONN_ROUTED_METHODS` set; errors route the same way as the success path.                                                                                                                      |
+| C4  | **P1**   | `bridge.detachClient` never called on teardown → stale bridge-stamped client ids linger in `knownClientIds()`/voter sets.                                                                   | Registry takes a `DetachSessionFn`; `closeSessionStream`/`destroy` detach each owned session (best-effort).                                                                                    |
+| C5  | **P1**   | `session/close` skipped local cleanup if `bridge.closeSession` threw.                                                                                                                       | `closeSessionStream` moved into a `finally`.                                                                                                                                                   |
+| C6  | **P2**   | Windows `cwd` (`C:\…`) rejected by `startsWith('/')`.                                                                                                                                       | `path.isAbsolute` (platform-aware), matching REST.                                                                                                                                             |
+| C7  | **P2**   | `protocolVersion` could negotiate `0`/negative.                                                                                                                                             | Clamp `Math.max(1, Math.min(requested, 1))`; tests for 0/neg/huge/invalid.                                                                                                                     |
+| C8  | **P2**   | `session/load`/`resume` accepted empty `sessionId`.                                                                                                                                         | Reject empty with `INVALID_PARAMS`.                                                                                                                                                            |
+| C9  | **P2**   | Notification-form `session/prompt` errors vanished silently.                                                                                                                                | Log on the no-id path.                                                                                                                                                                         |
+| C10 | **P2**   | Session SSE flushed buffered frames before headers/`retry:`.                                                                                                                                | `open()` before `attachSessionStream`.                                                                                                                                                         |
+| C11 | **P2**   | Duplicate local `logStderr`.                                                                                                                                                                | Shared `writeStderrLine` from `utils/stdioHelpers`.                                                                                                                                            |
+| C12 | **P2**   | Docs advertised `--no-acp-http` flag, `acp_http` capability tag, and `fs/*` forwarding not in v1.                                                                                           | Doc aligned to shipped surface (env-var toggle only; `fs/*`+`terminal/*` + flag + tag marked deferred).                                                                                        |
 
 Still deferred (unchanged): WebSocket + HTTP/2; per-connection secret for `DELETE`/ownership
 (token + single-workspace remains the boundary); strict prompt-result ordering barrier; the
@@ -460,11 +462,11 @@ Still deferred (unchanged): WebSocket + HTTP/2; per-connection secret for `DELET
 
 One more reviewer pass (qwen3.7-max). Suite **26 tests**, live re-verified.
 
-| # | Severity | Finding | Fix |
-|---|----------|---------|-----|
-| D1 | **P0** | `resolveClientResponse` deleted the pending entry BEFORE calling `respondToSessionPermission`. A malformed vote (`result: {}`) makes the bridge mediator throw — and with the pending entry already gone, teardown's `abandonPendingForSession` can't cancel it, so the agent's prompt hangs on a vote that never resolves (a token-holder could stall a session with one bad POST). | Wrap the vote in try/catch; on any failure fall back to `cancelAbandonedPermission` so the mediator is always released. New test covers the malformed-vote path. |
-| D2 | **P1** | Session-stream `onClose` aborted only the event pump, not `binding.promptAbort` — a client disconnect (tab close / network drop) left the in-flight prompt running (quota + FIFO) until idle TTL. | `onClose` now also aborts the session's `promptAbort`. |
-| D3 | **P1** | When `pumpSessionEvents` rejected, the `.catch` only logged — the SSE stream stayed open heartbeating but delivering nothing (zombie, no reconnect signal). | `.catch` now also `closeSessionStream(sessionId)`. |
+| #   | Severity | Finding                                                                                                                                                                                                                                                                                                                                                                              | Fix                                                                                                                                                              |
+| --- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | **P0**   | `resolveClientResponse` deleted the pending entry BEFORE calling `respondToSessionPermission`. A malformed vote (`result: {}`) makes the bridge mediator throw — and with the pending entry already gone, teardown's `abandonPendingForSession` can't cancel it, so the agent's prompt hangs on a vote that never resolves (a token-holder could stall a session with one bad POST). | Wrap the vote in try/catch; on any failure fall back to `cancelAbandonedPermission` so the mediator is always released. New test covers the malformed-vote path. |
+| D2  | **P1**   | Session-stream `onClose` aborted only the event pump, not `binding.promptAbort` — a client disconnect (tab close / network drop) left the in-flight prompt running (quota + FIFO) until idle TTL.                                                                                                                                                                                    | `onClose` now also aborts the session's `promptAbort`.                                                                                                           |
+| D3  | **P1**   | When `pumpSessionEvents` rejected, the `.catch` only logged — the SSE stream stayed open heartbeating but delivering nothing (zombie, no reconnect signal).                                                                                                                                                                                                                          | `.catch` now also `closeSessionStream(sessionId)`.                                                                                                               |
 
 ---
 
@@ -472,14 +474,14 @@ One more reviewer pass (qwen3.7-max). Suite **26 tests**, live re-verified.
 
 Another reviewer pass (qwen3.7-max). Suite **28 tests**, live re-verified.
 
-| # | Severity | Finding | Fix |
-|---|----------|---------|-----|
-| E1 | **P0** | `handlePrompt` overwrote `binding.promptAbort` without aborting the prior controller — two concurrent `session/prompt`s for one session orphaned the first (runs to completion in the bridge FIFO, unabortable by `session/cancel`). | Abort the prior `promptAbort` before installing the new one. Test added. |
-| E2 | **P0** | The `subscribeEvents`-throws path sent a `stream_error` notify then `return`ed (resolved) — the caller's `.catch` never fired, leaving a zombie SSE stream (heartbeats, no events, no reconnect signal). | Re-throw after the notify so the caller's `.catch` closes the stream. Test asserts prompt closure. |
-| E3 | **P1** | SSE heartbeat didn't mark the connection active — a long prompt with no intermediate events for >30 min got idle-reaped (streams + prompts killed). | `SseStream` takes an `onHeartbeat` hook; both GET handlers pass `() => conn.touch()`. |
-| E4 | **P2** | `pumpSessionEvents` `.catch` closed by sessionId — a reconnect between the throw and the microtask could kill the NEW stream. | Identity-guard: only close if `binding.stream` is still this stream. |
-| E6 | **P2** | `sendSession` auto-created a binding — a late pump/reply frame after `closeSessionStream` resurrected a ghost binding that buffered up to 256 frames forever. | `sendSession` is now lookup-only: drops frames when the session has no live binding. |
-| E5 | accepted | `session/load`/`resume` don't reject when another live connection owns the session ("hijack"). | **Accepted, not changed:** the daemon's trust boundary is the bearer token + single-workspace bind, and multi-client attach is intentional (the bridge is multi-client by design; REST has the same property). A token-holder gains no capability they lack via REST. Tracked with the other token-boundary items (DELETE ownership, §13). |
+| #   | Severity | Finding                                                                                                                                                                                                                              | Fix                                                                                                                                                                                                                                                                                                                                        |
+| --- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| E1  | **P0**   | `handlePrompt` overwrote `binding.promptAbort` without aborting the prior controller — two concurrent `session/prompt`s for one session orphaned the first (runs to completion in the bridge FIFO, unabortable by `session/cancel`). | Abort the prior `promptAbort` before installing the new one. Test added.                                                                                                                                                                                                                                                                   |
+| E2  | **P0**   | The `subscribeEvents`-throws path sent a `stream_error` notify then `return`ed (resolved) — the caller's `.catch` never fired, leaving a zombie SSE stream (heartbeats, no events, no reconnect signal).                             | Re-throw after the notify so the caller's `.catch` closes the stream. Test asserts prompt closure.                                                                                                                                                                                                                                         |
+| E3  | **P1**   | SSE heartbeat didn't mark the connection active — a long prompt with no intermediate events for >30 min got idle-reaped (streams + prompts killed).                                                                                  | `SseStream` takes an `onHeartbeat` hook; both GET handlers pass `() => conn.touch()`.                                                                                                                                                                                                                                                      |
+| E4  | **P2**   | `pumpSessionEvents` `.catch` closed by sessionId — a reconnect between the throw and the microtask could kill the NEW stream.                                                                                                        | Identity-guard: only close if `binding.stream` is still this stream.                                                                                                                                                                                                                                                                       |
+| E6  | **P2**   | `sendSession` auto-created a binding — a late pump/reply frame after `closeSessionStream` resurrected a ghost binding that buffered up to 256 frames forever.                                                                        | `sendSession` is now lookup-only: drops frames when the session has no live binding.                                                                                                                                                                                                                                                       |
+| E5  | accepted | `session/load`/`resume` don't reject when another live connection owns the session ("hijack").                                                                                                                                       | **Accepted, not changed:** the daemon's trust boundary is the bearer token + single-workspace bind, and multi-client attach is intentional (the bridge is multi-client by design; REST has the same property). A token-holder gains no capability they lack via REST. Tracked with the other token-boundary items (DELETE ownership, §13). |
 
 ---
 
@@ -487,15 +489,15 @@ Another reviewer pass (qwen3.7-max). Suite **28 tests**, live re-verified.
 
 Another reviewer pass (qwen3.7-max). Suite **30 tests**, live re-verified.
 
-| # | Severity | Finding | Fix |
-|---|----------|---------|-----|
-| F1 | **P0** | Concurrent `session/close` TOCTOU: `ownedSessions.delete` ran only in `finally` (after the await), so two concurrent closes both passed `requireOwned` → misleading error to the 2nd + redundant bridge close. | Delete the ownership gate SYNCHRONOUSLY before the await; bridge close runs once. Test added. |
-| F2 | **P1** | Pump lifecycle: a CLEAN iterator end (subprocess ended, `done`) resolved → the `.catch` never fired → zombie stream; and a MID-STREAM iterator error sent no `stream_error`. | `pumpSessionEvents` wraps the whole loop (sync + mid-stream errors send `stream_error` then re-throw); the consumer `.then(onDone, onErr)` closes the stream on BOTH paths (identity-guarded). Tests added. |
-| F3 | **P2** | 503 connection-cap rejection had no stderr log. | `writeStderrLine` with the cap value. |
-| F4 | **P2** | `_qwen/notify stream_error` spread let `event.data.kind` shadow the discriminator. | Spread first, then `kind: 'stream_error'`. |
-| F5 | **P2** | `MAX_WORKSPACE_PATH_LENGTH` redeclared (`= 4096`) vs the canonical `fs/paths.js`. | Import from `../fs/paths.js` (no divergence). |
-| F6 | **P2** | `isObjectParams` duplicated `jsonRpc.isObject`. | Import `isObject`. |
-| F7 | **P2** | Raw `process.stderr.write` in `index.ts`/`sseStream.ts` vs `writeStderrLine` elsewhere. | Unified on `writeStderrLine` across the module. |
+| #   | Severity | Finding                                                                                                                                                                                                        | Fix                                                                                                                                                                                                         |
+| --- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F1  | **P0**   | Concurrent `session/close` TOCTOU: `ownedSessions.delete` ran only in `finally` (after the await), so two concurrent closes both passed `requireOwned` → misleading error to the 2nd + redundant bridge close. | Delete the ownership gate SYNCHRONOUSLY before the await; bridge close runs once. Test added.                                                                                                               |
+| F2  | **P1**   | Pump lifecycle: a CLEAN iterator end (subprocess ended, `done`) resolved → the `.catch` never fired → zombie stream; and a MID-STREAM iterator error sent no `stream_error`.                                   | `pumpSessionEvents` wraps the whole loop (sync + mid-stream errors send `stream_error` then re-throw); the consumer `.then(onDone, onErr)` closes the stream on BOTH paths (identity-guarded). Tests added. |
+| F3  | **P2**   | 503 connection-cap rejection had no stderr log.                                                                                                                                                                | `writeStderrLine` with the cap value.                                                                                                                                                                       |
+| F4  | **P2**   | `_qwen/notify stream_error` spread let `event.data.kind` shadow the discriminator.                                                                                                                             | Spread first, then `kind: 'stream_error'`.                                                                                                                                                                  |
+| F5  | **P2**   | `MAX_WORKSPACE_PATH_LENGTH` redeclared (`= 4096`) vs the canonical `fs/paths.js`.                                                                                                                              | Import from `../fs/paths.js` (no divergence).                                                                                                                                                               |
+| F6  | **P2**   | `isObjectParams` duplicated `jsonRpc.isObject`.                                                                                                                                                                | Import `isObject`.                                                                                                                                                                                          |
+| F7  | **P2**   | Raw `process.stderr.write` in `index.ts`/`sseStream.ts` vs `writeStderrLine` elsewhere.                                                                                                                        | Unified on `writeStderrLine` across the module.                                                                                                                                                             |
 
 ---
 
@@ -506,26 +508,28 @@ Another reviewer pass (qwen3.7-max). Suite **30 tests**, live re-verified.
 ### 17.1 扩展方案审计 → 落地（替换 §5 的旧方案）
 
 依据**仓库实装 SDK `@agentclientprotocol/sdk@0.14.1`**（非仅官网）核对：
+
 - `session/set_config_option` 是**一等（非 `unstable_`）方法**，请求 `{sessionId, configId, value}`，`category` 含 `model`/`mode`/`thought_level`；而 `set_model` 仍走 `unstable_setSessionModel`。
 - 规范保留 `_` 前缀给扩展，示例为域风格 `_zed.dev/…`；厂商数据放 `_meta` 按域名分键。
 
 落地：
+
 - **命名空间 `_qwen/` → 反向域名 `_qwen/`**；`_meta` 统一 `_meta:{ "qwen": … }`（含 `initialize` 能力广告与 `session/request_permission` 的 requestId）。
 - **模型 + 审批模式 → 标准 `session/set_config_option`**（`configId:"model"|"mode"`），路由到现有 `bridge.setSessionModel`/`setSessionApprovalMode`；`session/new` 结果**广告 `configOptions`**（取自子进程会话状态 `getSessionContextStatus().state.configOptions`，已是 ACP 形状）。**删除**厂商 `_qwen/session/set_model`。
 - REST(http+sse) **无需同步修改**：两 transport 共用同一 bridge，状态天然一致。
 
 ### 17.2 本批新增的 `/acp` 方法（bridge 已支持，1:1 对齐 REST）
 
-| REST | `/acp` | bridge |
-|---|---|---|
-| `POST /session/:id/model` / `approval-mode` | **标准** `session/set_config_option`（model/mode） | setSessionModel / setSessionApprovalMode |
-| `GET /session/:id/context` | `_qwen/session/context` | getSessionContextStatus |
-| `GET /session/:id/supported-commands` | `_qwen/session/supported_commands` | getSessionSupportedCommandsStatus |
-| `PATCH /session/:id/metadata` | `_qwen/session/update_metadata` | updateSessionMetadata |
-| `GET /workspace/{mcp,skills,providers,env,preflight}` | `_qwen/workspace/{…}` | getWorkspace*Status |
-| `POST /workspace/init` | `_qwen/workspace/init` | initWorkspace |
-| `POST /workspace/tools/:name/enable` | `_qwen/workspace/set_tool_enabled` | setWorkspaceToolEnabled |
-| `POST /workspace/mcp/:server/restart` | `_qwen/workspace/restart_mcp_server` | restartMcpServer |
+| REST                                                  | `/acp`                                             | bridge                                   |
+| ----------------------------------------------------- | -------------------------------------------------- | ---------------------------------------- |
+| `POST /session/:id/model` / `approval-mode`           | **标准** `session/set_config_option`（model/mode） | setSessionModel / setSessionApprovalMode |
+| `GET /session/:id/context`                            | `_qwen/session/context`                            | getSessionContextStatus                  |
+| `GET /session/:id/supported-commands`                 | `_qwen/session/supported_commands`                 | getSessionSupportedCommandsStatus        |
+| `PATCH /session/:id/metadata`                         | `_qwen/session/update_metadata`                    | updateSessionMetadata                    |
+| `GET /workspace/{mcp,skills,providers,env,preflight}` | `_qwen/workspace/{…}`                              | getWorkspace\*Status                     |
+| `POST /workspace/init`                                | `_qwen/workspace/init`                             | initWorkspace                            |
+| `POST /workspace/tools/:name/enable`                  | `_qwen/workspace/set_tool_enabled`                 | setWorkspaceToolEnabled                  |
+| `POST /workspace/mcp/:server/restart`                 | `_qwen/workspace/restart_mcp_server`               | restartMcpServer                         |
 
 （既有：session/new·load·resume·close·list·prompt·cancel、heartbeat、permission、events 已对齐。）
 
@@ -541,10 +545,10 @@ REST 的 **文件 I/O**（`/file /glob /list /stat /file/write /file/edit`）、
 
 ## 18. Review round 9 — PR fold-ins
 
-| # | Severity | Finding | Fix |
-|---|----------|---------|-----|
-| G1 | **P1 (regression)** | Session-stream reconnect aborted the in-flight prompt: `attachSessionStream` closed the OLD stream before installing the new one, and the old stream's `onClose` unconditionally aborted `promptAbort` — so a reconnecting client (network glitch/roaming) lost its running prompt. | Install the new stream BEFORE closing the old; identity-guard `onClose`'s prompt-abort (only abort if THIS is still the session's live stream). Test added (prompt survives reconnect). |
-| G2 | **P2** | `session/cancel` passed `undefined` as the `CancelNotification` body, dropping client-supplied cancel fields (reason/context) that REST forwards. | Forward `{ ...params, sessionId }` (mirrors REST). |
+| #   | Severity            | Finding                                                                                                                                                                                                                                                                             | Fix                                                                                                                                                                                     |
+| --- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G1  | **P1 (regression)** | Session-stream reconnect aborted the in-flight prompt: `attachSessionStream` closed the OLD stream before installing the new one, and the old stream's `onClose` unconditionally aborted `promptAbort` — so a reconnecting client (network glitch/roaming) lost its running prompt. | Install the new stream BEFORE closing the old; identity-guard `onClose`'s prompt-abort (only abort if THIS is still the session's live stream). Test added (prompt survives reconnect). |
+| G2  | **P2**              | `session/cancel` passed `undefined` as the `CancelNotification` body, dropping client-supplied cancel fields (reason/context) that REST forwards.                                                                                                                                   | Forward `{ ...params, sessionId }` (mirrors REST).                                                                                                                                      |
 
 Rebased onto latest `daemon_mode_b_main` (#4473/#4483/#4484/#4500), no conflicts. Suite **33 tests**, live re-verified.
 

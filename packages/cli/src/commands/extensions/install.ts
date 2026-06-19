@@ -19,7 +19,7 @@ import {
   requestConsentNonInteractive,
   requestChoicePluginNonInteractive,
 } from './consent.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface InstallArgs {
   source: string;
@@ -70,9 +70,9 @@ export async function handleInstall(args: InstallArgs) {
     const workspaceDir = process.cwd();
     const extensionManager = new ExtensionManager({
       workspaceDir,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(workspaceDir).merged,
-      ),
+      locale: getCurrentLanguage(),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
       requestConsent,
       requestChoicePlugin: requestChoicePluginNonInteractive,
     });

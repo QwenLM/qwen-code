@@ -17,6 +17,10 @@ import {
   createDebugLogger,
   stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
+import type {
+  MCPServerConfig,
+  McpServerScope,
+} from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
 import { DefaultDark } from '../ui/themes/default.js';
@@ -87,6 +91,7 @@ export const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
 const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  'QWEN_CODE_MCP_APPROVALS_PATH',
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
 ];
@@ -399,6 +404,30 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   return [...warningSet];
 }
 
+/**
+ * Stamp every MCP server in a scope's settings with its provenance `scope`
+ * BEFORE the merge, so the winning entry of the shallow `mcpServers` merge
+ * carries the scope it actually came from. This drives both the approval gate
+ * (`'workspace'` is gated) and precedence (`'workspace'`/`'system'` outrank a
+ * `.mcp.json` server). User/default scopes are left unstamped (trusted, lower
+ * precedence than `.mcp.json`). Returns a shallow copy — never mutates input.
+ * See issue #4615.
+ */
+function tagMcpServerScope(
+  settings: Settings,
+  scope: McpServerScope,
+): Settings {
+  const servers = settings.mcpServers;
+  if (!servers || Object.keys(servers).length === 0) {
+    return settings;
+  }
+  const tagged: Record<string, MCPServerConfig> = {};
+  for (const [name, config] of Object.entries(servers)) {
+    tagged[name] = { ...config, scope };
+  }
+  return { ...settings, mcpServers: tagged };
+}
+
 function mergeSettings(
   system: Settings,
   systemDefaults: Settings,
@@ -406,7 +435,9 @@ function mergeSettings(
   workspace: Settings,
   isTrusted: boolean,
 ): Settings {
-  const safeWorkspace = isTrusted ? workspace : ({} as Settings);
+  const safeWorkspace = isTrusted
+    ? tagMcpServerScope(workspace, 'workspace')
+    : ({} as Settings);
 
   // Settings are merged with the following precedence (last one wins for
   // single values):
@@ -420,7 +451,7 @@ function mergeSettings(
     systemDefaults,
     user,
     safeWorkspace,
-    system,
+    tagMcpServerScope(system, 'system'),
   ) as Settings;
 }
 
@@ -435,6 +466,7 @@ export class LoadedSettings {
     migrationWarnings: string[] = [],
     corruptedPath: string | undefined = undefined,
     wasRecovered: boolean = false,
+    workspaceSettingsActive: boolean = true,
   ) {
     this.system = system;
     this.systemDefaults = systemDefaults;
@@ -445,6 +477,7 @@ export class LoadedSettings {
     this.migrationWarnings = migrationWarnings;
     this.corruptedPath = corruptedPath;
     this.wasRecovered = wasRecovered;
+    this.workspaceSettingsActive = workspaceSettingsActive;
     this._merged = this.computeMergedSettings();
   }
 
@@ -457,6 +490,7 @@ export class LoadedSettings {
   readonly migrationWarnings: string[];
   readonly corruptedPath: string | undefined;
   readonly wasRecovered: boolean;
+  readonly workspaceSettingsActive: boolean;
   corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
@@ -1151,28 +1185,34 @@ export function loadSettings(
   } => {
     try {
       if (fs.existsSync(filePath)) {
-        let content = fs.readFileSync(filePath, 'utf-8');
+        const content = fs.readFileSync(filePath, 'utf-8');
         let rawSettings: unknown;
         // Carry corruption state through to the final return so it
         // can be attached after the migration pipeline runs.
         const corruptedPath = `${filePath}${CORRUPTED_SUFFIX}`;
         let corruptedSaved = false;
-        let recoveredFromBackup = false;
         let recoveredFromEnvVar: boolean | null = null;
 
         try {
           rawSettings = JSON.parse(stripJsonComments(content));
         } catch (parseError: unknown) {
           // ===== JSON parse failed — enter corruption recovery =====
-          // Strategy: save corrupted file as .corrupted → recover from .orig →
+          // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
+          //
+          // Note: there is no on-disk `.orig` backup to recover from. Writes go
+          // through `writeWithBackupSync`, which uses `.orig` only as an
+          // in-flight safety net and removes it on success — so it never
+          // lingers in the user's directory (see writeWithBackup.ts).
 
           // Step 1: copy corrupted file to .corrupted for reference
           // MUST guarantee .corrupted exists so onExit can restore it.
           // Use copy (not rename) — the file must stay on disk so that
           // child processes spawned by relaunchAppInChildProcess() can
-          // enter the existsSync block where env-var propagation is
-          // checked.  Step 2 will overwrite it with .orig if available.
+          // enter the existsSync block where env-var propagation is checked.
+          debugLogger.warn(
+            `Settings file ${filePath} has invalid JSON (${getErrorMessage(parseError)}). Resetting to empty settings.`,
+          );
 
           try {
             fs.copyFileSync(filePath, corruptedPath);
@@ -1183,33 +1223,7 @@ export function loadSettings(
             );
           }
 
-          // Step 2: try recovering from .orig backup (created on each write)
-          const backupPath = `${filePath}.orig`;
-          if (fs.existsSync(backupPath)) {
-            debugLogger.warn(
-              `Settings file ${filePath} has invalid JSON (${getErrorMessage(parseError)}). Attempting recovery from backup ${backupPath}.`,
-            );
-            try {
-              const backupContent = fs.readFileSync(backupPath, 'utf-8');
-              const backupSettings = JSON.parse(
-                stripJsonComments(backupContent),
-              );
-              // Backup valid — overwrite with backup to restore last good state
-              fs.writeFileSync(filePath, backupContent, 'utf-8');
-              content = backupContent;
-              rawSettings = backupSettings;
-              const recoveryMsg = `Settings file ${filePath} had invalid JSON and was recovered from backup ${backupPath}. Some recent settings changes may have been lost.`;
-              debugLogger.warn(recoveryMsg);
-              recoveredFromBackup = true;
-            } catch (backupError) {
-              // Backup also corrupted — give up recovery
-              debugLogger.warn(
-                `Failed to recover from backup ${backupPath}: ${getErrorMessage(backupError)}. Falling back to empty settings.`,
-              );
-            }
-          }
-
-          // Step 3: no backup available — start with empty settings
+          // Step 2: no recoverable content — start with empty settings
           if (!rawSettings) {
             const warningMsg = `Settings file ${filePath} has invalid JSON. Your settings have been reset.`;
             debugLogger.warn(warningMsg);
@@ -1229,8 +1243,6 @@ export function loadSettings(
               wasRecovered: false,
             };
           }
-          // Fall through to migration pipeline — .orig backup may be in
-          // an older schema and needs to go through runMigrations.
         }
 
         // Propagate corruption state from parent process via env vars.
@@ -1333,7 +1345,7 @@ export function loadSettings(
           persistSettingsObject('Error normalizing settings version on disk');
         }
 
-        // Attach corruption state if settings were recovered from backup
+        // Attach corruption state propagated from the parent via env vars.
         const result: ReturnType<typeof loadAndMigrate> = {
           settings: settingsObject as Settings,
           rawJson: content,
@@ -1341,8 +1353,7 @@ export function loadSettings(
         };
         if (corruptedSaved) {
           result.corruptedPath = corruptedPath;
-          result.wasRecovered =
-            recoveredFromBackup || (recoveredFromEnvVar ?? false);
+          result.wasRecovered = recoveredFromEnvVar ?? false;
         }
         return result;
       }
@@ -1370,7 +1381,8 @@ export function loadSettings(
     settings: {} as Settings,
     rawJson: undefined,
   };
-  if (realWorkspaceDir !== realHomeDir) {
+  const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
+  if (workspaceSettingsActive) {
     workspaceResult = loadAndMigrate(
       workspaceSettingsPath,
       SettingScope.Workspace,
@@ -1491,6 +1503,7 @@ export function loadSettings(
     allMigrationWarnings,
     userResult.corruptedPath,
     userResult.wasRecovered ?? false,
+    workspaceSettingsActive,
   );
 }
 

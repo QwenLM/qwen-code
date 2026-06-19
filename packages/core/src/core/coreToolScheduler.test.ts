@@ -26,6 +26,7 @@ import {
   ToolConfirmationOutcome,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
   ToolErrorType,
 } from '../index.js';
 import * as path from 'node:path';
@@ -33,7 +34,11 @@ import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
-import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
+import type {
+  ExecutingToolCall,
+  ToolCall,
+  WaitingToolCall,
+} from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
   convertToFunctionResponse,
@@ -270,6 +275,7 @@ vi.mock('../telemetry/session-tracing.js', () => ({
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
+  mkdir: vi.fn(),
 }));
 
 vi.mock('../ide/ide-client.js', () => ({
@@ -680,6 +686,7 @@ describe('CoreToolScheduler', () => {
     onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
+    toolOutputBatchBudget?: number;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -722,10 +729,15 @@ describe('CoreToolScheduler', () => {
         }),
         storage: {
           getProjectTempDir: () => '/tmp',
+          getToolResultsDir: () => '/tmp/tool-results',
         },
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
         getTruncateToolOutputThreshold: () =>
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+        getToolOutputBatchBudget: () =>
+          options.toolOutputBatchBudget ?? Number.POSITIVE_INFINITY,
         getToolRegistry: () => mockToolRegistry,
         getCwd: () => '/repo',
         getUseModelRouter: () => false,
@@ -813,6 +825,642 @@ describe('CoreToolScheduler', () => {
     expect(completedCalls.every((call) => call.status === 'success')).toBe(
       true,
     );
+  });
+
+  it('executes only the first request for duplicate callIds in one batch', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'first result',
+      returnDisplay: 'first result',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'read_file',
+        new MockTool({
+          name: 'read_file',
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-dup',
+        },
+        {
+          callId: 'dup_id_0001',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-dup',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({ file_path: 'a.ts' }),
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    expect(completedCalls.map((call) => call.request.callId)).toEqual([
+      'dup_id_0001',
+    ]);
+  });
+
+  it('does not dedupe requests with empty callIds in one batch', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'result',
+      returnDisplay: 'result',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'read_file',
+        new MockTool({
+          name: 'read_file',
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-empty',
+        },
+        {
+          callId: '',
+          name: 'read_file',
+          args: { file_path: 'b.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-empty',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ file_path: 'a.ts' }),
+    );
+    expect(execute).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ file_path: 'b.ts' }),
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(2);
+  });
+
+  function outputOfFirstCall(
+    onAllToolCallsComplete: ReturnType<typeof vi.fn>,
+  ): string {
+    const completionCalls = onAllToolCallsComplete.mock
+      .calls as unknown as Array<[ToolCall[]]>;
+    const call = completionCalls[0]?.[0]?.[0];
+    return call && 'response' in call
+      ? ((call.response.responseParts[0]?.functionResponse?.response?.[
+          'output'
+        ] as string) ?? '')
+      : '';
+  }
+
+  it('truncates oversized model-facing string output before recording results', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'a'.repeat(200_000),
+      returnDisplay: 'big output',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      ['bigTool', new MockTool({ name: 'bigTool', execute })],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c-big',
+          name: 'bigTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-big',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const output = outputOfFirstCall(onAllToolCallsComplete);
+    expect(output).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(output.length).toBeLessThan(200_000);
+  });
+
+  it('leaves small model-facing output untouched', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'small output',
+      returnDisplay: 'small',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      ['smallTool', new MockTool({ name: 'smallTool', execute })],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c-small',
+          name: 'smallTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-small',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(outputOfFirstCall(onAllToolCallsComplete)).toBe('small output');
+  });
+
+  it('applies the per-tool budget for a tool invoked via a legacy alias', async () => {
+    // Regression (C1): limitsTool read getTool(request.name) with the raw alias
+    // ('task'), which the registry stores only under the canonical name
+    // ('agent') — so the per-tool maxOutputChars was silently dropped and the
+    // global default applied. schedule() already resolved scheduledCall.tool
+    // canonically, so the budget must come from there.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'a'.repeat(8000), // > 5k per-tool budget, < 25k global default
+      returnDisplay: 'big',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.AGENT,
+        new MockTool({ name: ToolNames.AGENT, execute, maxOutputChars: 5000 }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c-alias',
+          name: 'task', // legacy alias → AGENT
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-alias',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // Per-tool 5k budget applied via scheduledCall.tool. Pre-fix: getTool('task')
+    // is undefined → global 25k → the 8k output would pass untruncated.
+    expect(outputOfFirstCall(onAllToolCallsComplete)).toContain(
+      'Tool output was too large and has been truncated',
+    );
+  });
+
+  it('keeps PostToolUse additionalContext intact after truncating oversized output', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'a'.repeat(200_000),
+      returnDisplay: 'big output',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      ['bigHookTool', new MockTool({ name: 'bigHookTool', execute })],
+    ]);
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(async (request: { eventName: string }) => {
+          if (request.eventName === 'PostToolUse') {
+            return {
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: 'PostToolUse-hook',
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  additionalContext: 'POSTHOOK_CONTEXT_MARKER',
+                },
+              },
+            };
+          }
+          return {
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-hook`,
+            success: true,
+            output: { decision: 'allow' },
+          };
+        }),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.DEFAULT,
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c-bh',
+          name: 'bigHookTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-bh',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const output = outputOfFirstCall(onAllToolCallsComplete);
+    // The body was truncated...
+    expect(output).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    // ...yet the hook's additionalContext survived intact: it is appended
+    // AFTER truncation, so the head/tail truncator never bisects it.
+    expect(output).toContain('POSTHOOK_CONTEXT_MARKER');
+  });
+
+  it('appends PostToolUse additionalContext AFTER truncation so a head-keep tool cannot drop it', async () => {
+    // Discriminating reorder guard: with keep='head' the metadata marker lands
+    // at the tail. Only truncate-THEN-append preserves it — the reverted
+    // append-then-truncate order drops the tail marker because the head
+    // truncator keeps the head of the oversized body and discards the rest.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'a'.repeat(200_000),
+      returnDisplay: 'big output',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'headHookTool',
+        new MockTool({
+          name: 'headHookTool',
+          execute,
+          maxOutputChars: 30_000,
+          truncateKeep: 'head',
+        }),
+      ],
+    ]);
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(async (request: { eventName: string }) => {
+          if (request.eventName === 'PostToolUse') {
+            return {
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: 'PostToolUse-hook',
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  additionalContext: 'POSTHOOK_HEAD_MARKER',
+                },
+              },
+            };
+          }
+          return {
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-hook`,
+            success: true,
+            output: { decision: 'allow' },
+          };
+        }),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.DEFAULT,
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c-hh',
+          name: 'headHookTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-hh',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const output = outputOfFirstCall(onAllToolCallsComplete);
+    // Body truncated head-only, yet the tail marker survived because it was
+    // appended after truncation.
+    expect(output).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(output).toContain('POSTHOOK_HEAD_MARKER');
+  });
+
+  it('offloads the largest tool outputs when a batch exceeds the budget', async () => {
+    // Both outputs are individually under the single-result threshold (25k),
+    // so PR-A truncation leaves them alone; only their SUM (12k) exceeds the
+    // per-message batch budget (10k), so the largest is offloaded.
+    const bigExecute = vi.fn().mockResolvedValue({
+      llmContent: 'a'.repeat(9000),
+      returnDisplay: 'big',
+    });
+    const smallExecute = vi.fn().mockResolvedValue({
+      llmContent: 'b'.repeat(3000),
+      returnDisplay: 'small',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'bigBatchTool',
+        new MockTool({ name: 'bigBatchTool', execute: bigExecute }),
+      ],
+      [
+        'smallBatchTool',
+        new MockTool({ name: 'smallBatchTool', execute: smallExecute }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        toolOutputBatchBudget: 10_000,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'big',
+          name: 'bigBatchTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+        {
+          callId: 'small',
+          name: 'smallBatchTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completionCalls = onAllToolCallsComplete.mock
+      .calls as unknown as Array<[ToolCall[]]>;
+    const calls = completionCalls[0][0];
+    const outputOf = (name: string) => {
+      const c = calls.find((call) => call.request.name === name);
+      return c && 'response' in c
+        ? ((c.response.responseParts[0]?.functionResponse?.response?.[
+            'output'
+          ] as string) ?? '')
+        : '';
+    };
+
+    // Largest output is offloaded to disk (recoverable pointer).
+    expect(outputOf('bigBatchTool')).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    // Smaller output stays untouched (batch back under budget after offload).
+    expect(outputOf('smallBatchTool')).toBe('b'.repeat(3000));
+  });
+
+  it('preserves PostToolBatch additionalContext in the offload preview tail', async () => {
+    // The PostToolBatch hook context is appended to the TAIL of the last call.
+    // When that call is the batch's largest and gets offloaded, the offload
+    // preview uses keep:'both' (head + tail), so the tail-resident context
+    // survives in the preview — the model still sees the hook guidance, and the
+    // full output (context included) is recoverable from the spill file.
+    const bigExecute = vi.fn().mockResolvedValue({
+      llmContent: 'a'.repeat(9000),
+      returnDisplay: 'big',
+    });
+    const smallExecute = vi.fn().mockResolvedValue({
+      llmContent: 'b'.repeat(3000),
+      returnDisplay: 'small',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'smallBatchTool',
+        new MockTool({ name: 'smallBatchTool', execute: smallExecute }),
+      ],
+      [
+        'bigBatchTool',
+        new MockTool({ name: 'bigBatchTool', execute: bigExecute }),
+      ],
+    ]);
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(async (request: { eventName: string }) => {
+          if (request.eventName === 'PostToolBatch') {
+            return {
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: 'PostToolBatch-hook',
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: 'PostToolBatch',
+                  additionalContext: 'POSTBATCH_MARKER',
+                },
+              },
+            };
+          }
+          return {
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-hook`,
+            success: true,
+            output: { decision: 'allow' },
+          };
+        }),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        toolOutputBatchBudget: 10_000,
+        messageBus,
+        disableHooks: false,
+      });
+
+    // big is scheduled last, so it is the call PostToolBatch context attaches
+    // to — and it is also the batch's largest, so it gets offloaded.
+    await scheduler.schedule(
+      [
+        {
+          callId: 'small',
+          name: 'smallBatchTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+        {
+          callId: 'big',
+          name: 'bigBatchTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const calls = (
+      onAllToolCallsComplete.mock.calls as unknown as Array<[ToolCall[]]>
+    )[0][0];
+    const outputOf = (name: string) => {
+      const c = calls.find((call) => call.request.name === name);
+      return c && 'response' in c
+        ? ((c.response.responseParts[0]?.functionResponse?.response?.[
+            'output'
+          ] as string) ?? '')
+        : '';
+    };
+
+    const bigOutput = outputOf('bigBatchTool');
+    // big is offloaded (largest), yet the PostToolBatch context survives
+    // because it is appended after the budget pass.
+    expect(bigOutput).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(bigOutput).toContain('POSTBATCH_MARKER');
+  });
+
+  it('applies a tool-declared maxOutputChars instead of the global threshold', async () => {
+    // Both tools emit the SAME 8k output (under the global 25k threshold).
+    // tinyTool declares a 5k per-tool budget → its output IS truncated.
+    // defaultTool declares nothing → falls back to global 25k → NOT truncated.
+    const make = () =>
+      vi.fn().mockResolvedValue({
+        llmContent: 'a'.repeat(8000),
+        returnDisplay: 'x',
+      });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'tinyTool',
+        new MockTool({
+          name: 'tinyTool',
+          execute: make(),
+          maxOutputChars: 5000,
+        }),
+      ],
+      ['defaultTool', new MockTool({ name: 'defaultTool', execute: make() })],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'tinyTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+        {
+          callId: '2',
+          name: 'defaultTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const calls = (
+      onAllToolCallsComplete.mock.calls as unknown as Array<[ToolCall[]]>
+    )[0][0];
+    const outputOf = (name: string) => {
+      const c = calls.find((call) => call.request.name === name);
+      return c && 'response' in c
+        ? ((c.response.responseParts[0]?.functionResponse?.response?.[
+            'output'
+          ] as string) ?? '')
+        : '';
+    };
+
+    expect(outputOf('tinyTool')).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(outputOf('defaultTool')).toBe('a'.repeat(8000));
+  });
+
+  it('exempts a self-managed (Infinity maxOutputChars) tool from the line cap', async () => {
+    // 2000 short lines: ~4k chars (well under any char budget) but over the
+    // global 1000-line cap. A tool that declares Infinity maxOutputChars
+    // self-manages its size (e.g. ReadFile paging), so the scheduler must NOT
+    // apply the global line cap to it.
+    const content = Array(2000).fill('x').join('\n');
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: content,
+      returnDisplay: 'x',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'selfManaged',
+        new MockTool({
+          name: 'selfManaged',
+          execute,
+          maxOutputChars: Number.POSITIVE_INFINITY,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c',
+          name: 'selfManaged',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const output = outputOfFirstCall(onAllToolCallsComplete);
+    expect(output).not.toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(output).toBe(content);
   });
 
   it('schedules a memory pressure check after tool execution', async () => {
@@ -958,6 +1606,7 @@ describe('CoreToolScheduler', () => {
       'auto-denied',
       'classifier_blocked',
       abortController.signal,
+      'auto-denied',
     );
     expect(execute).not.toHaveBeenCalled();
     const completedCalls = onAllToolCallsComplete.mock
@@ -1082,6 +1731,7 @@ describe('CoreToolScheduler', () => {
       'auto-unavailable',
       'classifier_unavailable',
       abortController.signal,
+      'auto-unavailable',
     );
     expect(execute).not.toHaveBeenCalled();
   });
@@ -2492,7 +3142,10 @@ describe('CoreToolScheduler', () => {
         }),
         storage: {
           getProjectTempDir: () => '/tmp',
+          getToolResultsDir: () => '/tmp/tool-results',
         },
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
         getTruncateToolOutputThreshold: () =>
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -2581,7 +3234,10 @@ describe('CoreToolScheduler', () => {
         }),
         storage: {
           getProjectTempDir: () => '/tmp',
+          getToolResultsDir: () => '/tmp/tool-results',
         },
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
         getTruncateToolOutputThreshold: () =>
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -3079,6 +3735,122 @@ describe('CoreToolScheduler edit cancellation', () => {
 });
 
 describe('CoreToolScheduler YOLO mode', () => {
+  const runLongDisplayTool = async (
+    longDisplay: string,
+    isInteractive: boolean,
+  ) => {
+    const executeFn = vi.fn().mockResolvedValue({
+      llmContent: 'Tool executed',
+      returnDisplay: longDisplay,
+    });
+    const mockTool = new MockTool({
+      name: 'mockTool',
+      execute: executeFn,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+    });
+    const declarativeTool = mockTool;
+
+    const mockToolRegistry = {
+      getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
+      getToolByName: () => declarativeTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => declarativeTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getToolRegistry: () => mockToolRegistry,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      getTruncateToolOutputThreshold: () => 100_000,
+      getTruncateToolOutputLines: () => 10_000,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => isInteractive,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'mockTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      return completedCall.response.resultDisplay as string;
+    }
+    return undefined;
+  };
+
+  it('compacts completed resultDisplay before retaining interactive scheduler state', async () => {
+    const longDisplay = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+
+    const retainedDisplay = await runLongDisplayTool(longDisplay, true);
+
+    expect(retainedDisplay?.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(retainedDisplay).toContain('head-');
+    expect(retainedDisplay).toContain('-tail');
+    expect(retainedDisplay).toContain('truncated from');
+  });
+
+  it('preserves completed resultDisplay in non-interactive scheduler responses', async () => {
+    const longDisplay = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+
+    await expect(runLongDisplayTool(longDisplay, false)).resolves.toBe(
+      longDisplay,
+    );
+  });
+
   it('should execute tool requiring confirmation directly without waiting', async () => {
     // Arrange
     const executeFn = vi.fn().mockResolvedValue({
@@ -3280,6 +4052,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
         terminalWidth: 90,
         terminalHeight: 30,
       }),
+      isInteractive: () => true,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -3344,6 +4117,146 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     // #4302 review: cancelled: true so the exec sub-span ends UNSET (not
     // ERROR) — matches setToolSpanCancelled on the parent tool span.
     expect(execSpanRecord?.endMetadata?.cancelled).toBe(true);
+  });
+
+  it('compacts live output only before retaining it in scheduler state', async () => {
+    const longOutput = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+
+    class StreamingInvocation extends BaseToolInvocation<
+      { id: string },
+      ToolResult
+    > {
+      getDescription(): string {
+        return `Streaming tool ${this.params.id}`;
+      }
+
+      async execute(
+        signal: AbortSignal,
+        updateOutput?: (output: ToolResultDisplay) => void,
+      ): Promise<ToolResult> {
+        updateOutput?.(longOutput);
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          const onAbort = () => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        });
+        return { llmContent: 'done', returnDisplay: 'done' };
+      }
+    }
+
+    class StreamingTool extends BaseDeclarativeTool<
+      { id: string },
+      ToolResult
+    > {
+      constructor() {
+        super(
+          'stream-tool',
+          'Stream Tool',
+          'Emits live output and waits for abort',
+          Kind.Other,
+          {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+          },
+          true,
+          true,
+        );
+      }
+      protected createInvocation(params: { id: string }) {
+        return new StreamingInvocation(params);
+      }
+    }
+
+    const tool = new StreamingTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const outputUpdateHandler = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getToolRegistry: () => mockToolRegistry,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      isInteractive: () => true,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      outputUpdateHandler,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortController = new AbortController();
+    const schedulePromise = scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'stream-tool',
+          args: { id: 'x' },
+          isClientInitiated: true,
+          prompt_id: 'prompt-stream',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(outputUpdateHandler).toHaveBeenCalled();
+    });
+
+    expect(outputUpdateHandler.mock.calls[0][1]).toBe(longOutput);
+
+    const liveOutputUpdate = onToolCallsUpdate.mock.calls
+      .map((call) => call[0][0] as ToolCall)
+      .find(
+        (call): call is ExecutingToolCall =>
+          call.status === 'executing' && call.liveOutput !== undefined,
+      );
+    const retainedOutput = liveOutputUpdate?.liveOutput as string;
+    expect(retainedOutput.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(retainedOutput).toContain('head-');
+    expect(retainedOutput).toContain('-tail');
+    expect(retainedOutput).toContain('truncated from');
+
+    abortController.abort();
+    await schedulePromise;
   });
 });
 
@@ -3921,6 +4834,7 @@ describe('CoreToolScheduler request queueing', () => {
       'pending-protected-write',
       'classifier_blocked',
       expect.any(AbortSignal),
+      'pending-protected-write',
     );
     const statuses = onToolCallsUpdate.mock.calls
       .flatMap((call) => call[0] as ToolCall[])
@@ -7565,7 +8479,10 @@ describe('Fire hook functions integration', () => {
         }),
         storage: {
           getProjectTempDir: () => '/tmp',
+          getToolResultsDir: () => '/tmp/tool-results',
         },
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
         getTruncateToolOutputThreshold: () =>
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -7772,7 +8689,7 @@ describe('Fire hook functions integration', () => {
 
       const agentTool = new MockTool({
         name: ToolNames.AGENT,
-        kind: Kind.Other,
+        kind: Kind.Agent,
         execute: async (params) => {
           const id = (params as { id: string }).id;
           executionLog.push(`agent:start:${id}`);
@@ -8558,14 +9475,16 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     callId: string,
     name: string,
     args: Record<string, unknown>,
+    wasOutputTruncated = false,
   ) {
-    return {
+    const request = {
       callId,
       name,
       args,
       isClientInitiated: false,
       prompt_id: `prompt-${callId}`,
     };
+    return wasOutputTruncated ? { ...request, wasOutputTruncated } : request;
   }
 
   function getLastErrorMessage(onToolCallsUpdate: Mock): string | undefined {
@@ -8592,9 +9511,9 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     const tool = new StrictStringTool();
     const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
 
-    // Turn 1: bad params (value is number, not string)
+    // Turn 1: bad params (value is object, not string — not coercible by fixStringValues)
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     let msg = getLastErrorMessage(onToolCallsUpdate);
@@ -8603,7 +9522,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 2: same bad params
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
@@ -8611,10 +9530,39 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 3: same bad params — should trigger directive
     await scheduler.schedule(
-      [makeRequest('c3', 'strictStringTool', { value: 123 })],
+      [makeRequest('c3', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('should keep retry counts stable when truncation guidance is toggled', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    await scheduler.schedule(
+      [makeRequest('c1', 'strictStringTool', { value: {} }, true)],
+      new AbortController().signal,
+    );
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain('previous response was truncated');
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain('previous response was truncated');
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('c3', 'strictStringTool', { value: {} }, true)],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain('previous response was truncated');
     expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
 
@@ -8624,11 +9572,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 1-2: tool fails twice
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
 
@@ -8641,7 +9589,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 4: back to tool — should be count 1 again (no directive)
     await scheduler.schedule(
-      [makeRequest('c4', 'strictStringTool', { value: 123 })],
+      [makeRequest('c4', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     const msg = getLastErrorMessage(onToolCallsUpdate);
@@ -8655,11 +9603,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Two validation failures with the same error.
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
 
@@ -8671,11 +9619,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Two more failures — count should restart at 1, not jump to 3+.
     await scheduler.schedule(
-      [makeRequest('c4', 'strictStringTool', { value: 123 })],
+      [makeRequest('c4', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('c5', 'strictStringTool', { value: 123 })],
+      [makeRequest('c5', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
 
@@ -8802,18 +9750,18 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Tool A fails twice, accumulating a retry count of 2.
     await scheduler.schedule(
-      [makeRequest('a1', StrictStringTool.Name, { value: 123 })],
+      [makeRequest('a1', StrictStringTool.Name, { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('a2', StrictStringTool.Name, { value: 123 })],
+      [makeRequest('a2', StrictStringTool.Name, { value: {} })],
       new AbortController().signal,
     );
 
     // Now a batch for tool B only — tool A's counter must be pruned because
     // A is not present in this batch.
     await scheduler.schedule(
-      [makeRequest('b1', StrictToolAlt.Name, { other: 456 })],
+      [makeRequest('b1', StrictToolAlt.Name, { other: {} })],
       new AbortController().signal,
     );
 
@@ -8822,7 +9770,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     // Under per-tool pruning the counter starts fresh at 1 and no directive
     // should be emitted.
     await scheduler.schedule(
-      [makeRequest('a3', StrictStringTool.Name, { value: 123 })],
+      [makeRequest('a3', StrictStringTool.Name, { value: {} })],
       new AbortController().signal,
     );
     const msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9109,6 +10057,9 @@ describe('CoreToolScheduler activation wiring', () => {
     matchAndActivateByPaths: ReturnType<typeof vi.fn>;
     skillToolPresent: boolean;
     toolResult?: ToolResult;
+    // Names the mock SkillManager.listSkills will report as available. When
+    // omitted, defaults to ["tsx-helper"] which satisfies the common case.
+    availableSkillNames?: string[];
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -9172,9 +10123,25 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => undefined,
-      getSkillManager: () => ({
-        matchAndActivateByPaths: opts.matchAndActivateByPaths,
-      }),
+      getSkillManager: () => {
+        const names = opts.availableSkillNames ?? ['tsx-helper'];
+        return {
+          matchAndActivateByPaths: opts.matchAndActivateByPaths,
+          listSkills: vi.fn().mockResolvedValue(
+            names.map((n) => ({
+              name: n,
+              description: `Description of ${n}`,
+              level: 'project' as const,
+              filePath: `/p/.qwen/skills/${n}/SKILL.md`,
+              body: '',
+            })),
+          ),
+          isSkillActive: vi.fn().mockReturnValue(true),
+        };
+      },
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -9220,7 +10187,7 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(completed[0].status).toBe('success');
     const responseText = getResponseText(completed[0]);
     expect(responseText).toContain('tsx-helper');
-    expect(responseText).toContain('now available via the Skill tool');
+    expect(responseText).toContain('became available via the Skill tool');
   });
 
   it('includes concrete result paths in skill activation candidates', async () => {
@@ -9484,7 +10451,22 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => rulesRegistry,
-      getSkillManager: () => ({ matchAndActivateByPaths }),
+      getSkillManager: () => ({
+        matchAndActivateByPaths,
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'tsx-helper',
+            description: 'Helper for TSX',
+            level: 'project' as const,
+            filePath: '/p/.qwen/skills/tsx-helper/SKILL.md',
+            body: '',
+          },
+        ]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -9532,6 +10514,13 @@ describe('CoreToolScheduler activation wiring', () => {
     // but extension skills bypass it. A crafted extension name would
     // otherwise close the <system-reminder> envelope early when emitted
     // as part of "skill X is now available".
+    const evilSkill = {
+      name: 'evil<inject>',
+      description: 'Evil extension skill',
+      level: 'extension' as const,
+      filePath: '/ext/skills/evil/SKILL.md',
+      body: 'Body.',
+    };
     const matchAndActivateByPaths = vi.fn().mockResolvedValue(['evil<inject>']);
 
     const fsTool = new MockTool({
@@ -9582,7 +10571,14 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => undefined,
-      getSkillManager: () => ({ matchAndActivateByPaths }),
+      getSkillManager: () => ({
+        matchAndActivateByPaths,
+        listSkills: vi.fn().mockResolvedValue([evilSkill]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -9614,6 +10610,99 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(responseText).toContain('evil&lt;inject&gt;');
     // Raw tag must NOT appear (would close the envelope early).
     expect(responseText).not.toContain('evil<inject>');
+  });
+
+  it('falls back to name-only entries when collectAvailableSkillEntries throws in activation path', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+
+    const fsTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: (n: string) => {
+        if (n === ToolNames.SKILL) return fsTool;
+        return fsTool;
+      },
+      ensureTool: async () => fsTool,
+      getToolByName: () => fsTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => fsTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getConditionalRulesRegistry: () => undefined,
+      getSkillManager: () => ({
+        matchAndActivateByPaths,
+        listSkills: vi.fn().mockRejectedValue(new Error('skill load failed')),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const responseText = getResponseText(completed[0]);
+    // Even when collectAvailableSkillEntries throws, the fallback
+    // should still announce the activated skill by name.
+    expect(responseText).toContain('tsx-helper');
+    expect(responseText).toContain('available_skills');
   });
 
   // Build a scheduler that runs a single ReadFile call against a

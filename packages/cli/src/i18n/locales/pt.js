@@ -443,12 +443,57 @@ export default {
   'Auto Edit': 'Edição Automática',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'alternar modo vim ligado/desligado',
-  'check session stats. Usage: /stats [model|tools]':
-    'verificar estatísticas da sessão. Uso: /stats [model|tools]',
   'Show model-specific usage statistics.':
     'Mostrar estatísticas de uso específicas do modelo.',
   'Show tool-specific usage statistics.':
     'Mostrar estatísticas de uso específicas da ferramenta.',
+  'Show daily token usage statistics.':
+    'Mostrar estatísticas diárias de uso de tokens.',
+  'Show monthly token usage statistics.':
+    'Mostrar estatísticas mensais de uso de tokens.',
+  'Export token usage statistics to CSV or JSON.':
+    'Exportar estatísticas de uso de tokens para CSV ou JSON.',
+  'No usage data.': 'Nenhum dado de uso.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} requisições)',
+  'Daily token usage for {{value}}': 'Uso diário de tokens para {{value}}',
+  'Monthly token usage for {{value}}': 'Uso mensal de tokens para {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requisições: {{requests}}',
+  'Breakdown:': 'Detalhamento:',
+  'Input: {{tokens}}': 'Entrada: {{tokens}}',
+  'Output: {{tokens}}': 'Saída: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (incluído na entrada): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raciocínio: {{tokens}}',
+  'By model:': 'Por modelo:',
+  'By auth type:': 'Por tipo de autenticação:',
+  'By model/auth type:': 'Por modelo/tipo de autenticação:',
+  'By source:': 'Por origem:',
+  'Failed to load token usage stats: {{error}}':
+    'Falha ao carregar estatísticas de uso de tokens: {{error}}',
+  'Expected --format csv or --format json.':
+    'Esperado --format csv ou --format json.',
+  'Expected a file path after --output.':
+    'Esperado um caminho de arquivo após --output.',
+  'Unexpected argument: {{argument}}': 'Argumento inesperado: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Uso: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'O caminho de exportação do uso de tokens deve estar dentro do diretório de trabalho do projeto.',
+  'Export target does not exist: {{path}}':
+    'O destino da exportação não existe: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    'Não foi possível resolver o caminho de exportação dentro do diretório de trabalho.',
+  'Could not create a temporary export file.':
+    'Não foi possível criar um arquivo temporário de exportação.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Uso de tokens exportado para {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Falha ao exportar estatísticas de uso de tokens: {{error}}',
+  'Unclosed quote in arguments.': 'Aspas não fechadas nos argumentos.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Observação: o tempo de geração (TTFT/TPS) pertence às métricas de geração.',
   'exit the cli': 'sair da cli',
   'Manage workspace directories': 'Gerenciar diretórios do workspace',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -809,8 +854,6 @@ export default {
     'Não é possível criar um fork enquanto uma resposta ou chamada de ferramenta está em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
   'Cannot fork before the first conversation turn.':
     'Não é possível criar um fork antes da primeira rodada da conversa.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'O comando /fork requer o feature gate de fork. Defina QWEN_CODE_ENABLE_FORK_SUBAGENT=1 para ativá-lo.',
   'The agent tool is unavailable; cannot fork.':
     'A ferramenta de agente está indisponível; não é possível criar um fork.',
   'Failed to launch fork: {{error}}': 'Falha ao iniciar o fork: {{error}}',
@@ -1462,6 +1505,27 @@ export default {
   'Found {{count}} TOML command files:':
     'Encontrados {{count}} arquivos de comando TOML:',
   'Current tasks': 'Tarefas atuais',
+  'Background tasks': 'Tarefas em segundo plano',
+  'No tasks currently running': 'Nenhuma tarefa em execução',
+  'No entry to show.': 'Nenhuma entrada para mostrar.',
+  'needs approval': 'precisa de aprovação',
+  'Background agent needs approval':
+    'Agente em segundo plano precisa de aprovação',
+  'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
+  Running: 'Em execução',
+  Paused: 'Pausado',
+  Completed: 'Concluído',
+  Failed: 'Falhou',
+  Stopped: 'Parado',
+  Shell: 'Shell',
+  Monitor: 'Monitor',
+  Command: 'Comando',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidação de memória',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidação de memória (revisando {{count}} sessão)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidação de memória (revisando {{count}} sessões)',
   '... and {{count}} more': '... e mais {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'O formato TOML está obsoleto. Você gostaria de migrá-los para o formato Markdown?',

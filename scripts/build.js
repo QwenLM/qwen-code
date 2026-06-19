@@ -33,6 +33,10 @@ if (!existsSync(join(root, 'node_modules'))) {
 // build all workspaces/packages in dependency order
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
 
+// --cli-only: skip packages not needed by the CLI bundle
+// (webui, sdk, web-shell, vscode-ide-companion are for IDE/web use only)
+const cliOnly = process.argv.includes('--cli-only');
+
 // Build in dependency order:
 // 1. core (foundation package, includes test-utils)
 // 2. web-templates (embeddable web templates - used by cli)
@@ -52,13 +56,18 @@ const buildOrder = [
   'packages/channels/weixin',
   'packages/channels/dingtalk',
   'packages/channels/feishu',
+  'packages/channels/qqbot',
   'packages/channels/plugin-example',
   'packages/acp-bridge',
   'packages/cli',
-  'packages/webui',
-  'packages/sdk-typescript',
-  'packages/web-shell',
-  'packages/vscode-ide-companion',
+  ...(cliOnly
+    ? []
+    : [
+        'packages/webui',
+        'packages/sdk-typescript',
+        'packages/web-shell',
+        'packages/vscode-ide-companion',
+      ]),
 ];
 
 for (const workspace of buildOrder) {

@@ -32,14 +32,16 @@ export async function packageDarwin(config: BuildConfig): Promise<string> {
     process.env.CSC_NAME = cscName;
   }
 
-  // Add notarization if all credentials are available
+  // Add notarization if all credentials are available.
+  // electron-builder auto-notarizes via notarytool when APPLE_ID,
+  // APPLE_APP_SPECIFIC_PASSWORD, and APPLE_TEAM_ID are present in the env;
+  // no `notarize:` config block or NOTARIZE flag is required (or read).
   if (
     process.env.APPLE_ID &&
     process.env.APPLE_TEAM_ID &&
     process.env.APPLE_APP_SPECIFIC_PASSWORD
   ) {
     console.log('  Notarization enabled');
-    process.env.NOTARIZE = 'true';
   }
 
   // Run electron-builder

@@ -199,7 +199,7 @@ export class ImageTokenizer {
     width: number;
     height: number;
   } {
-    if (buffer.length < 30) {
+    if (buffer.length < 16) {
       throw new Error('Invalid WebP: too short');
     }
 
@@ -213,17 +213,32 @@ export class ImageTokenizer {
     const format = buffer.subarray(12, 16).toString('ascii');
 
     if (format === 'VP8 ') {
+      if (buffer.length < 30) {
+        throw new Error('Invalid VP8 WebP: too short');
+      }
+      // Lossy: 14-bit width/height at bytes 26-27 and 28-29 (little-endian)
       const width = buffer.readUInt16LE(26) & 0x3fff;
       const height = buffer.readUInt16LE(28) & 0x3fff;
       return { width, height };
     } else if (format === 'VP8L') {
+      if (buffer.length < 25) {
+        throw new Error('Invalid VP8L WebP: too short');
+      }
+      if (buffer[20] !== 0x2f) {
+        throw new Error('Invalid VP8L WebP signature');
+      }
+      // Lossless: 14-bit (width-1) then (height-1) packed from byte 21 (little-endian)
       const bits = buffer.readUInt32LE(21);
       const width = (bits & 0x3fff) + 1;
       const height = ((bits >> 14) & 0x3fff) + 1;
       return { width, height };
     } else if (format === 'VP8X') {
-      const width = (buffer.readUInt32LE(24) & 0xffffff) + 1;
-      const height = (buffer.readUInt32LE(26) & 0xffffff) + 1;
+      if (buffer.length < 30) {
+        throw new Error('Invalid VP8X WebP: too short');
+      }
+      // Extended: 24-bit (canvas width-1) at bytes 24-26 and (height-1) at bytes 27-29 (little-endian)
+      const width = buffer.readUIntLE(24, 3) + 1;
+      const height = buffer.readUIntLE(27, 3) + 1;
       return { width, height };
     }
 
@@ -354,7 +369,9 @@ export class ImageTokenizer {
     }
 
     const width = buffer.readUInt32LE(18);
-    const height = buffer.readUInt32LE(22);
+    // Height is a signed int32: a negative value means a top-down BMP. Read it
+    // signed so Math.abs recovers the real height instead of a ~4-billion value.
+    const height = buffer.readInt32LE(22);
 
     return { width, height: Math.abs(height) }; // Height can be negative for top-down BMPs
   }
@@ -420,16 +437,25 @@ export class ImageTokenizer {
         ? buffer.readUInt16LE(entryOffset + 2)
         : buffer.readUInt16BE(entryOffset + 2);
 
-      const value = isLittleEndian
-        ? buffer.readUInt32LE(entryOffset + 8)
-        : buffer.readUInt32BE(entryOffset + 8);
+      // A SHORT (type 3) value occupies only the first two bytes of the
+      // 4-byte value field. Reading it as a 32-bit int happens to work on
+      // little-endian (II) files but yields value << 16 on big-endian (MM)
+      // ones, so read it according to the field type.
+      const value =
+        type === 3
+          ? isLittleEndian
+            ? buffer.readUInt16LE(entryOffset + 8)
+            : buffer.readUInt16BE(entryOffset + 8)
+          : isLittleEndian
+            ? buffer.readUInt32LE(entryOffset + 8)
+            : buffer.readUInt32BE(entryOffset + 8);
 
       if (tag === 0x0100) {
         // ImageWidth
-        width = type === 3 ? value : value; // SHORT or LONG
+        width = value;
       } else if (tag === 0x0101) {
         // ImageLength (height)
-        height = type === 3 ? value : value; // SHORT or LONG
+        height = value;
       }
 
       if (width > 0 && height > 0) break;

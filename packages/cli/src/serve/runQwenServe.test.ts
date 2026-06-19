@@ -265,3 +265,122 @@ describe('runQwenServe daemon logger wiring', () => {
     }
   });
 });
+
+/**
+ * Boot validation for the embedded `runQwenServe` API: a non-finite
+ * `permissionResponseTimeoutMs` (e.g. config- or NaN-derived) must fail
+ * loud rather than reach the bridge, where it would be treated as the
+ * "disabled" sentinel and silently drop the permission deadline.
+ */
+describe('runQwenServe permissionResponseTimeoutMs validation', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-finite permissionResponseTimeoutMs', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pt-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    // Keep the daemon logger inside the temp dir so the boot path before
+    // the validation throw doesn't write into the real ~/.qwen.
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            permissionResponseTimeoutMs: Number.NaN,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/permissionResponseTimeoutMs/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+});
+
+describe('runQwenServe Web Shell signals on RunHandle', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  function makeFakeBridge(): HttpAcpBridge {
+    return {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HttpAcpBridge;
+  }
+
+  async function bootHandle(extra: {
+    serveWebShell?: boolean;
+    token?: string;
+  }) {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    return runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        ...extra,
+      },
+      { bridge: makeFakeBridge() },
+    );
+  }
+
+  it('reports webShellMounted=false when serveWebShell is false (--no-web)', async () => {
+    const handle = await bootHandle({ serveWebShell: false });
+    try {
+      expect(handle.webShellMounted).toBe(false);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('exposes the trimmed bearer token as resolvedToken', async () => {
+    const handle = await bootHandle({ token: '  secret-token  ' });
+    try {
+      expect(handle.resolvedToken).toBe('secret-token');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('leaves resolvedToken undefined when no token is configured', async () => {
+    const handle = await bootHandle({});
+    try {
+      expect(handle.resolvedToken).toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+});

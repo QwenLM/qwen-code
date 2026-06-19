@@ -163,7 +163,7 @@ describe('statusLinePresets', () => {
         data,
       ),
     ).toEqual([
-      'qwen3-code-plus high | qwen3-code-plus | feature/pr-4087-statusline | Context 75% left | 1.2k in | 340 out | /repo/project | project | #4087 | +12 -3 | Context 25% used | Ready | v1.2.3 | 1.0k window | 250 used | session-123',
+      'qwen3-code-plus high | qwen3-code-plus | feature/pr-4087-statusline | Context 75% left | 1.2k total in | 340 total out | /repo/project | project | #4087 | +12 -3 | Context 25% used | Ready | v1.2.3 | 1.0k window | 250 used | session-123',
     ]);
   });
 
