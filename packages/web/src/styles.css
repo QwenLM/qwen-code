@@ -91,45 +91,6 @@ pre {
   padding: 8px;
 }
 
-.web-sidebar-chrome {
-  align-items: center;
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 10px;
-  min-height: 18px;
-}
-
-.web-window-dots {
-  display: flex;
-  gap: 5px;
-}
-
-.web-window-dots span {
-  border-radius: 999px;
-  height: 8px;
-  width: 8px;
-}
-
-.web-window-dots span:nth-child(1) {
-  background: #ff655c;
-}
-
-.web-window-dots span:nth-child(2) {
-  background: #ffbd44;
-}
-
-.web-window-dots span:nth-child(3) {
-  background: #30c15b;
-}
-
-.web-sidebar-tools {
-  color: var(--web-muted);
-  display: flex;
-  font-size: 12px;
-  gap: 8px;
-  line-height: 1;
-}
-
 .web-brand {
   align-items: center;
   display: flex;

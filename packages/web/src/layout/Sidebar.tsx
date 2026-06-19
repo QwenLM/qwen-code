@@ -9,17 +9,6 @@ interface SidebarProps {
 export function Sidebar({ activeView, onSelectView }: SidebarProps) {
   return (
     <aside className="web-sidebar">
-      <div className="web-sidebar-chrome" aria-hidden="true">
-        <div className="web-window-dots">
-          <span />
-          <span />
-          <span />
-        </div>
-        <div className="web-sidebar-tools">
-          <span>⌕</span>
-          <span>□</span>
-        </div>
-      </div>
       <div className="web-brand">
         <div className="web-brand-mark">Q</div>
         <div>
