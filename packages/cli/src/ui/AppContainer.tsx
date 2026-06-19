@@ -281,6 +281,14 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  /**
+   * The stream hook that drives the conversation. Defaults to the in-process
+   * `useGeminiStream`. Daemon-client mode (terminal↔mobile handoff) passes an
+   * adapter that renders a daemon-hosted session instead — same return contract,
+   * but tools execute in the daemon. MUST be a stable reference per mounted
+   * container (never flip between renders, or hook order breaks).
+   */
+  useStream?: typeof useGeminiStream;
 }
 
 /**
@@ -297,6 +305,10 @@ const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
+  // Defaulted stream hook (see AppContainerProps.useStream). Stable per mount:
+  // `startInteractiveUI` never passes it (→ in-process), `DaemonAppContainer`
+  // always passes the daemon adapter.
+  const useStream = props.useStream ?? useGeminiStream;
   const historyManager = useHistory();
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
@@ -1390,7 +1402,9 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
-  } = useGeminiStream(
+    // `useStream` is a stable, unconditional hook call (defaulted prop, fixed
+    // per mounted container) — see AppContainerProps.useStream.
+  } = useStream(
     config.getGeminiClient(),
     historyManager.history,
     historyManager.addItem,

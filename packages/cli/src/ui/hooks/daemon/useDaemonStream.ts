@@ -47,10 +47,14 @@ import {
   type PendingPermission,
 } from './projectDaemonEvent.js';
 
-/** A vote on a daemon permission request. */
+/**
+ * A vote on a daemon permission request. The `outcome` is itself an object
+ * (matches the SDK's `PermissionResponse`): `{ outcome: { outcome: 'cancelled' } }`
+ * or `{ outcome: { outcome: 'selected', optionId } }`.
+ */
 export interface DaemonPermissionResponse {
-  outcome: string;
-  optionId?: string;
+  outcome: { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string };
+  [key: string]: unknown;
 }
 
 /**
@@ -180,8 +184,8 @@ export function useDaemonStream(
       await driver.respondToSessionPermission(
         gate.requestId,
         optionId === null
-          ? { outcome: 'cancelled' }
-          : { outcome: 'selected', optionId },
+          ? { outcome: { outcome: 'cancelled' } }
+          : { outcome: { outcome: 'selected', optionId } },
       );
     },
     [driver],

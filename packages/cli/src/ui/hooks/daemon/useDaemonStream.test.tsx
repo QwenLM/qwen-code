@@ -280,7 +280,9 @@ describe('useDaemonStream', () => {
     expect(driver.stats().permissions).toEqual([
       {
         requestId: 'req_1',
-        response: { outcome: 'selected', optionId: 'proceed_once' },
+        response: {
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        },
       },
     ]);
 
@@ -289,7 +291,7 @@ describe('useDaemonStream', () => {
     });
     expect(driver.stats().permissions[1]).toEqual({
       requestId: 'req_1',
-      response: { outcome: 'cancelled' },
+      response: { outcome: { outcome: 'cancelled' } },
     });
   });
 

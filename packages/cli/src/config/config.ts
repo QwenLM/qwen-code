@@ -144,6 +144,8 @@ export interface CliArgs {
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
+  attachDaemon: string | undefined;
+  daemonToken: string | undefined;
   experimentalLsp: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
@@ -680,6 +682,16 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Starts the agent in ACP mode (deprecated, use --acp instead)',
           hidden: true,
+        })
+        .option('attach-daemon', {
+          type: 'string',
+          description:
+            'Render an already-running `qwen serve` daemon session in the TUI (terminal↔mobile handoff). Pass its base URL, e.g. http://127.0.0.1:4180',
+        })
+        .option('daemon-token', {
+          type: 'string',
+          description:
+            "Bearer token for --attach-daemon (the daemon's QWEN_SERVER_TOKEN)",
         })
         .option('experimental-skills', {
           type: 'boolean',

@@ -54,6 +54,7 @@ import {
 } from './startup/worktreeStartup.js';
 import { runNonInteractiveStreamJson } from './nonInteractive/session.js';
 import { AppContainer } from './ui/AppContainer.js';
+import { DaemonAppContainer } from './ui/DaemonAppContainer.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
 import { KeypressProvider } from './ui/contexts/KeypressContext.js';
 import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
@@ -238,6 +239,8 @@ export async function startInteractiveUI(
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  attachDaemonUrl?: string,
+  attachDaemonToken?: string,
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
@@ -342,13 +345,25 @@ export async function startInteractiveUI(
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
                     <BackgroundTaskViewProvider config={config}>
-                      <AppContainer
-                        config={config}
-                        settings={settings}
-                        startupWarnings={startupWarnings}
-                        version={version}
-                        initializationResult={initializationResult}
-                      />
+                      {attachDaemonUrl ? (
+                        <DaemonAppContainer
+                          config={config}
+                          settings={settings}
+                          startupWarnings={startupWarnings}
+                          version={version}
+                          initializationResult={initializationResult}
+                          daemonUrl={attachDaemonUrl}
+                          daemonToken={attachDaemonToken ?? ''}
+                        />
+                      ) : (
+                        <AppContainer
+                          config={config}
+                          settings={settings}
+                          startupWarnings={startupWarnings}
+                          version={version}
+                          initializationResult={initializationResult}
+                        />
+                      )}
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>
@@ -1003,6 +1018,8 @@ export async function main() {
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        argv.attachDaemon,
+        argv.daemonToken,
       );
       // Clean up corruption env vars so subsequent relaunch children
       // and subprocesses don't inherit stale state.
