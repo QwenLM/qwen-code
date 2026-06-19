@@ -18,7 +18,10 @@ import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type { UseShellHistoryReturn } from '../hooks/useShellHistory.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import type { UseCommandCompletionReturn } from '../hooks/useCommandCompletion.js';
-import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import {
+  useCommandCompletion,
+  CompletionMode,
+} from '../hooks/useCommandCompletion.js';
 import type { UseInputHistoryReturn } from '../hooks/useInputHistory.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
@@ -289,9 +292,11 @@ describe('InputPrompt', () => {
       visibleStartIndex: 0,
       isPerfectMatch: false,
       midInputGhostText: null,
+      completionMode: CompletionMode.IDLE,
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       resetCompletionState: vi.fn(),
+      dismissCompletion: vi.fn(),
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
@@ -1923,6 +1928,72 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should dismiss completion on Enter after accepting @path suggestion', async () => {
+    // @path completion: pressing Enter should dismiss the completion
+    // (set dismissed flag + reset state) so the dropdown stays closed
+    // even if the @ token re-glob and produces new suggestions.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Enter should accept the suggestion and dismiss completion.
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should autocomplete @path on Tab without submitting or resetting completion', async () => {
+    // Tab means "complete the suggestion, do NOT execute". This is the
+    // standard shell convention. Completion state should NOT reset on Tab
+    // so the user can continue navigating deeper into directories.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Tab should autocomplete but NOT submit and NOT reset completion.
+    stdin.write('\t');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.resetCompletionState).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should reset history navigation after submitting on Enter', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
@@ -1976,6 +2047,7 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
     unmount();
   });
