@@ -220,6 +220,8 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     isHooksDialogOpen: false,
     isFeedbackDialogOpen: false,
     taskStartTokens: 0,
+    taskStartStreamingChars: 0,
+    responseCandidateTokens: 0,
     streamingResponseLengthRef: { current: 0 },
     isReceivingContent: false,
     sessionName: null,

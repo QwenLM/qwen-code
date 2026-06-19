@@ -258,6 +258,34 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   });
 }
 
+function getResponseCandidateTokens(
+  pendingGeminiHistoryItems: HistoryItemWithoutId[],
+): number {
+  let tokens = 0;
+
+  for (const item of pendingGeminiHistoryItems) {
+    if (item.type !== 'tool_group') {
+      continue;
+    }
+
+    for (const tool of item.tools) {
+      const display = tool.resultDisplay;
+      if (
+        typeof display === 'object' &&
+        display !== null &&
+        'type' in display &&
+        display.type === 'task_execution' &&
+        'tokenCount' in display &&
+        typeof display.tokenCount === 'number'
+      ) {
+        tokens += display.tokenCount;
+      }
+    }
+  }
+
+  return tokens;
+}
+
 function useStableStickyTodos(todos: TodoItem[] | null): TodoItem[] | null {
   const renderKey = getStickyTodosRenderKey(todos);
   const stableTodosRef = useRef<{
@@ -2837,16 +2865,21 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager, setShowCommandMigrationNudge, config.storage],
   );
 
-  const currentCandidatesTokens = Object.values(
-    sessionStats.metrics?.models ?? {},
-  ).reduce((acc, model) => acc + (model.tokens?.candidates ?? 0), 0);
+  const responseCandidateTokens = getResponseCandidateTokens(
+    pendingGeminiHistoryItems,
+  );
 
-  const { elapsedTime, currentLoadingPhrase, taskStartTokens } =
-    useLoadingIndicator(
-      streamingState,
-      settings.merged.ui?.customWittyPhrases,
-      currentCandidatesTokens,
-    );
+  const {
+    elapsedTime,
+    currentLoadingPhrase,
+    taskStartTokens,
+    taskStartStreamingChars,
+  } = useLoadingIndicator(
+    streamingState,
+    settings.merged.ui?.customWittyPhrases,
+    responseCandidateTokens,
+    streamingResponseLengthRef.current,
+  );
 
   useAttentionNotifications({
     isFocused,
@@ -3441,6 +3474,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      taskStartStreamingChars,
+      responseCandidateTokens,
       // Real-time token display
       streamingResponseLengthRef,
       isReceivingContent,
@@ -3574,6 +3609,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      taskStartStreamingChars,
+      responseCandidateTokens,
       // Real-time token display
       streamingResponseLengthRef,
       isReceivingContent,

@@ -349,6 +349,27 @@ describe('<LoadingIndicator />', () => {
       expect(output).toContain('100 t/s');
     });
 
+    it('should calculate response tokens/sec from tokens produced after the timer reset', () => {
+      const streamingCharsRef = { current: 400 };
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={550}
+          taskStartTokens={500}
+          taskStartStreamingChars={200}
+          streamingCharsRef={streamingCharsRef}
+          isStreaming
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 650 tokens');
+      expect(output).toContain('20 t/s');
+      expect(output).not.toContain('130 t/s');
+    });
+
     it('should format sub-10 response tokens/sec with one decimal place', () => {
       const { lastFrame } = renderWithContext(
         <LoadingIndicator

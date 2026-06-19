@@ -38,14 +38,25 @@ import { StreamingState } from '../types.js';
 vi.mock('./LoadingIndicator.js', () => ({
   LoadingIndicator: ({
     currentLoadingPhrase,
+    candidatesTokens,
+    taskStartTokens,
+    taskStartStreamingChars,
     showResponseTokensPerSecond,
   }: {
     currentLoadingPhrase?: string;
+    candidatesTokens?: number;
+    taskStartTokens?: number;
+    taskStartStreamingChars?: number;
     showResponseTokensPerSecond?: boolean;
   }) => (
     <Text>
       LoadingIndicator
       {currentLoadingPhrase ? `: ${currentLoadingPhrase}` : ''}
+      {typeof candidatesTokens === 'number' ? `: ${candidatesTokens}` : ''}
+      {typeof taskStartTokens === 'number' ? `: start ${taskStartTokens}` : ''}
+      {typeof taskStartStreamingChars === 'number'
+        ? `: chars ${taskStartStreamingChars}`
+        : ''}
       {showResponseTokensPerSecond ? ': show t/s' : ''}
     </Text>
   ),
@@ -132,6 +143,8 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     nightly: false,
     isTrustedFolder: true,
     taskStartTokens: 0,
+    taskStartStreamingChars: 0,
+    responseCandidateTokens: 0,
     streamingResponseLengthRef: { current: 0 },
     isReceivingContent: false,
     pendingGeminiHistoryItems: [],
@@ -209,6 +222,9 @@ describe('Composer', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,
         currentLoadingPhrase: 'Analyzing',
+        responseCandidateTokens: 550,
+        taskStartTokens: 500,
+        taskStartStreamingChars: 200,
       });
       const config = createMockConfig({
         getShowResponseTokensPerSecond: vi.fn(() => true),
@@ -216,7 +232,9 @@ describe('Composer', () => {
 
       const { lastFrame } = renderComposer(uiState, config);
 
-      expect(lastFrame()).toContain('LoadingIndicator: Analyzing: show t/s');
+      expect(lastFrame()).toContain('LoadingIndicator: Analyzing');
+      expect(lastFrame()).toContain(': 550: start 500: chars 200');
+      expect(lastFrame()).toContain(': show t/s');
     });
 
     // ─── Narrow-terminal suppression (suppressBottomLoadingIndicator) ───
