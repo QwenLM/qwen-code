@@ -2849,6 +2849,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings/setMcpServer rejects malformed timeout strings', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setMcpServer', {
+        scope: 'user',
+        name: 'bad-timeout',
+        server: { transport: 'stdio', command: 'node', timeout: '10ms' },
+      }),
+    ).rejects.toThrowError(/Expected a positive integer/);
+
+    await expect(
+      agent.extMethod('qwen/settings/setMcpServer', {
+        scope: 'user',
+        name: 'fractional-timeout',
+        server: { transport: 'stdio', command: 'node', timeout: '1.5' },
+      }),
+    ).rejects.toThrowError(/Expected a positive integer/);
+
+    await agent.extMethod('qwen/settings/setMcpServer', {
+      scope: 'user',
+      name: 'valid-timeout',
+      server: { transport: 'stdio', command: 'node', timeout: '1500' },
+    });
+
+    const persisted = vi
+      .mocked(settings.setValue)
+      .mock.calls.find((call) => call[1] === 'mcpServers')?.[2] as {
+      'valid-timeout': { timeout: number };
+    };
+    expect(persisted['valid-timeout'].timeout).toBe(1500);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings/removeMcpServer drops the named server and rejects a missing name', async () => {
     const settings = makeCoreSettings();
     (settings.user.settings as Record<string, unknown>)['mcpServers'] = {
@@ -2942,6 +2979,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       .mock.calls.filter((call) => call[1] === 'hooks');
     expect(hookWrites.at(-2)?.[2]).toHaveProperty('PostToolBatch');
     expect(hookWrites.at(-1)?.[2]).toHaveProperty('UserPromptExpansion');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setHook rejects malformed timeout strings', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setHook', {
+        scope: 'user',
+        event: 'PreToolUse',
+        hook: {
+          hooks: [{ type: 'command', command: 'echo hi', timeout: '10ms' }],
+        },
+      }),
+    ).rejects.toThrowError(/Expected a positive integer/);
 
     mockConnectionState.resolve();
     await agentPromise;

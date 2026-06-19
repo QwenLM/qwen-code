@@ -120,6 +120,14 @@ describe('SettingsSchema', () => {
       );
     });
 
+    it('should define tools.sandbox schema override as boolean or string', () => {
+      expect(
+        getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
+    });
+
     it('should have top-level proxy setting in schema', () => {
       expect(getSettingsSchema().proxy).toBeDefined();
       expect(getSettingsSchema().proxy.type).toBe('string');
@@ -289,6 +297,17 @@ describe('SettingsSchema', () => {
       expect(
         getSettingsSchema().context?.properties.includeDirectories.default,
       ).toEqual([]);
+    });
+
+    it('should define context.fileName schema override as string or string array', () => {
+      expect(
+        getSettingsSchema().context?.properties.fileName.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [
+          { type: 'string' },
+          { type: 'array', items: { type: 'string' } },
+        ],
+      });
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {

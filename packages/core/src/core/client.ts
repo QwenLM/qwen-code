@@ -211,6 +211,7 @@ export class GeminiClient {
   private skillsModifiedInSession = false;
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
+  private shutdownRequested = false;
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -594,6 +595,15 @@ export class GeminiClient {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
     });
+  }
+
+  /**
+   * Signal that shutdown is imminent. Subsequent calls to background memory
+   * tasks (extract, dream, skill review) will be skipped so the process can
+   * exit cleanly without spawning new work.
+   */
+  requestShutdown(): void {
+    this.shutdownRequested = true;
   }
 
   /**
@@ -1380,6 +1390,15 @@ export class GeminiClient {
   private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
   ): void {
+    // During shutdown, skip all background memory tasks so the process
+    // can exit cleanly without spawning new work.
+    if (this.shutdownRequested) {
+      debugLogger.debug(
+        'Skipping background memory tasks: shutdown requested.',
+      );
+      return;
+    }
+
     // autoSkill counts tool calls and can trigger on both UserQuery and
     // ToolResult turns so the threshold can fire mid-session.
     if (
@@ -2121,6 +2140,31 @@ export class GeminiClient {
           this.lastSentIdeContext = nextIdeContext;
           this.forceFullIdeContext = false;
           didUpdateIdeContextState = true;
+        }
+
+        // Always-on safety checks (turn tool-call cap). These fire before
+        // the skipLoopDetection gate so they cannot be bypassed by
+        // configuration.
+        const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
+        if (alwaysOnLoop) {
+          // The tripping response may carry several tool calls collected
+          // before the cap fired. Drop them so the run halts here instead of
+          // executing them, spawning a continuation, and re-tripping the cap
+          // (which would double-print the halt message and waste a request).
+          turn.pendingToolCalls.length = 0;
+          const loopType = this.loopDetector.getLastLoopType();
+          yield {
+            type: GeminiEventType.LoopDetected,
+            ...(loopType && { value: { loopType } }),
+          };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
+          }
+          this.lastApiCompletionTimestamp = Date.now();
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', { errorMessage: 'loop detected' });
+          this.cancelPendingMemoryPrefetch();
+          return turn;
         }
 
         // Loop detection is opt-in: `model.skipLoopDetection` defaults to true

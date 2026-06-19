@@ -946,4 +946,400 @@ describe('MemoryManager', () => {
       });
     });
   });
+
+  // ─── #5147 regression: trailing queue + memory pressure ─────────────────
+
+  describe('scheduleExtract #5147', () => {
+    /**
+     * B1: When an extract is already running and a new extract is queued,
+     * superseding the trailing request drops the old params reference (the
+     * old history becomes GC-eligible). Verify that only the latest params
+     * are retained and the trailing extract executes correctly.
+     */
+    it('supersedes trailing queue without leaking old history refs', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+
+      const mgr = new MemoryManager();
+
+      let resolveFirst: (
+        value: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+      ) => void;
+      let resolveTrailing: (
+        value: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+      ) => void;
+      const firstPromise = new Promise<
+        Awaited<ReturnType<typeof runAutoMemoryExtract>>
+      >((r) => {
+        resolveFirst = r;
+      });
+      const trailingPromise = new Promise<
+        Awaited<ReturnType<typeof runAutoMemoryExtract>>
+      >((r) => {
+        resolveTrailing = r;
+      });
+
+      // First call → starts running
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(firstPromise);
+
+      void mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [
+          { role: 'user', parts: [{ text: 'first history' }] },
+          { role: 'model', parts: [{ text: 'first response' }] },
+        ],
+      });
+
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      // Second call while first is running → queues trailing
+      const secondResult = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [
+          { role: 'user', parts: [{ text: 'second history' }] },
+          { role: 'model', parts: [{ text: 'second response' }] },
+        ],
+      });
+      expect(secondResult.skippedReason).toBe('queued');
+
+      // Third call while first is STILL running → supersedes trailing
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(trailingPromise);
+      const thirdResult = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [
+          { role: 'user', parts: [{ text: 'third history' }] },
+          { role: 'model', parts: [{ text: 'third response' }] },
+        ],
+      });
+      expect(thirdResult.skippedReason).toBe('queued');
+      // Still only 1 actual extract call (first is still running)
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      // Finish the first extract
+      resolveFirst!({
+        touchedTopics: [],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 2,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      // Wait for the trailing to be picked up and started
+      await vi.waitFor(() => {
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      });
+
+      // Verify the trailing extract received the third call's params,
+      // not the second call's stale history reference.
+      expect(runAutoMemoryExtract).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          history: [
+            { role: 'user', parts: [{ text: 'third history' }] },
+            { role: 'model', parts: [{ text: 'third response' }] },
+          ],
+        }),
+      );
+
+      // Finish the trailing (should use third history, not second)
+      resolveTrailing!({
+        touchedTopics: ['user'],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 2,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      // Drain to ensure everything settles
+      await mgr.drain({ timeoutMs: 500 });
+    });
+
+    /**
+     * B2: extract is skipped with 'memory_pressure' when the shared
+     * MemoryPressureMonitor reports hard/critical pressure. The cursor is
+     * NOT advanced (runAutoMemoryExtract is never called), so the unread
+     * messages are retried on a later, lower-pressure turn.
+     */
+    it('skips extract with memory_pressure when the monitor reports critical', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('critical'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBe('memory_pressure');
+      expect(result.touchedTopics).toEqual([]);
+      // The cursor is deliberately NOT advanced (no processedOffset) so
+      // unprocessed messages are retried on a later lower-pressure turn.
+      expect(result.cursor.processedOffset).toBeUndefined();
+      // Gate fired before invoking the real extract → cursor untouched.
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+    });
+
+    /**
+     * B3: extract proceeds normally when the monitor reports normal/soft
+     * pressure (only hard/critical gate it).
+     */
+    it('does not skip extract when pressure is normal', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
+        touchedTopics: ['user'],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 1,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('soft'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * B3c: when getMemoryPressureMonitor() returns undefined, the gate
+     * allows extraction to proceed — the optional-chain returns undefined
+     * (falsy), so isUnderMemoryPressure returns false.
+     */
+    it('does not skip extract when monitor is absent', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
+        touchedTopics: ['user'],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 1,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue(undefined),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * B3b: 'hard' pressure level also gates extract (not just 'critical').
+     * In production 'hard' is the first level to fire as memory climbs, so
+     * it needs the same coverage as 'critical'.
+     */
+    it('skips extract when monitor reports hard pressure', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('hard'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBe('memory_pressure');
+      expect(result.cursor.processedOffset).toBeUndefined();
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+    });
+
+    /**
+     * B4: a queued (trailing) extract is also gated. Because the gate lives
+     * in runExtract — the choke point both the direct and queued paths funnel
+     * through — a trailing extract started after pressure spikes is skipped
+     * rather than bypassing the gate via startQueuedExtract.
+     */
+    it('gates queued trailing extracts under memory pressure', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+
+      let pressure: 'normal' | 'critical' = 'normal';
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn(() => pressure),
+        }),
+      } as Partial<Config>);
+
+      let resolveFirst: (
+        value: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+      ) => void;
+      const firstPromise = new Promise<
+        Awaited<ReturnType<typeof runAutoMemoryExtract>>
+      >((r) => {
+        resolveFirst = r;
+      });
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(firstPromise);
+
+      const mgr = new MemoryManager();
+
+      // First extract starts running (pressure normal).
+      void mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'first' }] }],
+      });
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      // Queue a trailing extract while the first is still running.
+      const queuedResult = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'trailing' }] }],
+      });
+      expect(queuedResult.skippedReason).toBe('queued');
+
+      // Pressure spikes, then the first extract finishes → trailing dequeues.
+      pressure = 'critical';
+      resolveFirst!({
+        touchedTopics: [],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 1,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      // The trailing extract must NOT call the real runAutoMemoryExtract a
+      // second time — the gate in runExtract skips it under pressure.
+      await mgr.drain({ timeoutMs: 500 });
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * B4b: skill review pressure gate lives in runSkillReview (mirroring
+     * the extract pattern), producing a skipped task record.
+     */
+    it('skips skill review when monitor reports hard pressure', async () => {
+      vi.mocked(runSkillReviewByAgent).mockClear();
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('hard'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config,
+      });
+
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+      expect(record.status).toBe('skipped');
+      expect(record.metadata?.['skippedReason']).toBe('memory_pressure');
+      expect(runSkillReviewByAgent).not.toHaveBeenCalled();
+    });
+
+    /**
+     * B4c: after the gate fires, the finally block must clean up the
+     * skillReviewInFlightByProject Map entry. A second call to
+     * scheduleSkillReview must NOT return already_running.
+     */
+    it('cleans up Map entry after pressure gate fires', async () => {
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('hard'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+
+      // First call: gate fires, skipped record pushed to promise.
+      const first = mgr.scheduleSkillReview({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config,
+      });
+      expect(first.status).toBe('scheduled');
+      await first.promise!;
+
+      vi.mocked(runSkillReviewByAgent).mockClear();
+
+      // Second call: must not return already_running — the Map entry was
+      // cleaned up by the finally block.
+      const second = mgr.scheduleSkillReview({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config,
+      });
+
+      expect(second.status).toBe('scheduled');
+      expect(second.skippedReason).toBeUndefined();
+    });
+
+    /**
+     * B5: scheduleDream also gates on memory pressure. The dream path does
+     * its own structuredClone of full history, so hard/critical pressure
+     * should skip it alongside extract.
+     */
+    it('skips dream with memory_pressure when monitor reports critical', async () => {
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('critical'),
+        }),
+        getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleDream({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(result.skippedReason).toBe('memory_pressure');
+    });
+  });
 });

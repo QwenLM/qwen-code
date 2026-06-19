@@ -108,7 +108,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
   Read: 'ReadFile',
   Skill: 'Skill',
   Task: 'Task',
-  TodoWrite: 'TodoWrite',
+  TodoWrite: 'TodoList',
   WebFetch: 'WebFetch',
   WebSearch: 'None',
   Write: 'WriteFile',

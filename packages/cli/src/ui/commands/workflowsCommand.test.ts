@@ -28,6 +28,9 @@ function entry(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
     agentsDispatched: 0,
     agentsCompleted: 0,
     recentLogs: [],
+    tokensSpent: 0,
+    tokenBudgetTotal: null,
+    perPhaseTokens: new Map<string | null, number>(),
     ...overrides,
   };
 }
@@ -156,5 +159,105 @@ describe('workflowsCommand', () => {
     const result = await workflowsCommand.action!(context, '  wf_t  ');
     if (!result || result.type !== 'message') throw new Error('no result');
     expect(result.content).toContain('Workflow wf_t');
+  });
+
+  // ── P5: budget surfacing in list + detail ──────────────────────────────
+
+  it('P5: list row chips tokens/cap when capped (R1 #7: uses formatTokenCount)', async () => {
+    listMock.mockReturnValue([
+      entry({
+        runId: 'wf_capped',
+        status: 'running',
+        tokensSpent: 1500,
+        tokenBudgetTotal: 10_000,
+      }),
+    ]);
+    const result = await workflowsCommand.action!(context, '');
+    if (!result || result.type !== 'message') throw new Error('no result');
+    // R1 #7: `formatTokenCount` renders 1500 as `1.5k` and 10000 as `10k`.
+    expect(result.content).toContain('1.5k/10kt');
+  });
+
+  it('P5: list row chips plain spent when uncapped', async () => {
+    listMock.mockReturnValue([
+      entry({
+        runId: 'wf_uncapped',
+        status: 'running',
+        tokensSpent: 500,
+        tokenBudgetTotal: null,
+      }),
+    ]);
+    const result = await workflowsCommand.action!(context, '');
+    if (!result || result.type !== 'message') throw new Error('no result');
+    // < 1000 renders as the raw integer.
+    expect(result.content).toContain('500t');
+    // No slash → no cap rendered.
+    expect(result.content).not.toMatch(/500\/\d+t/);
+  });
+
+  it('P5: detail view renders tokens, cap, and per-phase chips (R1 #7: formatTokenCount)', async () => {
+    const perPhase = new Map<string | null, number>([
+      ['Find', 300],
+      ['Verify', 150],
+    ]);
+    const detail = entry({
+      runId: 'wf_detail',
+      status: 'completed',
+      phases: ['Find', 'Verify'],
+      tokensSpent: 450,
+      tokenBudgetTotal: 1000,
+      perPhaseTokens: perPhase,
+      endTime: 1_700_000_010_000,
+    });
+    getMock.mockImplementation((id) =>
+      id === 'wf_detail' ? detail : undefined,
+    );
+    const result = await workflowsCommand.action!(context, 'wf_detail');
+    if (!result || result.type !== 'message') throw new Error('no result');
+    // R1 #7: per-phase counts render via `formatTokenCount` (< 1000 = raw).
+    expect(result.content).toContain('tokens      : 450');
+    expect(result.content).toContain('cap         : 1.0k');
+    expect(result.content).toContain('· Find · 300t');
+    expect(result.content).toContain('· Verify · 150t');
+  });
+
+  it('P5 R1 #6: detail view surfaces null-sentinel as "(no phase)" row', async () => {
+    const perPhase = new Map<string | null, number>([
+      [null, 75], // pre-phase spend
+      ['Plan', 200],
+    ]);
+    const detail = entry({
+      runId: 'wf_pre',
+      status: 'completed',
+      phases: ['Plan'],
+      tokensSpent: 275,
+      tokenBudgetTotal: null,
+      perPhaseTokens: perPhase,
+      endTime: 1_700_000_010_000,
+    });
+    getMock.mockImplementation((id) =>
+      id === 'wf_pre' ? detail : undefined,
+    );
+    const result = await workflowsCommand.action!(context, 'wf_pre');
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain('· Plan · 200t');
+    // R1 #6 fix: the null-sentinel attribution is no longer hidden.
+    expect(result.content).toContain('· (no phase) · 75t');
+  });
+
+  it('P5: detail view renders "(no cap)" when uncapped', async () => {
+    const detail = entry({
+      runId: 'wf_uncapped',
+      status: 'completed',
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+    });
+    getMock.mockImplementation((id) =>
+      id === 'wf_uncapped' ? detail : undefined,
+    );
+    const result = await workflowsCommand.action!(context, 'wf_uncapped');
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain('tokens      : 0');
+    expect(result.content).toContain('cap         : (no cap)');
   });
 });

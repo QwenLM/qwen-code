@@ -133,10 +133,9 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     preferredEditor,
   });
 
-  // Sync agent buffer text to context so AgentTabBar can guard tab switching
+  // Sync the active agent buffer text to context.
   useEffect(() => {
     setAgentInputBufferText(buffer.text);
-    return () => setAgentInputBufferText('');
   }, [buffer.text, setAgentInputBufferText]);
 
   // When agent input is not active (agent running, completed, etc.),
@@ -257,6 +256,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       {approvalModePromptStyle.prefix}{' '}
     </Text>
   );
+  const prefixWidth = 2; // "> " or "* " = 2 chars
 
   return (
     <StreamingContext.Provider value={streamingState}>
@@ -289,6 +289,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           showCursor={isInputActive && !agentTabBarFocused}
           placeholder={'  ' + t('Send a message to this agent')}
           prefix={prefixNode}
+          prefixWidth={prefixWidth}
           borderColor={inputBorderColor}
           isActive={isInputActive && !agentShellFocused}
         />

@@ -446,7 +446,11 @@ class GrepToolInvocation extends BaseToolInvocation<
     // Pass all search paths to ripgrep (it supports multiple paths natively)
     rgArgs.push(...paths);
 
-    const result = await runRipgrep(rgArgs, options.signal);
+    const result = await runRipgrep(
+      rgArgs,
+      options.signal,
+      this.config.getUseBuiltinRipgrep(),
+    );
     if (result.error && !result.stdout) {
       throw result.error;
     }

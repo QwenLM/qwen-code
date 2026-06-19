@@ -48,7 +48,7 @@ export interface AgentViewState {
   agents: ReadonlyMap<string, RegisteredAgent>;
   /** Whether any agent tab's embedded shell currently has input focus. */
   agentShellFocused: boolean;
-  /** Current text in the active agent tab's input buffer (empty when on main). */
+  /** Last synced text from the active agent tab's input buffer. */
   agentInputBufferText: string;
   /** Whether the tab bar has keyboard focus (vs the agent input). */
   agentTabBarFocused: boolean;

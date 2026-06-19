@@ -285,8 +285,13 @@ export function convertGeminiToolParametersToOpenAI(
         key === 'maxItems'
       ) {
         // Ensure length constraints are integers, not strings
-        if (typeof value === 'string' && !isNaN(Number(value))) {
-          result[key] = parseInt(value, 10);
+        const numberValue = typeof value === 'string' ? Number(value) : NaN;
+        if (
+          typeof value === 'string' &&
+          value.trim() !== '' &&
+          Number.isInteger(numberValue)
+        ) {
+          result[key] = numberValue;
         } else {
           result[key] = value;
         }

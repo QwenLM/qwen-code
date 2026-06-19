@@ -214,7 +214,7 @@ export function registerSystemCoreHandlers(
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 5000,
       }).trim()
-      return branch || null
+      return branch && branch !== 'HEAD' ? branch : null
     } catch {
       return null
     }

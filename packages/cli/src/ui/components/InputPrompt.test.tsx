@@ -18,7 +18,10 @@ import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type { UseShellHistoryReturn } from '../hooks/useShellHistory.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import type { UseCommandCompletionReturn } from '../hooks/useCommandCompletion.js';
-import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import {
+  useCommandCompletion,
+  CompletionMode,
+} from '../hooks/useCommandCompletion.js';
 import type { UseInputHistoryReturn } from '../hooks/useInputHistory.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
@@ -289,9 +292,11 @@ describe('InputPrompt', () => {
       visibleStartIndex: 0,
       isPerfectMatch: false,
       midInputGhostText: null,
+      completionMode: CompletionMode.IDLE,
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       resetCompletionState: vi.fn(),
+      dismissCompletion: vi.fn(),
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
@@ -888,13 +893,14 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
     expect(mockCommandCompletion.navigateDown).not.toHaveBeenCalled();
 
-    // Ctrl+P should navigate history, not completion
-    // Two-step edge: pre-position cursor at col 0 so Ctrl+P directly triggers history
+    // Ctrl+P should navigate completion while suggestions are visible.
+    // Two-step edge: pre-position cursor at col 0 so a fallthrough would
+    // directly trigger history.
     mockBuffer.visualCursor = [0, 0];
     stdin.write('\u0010'); // Ctrl+P
     await wait();
-    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
-    expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(2);
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -919,13 +925,14 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
     expect(mockCommandCompletion.navigateUp).not.toHaveBeenCalled();
 
-    // Ctrl+N should navigate history, not completion
-    // Two-step edge: pre-position cursor at end so Ctrl+N directly triggers history
+    // Ctrl+N should navigate completion while suggestions are visible.
+    // Two-step edge: pre-position cursor at end so a fallthrough would
+    // directly trigger history.
     mockBuffer.visualCursor = [0, '/mem'.length];
     stdin.write('\u000E'); // Ctrl+N
     await wait();
-    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
-    expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(2);
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -1351,6 +1358,39 @@ describe('InputPrompt', () => {
     expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
     expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json');
     expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should keep cycling export formats with Ctrl+P/N after arrow navigation fills input', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[B');
+    await wait();
+    stdin.write('\u000E');
+    await wait();
+    stdin.write('\u0010');
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(4, '/export md');
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
     unmount();
   });
 
@@ -2013,6 +2053,72 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should dismiss completion on Enter after accepting @path suggestion', async () => {
+    // @path completion: pressing Enter should dismiss the completion
+    // (set dismissed flag + reset state) so the dropdown stays closed
+    // even if the @ token re-glob and produces new suggestions.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Enter should accept the suggestion and dismiss completion.
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should autocomplete @path on Tab without submitting or resetting completion', async () => {
+    // Tab means "complete the suggestion, do NOT execute". This is the
+    // standard shell convention. Completion state should NOT reset on Tab
+    // so the user can continue navigating deeper into directories.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Tab should autocomplete but NOT submit and NOT reset completion.
+    stdin.write('\t');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.resetCompletionState).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should reset history navigation after submitting on Enter', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
@@ -2066,6 +2172,7 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
     unmount();
   });
@@ -3479,7 +3586,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it.skip('expands and collapses long suggestion via Right/Left arrows', async () => {
+    it('expands and collapses long suggestion via Right/Left arrows', async () => {
       props.shellModeActive = false;
       const longValue = 'l'.repeat(200);
 
@@ -3498,20 +3605,22 @@ describe('InputPrompt', () => {
       await wait();
 
       stdin.write('\x12');
-      await wait();
-
-      expect(clean(stdout.lastFrame())).toContain('→');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('→');
+      });
 
       stdin.write('\u001B[C');
-      await wait();
-      expect(clean(stdout.lastFrame())).toContain('←');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('←');
+      });
       expect(stdout.lastFrame()).toMatchSnapshot(
         'command-search-expanded-match',
       );
 
       stdin.write('\u001B[D');
-      await wait();
-      expect(clean(stdout.lastFrame())).toContain('→');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('→');
+      });
       expect(stdout.lastFrame()).toMatchSnapshot(
         'command-search-collapsed-match',
       );

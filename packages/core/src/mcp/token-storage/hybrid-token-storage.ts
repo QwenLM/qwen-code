@@ -6,21 +6,26 @@
 
 import { BaseTokenStorage } from './base-token-storage.js';
 import { FileTokenStorage } from './file-token-storage.js';
-import type { TokenStorage, OAuthCredentials } from './types.js';
+import type { TokenStorage, SecretStorage, OAuthCredentials } from './types.js';
 import { TokenStorageType } from './types.js';
 
 const FORCE_FILE_STORAGE_ENV_VAR = 'QWEN_CODE_FORCE_FILE_STORAGE';
 
-export class HybridTokenStorage extends BaseTokenStorage {
-  private storage: TokenStorage | null = null;
+type HybridBackend = TokenStorage & SecretStorage;
+
+export class HybridTokenStorage
+  extends BaseTokenStorage
+  implements SecretStorage
+{
+  private storage: HybridBackend | null = null;
   private storageType: TokenStorageType | null = null;
-  private storageInitPromise: Promise<TokenStorage> | null = null;
+  private storageInitPromise: Promise<HybridBackend> | null = null;
 
   constructor(serviceName: string) {
     super(serviceName);
   }
 
-  private async initializeStorage(): Promise<TokenStorage> {
+  private async initializeStorage(): Promise<HybridBackend> {
     const forceFileStorage = process.env[FORCE_FILE_STORAGE_ENV_VAR] === 'true';
 
     if (!forceFileStorage) {
@@ -46,7 +51,7 @@ export class HybridTokenStorage extends BaseTokenStorage {
     return this.storage;
   }
 
-  private async getStorage(): Promise<TokenStorage> {
+  private async getStorage(): Promise<HybridBackend> {
     if (this.storage !== null) {
       return this.storage;
     }
@@ -93,5 +98,33 @@ export class HybridTokenStorage extends BaseTokenStorage {
   async getStorageType(): Promise<TokenStorageType> {
     await this.getStorage();
     return this.storageType!;
+  }
+
+  // Secret API — delegates to whichever backend is active (keychain when
+  // available, otherwise the encrypted file). This is what lets sensitive
+  // extension settings degrade gracefully to file storage without a keychain.
+  async isAvailable(): Promise<boolean> {
+    const storage = await this.getStorage();
+    return storage.isAvailable();
+  }
+
+  async setSecret(key: string, value: string): Promise<void> {
+    const storage = await this.getStorage();
+    await storage.setSecret(key, value);
+  }
+
+  async getSecret(key: string): Promise<string | null> {
+    const storage = await this.getStorage();
+    return storage.getSecret(key);
+  }
+
+  async deleteSecret(key: string): Promise<void> {
+    const storage = await this.getStorage();
+    await storage.deleteSecret(key);
+  }
+
+  async listSecrets(): Promise<string[]> {
+    const storage = await this.getStorage();
+    return storage.listSecrets();
   }
 }

@@ -40,10 +40,11 @@ describe('keyMatchers', () => {
     [Command.NAVIGATION_DOWN]: (key: Key) => key.name === 'down' && !key.shift,
     [Command.ACCEPT_SUGGESTION]: (key: Key) =>
       key.name === 'tab' || (key.name === 'return' && !key.ctrl),
-    // Completion navigation only uses arrow keys (not Ctrl+P/N)
-    // to allow Ctrl+P/N to always navigate history
-    [Command.COMPLETION_UP]: (key: Key) => key.name === 'up' && !key.shift,
-    [Command.COMPLETION_DOWN]: (key: Key) => key.name === 'down' && !key.shift,
+    // Completion navigation uses arrows plus readline/Vim-style Ctrl+P/N.
+    [Command.COMPLETION_UP]: (key: Key) =>
+      (key.name === 'up' && !key.shift) || (key.ctrl && key.name === 'p'),
+    [Command.COMPLETION_DOWN]: (key: Key) =>
+      (key.name === 'down' && !key.shift) || (key.ctrl && key.name === 'n'),
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
@@ -200,26 +201,24 @@ describe('keyMatchers', () => {
       negative: [createKey('return', { ctrl: true }), createKey('space')],
     },
     {
-      // Completion navigation only uses arrow keys (not Ctrl+P/N)
-      // to allow Ctrl+P/N to always navigate history
+      // Completion navigation uses arrows plus readline/Vim-style Ctrl+P.
       command: Command.COMPLETION_UP,
-      positive: [createKey('up')],
+      positive: [createKey('up'), createKey('p', { ctrl: true })],
       negative: [
         createKey('p'),
         createKey('down'),
-        createKey('p', { ctrl: true }),
+        createKey('n', { ctrl: true }),
         createKey('up', { shift: true }),
       ],
     },
     {
-      // Completion navigation only uses arrow keys (not Ctrl+P/N)
-      // to allow Ctrl+P/N to always navigate history
+      // Completion navigation uses arrows plus readline/Vim-style Ctrl+N.
       command: Command.COMPLETION_DOWN,
-      positive: [createKey('down')],
+      positive: [createKey('down'), createKey('n', { ctrl: true })],
       negative: [
         createKey('n'),
         createKey('up'),
-        createKey('n', { ctrl: true }),
+        createKey('p', { ctrl: true }),
         createKey('down', { shift: true }),
       ],
     },

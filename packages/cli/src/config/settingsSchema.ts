@@ -698,10 +698,10 @@ const SETTINGS_SCHEMA = {
         label: 'Show Status in Title',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
-          'Show Qwen Code status and thoughts in the terminal window title',
-        showInDialog: false,
+          'Show Qwen Code session name and status in the terminal window title',
+        showInDialog: true,
       },
       hideTips: {
         type: 'boolean',
@@ -1188,6 +1188,16 @@ const SETTINGS_SCHEMA = {
         description: 'Skip the next speaker check.',
         showInDialog: false,
       },
+      skipWorkflowUsageWarning: {
+        type: 'boolean',
+        label: 'Skip Workflow Usage Warning',
+        category: 'Model',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.',
+        showInDialog: false,
+      },
       skipLoopDetection: {
         type: 'boolean',
         label: 'Skip Loop Detection',
@@ -1342,8 +1352,14 @@ const SETTINGS_SCHEMA = {
         category: 'Context',
         requiresRestart: false,
         default: undefined as string | string[] | undefined,
-        description: 'The name of the context file.',
+        description: 'The name of the context file or files.',
         showInDialog: false,
+        jsonSchemaOverride: {
+          anyOf: [
+            { type: 'string' },
+            { type: 'array', items: { type: 'string' } },
+          ],
+        },
       },
       importFormat: {
         type: 'string',
@@ -1787,6 +1803,9 @@ const SETTINGS_SCHEMA = {
         description:
           'Sandbox execution environment (can be a boolean or a path string).',
         showInDialog: false,
+        jsonSchemaOverride: {
+          anyOf: [{ type: 'boolean' }, { type: 'string' }],
+        },
       },
       sandboxImage: {
         type: 'string',

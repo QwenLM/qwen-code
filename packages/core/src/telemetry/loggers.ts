@@ -122,6 +122,7 @@ import type {
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
+import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -467,6 +468,9 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
+    if (config.getUsageStatisticsEnabled()) {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+    }
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);

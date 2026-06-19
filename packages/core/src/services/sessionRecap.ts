@@ -17,8 +17,6 @@ const RECAP_SYSTEM_PROMPT = `You generate session recaps for a programming assis
 
 The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.
 
-Match the dominant language of the conversation (English or Chinese). For Chinese, treat the budget as roughly 80 characters total.
-
 Output format — strict:
 - Wrap your recap in <recap>...</recap> tags.
 - Put NOTHING outside the tags. No preamble, no reasoning, no closing remarks.
