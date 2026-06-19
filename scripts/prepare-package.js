@@ -180,6 +180,7 @@ if (result.signal) {
       'locales',
       'examples',
       'bundled',
+      'web-shell',
     ],
     config: rootPackageJson.config,
     dependencies: {},

@@ -104,6 +104,7 @@ import {
   type ServeOptions,
 } from './types.js';
 import { getDemoHtml } from './demo.js';
+import { registerWebShell } from './webShellStatic.js';
 import { mountWorkspaceMemoryRoutes } from './workspaceMemory.js';
 import { mountWorkspaceAgentsRoutes } from './workspaceAgents.js';
 import {
@@ -595,6 +596,16 @@ function parseAuthProviderInstallRequest(
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /**
+   * Directory of the built Web Shell SPA (`index.html` + `assets/`). When
+   * set (and `opts.serveWebShell !== false`), `createServeApp` mounts the
+   * UI at the daemon root before `bearerAuth`. Production `runQwenServe`
+   * resolves this via `resolveWebShellDir()` and injects it here; direct
+   * embeds / tests opt in by passing a fixture dir, so the default
+   * `createServeApp` (no injection) stays API-only and existing route tests
+   * are unaffected.
+   */
+  webShellDir?: string;
   /**
    * Qwen Code version advertised to web/SDK clients. Production passes the
    * resolved CLI package version; tests/direct embeds may omit it.
@@ -1302,6 +1313,18 @@ export function createServeApp(
       });
       next();
     });
+  }
+
+  // Serve the Web Shell SPA at the daemon root, BEFORE bearerAuth. The
+  // static shell carries no secrets and a browser cannot attach an
+  // Authorization header to a `<script src>` subresource or an address-bar
+  // navigation, so gating it would just break the UI — the front-end's own
+  // API calls still carry the bearer (getDaemonAuthHeaders) and every API
+  // route below stays token-gated. The assets dir is resolved by the caller
+  // (runQwenServe) and injected via deps.webShellDir; `--no-web` sets
+  // opts.serveWebShell=false to opt out.
+  if (opts.serveWebShell !== false && deps.webShellDir) {
+    registerWebShell(app, deps.webShellDir);
   }
 
   app.use(bearerAuth(opts.token));

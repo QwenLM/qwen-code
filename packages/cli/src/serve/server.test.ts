@@ -1619,6 +1619,92 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('Web Shell static serving', () => {
+    let webShellDir: string;
+    const INDEX_HTML =
+      '<!doctype html><html><head><title>Qwen Code Web terminal</title>' +
+      '<script type="module" src="/assets/app.js"></script></head>' +
+      '<body><div id="root"></div></body></html>';
+    const host = `127.0.0.1:${baseOpts.port}`;
+
+    beforeEach(async () => {
+      webShellDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-webshell-'));
+      await fsp.writeFile(path.join(webShellDir, 'index.html'), INDEX_HTML);
+      await fsp.mkdir(path.join(webShellDir, 'assets'));
+      await fsp.writeFile(
+        path.join(webShellDir, 'assets', 'app.js'),
+        'export const x = 1;\n',
+      );
+    });
+
+    afterEach(async () => {
+      await fsp.rm(webShellDir, { recursive: true, force: true });
+    });
+
+    it('serves the shell at the root with security headers', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app).get('/').set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+      expect(res.headers['content-security-policy']).toContain(
+        "frame-ancestors 'none'",
+      );
+      expect(res.headers['content-security-policy']).toContain(
+        "connect-src 'self'",
+      );
+      expect(res.headers['x-frame-options']).toBe('DENY');
+      expect(res.headers['referrer-policy']).toBe('no-referrer');
+      expect(res.headers['cache-control']).toContain('no-cache');
+    });
+
+    it('serves hashed asset chunks from /assets', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app).get('/assets/app.js').set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('export const x');
+    });
+
+    it('falls back to the shell for SPA deep-link navigations', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
+    it('leaves non-navigation API misses as JSON 404s', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/no/such/route')
+        .set('Host', host)
+        .set('Accept', 'application/json');
+      expect(res.status).toBe(404);
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('does not mount the UI when serveWebShell is false', async () => {
+      const app = createServeApp({ ...baseOpts, serveWebShell: false }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
+        .get('/')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('stays API-only when no webShellDir is injected', async () => {
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.text).not.toContain('<div id="root">');
+    });
+  });
+
   describe('GET /health', () => {
     it('returns 200 ok', async () => {
       const app = createServeApp(baseOpts);

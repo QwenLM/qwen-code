@@ -15,6 +15,8 @@ import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
+  openBrowserSecurely,
+  shouldLaunchBrowser,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
@@ -41,6 +43,8 @@ interface ServeArgs {
   workspace?: string;
   'require-auth': boolean;
   'enable-session-shell': boolean;
+  web: boolean;
+  open: boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -132,6 +136,18 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+      })
+      .option('web', {
+        type: 'boolean',
+        default: true,
+        description:
+          'Serve the Web Shell UI at the daemon root path. Use --no-web for an API-only daemon.',
+      })
+      .option('open', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Open the Web Shell in a browser once the daemon is listening. No-op with --no-web or in headless/CI/SSH environments.',
       })
       .option('event-ring-size', {
         type: 'number',
@@ -412,7 +428,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     // express + body-parser + qs in their startup path.
     const { runQwenServe } = await import('../serve/index.js');
     try {
-      await runQwenServe({
+      const handle = await runQwenServe({
         port: argv.port,
         hostname: argv.hostname,
         token: argv.token,
@@ -424,6 +440,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
+        serveWebShell: argv.web,
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
@@ -457,6 +474,16 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
       });
+      // Open the Web Shell in a browser once the listener is up. `handle.url`
+      // already reflects the resolved port (so `--port 0` works), and
+      // `shouldLaunchBrowser()` suppresses this in CI / SSH / headless. Best
+      // effort: a failed launch must not take down the daemon.
+      if (argv.open && argv.web && shouldLaunchBrowser()) {
+        const target = new URL(handle.url);
+        const browserToken = argv.token || process.env['QWEN_SERVER_TOKEN'];
+        if (browserToken) target.searchParams.set('token', browserToken);
+        await openBrowserSecurely(target.toString());
+      }
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${err instanceof Error ? err.message : String(err)}`,

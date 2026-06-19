@@ -51,6 +51,7 @@ import {
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
+import { resolveWebShellDir } from './webShellStatic.js';
 import { parseAllowOriginPatterns } from './auth.js';
 import {
   createPermissionAuditPublisher,
@@ -979,6 +980,28 @@ export async function runQwenServe(
   });
 
   let actualPort = opts.port;
+
+  // Resolve the built Web Shell SPA so createServeApp can mount the UI at the
+  // daemon root. --no-web (serveWebShell=false) skips it. Absent assets (e.g.
+  // a --cli-only build that omits packages/web-shell) degrade to API-only
+  // with a breadcrumb rather than failing the boot.
+  const webShellDir =
+    opts.serveWebShell === false ? undefined : resolveWebShellDir();
+  if (opts.serveWebShell !== false) {
+    if (!webShellDir) {
+      writeStderrLine(
+        'qwen serve: Web Shell assets not found; serving API only. ' +
+          'Build the web-shell workspace (npm run build) or pass --no-web to silence this.',
+      );
+    } else if (!isLoopbackBind(opts.hostname)) {
+      writeStderrLine(
+        'qwen serve: Web Shell UI is served WITHOUT auth on a non-loopback ' +
+          'bind (the static shell has no secrets; the API stays token-gated). ' +
+          'Pass --no-web to disable the UI.',
+      );
+    }
+  }
+
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
   // via `deps.boundWorkspace`. That field is the pre-canonicalized
   // fast-path: createServeApp skips its own `canonicalizeWorkspace`
@@ -992,6 +1015,7 @@ export async function runQwenServe(
   // routes and ACP fs calls share the same factory instance.
   const app = createServeApp(opts, () => actualPort, {
     bridge,
+    webShellDir,
     boundWorkspace,
     qwenCodeVersion: cliVersion,
     fsFactory,
