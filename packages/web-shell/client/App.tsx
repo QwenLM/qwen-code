@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useTransition,
   useRef,
   useState,
   type ReactNode,
@@ -1447,6 +1448,7 @@ export function App({
   );
   const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
   const [compactMode, setCompactMode] = useState(false);
+  const [, startTransition] = useTransition();
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
 
@@ -1527,7 +1529,7 @@ export function App({
   const handleToggleCompact = useCallback(() => {
     const previous = compactModeRef.current;
     const next = !compactModeRef.current;
-    setCompactMode(next);
+    startTransition(() => setCompactMode(next));
     setWorkspaceSetting('workspace', COMPACT_MODE_SETTING_KEY, next).catch(
       (error: unknown) => {
         setCompactMode(previous);
