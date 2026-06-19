@@ -2691,6 +2691,36 @@ describe('OpenAIContentConverter', () => {
 
       expect(response.candidates).toEqual([]);
     });
+
+    it('keeps the estimated prompt/completion split summing to total tokens', () => {
+      // When a provider reports only total_tokens, the 70/30 estimate must
+      // still add back up to the total instead of rounding each half on its
+      // own (5 would otherwise become 4 + 2 = 6).
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'hi' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 5 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      const usage = response.usageMetadata;
+      expect(usage?.totalTokenCount).toBe(5);
+      expect(
+        (usage?.promptTokenCount ?? 0) + (usage?.candidatesTokenCount ?? 0),
+      ).toBe(5);
+    });
   });
 
   describe('OpenAI -> Gemini reasoning content', () => {
