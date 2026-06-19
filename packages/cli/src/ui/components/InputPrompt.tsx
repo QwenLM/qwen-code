@@ -395,8 +395,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // entry rather than advancing from whatever index the user picked.
       resetHistoryNavRef.current();
 
-      // Dismiss follow-up suggestion after submit
+      // Dismiss follow-up suggestion after submit. `followup.dismiss()` only
+      // resets the controller; `onPromptSuggestionDismiss` also clears the
+      // persisted `promptSuggestion` prop so the placeholder doesn't leak a
+      // stale suggestion after synchronous commands (e.g. /clear, /help) that
+      // never trigger the streaming-transition effect in AppContainer.
       followup.dismiss();
+      onPromptSuggestionDismiss?.();
 
       // Clear attachments after submit
       setAttachments([]);
@@ -418,6 +423,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       config,
       pendingPastes,
       followup,
+      onPromptSuggestionDismiss,
     ],
   );
 
@@ -1007,6 +1013,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // suggestion (e.g. after type-then-delete), `fallbackText` carries the
         // still-available placeholder text so telemetry is logged either way.
         followup.accept('tab', { fallbackText: promptSuggestion ?? undefined });
+        // Clear the persisted `promptSuggestion` prop too, otherwise it survives
+        // the accept and reappears as a ghost placeholder once the buffer is
+        // cleared without submitting (e.g. Ctrl+U).
+        onPromptSuggestionDismiss?.();
         return true;
       }
 
@@ -1021,6 +1031,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         followup.accept('right', {
           fallbackText: promptSuggestion ?? undefined,
         });
+        onPromptSuggestionDismiss?.();
         return true;
       }
 
@@ -1277,6 +1288,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           followup.accept('enter', {
             fallbackText: promptSuggestion ?? undefined,
           });
+          onPromptSuggestionDismiss?.();
           return true;
         }
         if (buffer.text.trim()) {
@@ -1614,9 +1626,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // this drops to false; deleting back to empty restores it.
   const hasTabConsumer =
     shouldShowSuggestions ||
-    (buffer.text.length === 0 &&
-      ((followup.state.isVisible && Boolean(followup.state.suggestion)) ||
-        Boolean(promptSuggestion))) ||
+    (buffer.text.length === 0 && Boolean(availableSuggestion)) ||
     Boolean(completion.midInputGhostText?.acceptText);
 
   // Narrow signal — autocomplete dropdown only. Composer hides Footer /
