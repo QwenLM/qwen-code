@@ -32,6 +32,13 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   min-width: 1024px;
@@ -70,15 +77,13 @@ pre {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
 }
 
-#root {
-  min-height: 100vh;
-}
-
 .web-app {
   background: var(--web-canvas);
   display: grid;
   grid-template-columns: 204px minmax(0, 1fr);
   height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 .web-sidebar {
@@ -87,7 +92,9 @@ pre {
   color: var(--web-text);
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-height: 0;
+  overflow: hidden;
   padding: 8px;
 }
 
@@ -142,6 +149,8 @@ pre {
   flex-direction: column;
   gap: 3px;
   min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .web-nav-item {
@@ -233,7 +242,9 @@ pre {
   background: var(--web-canvas);
   display: flex;
   flex-direction: column;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 .web-topbar {
@@ -387,11 +398,13 @@ pre {
 .web-workspace.chat-mode {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 260px;
+  min-width: 0;
 }
 
 .web-content {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -410,6 +423,8 @@ pre {
   --editor-bg: #fbfbf7;
   --msg-body-color: #226b46;
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .web-chat-shell [class*='composer'] {
@@ -598,8 +613,10 @@ pre {
   color: var(--web-text);
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 14px;
 }
 
