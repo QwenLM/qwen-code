@@ -118,6 +118,20 @@ describe('RipGrepTool', () => {
       expect(grepTool.validateToolParams(params)).toBeNull();
     });
 
+    it('should return null for a positive integer limit', () => {
+      const params: RipGrepToolParams = { pattern: 'hello', limit: 2 };
+      expect(grepTool.validateToolParams(params)).toBeNull();
+    });
+
+    it.each([
+      [0, 'params/limit must be >= 1'],
+      [-1, 'params/limit must be >= 1'],
+      [1.5, 'params/limit must be integer'],
+    ])('should return error for invalid limit %s', (limit, expectedError) => {
+      const params: RipGrepToolParams = { pattern: 'hello', limit };
+      expect(grepTool.validateToolParams(params)).toBe(expectedError);
+    });
+
     it('should return error if pattern is missing', () => {
       const params = { path: '.' } as unknown as RipGrepToolParams;
       expect(grepTool.validateToolParams(params)).toBe(
