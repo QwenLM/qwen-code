@@ -242,7 +242,7 @@ complete) confirmed on a real 0.17.x daemon.
   `write_file`; the capture harness forces the mode (`CAPTURE_APPROVAL_MODE`) and can
   attach to a running daemon (`CAPTURE_ATTACH_URL`) to record real gates.
 
-### Handoff finding — the 0.17.x daemon does NOT broadcast remote prompts
+### Handoff finding — 0.17.x didn't broadcast remote prompts/turn-end (NOW FIXED in-fork)
 
 Verified live (terminal TUI + browser `/ui` on ONE shared daemon session): both
 directions DRIVE the session — a prompt from either client runs the turn and the
@@ -253,15 +253,22 @@ _other_ client's PROMPT TEXT: across a real cross-client turn the TUI logged
 the broadcast — same version gap as `turn_complete`). Two distinct needs fall out:
 
 - **Live co-watching** (both screens, each sees the other's prompts as typed) →
-  needs the daemon to broadcast `user_message_chunk`. Our reducer ALREADY renders a
-  non-self `user_message_chunk`, so the fix is daemon-side: patch the fork's
-  `qwen serve` to emit one on prompt accept (we own it), or bump the bundled daemon
-  to 0.18.x (bigger drift). Lesser priority.
+  ✅ **DONE + verified live.** The fork's `qwen serve` now broadcasts, on the SSE
+  bus, TWO frames it omitted natively (both surgical to the HTTP bridge's
+  `sendPrompt`, tagged with the submitter's `originatorClientId`, in the ring
+  buffer for re-subscribers):
+  - `user_message_chunk` on prompt-accept (before the agent frames) — the
+    submitter drops its own echo (originatorClientId === ownClientId), other
+    clients render the prompt text. Verified: a browser-typed prompt appears in
+    the watching terminal; terminal-typed prompts render exactly once.
+  - `turn_complete` on prompt-resolve (after the agent frames) — a REMOTE client
+    that didn't call `prompt()` gets no HTTP `stopReason`, so without this its
+    spinner ran forever. Verified: browser-driven turns now finalize in the
+    terminal. The originator already finalized on its HTTP response → idempotent.
 - **Pick-up handoff** (step away → drive from phone → return to terminal and catch
   up on the whole conversation) → needs **replay-on-attach (Slice 3)**. The session
   TRANSCRIPT already contains every prompt (incl. the phone's), so replay surfaces
-  them with no daemon change. **This is the user's actual goal**, so Slice 3 is the
-  high-value next step — not the live-echo patch.
+  them with no daemon change. Still the high-value next step.
 
 ## Phasing inside Phase 2 ("grows")
 
