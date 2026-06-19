@@ -7865,7 +7865,7 @@ describe('Session', () => {
       expect(execute).not.toHaveBeenCalled();
       const { parts } = result;
       expect(parts).toHaveLength(1);
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(result.stopAfterPermissionCancel).toBe(false);
       expect(parts[0].functionResponse?.id).toBe('shell_1__qwen_dup_2');
       expect(parts[0].functionResponse?.response).toEqual({
         error: expect.stringContaining(
@@ -7936,7 +7936,7 @@ describe('Session', () => {
 
       expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
       const { parts } = result;
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(result.stopAfterPermissionCancel).toBe(false);
       expect(parts[0].functionResponse?.id).toBe('todo_1__qwen_dup_2');
       expect(parts[0].functionResponse?.response).toEqual({
         error: expect.stringContaining(
@@ -8016,7 +8016,7 @@ describe('Session', () => {
 
       expect(execute).toHaveBeenCalledTimes(2);
       const { parts } = result;
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(result.stopAfterPermissionCancel).toBe(false);
       expect(parts.map((part) => part.functionResponse?.id)).toEqual([
         'call_a',
         'dup_mid__qwen_dup_2',
