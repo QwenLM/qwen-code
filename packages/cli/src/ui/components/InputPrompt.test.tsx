@@ -538,6 +538,130 @@ describe('InputPrompt', () => {
         }
       });
     });
+
+    // Regression for #5145 (doudouOUC Critical #1/#2, confirmed by wenshao's
+    // re-verification): accepting or submitting must clear the persisted
+    // `promptSuggestion` via onPromptSuggestionDismiss. Otherwise the prop
+    // survives, and the next time the buffer empties `availableSuggestion`
+    // re-derives from it and the just-accepted/submitted suggestion reappears
+    // as a ghost placeholder. Typing (#1380) and paste (#665) already clear it;
+    // accept and submit must match.
+    describe('clears promptSuggestion on accept/submit (no ghost placeholder)', () => {
+      // Under the 300ms SUGGESTION_DELAY_MS so the accept goes through the
+      // promptSuggestion fallback path (followup.state.suggestion stays null).
+      const BEFORE_SUGGESTION_VISIBLE_MS = 100;
+
+      it('calls onPromptSuggestionDismiss when Tab accepts the suggestion', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\t');
+          });
+          await flush();
+
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('calls onPromptSuggestionDismiss when Right arrow accepts the suggestion', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\x1b[C'); // right arrow
+          });
+          await flush();
+
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('calls onPromptSuggestionDismiss when Enter accepts the suggestion', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\r');
+          });
+          await flush();
+
+          // Enter accepts into the buffer (does not submit) and clears the prop.
+          expect(props.onSubmit).not.toHaveBeenCalled();
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('calls onPromptSuggestionDismiss when a typed message is submitted', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        mockBuffer.text = 'ship it';
+        mockBuffer.lines = ['ship it'];
+        mockBuffer.cursor = [0, 'ship it'.length];
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\r');
+          });
+          await flush();
+
+          // Submitting a non-empty buffer clears the stale suggestion too, so a
+          // synchronous slash command (/clear, /help) can't leave a ghost.
+          expect(props.onSubmit).toHaveBeenCalledWith('ship it');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+    });
   });
 
   // Regression for #4171: `onTabConsumerChange` (consumed by AppContainer
