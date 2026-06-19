@@ -779,20 +779,39 @@ export class AgentCore {
             }
             const content = resp.candidates?.[0]?.content;
             const parts = content?.parts || [];
+            // #2928: Batch STREAM_TEXT emits per chunk to reduce UI flicker
+            // during parallel sub-agent execution. Accumulate text parts
+            // then emit once instead of per-part.
+            let chunkThoughtText = '';
+            let chunkStreamText = '';
             for (const p of parts) {
               const txt = p.text;
               const isThought = p.thought ?? false;
-              if (txt && isThought) roundThoughtText += txt;
-              if (txt && !isThought) roundText += txt;
-              if (txt)
-                this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
-                  subagentId: this.subagentId,
-                  round: turnCounter,
-                  text: txt,
-                  thought: isThought,
-                  timestamp: Date.now(),
-                });
+              if (txt && isThought) {
+                roundThoughtText += txt;
+                chunkThoughtText += txt;
+              }
+              if (txt && !isThought) {
+                roundText += txt;
+                chunkStreamText += txt;
+              }
             }
+            if (chunkThoughtText)
+              this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
+                subagentId: this.subagentId,
+                round: turnCounter,
+                text: chunkThoughtText,
+                thought: true,
+                timestamp: Date.now(),
+              });
+            if (chunkStreamText)
+              this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
+                subagentId: this.subagentId,
+                round: turnCounter,
+                text: chunkStreamText,
+                thought: false,
+                timestamp: Date.now(),
+              });
             if (resp.usageMetadata) lastUsage = resp.usageMetadata;
           }
         }
