@@ -68,6 +68,8 @@ export class SleepInhibitor {
   private readonly env: NodeJS.ProcessEnv;
   private readonly spawn: NonNullable<SleepInhibitorConfig['spawn']>;
   private readonly logger: NonNullable<SleepInhibitorConfig['logger']>;
+  private noAskPasswordSupported: boolean | undefined;
+  private probing = false;
 
   constructor(config: SleepInhibitorConfig = {}) {
     this.platform = config.platform ?? defaultPlatform();
@@ -84,7 +86,7 @@ export class SleepInhibitor {
     if (this.activeCount === 1) {
       this.spawnFailedForCurrentRun = false;
       this.start(reason);
-    } else if (!this.child && !this.spawnFailedForCurrentRun) {
+    } else if (!this.child && !this.spawnFailedForCurrentRun && !this.probing) {
       this.start(reason);
     }
 
@@ -121,10 +123,58 @@ export class SleepInhibitor {
   }
 
   private start(reason: string): void {
-    if (this.child || this.spawnFailedForCurrentRun) {
+    if (this.child || this.spawnFailedForCurrentRun || this.probing) {
       return;
     }
 
+    if (this.platform === 'linux' && !isHeadlessSshSession(this.env)) {
+      if (this.noAskPasswordSupported === undefined) {
+        this.probing = true;
+        this.probeNoAskPassword(() => {
+          this.probing = false;
+          if (this.activeCount > 0) {
+            this.doStart(reason);
+          }
+        });
+        return;
+      }
+    }
+    this.doStart(reason);
+  }
+
+  /**
+   * Spawn `systemd-inhibit --help` and inspect the output to determine whether
+   * `--no-ask-password` is supported. The result is cached so the probe only
+   * runs once per process lifetime.
+   */
+  private probeNoAskPassword(callback: () => void): void {
+    try {
+      const probe = this.spawn('systemd-inhibit', ['--help'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      let settled = false;
+      const settle = (supported: boolean): void => {
+        if (settled) return;
+        settled = true;
+        this.noAskPasswordSupported = supported;
+        callback();
+      };
+      probe.stdout?.on('data', (chunk: Buffer) => {
+        output += chunk.toString();
+      });
+      probe.stderr?.on('data', (chunk: Buffer) => {
+        output += chunk.toString();
+      });
+      probe.on('error', () => settle(false));
+      probe.on('close', () => settle(output.includes('--no-ask-password')));
+    } catch {
+      this.noAskPasswordSupported = false;
+      callback();
+    }
+  }
+
+  private doStart(reason: string): void {
     const command = this.getCommand(reason);
     if (!command) {
       this.logger.debug(this.getUnavailableMessage());
@@ -248,21 +298,24 @@ export class SleepInhibitor {
         // way to block that, so this does not fully match the Linux
         // systemd-inhibit semantics on battery.
         return { command: 'caffeinate', args: ['-is'] };
-      case 'linux':
+      case 'linux': {
         if (isHeadlessSshSession(this.env)) {
           return undefined;
         }
-        return {
-          command: 'systemd-inhibit',
-          args: [
-            '--what=sleep',
-            '--who=Qwen Code',
-            `--why=${sanitizeInhibitorReason(reason)}`,
-            '--mode=block',
-            'sleep',
-            'infinity',
-          ],
-        };
+        const args: string[] = [];
+        if (this.noAskPasswordSupported) {
+          args.push('--no-ask-password');
+        }
+        args.push(
+          '--what=sleep',
+          '--who=Qwen Code',
+          `--why=${sanitizeInhibitorReason(reason)}`,
+          '--mode=block',
+          'sleep',
+          'infinity',
+        );
+        return { command: 'systemd-inhibit', args };
+      }
       case 'win32':
         return {
           command: 'powershell.exe',
