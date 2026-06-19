@@ -2314,13 +2314,17 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       dnsResolutionOrder: {
-        type: 'string',
+        type: 'enum',
         label: 'DNS Resolution Order',
         category: 'Advanced',
         requiresRestart: true,
         default: undefined as DnsResolutionOrder | undefined,
         description: 'The DNS resolution order.',
         showInDialog: false,
+        options: [
+          { value: 'ipv4first', label: 'IPv4 First' },
+          { value: 'verbatim', label: 'Verbatim' },
+        ],
       },
       excludedEnvVars: {
         type: 'array',

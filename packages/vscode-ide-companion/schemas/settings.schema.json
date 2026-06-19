@@ -1077,8 +1077,11 @@
           "default": false
         },
         "dnsResolutionOrder": {
-          "description": "The DNS resolution order.",
-          "type": "string"
+          "description": "The DNS resolution order. Options: ipv4first, verbatim",
+          "enum": [
+            "ipv4first",
+            "verbatim"
+          ]
         },
         "excludedEnvVars": {
           "description": "Environment variables to exclude from project context.",
