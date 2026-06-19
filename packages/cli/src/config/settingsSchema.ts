@@ -1287,6 +1287,21 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          toolResultContentFormat: {
+            type: 'enum',
+            label: 'Tool Result Content Format',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: 'parts',
+            description:
+              'Controls how text-only tool results are serialized in OpenAI-compatible requests. Use "parts" for the default content-part array shape. Use "string" only for legacy OpenAI-compatible runtimes whose tool templates ignore text content parts (for example older GLM-5.1 vLLM/SGLang templates; QwenLM/qwen-code#3361). Tool-returned media is still handled by splitToolMedia.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+            options: [
+              { value: 'parts', label: 'Content Parts (Default)' },
+              { value: 'string', label: 'String' },
+            ],
+          },
           schemaCompliance: {
             type: 'enum',
             label: 'Tool Schema Compliance',

@@ -553,6 +553,14 @@
               "type": "boolean",
               "default": true
             },
+            "toolResultContentFormat": {
+              "description": "Controls how text-only tool results are serialized in OpenAI-compatible requests. Use \"parts\" for the default content-part array shape. Use \"string\" only for legacy OpenAI-compatible runtimes whose tool templates ignore text content parts (for example older GLM-5.1 vLLM/SGLang templates; QwenLM/qwen-code#3361). Tool-returned media is still handled by splitToolMedia. Options: parts, string",
+              "enum": [
+                "parts",
+                "string"
+              ],
+              "default": "parts"
+            },
             "schemaCompliance": {
               "description": "The compliance mode for tool schemas sent to the model. Use \"openapi_30\" for strict OpenAPI 3.0 compatibility (e.g., for Gemini). Options: auto, openapi_30",
               "enum": [
