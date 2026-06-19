@@ -78,7 +78,9 @@ export class FileTokenStorage
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   }
 
-  private async loadTokens(): Promise<Map<string, OAuthCredentials>> {
+  private async loadTokens(
+    allowMissing = false,
+  ): Promise<Map<string, OAuthCredentials>> {
     try {
       const data = await fs.readFile(this.tokenFilePath, 'utf-8');
       const decrypted = this.decrypt(data);
@@ -87,6 +89,9 @@ export class FileTokenStorage
     } catch (error: unknown) {
       const err = error as NodeJS.ErrnoException & { message?: string };
       if (err.code === 'ENOENT') {
+        if (allowMissing) {
+          return new Map();
+        }
         throw new Error('Token file does not exist');
       }
       if (
@@ -135,7 +140,7 @@ export class FileTokenStorage
   async setCredentials(credentials: OAuthCredentials): Promise<void> {
     this.validateCredentials(credentials);
 
-    const tokens = await this.loadTokens();
+    const tokens = await this.loadTokens(true);
     const updatedCredentials: OAuthCredentials = {
       ...credentials,
       updatedAt: Date.now(),

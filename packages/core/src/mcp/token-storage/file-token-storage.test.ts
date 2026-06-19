@@ -120,6 +120,39 @@ describe('FileTokenStorage', () => {
   });
 
   describe('setCredentials', () => {
+    it('should create token file when saving credentials for the first time', async () => {
+      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+      mockFs.mkdir.mockResolvedValue(undefined);
+      vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
+
+      const credentials: OAuthCredentials = {
+        serverName: 'test-server',
+        token: {
+          accessToken: 'access-token',
+          tokenType: 'Bearer',
+        },
+        updatedAt: Date.now() - 10000,
+      };
+
+      await storage.setCredentials(credentials);
+
+      expect(mockFs.mkdir).toHaveBeenCalledWith(
+        path.join('/home/test', '.qwen'),
+        { recursive: true, mode: 0o700 },
+      );
+      expect(atomicWriteFile).toHaveBeenCalled();
+
+      const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
+      const decrypted = storage['decrypt'](writeCall[1] as string);
+      const saved = JSON.parse(decrypted);
+
+      expect(Object.keys(saved)).toEqual(['test-server']);
+      expect(saved['test-server']).toEqual({
+        ...credentials,
+        updatedAt: expect.any(Number),
+      });
+    });
+
     it('should save credentials with encryption', async () => {
       const encryptedData = storage['encrypt'](
         JSON.stringify({ 'existing-server': existingCredentials }),
