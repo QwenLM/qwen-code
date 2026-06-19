@@ -1,10 +1,49 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { isValidChatId, hasMarkdownSyntax, splitText } from './QQChannel.js';
 
-const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
-  mockSendQQMessage: vi.fn(),
-  mockFetchAccessToken: vi.fn(),
-}));
+const {
+  mockSendQQMessage,
+  mockFetchAccessToken,
+  MockWebSocket,
+  mockWebSockets,
+} = vi.hoisted(() => {
+  const mockWebSockets: unknown[] = [];
+
+  class MockWebSocket {
+    static OPEN = 1;
+    readyState = MockWebSocket.OPEN;
+    send = vi.fn();
+    close = vi.fn();
+    private readonly listeners = new Map<
+      string,
+      Array<(...args: unknown[]) => void>
+    >();
+
+    constructor(_url: string) {
+      mockWebSockets.push(this);
+    }
+
+    on(event: string, listener: (...args: unknown[]) => void): this {
+      const listeners = this.listeners.get(event) ?? [];
+      listeners.push(listener);
+      this.listeners.set(event, listeners);
+      return this;
+    }
+
+    emit(event: string, ...args: unknown[]): void {
+      for (const listener of this.listeners.get(event) ?? []) {
+        listener(...args);
+      }
+    }
+  }
+
+  return {
+    mockSendQQMessage: vi.fn(),
+    mockFetchAccessToken: vi.fn(),
+    MockWebSocket,
+    mockWebSockets,
+  };
+});
 
 vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
@@ -18,6 +57,10 @@ vi.mock('./api.js', () => ({
   getApiBase: () => 'https://api.sgroup.qq.com',
   fetchAccessToken: mockFetchAccessToken,
   fetchGatewayUrl: vi.fn(),
+}));
+
+vi.mock('ws', () => ({
+  default: MockWebSocket,
 }));
 
 vi.mock('./accounts.js', () => ({
@@ -423,5 +466,62 @@ describe('sendMessage', () => {
       'test-token',
       { content: 'a'.repeat(500), msg_type: 0, msg_id: 'msg-789', msg_seq: 2 },
     );
+  });
+});
+
+describe('gateway reconnect timer', () => {
+  function makeChannel(): QQChannel {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+    );
+  }
+
+  beforeEach(() => {
+    mockWebSockets.length = 0;
+  });
+
+  it('tracks and unrefs reconnect timers scheduled by close handler', () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      dialGateway: (
+        url: string,
+        resolve: () => void,
+        reject: (err: Error) => void,
+      ) => void;
+      reconnectTimer: ReturnType<typeof setTimeout> | null;
+    };
+
+    chp.dialGateway('wss://gateway.example.test', vi.fn(), vi.fn());
+    const ws = mockWebSockets[0] as {
+      emit(event: string, ...args: unknown[]): void;
+    };
+
+    ws.emit('close', 4001);
+
+    const timer = chp.reconnectTimer;
+    expect(timer).not.toBeNull();
+    expect(timer?.hasRef()).toBe(false);
+
+    try {
+      ch.disconnect();
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(timer);
+      expect(chp.reconnectTimer).toBeNull();
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
   });
 });
