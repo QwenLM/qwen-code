@@ -528,9 +528,10 @@ export class RipGrepTool extends BaseDeclarativeTool<
               'File or directory to search in (rg PATH). Defaults to current working directory.',
           },
           limit: {
-            type: 'number',
+            type: 'integer',
+            minimum: 1,
             description:
-              'Limit output to first N lines/entries. Optional - shows all matches if not specified.',
+              'Limit output to first N lines/entries. Must be a positive integer. Optional - shows all matches if not specified.',
           },
         },
         required: ['pattern'],
@@ -553,6 +554,13 @@ export class RipGrepTool extends BaseDeclarativeTool<
     );
     if (errors) {
       return errors;
+    }
+
+    if (
+      params.limit !== undefined &&
+      (!Number.isInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'limit must be a positive integer';
     }
 
     // Validate pattern is a valid regex

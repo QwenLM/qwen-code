@@ -186,8 +186,12 @@ export interface UIState {
   setSessionName: (name: string | null) => void;
   // Prompt suggestion
   promptSuggestion: string | null;
-  /** Dismiss prompt suggestion (clears state, aborts speculation) */
-  dismissPromptSuggestion: () => void;
+  /**
+   * Abort in-flight suggestion generation/speculation; intentionally preserves
+   * `promptSuggestion` so the placeholder can restore it when the buffer is
+   * emptied again.
+   */
+  abortPromptSuggestion: () => void;
   // Rewind selector
   isRewindSelectorOpen: boolean;
   rewindEscPending: boolean;
