@@ -25,6 +25,10 @@ const qwenMockState = vi.hoisted(() => ({
   oauthError: null as Error | null,
 }));
 
+const dpMockState = vi.hoisted(() => ({
+  generator: {} as unknown,
+}));
+
 vi.mock('./openaiContentGenerator/index.js', () => {
   if (openaiMockState.importError) {
     throw openaiMockState.importError;
@@ -51,6 +55,10 @@ vi.mock('../qwen/qwenOAuth2.js', () => ({
 
 vi.mock('../qwen/qwenContentGenerator.js', () => ({
   QwenContentGenerator: class {},
+}));
+
+vi.mock('../dp/dpContentGenerator.js', () => ({
+  createDpContentGenerator: vi.fn(async () => dpMockState.generator),
 }));
 
 describe('createContentGenerator', () => {
@@ -89,6 +97,29 @@ describe('createContentGenerator', () => {
     expect(generator).toBeInstanceOf(LoggingContentGenerator);
     const wrapped = (generator as LoggingContentGenerator).getWrapped();
     expect(wrapped).toBeDefined();
+  });
+
+  it('should create a DP/Nestor content generator without a static apiKey', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+
+    const generator = await createContentGenerator(
+      {
+        model: 'tgpt/qwen3-next-80b-a3b-instruct',
+        authType: AuthType.DP_AUTH,
+      },
+      mockConfig,
+    );
+
+    expect(generator).toBeInstanceOf(LoggingContentGenerator);
+    expect((generator as LoggingContentGenerator).getWrapped()).toBe(
+      dpMockState.generator,
+    );
   });
 
   it('should create a Gemini content generator with client install id logging disabled', async () => {

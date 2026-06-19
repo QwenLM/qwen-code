@@ -909,6 +909,7 @@ export async function parseArguments(): Promise<CliArgs> {
           choices: [
             AuthType.USE_OPENAI,
             AuthType.USE_ANTHROPIC,
+            AuthType.DP_AUTH,
             AuthType.QWEN_OAUTH,
             AuthType.USE_GEMINI,
             AuthType.USE_VERTEX_AI,
@@ -1943,8 +1944,7 @@ export async function loadCliConfig(
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
-    skipWorkflowUsageWarning:
-      settings.model?.skipWorkflowUsageWarning ?? false,
+    skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,

@@ -28,6 +28,7 @@ const SECRET_ENV_VARS = [
   'GOOGLE_API_KEY',
   'DASHSCOPE_API_KEY',
   'OPENROUTER_API_KEY',
+  'BLAZE_RUNTIME_TOKEN',
   'QWEN_SERVER_TOKEN',
 ] as const;
 
@@ -47,6 +48,7 @@ const NONSECRET_ENV_VARS = [
   'LANG',
   'LC_ALL',
   'TERM',
+  'BLAZE_RUNTIME_ENTRY',
   'QWEN_CLI_ENTRY',
 ] as const;
 

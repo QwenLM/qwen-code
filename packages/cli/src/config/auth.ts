@@ -6,6 +6,7 @@
 
 import {
   AuthType,
+  hasDpAuthCredentials,
   type Config,
   type ModelProvidersConfig,
   type ProviderModelConfig,
@@ -21,6 +22,7 @@ const DEFAULT_ENV_KEYS: Record<string, string> = {
   [AuthType.USE_ANTHROPIC]: 'ANTHROPIC_API_KEY',
   [AuthType.USE_GEMINI]: 'GEMINI_API_KEY',
   [AuthType.USE_VERTEX_AI]: 'GOOGLE_API_KEY',
+  [AuthType.DP_AUTH]: 'BLAZE_DP_TOKEN',
 };
 
 /**
@@ -255,6 +257,15 @@ export function validateAuthMethod(
     return t(
       'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.',
     );
+  }
+
+  if (authMethod === AuthType.DP_AUTH) {
+    if (!hasDpAuthCredentials()) {
+      return t(
+        'Missing DP/Nestor credentials. Set BLAZE_DP_TOKEN or DP_TOKEN for token exchange, or set BLAZE_DP_JWT / NESSY_CLI_DP_AUTH_TOKEN with a delegated JWT.',
+      );
+    }
+    return null;
   }
 
   if (authMethod === AuthType.USE_ANTHROPIC) {

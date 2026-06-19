@@ -22,6 +22,7 @@ import { t } from '../../i18n/index.js';
  */
 export enum AuthDisplayType {
   QWEN_OAUTH = 'qwen_oauth',
+  DP_AUTH = 'dp_auth',
   CODING_PLAN = 'coding_plan',
   API_KEY = 'api_key',
   UNKNOWN = 'unknown',
@@ -38,6 +39,8 @@ function formatAuthDisplayType(
   switch (value) {
     case AuthDisplayType.QWEN_OAUTH:
       return t('Qwen OAuth');
+    case AuthDisplayType.DP_AUTH:
+      return t('DP/Nestor');
     case AuthDisplayType.CODING_PLAN:
       return t('Coding Plan');
     case AuthDisplayType.API_KEY:

@@ -109,6 +109,10 @@ function formatAuth(info: ExtendedSystemInfo): string {
     return 'Qwen OAuth';
   }
 
+  if (info.selectedAuthType === 'dp-auth') {
+    return 'DP/Nestor';
+  }
+
   return `API Key - ${info.selectedAuthType}`;
 }
 

@@ -75,8 +75,9 @@ export class BridgeChannelClosedError extends Error {
 }
 
 /**
- * Raised by `defaultSpawnChannelFactory` when neither `QWEN_CLI_ENTRY` nor
- * `process.argv[1]` resolves to a path that can be re-spawned for the ACP
+ * Raised by `defaultSpawnChannelFactory` when neither `BLAZE_RUNTIME_ENTRY`,
+ * legacy `QWEN_CLI_ENTRY`, nor `process.argv[1]` resolves to a path that can
+ * be re-spawned for the ACP
  * child. Replaces a generic `new Error(...)` so `mapDomainErrorToErrorKind`
  * can return `'missing_binary'` via `instanceof` rather than regex-matching
  * `.message`. The constructor message is preserved verbatim so existing
@@ -86,9 +87,10 @@ export class MissingCliEntryError extends Error {
   constructor() {
     super(
       'Cannot determine CLI entry path for spawning the ACP child: ' +
-        'process.argv[1] is empty and QWEN_CLI_ENTRY is unset. ' +
-        'Set QWEN_CLI_ENTRY to the absolute path of the qwen entry ' +
-        'script (e.g. `export QWEN_CLI_ENTRY=$(which qwen)`) to override.',
+        'process.argv[1] is empty and BLAZE_RUNTIME_ENTRY / ' +
+        'QWEN_CLI_ENTRY are unset. ' +
+        'Set BLAZE_RUNTIME_ENTRY to the absolute path of the runtime entry ' +
+        'script to override.',
     );
     this.name = 'MissingCliEntryError';
   }

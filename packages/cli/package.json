@@ -10,7 +10,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "qwen": "dist/index.js"
+    "qwen": "dist/index.js",
+    "blaze-runtime": "dist/src/blaze-runtime.js"
   },
   "exports": {
     ".": {

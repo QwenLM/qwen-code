@@ -4,7 +4,7 @@ Stage 1 of the [qwen-code daemon design](https://github.com/QwenLM/qwen-code/iss
 
 ## Authentication
 
-When the daemon was started with `--token` or `QWEN_SERVER_TOKEN`, **every route except `/health` on loopback binds** must carry:
+When the daemon was started with `--token`, `BLAZE_RUNTIME_TOKEN`, or legacy `QWEN_SERVER_TOKEN`, **every route except `/health` on loopback binds** must carry:
 
 ```
 Authorization: Bearer <token>
@@ -20,7 +20,7 @@ When the flag is on, the global `bearerAuth` middleware gates **every** route �
 
 **`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser webuis hitting the daemon cross-origin are blocked by default — any request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
 
-- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token is set (any source: `--token`, `QWEN_SERVER_TOKEN`, or `--require-auth` which mandates a token at boot). The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` and `/demo` are also gated by the bearer — they're registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach `/health` without a token), and a `*` allowlist makes them reachable from any cross-origin browser. On non-loopback binds the bearer is already mandatory at boot, so the `*` exposure surface is just `/health` (status JSON) and `/demo` (a static page whose JS still calls token-gated routes) — the actual API surface is gated regardless.
+- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token is set (any source: `--token`, `BLAZE_RUNTIME_TOKEN`, legacy `QWEN_SERVER_TOKEN`, or `--require-auth` which mandates a token at boot). The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` and `/demo` are also gated by the bearer — they're registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach `/health` without a token), and a `*` allowlist makes them reachable from any cross-origin browser. On non-loopback binds the bearer is already mandatory at boot, so the `*` exposure surface is just `/health` (status JSON) and `/demo` (a static page whose JS still calls token-gated routes) — the actual API surface is gated regardless.
 - A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input.
 
 Matched origins receive the standard CORS response headers on every request:
@@ -1663,10 +1663,11 @@ The connection then closes.
 
 ## Environment variables
 
-| Var                 | Purpose                                                                                                                                                             |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QWEN_SERVER_TOKEN` | Bearer token. Stripped of leading/trailing whitespace at boot.                                                                                                      |
-| `SKIP_LLM_TESTS`    | Set to `1` to **skip** LLM-required integration tests in `integration-tests/cli/qwen-serve-streaming.test.ts` (default-on for CI envs that lack provider API keys). |
+| Var                   | Purpose                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BLAZE_RUNTIME_TOKEN` | Bearer token. Stripped of leading/trailing whitespace at boot. Preferred for the standalone Blaze runtime.                                                          |
+| `QWEN_SERVER_TOKEN`   | Legacy bearer token fallback. Stripped of leading/trailing whitespace at boot.                                                                                      |
+| `SKIP_LLM_TESTS`      | Set to `1` to **skip** LLM-required integration tests in `integration-tests/cli/qwen-serve-streaming.test.ts` (default-on for CI envs that lack provider API keys). |
 
 ## Source layout
 

@@ -255,6 +255,12 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
   anthropic: ['ANTHROPIC_API_KEY'],
   gemini: ['GEMINI_API_KEY'],
   'vertex-ai': ['GOOGLE_API_KEY'],
+  'dp-auth': [
+    'BLAZE_DP_TOKEN',
+    'DP_TOKEN',
+    'BLAZE_DP_JWT',
+    'NESSY_CLI_DP_AUTH_TOKEN',
+  ],
 };
 
 /**

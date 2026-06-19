@@ -76,11 +76,16 @@ import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rateLimit.js';
 import type { AcpHttpHandle } from './acpHttp/index.js';
 
+const BLAZE_RUNTIME_TOKEN_ENV = 'BLAZE_RUNTIME_TOKEN';
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+
+function bearerTokenEnvHint(): string {
+  return `${BLAZE_RUNTIME_TOKEN_ENV} or legacy ${QWEN_SERVER_TOKEN_ENV}`;
+}
 
 function isPositiveIntegerMs(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value) && value > 0;
@@ -427,7 +432,8 @@ function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
  *
  * Token resolution order:
  *   1. explicit `opts.token`
- *   2. `QWEN_SERVER_TOKEN` env var
+ *   2. `BLAZE_RUNTIME_TOKEN` env var
+ *   3. legacy `QWEN_SERVER_TOKEN` env var
  *
  * Boot refuses to start when bound beyond loopback without a token; this is a
  * hard rule, not a warning, per the threat model in the design issue.
@@ -436,13 +442,16 @@ export async function runQwenServe(
   optsIn: Omit<ServeOptions, 'token'> & { token?: string },
   deps: RunQwenServeDeps = {},
 ): Promise<RunHandle> {
-  // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
+  // Trim all sources. Common gotcha: `export BLAZE_RUNTIME_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
   // hashed-then-compared token never matches what well-behaved clients
   // send. Every request returns the generic 401 with no breadcrumb
   // pointing at the whitespace, and operators chase ghosts. Trim once
   // at boot so the comparison is over what humans intended to set.
-  const rawToken = optsIn.token ?? process.env[QWEN_SERVER_TOKEN_ENV];
+  const rawToken =
+    optsIn.token ??
+    process.env[BLAZE_RUNTIME_TOKEN_ENV] ??
+    process.env[QWEN_SERVER_TOKEN_ENV];
   const token =
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
@@ -452,7 +461,7 @@ export async function runQwenServe(
   if (optsIn.enableSessionShell === true && token === undefined) {
     writeStderrLine(
       `qwen serve: --enable-session-shell ignored because no bearer token ` +
-        `is configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token to ` +
+        `is configured. Set ${bearerTokenEnvHint()} or pass --token to ` +
         `enable direct session shell.`,
     );
   }
@@ -498,7 +507,7 @@ export async function runQwenServe(
   if (!isLoopbackBind(opts.hostname) && !token) {
     throw new Error(
       `Refusing to bind ${opts.hostname}:${opts.port} without a bearer token. ` +
-        `Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to loopback ` +
+        `Set ${bearerTokenEnvHint()} or pass --token, or rebind to loopback ` +
         `(127.0.0.1, localhost, ::1, or [::1]).`,
     );
   }
@@ -511,7 +520,7 @@ export async function runQwenServe(
   if (opts.requireAuth && !token) {
     throw new Error(
       `Refusing to start with --require-auth set but no bearer token ` +
-        `configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or omit ` +
+        `configured. Set ${bearerTokenEnvHint()} or pass --token, or omit ` +
         `--require-auth to keep the loopback developer default.`,
     );
   }
@@ -542,7 +551,7 @@ export async function runQwenServe(
         `Refusing to start with --allow-origin '*' but no bearer token ` +
           `configured. '*' admits any cross-origin browser to the API; ` +
           `without a token, any local page can drive the daemon. Set ` +
-          `${QWEN_SERVER_TOKEN_ENV} or pass --token, or list specific ` +
+          `${bearerTokenEnvHint()} or pass --token, or list specific ` +
           `origins instead of '*'.`,
       );
     }
@@ -1141,7 +1150,7 @@ export async function runQwenServe(
       );
       if (!token) {
         writeStderrLine(
-          `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
+          `qwen serve: bearer auth disabled (loopback default). Set ${bearerTokenEnvHint()} to enable.`,
         );
       } else if (opts.requireAuth) {
         // The boot check above guarantees `token` is set whenever

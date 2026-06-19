@@ -36,6 +36,11 @@ describe('validateAuthMethod', () => {
     delete process.env['GOOGLE_API_KEY'];
     delete process.env['IDEALAB_KEY'];
     delete process.env['TOKEN_PLAN_KEY'];
+    delete process.env['BLAZE_DP_TOKEN'];
+    delete process.env['DP_TOKEN'];
+    delete process.env['BLAZE_DP_JWT'];
+    delete process.env['NESSY_CLI_DP_AUTH_TOKEN'];
+    delete process.env['BLAZE_DP_CREDENTIALS_PATH'];
   });
 
   it('should return null for USE_OPENAI with default env key', () => {
@@ -187,6 +192,21 @@ describe('validateAuthMethod', () => {
   it('should return an error for QWEN_OAUTH (free tier discontinued)', () => {
     const result = validateAuthMethod(AuthType.QWEN_OAUTH);
     expect(result).toContain('discontinued on 2026-04-15');
+  });
+
+  it('should return null for DP_AUTH with DP token exchange env', () => {
+    process.env['BLAZE_DP_TOKEN'] = 'dp-token';
+
+    expect(validateAuthMethod(AuthType.DP_AUTH)).toBeNull();
+  });
+
+  it('should return an error for DP_AUTH without DP/Nestor credentials', () => {
+    process.env['BLAZE_DP_CREDENTIALS_PATH'] =
+      '/tmp/qwen-code-test-missing-dp-creds.json';
+
+    expect(validateAuthMethod(AuthType.DP_AUTH)).toContain(
+      'Missing DP/Nestor credentials',
+    );
   });
 
   it('should return an error message for an invalid auth method', () => {

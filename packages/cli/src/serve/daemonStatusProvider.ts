@@ -125,7 +125,9 @@ async function buildDaemonPreflightCells(
   // Mirrors `defaultSpawnChannelFactory`'s lookup so the preflight cell
   // reflects the path the child would actually be spawned from.
   const cliEntryCell = (): ServePreflightCell => {
-    const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1] || '';
+    const blazeEntry = process.env['BLAZE_RUNTIME_ENTRY'];
+    const qwenEntry = process.env['QWEN_CLI_ENTRY'];
+    const cliEntry = blazeEntry || qwenEntry || process.argv[1] || '';
     if (cliEntry) {
       return {
         kind: 'cli_entry',
@@ -133,9 +135,11 @@ async function buildDaemonPreflightCells(
         locality: 'daemon',
         detail: {
           path: cliEntry,
-          source: process.env['QWEN_CLI_ENTRY']
-            ? 'QWEN_CLI_ENTRY'
-            : 'process.argv[1]',
+          source: blazeEntry
+            ? 'BLAZE_RUNTIME_ENTRY'
+            : qwenEntry
+              ? 'QWEN_CLI_ENTRY'
+              : 'process.argv[1]',
         },
       };
     }
@@ -144,7 +148,7 @@ async function buildDaemonPreflightCells(
       status: 'error',
       errorKind: 'missing_binary',
       error: 'Cannot determine CLI entry path for spawning the ACP child.',
-      hint: 'Set QWEN_CLI_ENTRY to the absolute path of the qwen entry script.',
+      hint: 'Set BLAZE_RUNTIME_ENTRY to the absolute path of the runtime entry script.',
       locality: 'daemon',
     };
   };

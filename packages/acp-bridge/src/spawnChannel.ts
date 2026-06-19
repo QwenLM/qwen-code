@@ -12,6 +12,11 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
 import { MissingCliEntryError } from './status.js';
 
+const BLAZE_RUNTIME_ENTRY_ENV = 'BLAZE_RUNTIME_ENTRY';
+const QWEN_CLI_ENTRY_ENV = 'QWEN_CLI_ENTRY';
+const BLAZE_RUNTIME_TOKEN_ENV = 'BLAZE_RUNTIME_TOKEN';
+const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
+
 let cachedMemoryArgs: string[] | undefined;
 export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
@@ -101,7 +106,7 @@ export interface SpawnChannelFactoryOptions {
 }
 
 /**
- * Creates a `ChannelFactory` that spawns `qwen --acp` child processes.
+ * Creates a `ChannelFactory` that spawns ACP child processes.
  * Accepts an optional `onDiagnosticLine` callback that receives every
  * child-stderr line (already prefixed) so callers can tee to a log file
  * or structured logger without intercepting process.stderr globally.
@@ -113,7 +118,10 @@ export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
   return async (workspaceCwd, childEnvOverrides) => {
-    const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1];
+    const cliEntry =
+      process.env[BLAZE_RUNTIME_ENTRY_ENV] ||
+      process.env[QWEN_CLI_ENTRY_ENV] ||
+      process.argv[1];
     if (!cliEntry) {
       throw new MissingCliEntryError();
     }
@@ -226,11 +234,12 @@ export const defaultSpawnChannelFactory: ChannelFactory =
 const KILL_HARD_DEADLINE_MS = 10_000;
 
 /**
- * Environment variables stripped from the spawned `qwen --acp` child's
+ * Environment variables stripped from the spawned ACP child's
  * environment. Everything else is passed through — see the
  * threat-model rationale at the call site in `defaultSpawnChannelFactory`.
  *
- * Currently just `QWEN_SERVER_TOKEN`: the daemon's own bearer token,
+ * Currently the daemon's own bearer token env vars: `BLAZE_RUNTIME_TOKEN`
+ * and legacy `QWEN_SERVER_TOKEN`,
  * which the agent doesn't need (it speaks to the daemon over stdio,
  * not HTTP). Leaving it in the child's env would let prompt injection
  * turn the agent into an authenticated client of its own daemon — an
@@ -249,7 +258,8 @@ const KILL_HARD_DEADLINE_MS = 10_000;
  * Defined at module scope so the Set is allocated once at load.
  */
 const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
-  'QWEN_SERVER_TOKEN',
+  BLAZE_RUNTIME_TOKEN_ENV,
+  QWEN_SERVER_TOKEN_ENV,
 ]);
 
 /**
@@ -260,14 +270,14 @@ const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
  *   1. Start from a shallow clone of `source` (no aliasing into the
  *      daemon's `process.env`).
  *   2. Delete every key listed in `scrubbed` (the daemon-internal secret
- *      denylist — currently just `QWEN_SERVER_TOKEN`, see security
- *      rationale on the constant).
+ *      denylist — currently `BLAZE_RUNTIME_TOKEN` and `QWEN_SERVER_TOKEN`,
+ *      see security rationale on the constant).
  *   3. Apply `overrides` per-handle. `undefined` value deletes the key
  *      (lets an embedded caller scrub a stale inherited var without
  *      mutating the daemon's global `process.env`). Anything else
  *      assigns. **`overrides` CANNOT re-introduce a scrubbed key** —
  *      defense-in-depth so an operator passing
- *      `{ QWEN_SERVER_TOKEN: 'x' }` in overrides can't smuggle the
+ *      `{ BLAZE_RUNTIME_TOKEN: 'x' }` in overrides can't smuggle the
  *      daemon's bearer token back into the child.
  *
  * Used by `defaultSpawnChannelFactory` above. The split mirrors the

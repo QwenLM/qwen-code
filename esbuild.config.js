@@ -81,7 +81,10 @@ const external = [
 const BUNDLE_CHUNK_DIR = 'chunks';
 
 const mainBuild = esbuild.build({
-  entryPoints: { cli: 'packages/cli/index.ts' },
+  entryPoints: {
+    cli: 'packages/cli/index.ts',
+    'blaze-runtime': 'packages/cli/src/blaze-runtime.ts',
+  },
   bundle: true,
   outdir: 'dist',
   entryNames: '[name]',

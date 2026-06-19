@@ -70,6 +70,9 @@ export * from './core/tokenLimits.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
 
+// DP/Nestor auth helpers used by Blaze Runtime server integrations.
+export * from './dp/index.js';
+
 // ============================================================================
 // Tools
 // ============================================================================

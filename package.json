@@ -94,11 +94,13 @@
     "@types/react-dom": "^19.2.0"
   },
   "bin": {
-    "qwen": "scripts/cli-entry.js"
+    "qwen": "scripts/cli-entry.js",
+    "blaze-runtime": "scripts/blaze-runtime-entry.js"
   },
   "files": [
     "dist/",
     "scripts/cli-entry.js",
+    "scripts/blaze-runtime-entry.js",
     "README.md",
     "LICENSE"
   ],

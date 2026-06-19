@@ -55,6 +55,7 @@ export interface ContentGenerator {
 export enum AuthType {
   USE_OPENAI = 'openai',
   QWEN_OAUTH = 'qwen-oauth',
+  DP_AUTH = 'dp-auth',
   USE_GEMINI = 'gemini',
   USE_VERTEX_AI = 'vertex-ai',
   USE_ANTHROPIC = 'anthropic',
@@ -243,13 +244,17 @@ export function validateModelConfig(
 ): ModelConfigValidationResult {
   const errors: Error[] = [];
 
-  // Qwen OAuth doesn't need validation - it uses dynamic tokens
+  // Qwen OAuth doesn't need validation - it uses dynamic tokens.
   if (config.authType === AuthType.QWEN_OAUTH) {
     return { valid: true, errors: [] };
   }
 
-  // API key is required for all other auth types
-  if (!config.apiKey) {
+  // DP auth resolves a Nestor JWT lazily from BLAZE_DP_TOKEN/DP_TOKEN,
+  // BLAZE_DP_JWT/NESSY_CLI_DP_AUTH_TOKEN, or a cached credentials file.
+  const requiresStaticApiKey = config.authType !== AuthType.DP_AUTH;
+
+  // API key is required for static-key auth types.
+  if (requiresStaticApiKey && !config.apiKey) {
     if (isStrictModelProvider) {
       errors.push(
         new StrictMissingCredentialsError(
@@ -352,6 +357,11 @@ export async function createContentGenerator(
         './openaiContentGenerator/index.js'
       );
       baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
+    } else if (authType === AuthType.DP_AUTH) {
+      const { createDpContentGenerator } = await import(
+        '../dp/dpContentGenerator.js'
+      );
+      baseGenerator = await createDpContentGenerator(generatorConfig, config);
     } else if (authType === AuthType.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(
         '../qwen/qwenOAuth2.js'

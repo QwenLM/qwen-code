@@ -21,6 +21,8 @@ export default {
   'channel-plugins': 'Channel Plugin Guide',
   tools: 'Tools',
   'qwen-serve-protocol': 'qwen serve HTTP protocol',
+  'blaze-runtime-extraction': 'Blaze Runtime Extraction',
+  'blaze-runtime-sandbox-mvp-handoff': 'Blaze Runtime Sandbox MVP Handoff',
   daemon: 'Daemon Mode (Developer Deep Dive)',
 
   examples: {

@@ -5,6 +5,7 @@
  */
 
 import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
+import { DEFAULT_BLAZE_NESTOR_MODEL } from '../dp/dpConfig.js';
 
 import type { ModelConfig } from './types.js';
 
@@ -88,11 +89,17 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: [],
   },
+  'dp-auth': {
+    apiKey: ['BLAZE_DP_JWT', 'NESSY_CLI_DP_AUTH_TOKEN'],
+    baseUrl: ['BLAZE_NESTOR_BASE_URL', 'NESTOR_BASE_URL'],
+    model: ['BLAZE_NESTOR_MODEL', 'NESTOR_MODEL'],
+  },
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
   openai: MAINLINE_CODER_MODEL,
   'qwen-oauth': DEFAULT_QWEN_MODEL,
+  'dp-auth': DEFAULT_BLAZE_NESTOR_MODEL,
 } as Partial<Record<AuthType, string>>;
 
 /**

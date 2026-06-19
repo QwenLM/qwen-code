@@ -26,6 +26,7 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_VERTEX_AI]: ['GOOGLE_MODEL'],
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
   [AuthType.QWEN_OAUTH]: [],
+  [AuthType.DP_AUTH]: ['BLAZE_NESTOR_MODEL', 'NESTOR_MODEL'],
 };
 
 function getIgnoredTopLevelGenerationConfigFields(
@@ -98,6 +99,15 @@ export interface ResolvedCliGenerationConfig {
 export function getAuthTypeFromEnv(): AuthType | undefined {
   if (process.env['QWEN_OAUTH']) {
     return AuthType.QWEN_OAUTH;
+  }
+
+  if (
+    process.env['BLAZE_DP_TOKEN'] ||
+    process.env['DP_TOKEN'] ||
+    process.env['BLAZE_DP_JWT'] ||
+    process.env['NESSY_CLI_DP_AUTH_TOKEN']
+  ) {
+    return AuthType.DP_AUTH;
   }
 
   if (

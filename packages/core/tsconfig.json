@@ -5,7 +5,10 @@
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
     "composite": true,
     "types": ["node", "vitest/globals"],
+    "baseUrl": ".",
     "paths": {
+      "@qwen-code/qwen-code-core": ["./src/index.ts"],
+      "@qwen-code/qwen-code-core/*": ["./src/*"],
       "@lydell/node-pty": ["../../node_modules/@lydell/node-pty/node-pty.d.ts"]
     }
   },
