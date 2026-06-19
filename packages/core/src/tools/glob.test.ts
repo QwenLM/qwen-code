@@ -659,6 +659,25 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('[5 files truncated] ...');
     });
   });
+
+  describe('getDefaultPermission', () => {
+    it('should return allow for paths within workspace', async () => {
+      const params: GlobToolParams = { pattern: '*', path: 'sub' };
+      const invocation = globTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for tilde paths outside workspace', async () => {
+      const params: GlobToolParams = {
+        pattern: '*',
+        path: '~/outside-workspace',
+      };
+      const invocation = globTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+  });
 });
 
 describe('sortFileEntries', () => {
