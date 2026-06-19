@@ -1211,6 +1211,7 @@ export class PromptSuggestionEvent implements BaseTelemetryEvent {
   outcome: 'accepted' | 'ignored' | 'suppressed';
   prompt_id?: string;
   accept_method?: 'tab' | 'enter' | 'right';
+  accept_source?: 'live' | 'fallback';
   time_to_accept_ms?: number;
   time_to_ignore_ms?: number;
   time_to_first_keystroke_ms?: number;
@@ -1223,6 +1224,7 @@ export class PromptSuggestionEvent implements BaseTelemetryEvent {
     outcome: 'accepted' | 'ignored' | 'suppressed';
     prompt_id?: string;
     accept_method?: 'tab' | 'enter' | 'right';
+    accept_source?: 'live' | 'fallback';
     time_to_accept_ms?: number;
     time_to_ignore_ms?: number;
     time_to_first_keystroke_ms?: number;
@@ -1236,6 +1238,7 @@ export class PromptSuggestionEvent implements BaseTelemetryEvent {
     this.outcome = params.outcome;
     this.prompt_id = params.prompt_id ?? 'user_intent';
     this.accept_method = params.accept_method;
+    this.accept_source = params.accept_source;
     this.time_to_accept_ms = params.time_to_accept_ms;
     this.time_to_ignore_ms = params.time_to_ignore_ms;
     this.time_to_first_keystroke_ms = params.time_to_first_keystroke_ms;
