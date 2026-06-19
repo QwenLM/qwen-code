@@ -8,7 +8,9 @@ export function MemoryPanel() {
   const [selectedFile, setSelectedFile] = useState<DaemonWorkspaceMemoryFile>();
   const [content, setContent] = useState<string>();
   const [draft, setDraft] = useState('');
+  const [appendDraft, setAppendDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  const [appending, setAppending] = useState(false);
   const [actionError, setActionError] = useState<string>();
   const [actionMessage, setActionMessage] = useState<string>();
   const dirty = content !== undefined && draft !== content;
@@ -24,6 +26,7 @@ export function MemoryPanel() {
       const result = await memory.readFile(file.path);
       setContent(result.content);
       setDraft(result.content);
+      setAppendDraft('');
     } catch (error) {
       setContent(undefined);
       setDraft('');
@@ -59,6 +62,35 @@ export function MemoryPanel() {
       setActionError(errorMessage(error));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function appendNote() {
+    const note = appendDraft.trim();
+    if (!selectedFile || selectedFile.scope !== 'workspace' || !note) return;
+    setAppending(true);
+    setActionError(undefined);
+    setActionMessage(undefined);
+    try {
+      const result = await memory.writeMemory({
+        scope: selectedFile.scope,
+        content: note,
+        mode: 'append',
+      });
+      await memory.reload();
+      const next = await memory.readFile(selectedFile.path);
+      setContent(next.content);
+      setDraft(next.content);
+      setAppendDraft('');
+      setActionMessage(
+        result.changed === false
+          ? 'Memory unchanged.'
+          : `Appended to ${result.filePath}.`,
+      );
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setAppending(false);
     }
   }
 
@@ -139,6 +171,28 @@ export function MemoryPanel() {
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
                 />
+                <div className="memory-append-box">
+                  <label htmlFor="memory-append-note">Append note</label>
+                  <textarea
+                    className="web-textarea"
+                    id="memory-append-note"
+                    placeholder="Add a short note to this workspace memory."
+                    readOnly={selectedFile.scope !== 'workspace'}
+                    value={appendDraft}
+                    onChange={(event) => setAppendDraft(event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    disabled={
+                      selectedFile.scope !== 'workspace' ||
+                      !appendDraft.trim() ||
+                      appending
+                    }
+                    onClick={() => void appendNote()}
+                  >
+                    {appending ? 'Appending' : 'Append note'}
+                  </button>
+                </div>
               </>
             )}
           </div>

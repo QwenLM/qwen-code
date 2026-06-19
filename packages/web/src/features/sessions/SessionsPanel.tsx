@@ -202,7 +202,7 @@ function SessionRow({
 }) {
   const [editing, setEditing] = useState(false);
   const [displayName, setDisplayName] = useState(getSessionTitle(session));
-  const live = (session.clientCount ?? 0) > 0;
+  const status = getSessionStatus(session, current);
 
   function cancelEdit() {
     setDisplayName(getSessionTitle(session));
@@ -238,17 +238,16 @@ function SessionRow({
         ) : (
           <div className="web-session-title-row">
             <h3>{getSessionTitle(session)}</h3>
-            {current ? <span className="web-session-badge">当前</span> : null}
-            {live ? <span className="web-session-badge">live</span> : null}
-            {session.hasActivePrompt ? (
-              <span className="web-session-badge">执行中</span>
-            ) : null}
+            <span className="web-session-badge">{status}</span>
           </div>
         )}
         <p>{session.workspaceCwd}</p>
         <div className="web-meta">
           <span>{session.sessionId.slice(0, 8)}</span>
           <span>{session.clientCount ?? 0} client(s)</span>
+          {session.createdAt ? (
+            <span>创建于 {formatSessionTime(session.createdAt)}</span>
+          ) : null}
           {session.updatedAt ? (
             <span>更新于 {formatSessionTime(session.updatedAt)}</span>
           ) : null}
@@ -281,6 +280,13 @@ function SessionRow({
 
 function getSessionTitle(session: DaemonSessionSummary) {
   return session.displayName ?? session.title ?? session.sessionId.slice(0, 8);
+}
+
+function getSessionStatus(session: DaemonSessionSummary, current: boolean) {
+  if (session.hasActivePrompt) return 'Running';
+  if (current) return 'Current';
+  if ((session.clientCount ?? 0) > 0) return 'Connected';
+  return 'Idle';
 }
 
 function isSessionSwitchCleanup(error: unknown) {

@@ -721,6 +721,31 @@ pre {
   white-space: nowrap;
 }
 
+.web-task-artifact-row {
+  align-items: stretch;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.web-task-artifact-row strong {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.web-task-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.web-task-actions button {
+  background: rgba(78, 141, 108, 0.12);
+  border: 1px solid rgba(78, 141, 108, 0.22);
+  border-radius: 999px;
+  color: #2f684d;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 3px 7px;
+}
+
 .web-task-mono strong,
 .web-task-mono {
   font-family: var(--web-font-mono);
@@ -985,12 +1010,43 @@ pre {
 }
 
 .web-action-result {
+  align-items: center;
   background: rgba(78, 141, 108, 0.1);
   border: 1px solid rgba(78, 141, 108, 0.2);
   border-radius: 14px;
   color: #2f684d;
+  display: flex;
+  flex-wrap: wrap;
   font-size: 12px;
+  gap: 8px;
   padding: 10px 12px;
+}
+
+.web-action-result a {
+  color: #225f43;
+  font-weight: 650;
+}
+
+.memory-append-box {
+  border-top: 1px solid var(--web-border);
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.memory-append-box label {
+  color: var(--web-text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.memory-append-box textarea {
+  min-height: 92px;
+}
+
+.memory-append-box button {
+  justify-self: start;
 }
 
 .memory-editor {

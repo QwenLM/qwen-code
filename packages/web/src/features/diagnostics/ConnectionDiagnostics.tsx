@@ -2,7 +2,8 @@ interface ConnectionDiagnosticsProps {
   daemonStatus: string;
   workspaceStatus: string;
   daemonUrl: string;
-  workspaceCwd?: string;
+  requestedWorkspaceCwd?: string;
+  boundWorkspaceCwd?: string;
   sessionId?: string;
   currentModel?: string;
   daemonError?: string;
@@ -13,15 +14,22 @@ export function ConnectionDiagnostics({
   daemonStatus,
   workspaceStatus,
   daemonUrl,
-  workspaceCwd,
+  requestedWorkspaceCwd,
+  boundWorkspaceCwd,
   sessionId,
   currentModel,
   daemonError,
   workspaceError,
 }: ConnectionDiagnosticsProps) {
+  const workspaceMismatch = Boolean(
+    requestedWorkspaceCwd &&
+      boundWorkspaceCwd &&
+      requestedWorkspaceCwd !== boundWorkspaceCwd,
+  );
   const hasIssue =
     daemonStatus !== 'connected' ||
     workspaceStatus === 'error' ||
+    workspaceMismatch ||
     Boolean(daemonError) ||
     Boolean(workspaceError);
 
@@ -32,18 +40,31 @@ export function ConnectionDiagnostics({
   return (
     <div className="web-connection-diagnostics" role="status">
       <div>
-        <strong>{getTitle(daemonStatus, workspaceStatus)}</strong>
-        <p>{getDescription(daemonStatus, workspaceStatus, error)}</p>
+        <strong>{getTitle(daemonStatus, workspaceStatus, workspaceMismatch)}</strong>
+        <p>
+          {getDescription(
+            daemonStatus,
+            workspaceStatus,
+            workspaceMismatch,
+            error,
+          )}
+        </p>
       </div>
       <dl>
         <div>
           <dt>Daemon URL</dt>
           <dd>{daemonUrl}</dd>
         </div>
-        {workspaceCwd ? (
+        {requestedWorkspaceCwd ? (
           <div>
-            <dt>Workspace</dt>
-            <dd>{workspaceCwd}</dd>
+            <dt>Requested workspace</dt>
+            <dd>{requestedWorkspaceCwd}</dd>
+          </div>
+        ) : null}
+        {boundWorkspaceCwd ? (
+          <div>
+            <dt>Bound workspace</dt>
+            <dd>{boundWorkspaceCwd}</dd>
           </div>
         ) : null}
         {sessionId ? (
@@ -73,7 +94,12 @@ export function ConnectionDiagnostics({
   );
 }
 
-function getTitle(daemonStatus: string, workspaceStatus: string) {
+function getTitle(
+  daemonStatus: string,
+  workspaceStatus: string,
+  workspaceMismatch: boolean,
+) {
+  if (workspaceMismatch) return 'Workspace 不匹配';
   if (workspaceStatus === 'error') return 'Workspace 连接失败';
   if (daemonStatus === 'error') return 'Daemon 连接失败';
   if (daemonStatus === 'disconnected') return 'Daemon 已断开，正在等待恢复';
@@ -83,9 +109,10 @@ function getTitle(daemonStatus: string, workspaceStatus: string) {
 function getDescription(
   daemonStatus: string,
   workspaceStatus: string,
+  workspaceMismatch: boolean,
   error: string | undefined,
 ) {
-  if (error?.includes('Workspace mismatch')) {
+  if (workspaceMismatch || error?.includes('Workspace mismatch')) {
     return '当前页面连接到了其他工作区的 daemon，请改用当前仓库专属的 Web 开发启动命令。';
   }
   if (error?.includes('AcpSessionBridge initialize timed out')) {

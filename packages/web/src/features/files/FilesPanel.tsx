@@ -408,6 +408,18 @@ function PreviewPane({
         ) : (
           <img src={preview.dataUrl} alt={preview.path} />
         )
+      ) : preview.mimeType.startsWith('text/html') ? (
+        <>
+          {preview.truncated ? (
+            <p>预览已截断在 {formatBytes(PREVIEW_MAX_BYTES)}。</p>
+          ) : null}
+          <iframe
+            className="file-html-preview"
+            sandbox=""
+            srcDoc={preview.content}
+            title={preview.path}
+          />
+        </>
       ) : (
         <>
           {preview.truncated ? (

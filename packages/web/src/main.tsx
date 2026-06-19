@@ -11,10 +11,12 @@ if (!root) {
   throw new Error('Root element not found');
 }
 
+const daemonConfig = getWebDaemonConfig();
+
 createRoot(root).render(
   <React.StrictMode>
-    <DaemonProviders config={getWebDaemonConfig()}>
-      <App />
+    <DaemonProviders config={daemonConfig}>
+      <App config={daemonConfig} />
     </DaemonProviders>
   </React.StrictMode>,
 );

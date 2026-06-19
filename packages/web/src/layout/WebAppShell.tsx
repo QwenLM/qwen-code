@@ -7,12 +7,18 @@ import { WEB_VIEWS } from './views';
 
 interface WebAppShellProps {
   activeView: WebViewId;
+  requestedWorkspaceCwd?: string;
+  onAddToChat?: (text: string) => void;
+  onOpenFile?: (path: string) => void;
   onSelectView: (view: WebViewId) => void;
   children: ReactNode;
 }
 
 export function WebAppShell({
   activeView,
+  requestedWorkspaceCwd,
+  onAddToChat,
+  onOpenFile,
   onSelectView,
   children,
 }: WebAppShellProps) {
@@ -20,6 +26,7 @@ export function WebAppShell({
   const workspace = useWorkspace();
   const active = WEB_VIEWS.find((view) => view.id === activeView);
   const showTaskRail = activeView === 'chat';
+  const boundWorkspaceCwd = connection.workspaceCwd ?? workspace.workspaceCwd;
 
   return (
     <div className="web-app">
@@ -36,10 +43,8 @@ export function WebAppShell({
               value={connection.status}
               details={toStatusDetails([
                 ['URL', workspace.baseUrl],
-                [
-                  'Workspace',
-                  connection.workspaceCwd ?? workspace.workspaceCwd,
-                ],
+                ['Requested workspace', requestedWorkspaceCwd],
+                ['Bound workspace', boundWorkspaceCwd],
                 ['Session', connection.sessionId],
                 ['Model', connection.currentModel],
                 ['Error', connection.error],
@@ -50,7 +55,8 @@ export function WebAppShell({
               value={workspace.status}
               details={toStatusDetails([
                 ['URL', workspace.baseUrl],
-                ['Workspace', workspace.workspaceCwd],
+                ['Requested workspace', requestedWorkspaceCwd],
+                ['Bound workspace', workspace.workspaceCwd],
                 ['Error', workspace.error?.message],
               ])}
             />
@@ -60,7 +66,9 @@ export function WebAppShell({
           className={showTaskRail ? 'web-workspace chat-mode' : 'web-workspace'}
         >
           <section className="web-content">{children}</section>
-          {showTaskRail ? <TaskRail /> : null}
+          {showTaskRail ? (
+            <TaskRail onAddToChat={onAddToChat} onOpenFile={onOpenFile} />
+          ) : null}
         </div>
       </main>
     </div>

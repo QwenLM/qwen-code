@@ -19,7 +19,12 @@ import type {
 const MAX_RECENT_ITEMS = 5;
 const MAX_NOTICE_ITEMS = 2;
 
-export function TaskRail() {
+interface TaskRailProps {
+  onAddToChat?: (text: string) => void;
+  onOpenFile?: (path: string) => void;
+}
+
+export function TaskRail({ onAddToChat, onOpenFile }: TaskRailProps) {
   const connection = useConnection();
   const workspace = useWorkspace();
   const promptStatus = usePromptStatus();
@@ -155,12 +160,33 @@ export function TaskRail() {
       </section>
 
       <section className="web-task-section">
-        <h3>最近文件</h3>
+        <h3>Artifacts / 最近文件</h3>
+        <p className="web-task-muted">
+          从最近工具输出中推断，不代表完整 artifact 索引。
+        </p>
         {recentPaths.length > 0 ? (
           <ul className="web-task-list">
             {recentPaths.map((path) => (
-              <li key={path} className="web-task-row web-task-mono">
+              <li
+                key={path}
+                className="web-task-row web-task-mono web-task-artifact-row"
+              >
                 <strong>{path}</strong>
+                <span className="web-task-actions">
+                  {onOpenFile ? (
+                    <button type="button" onClick={() => onOpenFile(path)}>
+                      Open
+                    </button>
+                  ) : null}
+                  {onAddToChat ? (
+                    <button
+                      type="button"
+                      onClick={() => onAddToChat(`@${path} `)}
+                    >
+                      Add
+                    </button>
+                  ) : null}
+                </span>
               </li>
             ))}
           </ul>

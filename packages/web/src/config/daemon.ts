@@ -3,6 +3,7 @@ export interface WebDaemonConfig {
   token?: string;
   initialSessionId?: string;
   clientId?: string;
+  workspaceCwd?: string;
 }
 
 export interface WebDaemonLocation {
@@ -11,13 +12,18 @@ export interface WebDaemonLocation {
   search: string;
 }
 
+interface WebDaemonEnv {
+  workspaceCwd?: string;
+}
+
 export function getWebDaemonConfig(): WebDaemonConfig {
   if (typeof window === 'undefined') return { baseUrl: '' };
-  return getWebDaemonConfigFromLocation(window.location);
+  return getWebDaemonConfigFromLocation(window.location, getWebDaemonEnv());
 }
 
 export function getWebDaemonConfigFromLocation(
   location: WebDaemonLocation,
+  env: WebDaemonEnv = {},
 ): WebDaemonConfig {
   const params = new URLSearchParams(location.search);
   const baseUrl = resolveBaseUrl(
@@ -28,12 +34,14 @@ export function getWebDaemonConfigFromLocation(
   const initialSessionId =
     params.get('session') || readSessionIdFromPathname(location.pathname);
   const clientId = params.get('clientId') ?? undefined;
+  const workspaceCwd = params.get('workspace') || env.workspaceCwd;
 
   return {
     baseUrl,
     ...(token ? { token } : {}),
     ...(initialSessionId ? { initialSessionId } : {}),
     ...(clientId ? { clientId } : {}),
+    ...(workspaceCwd ? { workspaceCwd } : {}),
   };
 }
 
@@ -47,6 +55,16 @@ export function readSessionIdFromPathname(
   } catch {
     return undefined;
   }
+}
+
+function getWebDaemonEnv(): WebDaemonEnv {
+  return {
+    workspaceCwd: (
+      import.meta as ImportMeta & {
+        env?: Record<string, string | undefined>;
+      }
+    ).env?.['VITE_QWEN_WORKSPACE_CWD'],
+  };
 }
 
 function resolveBaseUrl(input: string | undefined, origin: string): string {

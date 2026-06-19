@@ -23,6 +23,7 @@ export function McpPanel() {
   >({});
   const [actionError, setActionError] = useState<string>();
   const [actionMessage, setActionMessage] = useState<string>();
+  const [actionUrl, setActionUrl] = useState<string>();
 
   const servers = useMemo(
     () => mcp.status?.servers ?? [],
@@ -41,6 +42,7 @@ export function McpPanel() {
   async function loadTools(serverName: string) {
     setActionError(undefined);
     setActionMessage(undefined);
+    setActionUrl(undefined);
     setPendingAction({ serverName, action: 'tools' });
     try {
       const tools = await mcp.loadTools(serverName);
@@ -56,11 +58,12 @@ export function McpPanel() {
   async function restartServer(serverName: string) {
     setActionError(undefined);
     setActionMessage(undefined);
+    setActionUrl(undefined);
     setPendingAction({ serverName, action: 'restart' });
     try {
       await mcp.restartServer(serverName);
       await mcp.reload();
-      setActionMessage(`${serverName} restarted.`);
+      setActionMessage(`${serverName} reconnected.`);
     } catch (error) {
       setActionError(errorMessage(error));
     } finally {
@@ -71,13 +74,15 @@ export function McpPanel() {
   async function manageServer(serverName: string, action: McpAction) {
     setActionError(undefined);
     setActionMessage(undefined);
+    setActionUrl(undefined);
     setPendingAction({ serverName, action });
     try {
       const result = await mcp.manageServer(serverName, action);
       await mcp.reload();
+      setActionUrl(result.authUrl);
       setActionMessage(
         result.authUrl
-          ? `Open auth URL for ${serverName}: ${result.authUrl}`
+          ? `Open auth URL for ${serverName}.`
           : result.messages?.join(' ') || `${serverName} ${action} completed.`,
       );
     } catch (error) {
@@ -112,7 +117,14 @@ export function McpPanel() {
       </div>
       {actionError ? <div className="web-error">{actionError}</div> : null}
       {actionMessage ? (
-        <div className="web-action-result">{actionMessage}</div>
+        <div className="web-action-result">
+          {actionMessage}
+          {actionUrl ? (
+            <a href={actionUrl} rel="noreferrer" target="_blank">
+              Open OAuth URL
+            </a>
+          ) : null}
+        </div>
       ) : null}
       {mcp.status?.errors?.length ? (
         <div className="web-error">
@@ -183,7 +195,7 @@ export function McpPanel() {
                       pendingAction,
                       server.name,
                       'restart',
-                    ) ?? 'Restart'}
+                    ) ?? 'Reconnect'}
                   </button>
                   <button
                     type="button"
@@ -272,6 +284,12 @@ function ServerDetails({ server }: { server: DaemonWorkspaceMcpServerStatus }) {
         <div>
           <dt>URL</dt>
           <dd>{server.config.httpUrl ?? server.config.url}</dd>
+        </div>
+      ) : null}
+      {!server.config?.command && !(server.config?.httpUrl ?? server.config?.url) ? (
+        <div>
+          <dt>Config</dt>
+          <dd>No launch config reported.</dd>
         </div>
       ) : null}
       {server.error ? (

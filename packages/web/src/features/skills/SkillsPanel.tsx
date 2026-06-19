@@ -4,9 +4,10 @@ import { errorMessage, ResourceState } from '../common/ResourceState';
 
 interface SkillsPanelProps {
   onAddToChat?: (text: string) => void;
+  onRunSkill?: (text: string) => void;
 }
 
-export function SkillsPanel({ onAddToChat }: SkillsPanelProps) {
+export function SkillsPanel({ onAddToChat, onRunSkill }: SkillsPanelProps) {
   const skills = useSkills({ autoLoad: true });
   const [query, setQuery] = useState('');
   const [levelFilter, setLevelFilter] = useState('all');
@@ -75,6 +76,9 @@ export function SkillsPanel({ onAddToChat }: SkillsPanelProps) {
           ))}
         </select>
       </div>
+      <div className="web-action-result">
+        Skills are read-only here; Run sends the slash command to chat.
+      </div>
       {actionError ? <div className="web-error">{actionError}</div> : null}
       <ResourceState
         loading={skills.loading}
@@ -109,6 +113,14 @@ export function SkillsPanel({ onAddToChat }: SkillsPanelProps) {
                     onClick={() => onAddToChat(`/${skill.name} `)}
                   >
                     Insert command
+                  </button>
+                ) : null}
+                {onRunSkill ? (
+                  <button
+                    type="button"
+                    onClick={() => onRunSkill(`/${skill.name}`)}
+                  >
+                    Run
                   </button>
                 ) : null}
               </div>

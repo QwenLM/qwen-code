@@ -6,10 +6,15 @@ import { ConnectionDiagnostics } from '../diagnostics/ConnectionDiagnostics';
 
 interface ChatPaneProps {
   composerRef?: Ref<WebShellComposerApi>;
+  requestedWorkspaceCwd?: string;
   onSessionIdChange: (sessionId: string) => void;
 }
 
-export function ChatPane({ composerRef, onSessionIdChange }: ChatPaneProps) {
+export function ChatPane({
+  composerRef,
+  requestedWorkspaceCwd,
+  onSessionIdChange,
+}: ChatPaneProps) {
   const connection = useConnection();
   const workspace = useWorkspace();
 
@@ -28,7 +33,8 @@ export function ChatPane({ composerRef, onSessionIdChange }: ChatPaneProps) {
               daemonStatus={connection.status}
               workspaceStatus={workspace.status}
               daemonUrl={workspace.baseUrl}
-              workspaceCwd={
+              requestedWorkspaceCwd={requestedWorkspaceCwd}
+              boundWorkspaceCwd={
                 connection.workspaceCwd ?? workspace.workspaceCwd ?? cwd
               }
               sessionId={connection.sessionId}

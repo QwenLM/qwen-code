@@ -81,7 +81,7 @@ npm run dev:web
 
 - 在 Chat 首页增加连接错误状态。
 - 顶部状态 pill 可点击查看连接详情。
-- 显示 daemon URL、workspace cwd、session id、最近错误和建议修复命令。
+- 显示 daemon URL、requested workspace、bound workspace、session id、最近错误和建议修复命令。
 
 ### 可能涉及文件
 
@@ -105,7 +105,7 @@ npm run dev:web
 ### 研发内容
 
 - 当前会话高亮。
-- 展示最近更新时间、模型、workspace、状态。
+- 展示创建 / 最近更新时间、workspace、客户端数和派生状态；模型字段待 daemon session summary 暴露后补充。
 - 支持从会话列表恢复会话。
 - 支持新建、重命名、关闭 / 释放会话。
 - URL 同步为 `/session/:sessionId`。
@@ -135,7 +135,7 @@ npm run dev:web
 - 文件类型标识。
 - 搜索 / glob 快捷入口。
 - 大文件保护提示。
-- 支持常见文件预览：文本、Markdown、JSON、图片、HTML / PDF iframe。
+- 支持常见文件预览：文本、Markdown、JSON、图片、HTML sandbox iframe / PDF iframe。
 - 提供“复制路径”或“引用到输入框”操作。
 
 ### 可能涉及文件
@@ -164,7 +164,7 @@ npm run dev:web
 - 当前 cwd。
 - 当前 active todos。
 - 当前 pending permissions。
-- 当前生成文件 / artifacts 的占位信息。
+- 从工具输出推断的最近文件 / artifacts 占位信息。
 
 ### 暂不做
 
@@ -205,9 +205,9 @@ npm run dev:web
 
 ### P2
 
-- MCP OAuth / reconnect 操作。
-- Skills marketplace 类体验。
-- 多 scope settings 编辑。
+- MCP OAuth / reconnect 操作：OAuth URL 可点击，reconnect 复用 daemon restart action。
+- Skills marketplace 类体验：需要 daemon skills 管理 API，当前只支持查看 / 搜索 / 复制 / slash command 运行。
+- 多 scope settings 编辑：需要 daemon route + SDK 扩展，当前只写 workspace scope。
 
 ### 可能涉及文件
 
@@ -339,16 +339,13 @@ PATH="/Users/jifeng/.nvm/versions/node/v24.14.0/bin:$PATH" npm run smoke:web
 - 引入大型 UI 框架。
 - desktop 级 native integration。
 
-## 下一步建议
+## 当前 Phase 3 收尾状态
 
-优先实施：
+Phase 3 已覆盖一条命令启动、连接诊断、会话恢复、文件浏览 / 预览、Task Rail、管理页常用操作和验证入口。
 
-```text
-Phase 3.1 + Phase 3.2
-```
+仍需后续 daemon/API 支撑的能力：
 
-即先解决：
-
-1. 一条命令启动 Web + 当前 workspace daemon。
-2. 页面遇到 daemon/session 错误时有明确提示。
-3. 避免再次出现“页面能打开但输入框不能输入”的情况。
+1. Session summary 暴露 per-session model 后，Sessions 页再显示模型。
+2. Settings user/global scope 写入需要 daemon route 与 SDK 类型扩展。
+3. Skills install/update/remove 需要 daemon skills 管理 API。
+4. 完整 artifact index 需要 daemon 侧结构化产物记录；当前 Web 仅从工具输出推断最近文件。

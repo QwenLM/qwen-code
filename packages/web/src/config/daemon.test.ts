@@ -6,8 +6,11 @@ import {
 
 const origin = 'http://127.0.0.1:5174';
 
-function config(search = '', pathname = '/') {
-  return getWebDaemonConfigFromLocation({ origin, pathname, search });
+function config(search = '', pathname = '/', workspaceCwd?: string) {
+  return getWebDaemonConfigFromLocation(
+    { origin, pathname, search },
+    { workspaceCwd },
+  );
 }
 
 describe('getWebDaemonConfigFromLocation', () => {
@@ -40,6 +43,17 @@ describe('getWebDaemonConfigFromLocation', () => {
       token: 'abc',
       clientId: 'browser-1',
       initialSessionId: 'query-session',
+    });
+  });
+
+  it('reads requested workspace from query or env', () => {
+    expect(config('?workspace=%2Ftmp%2Ffrom-query', '/', '/tmp/from-env')).toEqual({
+      baseUrl: origin,
+      workspaceCwd: '/tmp/from-query',
+    });
+    expect(config('', '/', '/tmp/from-env')).toEqual({
+      baseUrl: origin,
+      workspaceCwd: '/tmp/from-env',
     });
   });
 

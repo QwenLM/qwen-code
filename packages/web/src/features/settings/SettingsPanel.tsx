@@ -71,6 +71,10 @@ export function SettingsPanel() {
           onChange={(event) => setQuery(event.target.value)}
         />
       </div>
+      <div className="web-action-result">
+        当前 Web Cockpit 只写入 workspace scope；user/global scope 需要 daemon
+        API 扩展。
+      </div>
       {settings.status?.warnings?.length ? (
         <div className="web-error">
           {settings.status.warnings.map((warning) => warning.type).join(' · ')}

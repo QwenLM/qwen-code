@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { WebShellComposerApi } from '@qwen-code/web-shell';
+import type { WebDaemonConfig } from './config/daemon';
 import { ChatPane } from './features/chat/ChatPane';
 import { FilesPanel } from './features/files/FilesPanel';
 import { McpPanel } from './features/mcp/McpPanel';
@@ -13,13 +14,23 @@ import { buildWebRouteUrl, parseWebRoute, routeForView } from './layout/routes';
 import type { WebRoute } from './layout/routes';
 import type { WebViewId } from './layout/views';
 
-export function App() {
+interface AppProps {
+  config: WebDaemonConfig;
+}
+
+interface PendingComposerAction {
+  text: string;
+  submit?: boolean;
+}
+
+export function App({ config }: AppProps) {
   const composerRef = useRef<WebShellComposerApi | null>(null);
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const [route, setRoute] = useState<WebRoute>(() =>
     parseWebRoute(new URL(window.location.href)),
   );
-  const [pendingComposerText, setPendingComposerText] = useState<string>();
+  const [pendingComposerAction, setPendingComposerAction] =
+    useState<PendingComposerAction>();
   const activeView = route.view;
 
   const navigate = useCallback(
@@ -55,10 +66,25 @@ export function App() {
 
   const addTextToChat = useCallback(
     (text: string) => {
-      setPendingComposerText(text);
+      setPendingComposerAction({ text });
       openChat();
     },
     [openChat],
+  );
+
+  const runTextInChat = useCallback(
+    (text: string) => {
+      setPendingComposerAction({ text, submit: true });
+      openChat();
+    },
+    [openChat],
+  );
+
+  const openFile = useCallback(
+    (path: string) => {
+      navigate({ view: 'files', path });
+    },
+    [navigate],
   );
 
   useEffect(() => {
@@ -69,19 +95,32 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (activeView !== 'chat' || !pendingComposerText) return;
+    if (activeView !== 'chat' || !pendingComposerAction) return;
     const timer = window.setTimeout(() => {
-      composerRef.current?.insertText(pendingComposerText, { mode: 'append' });
-      setPendingComposerText(undefined);
+      if (pendingComposerAction.submit) {
+        composerRef.current?.submit({ text: pendingComposerAction.text });
+      } else {
+        composerRef.current?.insertText(pendingComposerAction.text, {
+          mode: 'append',
+        });
+      }
+      setPendingComposerAction(undefined);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [activeView, pendingComposerText]);
+  }, [activeView, pendingComposerAction]);
 
   return (
-    <WebAppShell activeView={activeView} onSelectView={selectView}>
+    <WebAppShell
+      activeView={activeView}
+      requestedWorkspaceCwd={config.workspaceCwd}
+      onAddToChat={addTextToChat}
+      onOpenFile={openFile}
+      onSelectView={selectView}
+    >
       {activeView === 'chat' ? (
         <ChatPane
           composerRef={composerRef}
+          requestedWorkspaceCwd={config.workspaceCwd}
           onSessionIdChange={updateSessionUrl}
         />
       ) : null}
@@ -100,7 +139,7 @@ export function App() {
       {activeView === 'mcp' ? <McpPanel /> : null}
       {activeView === 'tools' ? <ToolsPanel /> : null}
       {activeView === 'skills' ? (
-        <SkillsPanel onAddToChat={addTextToChat} />
+        <SkillsPanel onAddToChat={addTextToChat} onRunSkill={runTextInChat} />
       ) : null}
       {activeView === 'memory' ? <MemoryPanel /> : null}
       {activeView === 'settings' ? <SettingsPanel /> : null}

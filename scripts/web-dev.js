@@ -296,6 +296,7 @@ const serveEnv = {
 const webEnv = {
   ...process.env,
   QWEN_DAEMON_URL: daemonUrl,
+  VITE_QWEN_WORKSPACE_CWD: workspace,
 };
 const browserUrl = token
   ? `${webUrl}/?token=${encodeURIComponent(token)}`
