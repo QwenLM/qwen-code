@@ -52,10 +52,12 @@ import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths, makeRelative, shortenPath } from '../utils/paths.js';
 import {
   buildShellExecWarnings,
+  detectSelfKillCommand,
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
   hasShellSubstitution,
+  SHELL_SELF_KILL_REJECTION,
   type ShellConfiguration,
   type ShellType,
   splitCommands,
@@ -4760,11 +4762,15 @@ export class ShellTool extends BaseDeclarativeTool<
   ): string | null {
     // NOTE: Permission checks (read-only detection, PM rules) are handled at
     // L3 (getDefaultPermission) and L4 (PM override) in coreToolScheduler.
-    // This method only performs pure parameter validation.
+    // This method handles parameter validation plus non-overridable shell
+    // safety gates that must run before auto/YOLO execution.
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
     }
     const strippedCommand = stripShellWrapper(params.command);
+    if (detectSelfKillCommand(params.command)) {
+      return SHELL_SELF_KILL_REJECTION;
+    }
     if (
       params.is_background &&
       hasTopLevelTrailingBackgroundOperator(strippedCommand)

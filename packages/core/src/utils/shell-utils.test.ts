@@ -10,6 +10,7 @@ import {
   checkArgumentSafety,
   checkCommandPermissions,
   COMMAND_SUBSTITUTION_WARNING,
+  detectSelfKillCommand,
   escapeShellArg,
   getCommandRoots,
   getShellConfiguration,
@@ -507,6 +508,18 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper('cmd.exe /c "dir"')).toEqual('dir');
   });
 
+  it('should preserve the full unquoted command after cmd.exe /c', async () => {
+    expect(stripShellWrapper('cmd.exe /c taskkill /F /IM node.exe')).toEqual(
+      'taskkill /F /IM node.exe',
+    );
+  });
+
+  it('should preserve the full unquoted command after PowerShell -Command', async () => {
+    expect(
+      stripShellWrapper('powershell -Command taskkill /F /IM node.exe'),
+    ).toEqual('taskkill /F /IM node.exe');
+  });
+
   it('should not strip anything if no wrapper is present', async () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
   });
@@ -563,6 +576,48 @@ describe('stripTrailingBackgroundAmp', () => {
     expect(stripTrailingBackgroundAmp('sleep 5 & echo done')).toBe(
       'sleep 5 & echo done',
     );
+  });
+});
+
+describe('detectSelfKillCommand', () => {
+  it('detects broad Windows taskkill patterns that target qwen-code hosts', () => {
+    expect(detectSelfKillCommand('taskkill /F /IM node.exe 2>nul')).toBe(true);
+    expect(
+      detectSelfKillCommand('taskkill /FI "IMAGENAME eq qwen-code.exe" /F'),
+    ).toBe(true);
+  });
+
+  it('detects broad Unix killall and pkill patterns', () => {
+    expect(detectSelfKillCommand('killall -9 node')).toBe(true);
+    expect(detectSelfKillCommand('pkill -f qwen-code')).toBe(true);
+    expect(detectSelfKillCommand('pkill -f /usr/bin/node')).toBe(true);
+    expect(detectSelfKillCommand("bash -lc 'pkill -f qwen'")).toBe(true);
+  });
+
+  it('detects taskkill through Windows shell wrappers', () => {
+    expect(
+      detectSelfKillCommand('powershell -Command "taskkill /F /IM node.exe"'),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand(
+        'pwsh -NoProfile -Command "taskkill /F /IM node.exe"',
+      ),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand('powershell -Command taskkill /F /IM node.exe'),
+    ).toBe(true);
+    expect(detectSelfKillCommand('cmd.exe /c taskkill /F /IM node.exe')).toBe(
+      true,
+    );
+  });
+
+  it('allows targeted process kills and unrelated process patterns', () => {
+    expect(detectSelfKillCommand('taskkill /PID 1234 /F')).toBe(false);
+    expect(detectSelfKillCommand('kill 1234')).toBe(false);
+    expect(detectSelfKillCommand('pkill -f vite')).toBe(false);
+    expect(detectSelfKillCommand('pkill -f "node server.js"')).toBe(false);
+    expect(detectSelfKillCommand('pkill -F qwen-code.pid vite')).toBe(false);
+    expect(detectSelfKillCommand('taskkill /IM notepad.exe')).toBe(false);
   });
 });
 
