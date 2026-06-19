@@ -214,47 +214,74 @@ the SSE idle-closes between turns). Verification recipe: run the TUI attached wi
 `QWEN_DAEMON_STREAM_DEBUG=<file>`; the log shows
 `prompt() resolved → frame type=turn_complete -> state=idle committed=1`.
 
+## ✅ Milestone 2 — VERIFIED on a real machine (pkix)
+
+Tool calls render live AND their approval prompts are answerable in the rich TUI:
+a daemon-hosted `run_shell_command`/`write_file` shows its tool box during the turn,
+and when the daemon gates it the TUI renders an answerable prompt. Selecting **Yes,
+allow once** executed the tool **in the daemon** (`echo "Test" > test.txt`,
+`printf …` — Exit 0), the turn ran on to `read_file` and a final reply, the spinner
+stopped, and `cat test.txt` → `Test`. Round-trip (render → input → vote → execute →
+complete) confirmed on a real 0.17.x daemon.
+
+**Findings that shaped the wiring (ground-truthed via
+`scripts/capture-daemon-frames.mts` against a live daemon):**
+
+- **Edits send NO `tool_call` frame** — a `write_file` gate arrives _only_ as a
+  `permission_request` carrying its own `toolCall` (`toolCallId`, `title`, `kind`,
+  diff). The reducer **seeds the tool from the request** so it renders; a
+  `run_shell_command` _does_ send a prior `tool_call`, so there `upsertTool` just
+  refreshes it.
+- **Options carry an ACP `kind`** (`allow_once`/`allow_always`/`reject_once`
+  /`reject_always`); the outcome→optionId map keys on `kind`, never the opaque id.
+- **Universal `info` confirmation** — its rendered outcomes (`ProceedOnce` /
+  `ProceedAlways{Project,User}` / `Cancel`) all map to a daemon `kind`, and it omits
+  `ModifyWithEditor` (no remote round-trip). The project/user always-scopes collapse
+  onto the daemon's single `allow_always`.
+- **`default` mode auto-approves read-ish shell** (`du`, `ls`) but gates
+  `write_file`; the capture harness forces the mode (`CAPTURE_APPROVAL_MODE`) and can
+  attach to a running daemon (`CAPTURE_ATTACH_URL`) to record real gates.
+
 ## Phasing inside Phase 2 ("grows")
 
-Built + unit-tested here (now 25 daemon tests):
+Built + unit-tested here (now 37 daemon tests):
 
-- `projectDaemonEvent.ts` (16 tests) — the pure reducer folding daemon frames
-  into the UI's history/streaming/tool/permission shapes.
-- `useDaemonStream.ts` (8 tests) — the React hook: subscribes to
+- `projectDaemonEvent.ts` (18 tests) — the pure reducer folding daemon frames
+  into the UI's history/streaming/tool/permission shapes (incl. seed-gated-tool
+  -from-`permission_request`).
+- `useDaemonStream.ts` (10 tests) — the React hook: subscribes to
   `driver.events()` (AbortController cleanup + retry on the daemon's
-  single-subscription race), folds frames through the reducer, and exposes the
-  `useGeminiStream` contract + a permission action. Decoupled via a structural
-  `DaemonSessionDriver` (no `@qwen-code/sdk` dep), so it's fakeable in tests.
+  single-subscription race), folds frames through the reducer, attaches the
+  approval `confirmationDetails`, and exposes the `useGeminiStream` contract.
+  Decoupled via a structural `DaemonSessionDriver` (no `@qwen-code/sdk` dep).
+- `daemonConfirmation.ts` (9 tests) — the pure outcome→optionId mapper (by ACP
+  `kind`) + `info` confirmation builder, tested against the real captured options.
 
 1. **Slice 1 — text round-trip.** ✅ **DONE + rendered + verified on pkix** (see
    Milestone 1 above). Origin-aware user echo, streamed thought + message,
    completion via `prompt()`-resolution synthesis, multi-turn re-subscribe, the
    `--attach-daemon` flag, `DaemonAppContainer`, and the `useStream` swap in
    `AppContainer` all working in the rich TUI.
-2. **Slice 2 — tool approval.** ✅ _Projection + hook gate done_
-   (`tool_call`/`tool_call_update` → `tool_group`; `permission_request` →
-   Confirming + `activePermission`; `respondToPermission` posts the vote;
-   `permission_resolved` first-responder-wins). Remaining (interactive): bind
-   `confirmationDetails.onConfirm` → `respondToPermission` so `ToolGroupMessage` /
-   `ToolConfirmationMessage` can render and answer the prompt. **Until that binding
-   lands the daemon-mode permission UI is non-functional** (a Confirming tool with
-   no `confirmationDetails` shows a prompt with no way to respond).
+2. **Slice 2 — tools + approval.** ✅ **DONE + rendered + verified on pkix** (see
+   Milestone 2 below). Live tool boxes render during the turn
+   (`tool_call`/`tool_call_update` → `tool_group` in `pendingHistoryItems`); a
+   `permission_request` seeds the gated tool **from its own `toolCall`** (edits send
+   no preceding `tool_call` frame) and the hook attaches a `confirmationDetails`
+   whose `onConfirm` maps the chosen `ToolConfirmationOutcome` → daemon `optionId`
+   **by ACP `kind`** and posts the vote. Approve → the tool executes in the daemon
+   and the turn completes; Esc declines; `permission_resolved` folds state back.
 3. **Slice 3 — model switch + catch-up.** `setModel`; `Last-Event-ID`/`resume` on
    re-attach so a mid-conversation join (terminal _or_ phone) replays history.
 4. **Then** the Phase-3 launcher (`qwen --remote-control`) is small glue: spawn one
    daemon, start the gateway attached (Phase 1), run the TUI attached (this), print
    the `/ui` URL + pairing code.
 
-**Where the interactive boundary now falls:** the reducer is verified here; the
-hook's **logic is verified in isolation** (against a fake `DaemonSessionDriver`) —
-NOT yet in the TUI. The stub-vs-real risk stands: e.g. the real `submitQuery` is
-`(query, submitType?, prompt_id?, metadata?)` over `PartListUnion`, not
-`(query: string)`, and the component-boundary swap may not be the clean drop-in
-the seam doc assumes (tsc will surface the shape mismatches at wiring time). What's
-left is purely interactive — the **AppContainer component-boundary split**, the
-**opt-in flag wiring**, the **permission `confirmationDetails` binding**, and the
-actual **TUI rendering / handoff feel** — all of which need a real terminal. That's
-the handoff to the user.
+**Where the interactive boundary now falls:** slices 1–2 are verified end-to-end in
+the rich TUI on pkix (text round-trip, live tools, answerable approval). What
+remains is **slice 3** (model switch + resume/replay catch-up) and the **Phase-3
+launcher**. One real-terminal lesson worth keeping: always `npm run build` after a
+`git pull` before testing — a stale build silently runs old client code (it cost us
+a "nothing renders" red herring that a rebuild fixed with no code change).
 
 **Slice-3 note — idempotent commit on resume/replay.** The hook retries its
 subscription (StrictMode race) and slice 3 adds `Last-Event-ID`/`resume`. Because

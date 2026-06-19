@@ -18,16 +18,15 @@
  * (an attached `DaemonSessionClient` satisfies it) so this package gains no
  * `@qwen-code/sdk` dependency and the hook is unit-testable with a fake driver.
  *
- * Approval wiring (implemented; unit-verified — confirm the round-trip on a real
- * daemon): the reducer marks a gated tool `Confirming`; this hook attaches a
- * `confirmationDetails` (built by {@link buildDaemonConfirmation}) to that tool in
- * `pendingHistoryItems`, so `ToolGroupMessage`/`ToolConfirmationMessage` render an
- * answerable prompt whose `onConfirm` maps the chosen `ToolConfirmationOutcome` to
- * the daemon `optionId` and posts the vote. Esc also works: that component's
- * keypress handler only mounts once `confirmationDetails` is present, and a decline
- * emits `permission_resolved` which the reducer folds back to `Responding`. What
- * unit tests can't prove (verify in a terminal): Enter actually selects the radio
- * option and the approved turn executes + completes.
+ * Approval wiring (verified end-to-end on a real 0.17.x daemon): the reducer marks
+ * a gated tool `Confirming`; this hook attaches a `confirmationDetails` (built by
+ * {@link buildDaemonConfirmation}) to that tool in `pendingHistoryItems`, so
+ * `ToolGroupMessage`/`ToolConfirmationMessage` render an answerable prompt whose
+ * `onConfirm` maps the chosen `ToolConfirmationOutcome` to the daemon `optionId`
+ * and posts the vote. Approving executes the tool in the daemon and the turn
+ * completes; Esc declines (that component's keypress handler only mounts once
+ * `confirmationDetails` is present), and `permission_resolved` folds state back to
+ * `Responding`.
  *
  * Known gaps for a later pass (NOT done here):
  * - **Errored/canceled turns** (`stream_error`/`session_died`) don't reset
