@@ -148,8 +148,6 @@ export function mountWebShellAssets(
   webShellDir: string,
 ): void {
   const sendIndex = createSendIndex(webShellDir);
-  // `fallthrough: true` (default) lets an unknown /assets/* path continue to
-  // the SPA fallback / 404 instead of ending the chain here.
   app.use(
     '/assets',
     express.static(path.join(webShellDir, 'assets'), {
@@ -158,6 +156,15 @@ export function mountWebShellAssets(
       maxAge: '1y',
     }),
   );
+  // A request still under /assets here is a missing chunk (e.g. a stale hashed
+  // name after a redeploy) — return a clean 404 rather than letting it reach
+  // the SPA fallback, which would answer a browser nav to /assets/<anything>
+  // with a 200 index.html. (express.static's own `fallthrough: false` can't be
+  // used: it forwards a 404 error to the catch-all error handler, which turns
+  // it into a 500.)
+  app.use('/assets', (_req: Request, res: Response) => {
+    res.status(404).type('text/plain').send('Not found');
+  });
   app.get('/', (_req: Request, res: Response) => sendIndex(res));
 }
 

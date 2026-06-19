@@ -1665,6 +1665,18 @@ describe('createServeApp', () => {
       expect(res.text).toContain('export const x');
     });
 
+    it('returns 404 (not the shell) for a missing asset', async () => {
+      // fallthrough:false — a stale/renamed chunk must 404, not fall through to
+      // the SPA fallback and get a 200 index.html, even on a browser nav.
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/assets/missing-chunk.js')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(404);
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
     it('falls back to the shell for SPA deep-link navigations', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
