@@ -29,6 +29,7 @@
  *   streaming state yet (reducer slice-1 gap) — a stuck spinner.
  * - Several contract fields are documented stubs (see the return).
  */
+import { appendFileSync } from 'node:fs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   StreamingState,
@@ -36,6 +37,21 @@ import {
   type IndividualToolCallDisplay,
   type ThoughtSummary,
 } from '../../types.js';
+
+/**
+ * Diagnostic frame log (opt-in via `QWEN_DAEMON_STREAM_DEBUG=<file>`). The TUI
+ * owns stdout, so console logging would corrupt the Ink render — this appends to
+ * a file instead. Off unless the env var is set.
+ */
+const dbg = (msg: string): void => {
+  const path = process.env['QWEN_DAEMON_STREAM_DEBUG'];
+  if (!path) return;
+  try {
+    appendFileSync(path, `${Date.now()} ${msg}\n`);
+  } catch {
+    /* best-effort diagnostics only */
+  }
+};
 import {
   activePermissionOf,
   initialDaemonProjectionState,
@@ -128,21 +144,32 @@ export function useDaemonStream(
     void (async () => {
       for (let attempt = 0; !disposed && !ac.signal.aborted; attempt++) {
         try {
+          dbg(`subscribe attempt=${attempt} clientId=${driver.clientId}`);
           for await (const frame of driver.events({ signal: ac.signal })) {
             if (disposed) break;
             const { state, committed } = projectDaemonEvent(
               stateRef.current,
               frame,
             );
+            const su = (frame.data as { update?: { sessionUpdate?: string } })
+              ?.update?.sessionUpdate;
+            dbg(
+              `frame type=${frame.type}${su ? `/${su}` : ''} oc=${frame.originatorClientId ?? '∅'} -> state=${state.streamingState} committed=${committed.length}`,
+            );
             stateRef.current = state;
             for (const item of committed) addItemRef.current(item, now());
             streamingResponseLengthRef.current = state.pendingText.length;
             setSnapshot(state);
           }
+          dbg('stream ended normally');
           break; // stream ended normally
         } catch (err) {
-          if (disposed || ac.signal.aborted) break;
+          if (disposed || ac.signal.aborted) {
+            dbg(`stream aborted (disposed=${disposed})`);
+            break;
+          }
           const msg = String((err as Error)?.message ?? err);
+          dbg(`stream error: ${msg}`);
           // The daemon allows ONE live subscription per session; React
           // StrictMode's mount→unmount→remount can race the previous
           // subscription's teardown. Back off and retry rather than surfacing a
@@ -168,7 +195,9 @@ export function useDaemonStream(
       // Echo locally for responsiveness; the reducer drops the daemon's
       // self-echo (matched by originatorClientId === our clientId).
       addItemRef.current({ type: 'user', text: query }, now());
+      dbg(`submitQuery len=${query.length}`);
       await driver.prompt({ prompt: [{ type: 'text', text: query }] });
+      dbg('prompt() resolved');
     },
     [driver],
   );
