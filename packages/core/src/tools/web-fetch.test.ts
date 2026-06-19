@@ -54,6 +54,26 @@ describe('WebFetchTool', () => {
       );
     });
 
+    it.each(['HTTPS://example.com', 'Http://example.com'])(
+      'should accept uppercase http url schemes: %s',
+      (url) => {
+        const tool = new WebFetchTool(mockConfig);
+        expect(() =>
+          tool.build({ url, prompt: 'summarize this' }),
+        ).not.toThrow();
+      },
+    );
+
+    it.each(['ftp://example.com', 'http:example.com', 'http:/example.com'])(
+      'should reject invalid or unsupported url schemes: %s',
+      (url) => {
+        const tool = new WebFetchTool(mockConfig);
+        expect(() => tool.build({ url, prompt: 'summarize this' })).toThrow(
+          "The 'url' must be a valid URL starting with http:// or https://.",
+        );
+      },
+    );
+
     it('should return WEB_FETCH_FALLBACK_FAILED on fetch failure', async () => {
       vi.spyOn(fetchUtils, 'isPrivateIp').mockReturnValue(true);
       vi.spyOn(fetchUtils, 'fetchWithTimeout').mockRejectedValue(
