@@ -20,6 +20,8 @@
  *   - `QWEN_SERVER_TOKEN` (the daemon's own bearer token) leaking into
  *     the spawned agent's environment, where prompt-injection could
  *     turn the agent into an authenticated client of its own daemon.
+ *   - `QWEN_CODE_SIMPLE` leaking from the daemon/IDE process into
+ *     per-session ACP children, where it would silently suppress skills.
  *   - An `overrides` map smuggling a scrubbed key BACK into the child
  *     env (defense-in-depth — operators / embedders can pass overrides,
  *     but the denylist still wins).
@@ -30,12 +32,84 @@
  * Each branch listed below is now regression-guarded by an assertion.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import type { ChildProcess } from 'node:child_process';
+import { PassThrough } from 'node:stream';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mockSpawn = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: mockSpawn,
+  };
+});
+
 import {
+  createSpawnChannelFactory,
   createStderrForwarder,
   getAcpMemoryArgs,
   scrubChildEnv,
 } from './spawnChannel.js';
+
+function createFakeChildProcess(): ChildProcess {
+  return Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 12345,
+    exitCode: null,
+    signalCode: null,
+    kill: vi.fn(() => true),
+  }) as unknown as ChildProcess;
+}
+
+describe('createSpawnChannelFactory env policy', () => {
+  const originalArgv1 = process.argv[1];
+  let originalSimple: string | undefined;
+  let originalServerToken: string | undefined;
+
+  beforeEach(() => {
+    mockSpawn.mockReset();
+    originalSimple = process.env['QWEN_CODE_SIMPLE'];
+    originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+    process.argv[1] = '/tmp/qwen.js';
+    process.env['QWEN_CODE_SIMPLE'] = '1';
+    process.env['QWEN_SERVER_TOKEN'] = 'secret';
+  });
+
+  afterEach(() => {
+    process.argv[1] = originalArgv1;
+    if (originalSimple === undefined) {
+      delete process.env['QWEN_CODE_SIMPLE'];
+    } else {
+      process.env['QWEN_CODE_SIMPLE'] = originalSimple;
+    }
+    if (originalServerToken === undefined) {
+      delete process.env['QWEN_SERVER_TOKEN'];
+    } else {
+      process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+    }
+  });
+
+  it('scrubs daemon-only env vars from the spawned ACP child', async () => {
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+
+    const factory = createSpawnChannelFactory();
+    await factory('/tmp/project', {
+      QWEN_CODE_SIMPLE: '1',
+      QWEN_SERVER_TOKEN: 'override-secret',
+    });
+
+    const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(spawnOptions?.env).not.toHaveProperty('QWEN_CODE_SIMPLE');
+    expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(spawnOptions?.env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
+  });
+});
 
 describe('createStderrForwarder', () => {
   it('calls onDiagnosticLine for each complete line', () => {
@@ -133,7 +207,7 @@ describe('createStderrForwarder', () => {
 // of any current production denylist. The multi-key test below
 // forward-guards expansion when a future sandboxed-agent mode grows
 // the production set per the WARNING on `SCRUBBED_CHILD_ENV_KEYS`.
-const SCRUBBED = new Set<string>(['QWEN_SERVER_TOKEN']);
+const SCRUBBED = new Set<string>(['QWEN_SERVER_TOKEN', 'QWEN_CODE_SIMPLE']);
 
 describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {
   it('shallow-clones source — never aliases into the live process.env', () => {
@@ -147,6 +221,13 @@ describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {
     const source = { QWEN_SERVER_TOKEN: 'super-secret', PATH: '/usr/bin' };
     const result = scrubChildEnv(source, SCRUBBED);
     expect(result).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(result['PATH']).toBe('/usr/bin');
+  });
+
+  it('strips QWEN_CODE_SIMPLE from the child env', () => {
+    const source = { QWEN_CODE_SIMPLE: '1', PATH: '/usr/bin' };
+    const result = scrubChildEnv(source, SCRUBBED);
+    expect(result).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(result['PATH']).toBe('/usr/bin');
   });
 
@@ -185,6 +266,14 @@ describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {
       QWEN_SERVER_TOKEN: 'sneaky-attempt-via-override',
     });
     expect(result).not.toHaveProperty('QWEN_SERVER_TOKEN');
+  });
+
+  it('overrides CANNOT re-introduce QWEN_CODE_SIMPLE', () => {
+    const source = { PATH: '/usr/bin' };
+    const result = scrubChildEnv(source, SCRUBBED, {
+      QWEN_CODE_SIMPLE: '1',
+    });
+    expect(result).not.toHaveProperty('QWEN_CODE_SIMPLE');
   });
 
   it('overrides CANNOT undo the scrub by setting undefined for a scrubbed key', () => {
@@ -229,17 +318,20 @@ describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {
     // anticipates), this verifies the loop handles multiple keys.
     const sandboxScrub = new Set<string>([
       'QWEN_SERVER_TOKEN',
+      'QWEN_CODE_SIMPLE',
       'AWS_SECRET_ACCESS_KEY',
       'OPENAI_API_KEY',
     ]);
     const source = {
       QWEN_SERVER_TOKEN: 't1',
-      AWS_SECRET_ACCESS_KEY: 't2',
-      OPENAI_API_KEY: 't3',
+      QWEN_CODE_SIMPLE: 't2',
+      AWS_SECRET_ACCESS_KEY: 't3',
+      OPENAI_API_KEY: 't4',
       PATH: '/usr/bin',
     };
     const result = scrubChildEnv(source, sandboxScrub);
     expect(result).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(result).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(result).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
     expect(result).not.toHaveProperty('OPENAI_API_KEY');
     expect(result['PATH']).toBe('/usr/bin');
