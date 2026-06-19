@@ -24,6 +24,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
+import { isContainerPathWithinWorkdir } from './sandbox-path.js';
 
 const execAsync = promisify(exec);
 
@@ -121,9 +122,7 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
     const paths = process.env['PATH'].split(pathSeparator);
     for (const p of paths) {
       const containerPath = getContainerPath(p);
-      if (
-        containerPath.toLowerCase().startsWith(containerWorkdir.toLowerCase())
-      ) {
+      if (isContainerPathWithinWorkdir(containerWorkdir, containerPath)) {
         pathSuffix += `:${containerPath}`;
       }
     }
@@ -137,9 +136,7 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
     const paths = process.env['PYTHONPATH'].split(pathSeparator);
     for (const p of paths) {
       const containerPath = getContainerPath(p);
-      if (
-        containerPath.toLowerCase().startsWith(containerWorkdir.toLowerCase())
-      ) {
+      if (isContainerPathWithinWorkdir(containerWorkdir, containerPath)) {
         pythonPathSuffix += `:${containerPath}`;
       }
     }
@@ -723,8 +720,13 @@ export async function start_sandbox(
   // also mount-replace VIRTUAL_ENV directory with <project_settings>/sandbox.venv
   // sandbox can then set up this new VIRTUAL_ENV directory using sandbox.bashrc (see below)
   // directory will be empty if not set up, which is still preferable to having host binaries
+  const virtualEnv = process.env['VIRTUAL_ENV'];
   if (
-    process.env['VIRTUAL_ENV']?.toLowerCase().startsWith(workdir.toLowerCase())
+    virtualEnv &&
+    isContainerPathWithinWorkdir(
+      getContainerPath(workdir),
+      getContainerPath(virtualEnv),
+    )
   ) {
     const sandboxVenvPath = path.resolve(
       SETTINGS_DIRECTORY_NAME,
@@ -733,14 +735,8 @@ export async function start_sandbox(
     if (!fs.existsSync(sandboxVenvPath)) {
       fs.mkdirSync(sandboxVenvPath, { recursive: true });
     }
-    args.push(
-      '--volume',
-      `${sandboxVenvPath}:${getContainerPath(process.env['VIRTUAL_ENV'])}`,
-    );
-    args.push(
-      '--env',
-      `VIRTUAL_ENV=${getContainerPath(process.env['VIRTUAL_ENV'])}`,
-    );
+    args.push('--volume', `${sandboxVenvPath}:${getContainerPath(virtualEnv)}`);
+    args.push('--env', `VIRTUAL_ENV=${getContainerPath(virtualEnv)}`);
   }
 
   // copy additional environment variables from SANDBOX_ENV
