@@ -147,7 +147,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Open the Web Shell in a browser once the daemon is listening. No-op with --no-web or in headless/CI/SSH environments.',
+          'Open the Web Shell in a browser once the daemon is listening. With a token configured, the launch URL (token included) is handed to the browser launcher and is visible in the process list, so prefer opening the URL manually on multi-user hosts. No-op with --no-web, when the UI assets are absent, or in headless/CI/SSH environments.',
       })
       .option('event-ring-size', {
         type: 'number',
@@ -474,15 +474,48 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
       });
-      // Open the Web Shell in a browser once the listener is up. `handle.url`
-      // already reflects the resolved port (so `--port 0` works), and
-      // `shouldLaunchBrowser()` suppresses this in CI / SSH / headless. Best
-      // effort: a failed launch must not take down the daemon.
-      if (argv.open && argv.web && shouldLaunchBrowser()) {
-        const target = new URL(handle.url);
-        const browserToken = argv.token || process.env['QWEN_SERVER_TOKEN'];
-        if (browserToken) target.searchParams.set('token', browserToken);
-        await openBrowserSecurely(target.toString());
+      // Open the Web Shell in a browser once the listener is up. Gated on
+      // `handle.webShellMounted` so we never point a browser at an API-only
+      // daemon (assets absent or --no-web). `shouldLaunchBrowser()` suppresses
+      // this in CI / SSH / headless. The whole block is wrapped in its own
+      // try/catch: openBrowserSecurely can throw (URL validation, unsupported
+      // platform), and the outer catch calls process.exit(1) — a failed
+      // browser launch must NOT take down the already-listening daemon.
+      if (argv.open && handle.webShellMounted && shouldLaunchBrowser()) {
+        try {
+          const target = new URL(handle.url);
+          // `handle.url` carries the raw bind host; a wildcard bind is not
+          // client-addressable, so send the browser to loopback instead.
+          if (
+            target.hostname === '0.0.0.0' ||
+            target.hostname === '::' ||
+            target.hostname === '[::]'
+          ) {
+            target.hostname = '127.0.0.1';
+          }
+          // Trim to match runQwenServe's own token normalization — otherwise a
+          // trailing newline from `$(cat token.txt)` makes the browser's token
+          // mismatch the server's trimmed value and 401 every API call.
+          const rawBrowserToken =
+            argv.token || process.env['QWEN_SERVER_TOKEN'];
+          const browserToken =
+            typeof rawBrowserToken === 'string' &&
+            rawBrowserToken.trim().length > 0
+              ? rawBrowserToken.trim()
+              : undefined;
+          if (browserToken) {
+            target.searchParams.set('token', browserToken);
+            writeStderrLine(
+              'qwen serve: --open passes the token in the browser launch command ' +
+                '(visible via `ps` / /proc); on a multi-user host open the URL manually instead.',
+            );
+          }
+          await openBrowserSecurely(target.toString());
+        } catch (browserErr) {
+          writeStderrLine(
+            `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}`,
+          );
+        }
       }
     } catch (err) {
       writeStderrLine(

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync, promises as fsp } from 'node:fs';
+import { existsSync, realpathSync, promises as fsp } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -19,6 +19,7 @@ import {
   resolvePromptDeadlineMs,
 } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
+import { resolveWebShellDir, isDocumentNavigation } from './webShellStatic.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
   getAdvertisedServeFeatures,
@@ -1702,6 +1703,68 @@ describe('createServeApp', () => {
         .set('Host', host)
         .set('Accept', 'text/html');
       expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('does not serve the shell for POST navigations (method guard)', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .post('/session/abc')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('falls back to the shell on a sec-fetch navigation signal', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/session/deep')
+        .set('Host', host)
+        .set('Accept', '*/*')
+        .set('Sec-Fetch-Mode', 'navigate');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
+    it('does not shadow /health on a browser navigation (Critical #1)', async () => {
+      // Non-loopback + requireAuth registers /health POST-auth. A browser
+      // navigation (Accept text/html) must fall THROUGH the SPA fallback to
+      // bearerAuth (401), not receive the shell. Without the /health guard the
+      // pre-auth fallback would return index.html instead.
+      const app = createServeApp(
+        { ...baseOpts, hostname: '0.0.0.0', token: 'secret', requireAuth: true },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app)
+        .get('/health')
+        .set('Host', '0.0.0.0:4170')
+        .set('Accept', 'text/html');
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('returns 500 when index.html is unreadable after mount', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      await fsp.rm(path.join(webShellDir, 'index.html'));
+      const res = await request(app).get('/').set('Host', host);
+      expect(res.status).toBe(500);
+    });
+
+    it('isDocumentNavigation recognizes each navigation signal', () => {
+      const nav = (headers: Record<string, string>) =>
+        isDocumentNavigation({ headers } as never);
+      expect(nav({ 'sec-fetch-mode': 'navigate' })).toBe(true);
+      expect(nav({ 'sec-fetch-dest': 'document' })).toBe(true);
+      expect(nav({ accept: 'text/html,application/xhtml+xml' })).toBe(true);
+      expect(nav({ accept: 'application/json' })).toBe(false);
+      expect(nav({})).toBe(false);
+    });
+
+    it('resolveWebShellDir returns undefined or a dir with index.html + assets', () => {
+      const dir = resolveWebShellDir();
+      if (dir !== undefined) {
+        expect(existsSync(path.join(dir, 'index.html'))).toBe(true);
+        expect(existsSync(path.join(dir, 'assets'))).toBe(true);
+      }
     });
   });
 

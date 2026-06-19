@@ -53,7 +53,16 @@ export function resolveWebShellDir(): string | undefined {
     path.resolve(selfDir, '..', '..', '..', 'web-shell', 'dist'),
   ];
   for (const dir of candidates) {
-    if (existsSync(path.join(dir, 'index.html'))) return dir;
+    // Require BOTH index.html and assets/: a partial build (index.html
+    // without its hashed chunks) would otherwise pass and serve a shell
+    // whose every script/style 404s. copy_bundle_assets.js applies the same
+    // two-part check before copying.
+    if (
+      existsSync(path.join(dir, 'index.html')) &&
+      existsSync(path.join(dir, 'assets'))
+    ) {
+      return dir;
+    }
   }
   return undefined;
 }
@@ -136,6 +145,13 @@ export function registerWebShell(app: Application, webShellDir: string): void {
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (!isDocumentNavigation(req)) return next();
+    // Don't shadow the daemon's own browser-reachable endpoints. On
+    // non-loopback binds /health and /demo are registered AFTER bearerAuth
+    // (i.e. after this pre-auth fallback), so without this guard a browser
+    // navigation to them would receive index.html instead of their real
+    // response. API routes send Accept: application/json and already fail
+    // isDocumentNavigation, so they need no listing here.
+    if (req.path === '/health' || req.path === '/demo') return next();
     sendIndex(res);
   });
 }

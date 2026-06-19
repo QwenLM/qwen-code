@@ -347,6 +347,12 @@ export interface RunHandle {
   server: Server;
   url: string;
   bridge: AcpSessionBridge;
+  /**
+   * Whether the Web Shell UI was actually mounted (assets resolved and
+   * `serveWebShell !== false`). The `--open` launcher checks this so it never
+   * points a browser at an API-only daemon.
+   */
+  webShellMounted: boolean;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
@@ -993,14 +999,33 @@ export async function runQwenServe(
         'qwen serve: Web Shell assets not found; serving API only. ' +
           'Build the web-shell workspace (npm run build) or pass --no-web to silence this.',
       );
-    } else if (!isLoopbackBind(opts.hostname)) {
-      writeStderrLine(
-        'qwen serve: Web Shell UI is served WITHOUT auth on a non-loopback ' +
-          'bind (the static shell has no secrets; the API stays token-gated). ' +
-          'Pass --no-web to disable the UI.',
-      );
+    } else {
+      // Positive happy-path breadcrumb so operators can confirm the UI is live
+      // (the only other lines are negative-path warnings).
+      writeStderrLine(`qwen serve: Web Shell UI served from ${webShellDir}`);
+      if (!isLoopbackBind(opts.hostname)) {
+        writeStderrLine(
+          'qwen serve: Web Shell UI is served WITHOUT auth on a non-loopback ' +
+            'bind (the static shell has no secrets; the API stays token-gated). ' +
+            'Pass --no-web to disable the UI.',
+        );
+        // The shell HTML/JS loads (GET carries no Origin), but its same-origin
+        // POSTs (create session, prompt, permission vote) send an Origin the
+        // daemon's CORS wall rejects with 403 unless allow-listed — so without
+        // --allow-origin the UI is effectively read-only on a non-loopback
+        // bind. Front the daemon with a same-origin reverse proxy, or pass
+        // --allow-origin <origin>, to make mutations work.
+        if (!opts.allowOrigins || opts.allowOrigins.length === 0) {
+          writeStderrLine(
+            'qwen serve: without --allow-origin the Web Shell is read-only on a ' +
+              'non-loopback bind — same-origin POSTs are blocked by CORS (403). ' +
+              'Pass --allow-origin <origin> or front it with a same-origin proxy.',
+          );
+        }
+      }
     }
   }
+  const webShellMounted = !!webShellDir && opts.serveWebShell !== false;
 
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
   // via `deps.boundWorkspace`. That field is the pre-canonicalized
@@ -1227,6 +1252,7 @@ export async function runQwenServe(
         server,
         url,
         bridge,
+        webShellMounted,
         close: () => {
           // Idempotent: cache the in-flight (or settled) close promise so
           // overlapping calls (e.g. test harness + signal handler firing
