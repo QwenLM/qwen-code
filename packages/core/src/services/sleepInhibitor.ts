@@ -107,7 +107,7 @@ export class SleepInhibitor {
   }
 
   isRunning(): boolean {
-    return this.child !== undefined && this.probing;
+    return this.child !== undefined;
   }
 
   private release(): void {
@@ -127,12 +127,14 @@ export class SleepInhibitor {
       return;
     }
 
-    if (this.platform === 'linux') {
+    if (this.platform === 'linux' && !isHeadlessSshSession(this.env)) {
       if (this.noAskPasswordSupported === undefined) {
         this.probing = true;
         this.probeNoAskPassword(() => {
           this.probing = false;
-          this.doStart(reason);
+          if (this.activeCount > 0) {
+            this.doStart(reason);
+          }
         });
         return;
       }
