@@ -33,7 +33,8 @@ export async function getExtensionManager(): Promise<ExtensionManager> {
       requestConsentNonInteractive,
     ),
     requestChoicePlugin: requestChoicePluginNonInteractive,
-    isWorkspaceTrusted: !!isWorkspaceTrusted(loadSettings(workspaceDir).merged),
+    isWorkspaceTrusted:
+      isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
   });
   await extensionManager.refreshCache();
   return extensionManager;

@@ -31,48 +31,15 @@ import {
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACT');
 
-export interface AutoMemoryTranscriptMessage {
-  offset: number;
-  role: 'user' | 'model';
-  text: string;
-}
-
 export interface AutoMemoryExtractResult {
   touchedTopics: AutoMemoryType[];
-  skippedReason?: 'already_running' | 'queued' | 'memory_tool';
+  skippedReason?:
+    | 'already_running'
+    | 'queued'
+    | 'memory_tool'
+    | 'memory_pressure';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
-}
-
-export function buildTranscriptMessages(
-  history: Content[],
-): AutoMemoryTranscriptMessage[] {
-  return history
-    .map((message, index) => ({
-      offset: index,
-      role: message.role,
-      text: partToString(message.parts ?? [])
-        .replace(/\s+/g, ' ')
-        .trim(),
-    }))
-    .filter(
-      (message): message is AutoMemoryTranscriptMessage =>
-        (message.role === 'user' || message.role === 'model') &&
-        message.text.length > 0,
-    );
-}
-
-export function loadUnprocessedTranscriptSlice(
-  sessionId: string,
-  messages: AutoMemoryTranscriptMessage[],
-  cursor: AutoMemoryExtractCursor,
-): { messages: AutoMemoryTranscriptMessage[]; nextProcessedOffset: number } {
-  const startOffset =
-    cursor.sessionId === sessionId ? (cursor.processedOffset ?? 0) : 0;
-  return {
-    messages: messages.filter((message) => message.offset >= startOffset),
-    nextProcessedOffset: messages.length,
-  };
 }
 
 async function readExtractCursor(
@@ -153,26 +120,37 @@ export async function runAutoMemoryExtract(params: {
     );
   }
 
-  const transcript = buildTranscriptMessages(params.history);
-  const currentCursor = await readExtractCursor(params.projectRoot);
-  const slice = loadUnprocessedTranscriptSlice(
-    params.sessionId,
-    transcript,
-    currentCursor,
-  );
-
   if (!params.config) {
     throw new Error(
       'Managed auto-memory extraction requires config for forked-agent execution.',
     );
   }
 
-  // Skip if no new user messages in the unprocessed slice.
-  const hasNewUserMessages = slice.messages.some((m) => m.role === 'user');
+  // Read the cursor first, then scan only the unprocessed slice. The old
+  // code ran partToString().replace() over EVERY message but the resulting
+  // text was never read — fork agent context comes from getCacheSafeParams().
+  const currentCursor = await readExtractCursor(params.projectRoot);
+  const rawOffset =
+    currentCursor.sessionId === params.sessionId
+      ? (currentCursor.processedOffset ?? 0)
+      : 0;
+  // History may shrink between extract calls (compression). Clamp to length
+  // so new messages after compression are not permanently skipped.
+  const startOffset = rawOffset > params.history.length ? 0 : rawOffset;
+
+  // Skip if there are no new, non-empty user messages in the unprocessed
+  // slice. partToString runs only on this small slice and without the
+  // global whitespace regex — the .trim().length check preserves the old
+  // behaviour of ignoring empty-text user turns.
+  const hasNewUserMessages = params.history
+    .slice(startOffset)
+    .some(
+      (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+    );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
-      processedOffset: slice.nextProcessedOffset,
+      processedOffset: params.history.length,
       updatedAt: now.toISOString(),
     };
     await writeExtractCursor(params.projectRoot, cursor);
@@ -221,7 +199,7 @@ export async function runAutoMemoryExtract(params: {
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    processedOffset: slice.nextProcessedOffset,
+    processedOffset: params.history.length,
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);

@@ -1,21 +1,20 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`InputPrompt > command search (Ctrl+R when not in shell) > expands and collapses long suggestion via Right/Left arrows > command-search-collapsed-match 1`] = `
-"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ (r:)    Type your message or @path/to/file                                                       │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
- lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll →
- lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
- ..."
+"────────────────────────────────────────────────────────────────────────────────
+(r:)    Type your message or @path/to/file
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll →
+  lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll..."
 `;
 
 exports[`InputPrompt > command search (Ctrl+R when not in shell) > expands and collapses long suggestion via Right/Left arrows > command-search-expanded-match 1`] = `
-"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ (r:)    Type your message or @path/to/file                                                       │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
- lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll ←
- lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
- llllllllllllllllllllllllllllllllllllllllllllllllll"
+"────────────────────────────────────────────────────────────────────────────────
+(r:)    Type your message or @path/to/file
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll ←
+  lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
+  llllllllllllllllllllllllllllllllllllllllllllll"
 `;
 
 exports[`InputPrompt > command search (Ctrl+R when not in shell) > renders match window and expanded view (snapshots) > command-search-collapsed-match 1`] = `

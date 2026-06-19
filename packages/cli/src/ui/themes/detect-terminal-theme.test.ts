@@ -62,6 +62,7 @@ describe('detectTerminalTheme', () => {
 
     it('should return undefined for invalid data', async () => {
       expect(parseOscRgb('garbage')).toBeUndefined();
+      expect(parseOscRgb('rgb:0000/0000/0000junk')).toBeUndefined();
       expect(parseOscRgb('')).toBeUndefined();
     });
   });

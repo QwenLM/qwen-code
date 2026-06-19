@@ -698,10 +698,10 @@ const SETTINGS_SCHEMA = {
         label: 'Show Status in Title',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
-          'Show Qwen Code status and thoughts in the terminal window title',
-        showInDialog: false,
+          'Show Qwen Code session name and status in the terminal window title',
+        showInDialog: true,
       },
       hideTips: {
         type: 'boolean',
@@ -1803,6 +1803,9 @@ const SETTINGS_SCHEMA = {
         description:
           'Sandbox execution environment (can be a boolean or a path string).',
         showInDialog: false,
+        jsonSchemaOverride: {
+          anyOf: [{ type: 'boolean' }, { type: 'string' }],
+        },
       },
       sandboxImage: {
         type: 'string',

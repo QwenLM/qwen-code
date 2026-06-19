@@ -489,12 +489,57 @@ export default {
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activar/desactivar el mode Vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'comprovar les estadístiques de la sessió. Ús: /stats [model|tools]',
   'Show model-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques de les eines.",
+  'Show daily token usage statistics.':
+    "Mostrar les estadístiques diàries d'ús de tokens.",
+  'Show monthly token usage statistics.':
+    "Mostrar les estadístiques mensuals d'ús de tokens.",
+  'Export token usage statistics to CSV or JSON.':
+    "Exportar les estadístiques d'ús de tokens a CSV o JSON.",
+  'No usage data.': "No hi ha dades d'ús.",
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} sol·licituds)',
+  'Daily token usage for {{value}}': 'Ús diari de tokens per a {{value}}',
+  'Monthly token usage for {{value}}': 'Ús mensual de tokens per a {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Sol·licituds: {{requests}}',
+  'Breakdown:': 'Desglossament:',
+  'Input: {{tokens}}': 'Entrada: {{tokens}}',
+  'Output: {{tokens}}': 'Sortida: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Memòria cau (inclosa a l’entrada): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raonament: {{tokens}}',
+  'By model:': 'Per model:',
+  'By auth type:': "Per tipus d'autenticació:",
+  'By model/auth type:': "Per model/tipus d'autenticació:",
+  'By source:': 'Per origen:',
+  'Failed to load token usage stats: {{error}}':
+    "No s'han pogut carregar les estadístiques d'ús de tokens: {{error}}",
+  'Expected --format csv or --format json.':
+    "S'esperava --format csv o --format json.",
+  'Expected a file path after --output.':
+    "S'esperava una ruta de fitxer després de --output.",
+  'Unexpected argument: {{argument}}': 'Argument inesperat: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Ús: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    "La ruta d'exportació de l'ús de tokens ha d'estar dins del directori de treball del projecte.",
+  'Export target does not exist: {{path}}':
+    "La destinació d'exportació no existeix: {{path}}",
+  'Cannot resolve export path within the working directory.':
+    "No s'ha pogut resoldre la ruta d'exportació dins del directori de treball.",
+  'Could not create a temporary export file.':
+    "No s'ha pogut crear un fitxer temporal d'exportació.",
+  'Token usage exported to {{format}}: {{path}}':
+    'Ús de tokens exportat a {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    "No s'han pogut exportar les estadístiques d'ús de tokens: {{error}}",
+  'Unclosed quote in arguments.': 'Cometes sense tancar als arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Nota: el temps de generació (TTFT/TPS) pertany a les mètriques de generació.',
   'exit the cli': 'sortir del CLI',
   'Manage workspace directories':
     "Gestionar els directoris de l'espai de treball",

@@ -30,6 +30,7 @@ import {
   TeamEventType,
   ApprovalMode,
   ToolConfirmationOutcome,
+  createDuplicateProviderToolCallResponse,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -755,24 +756,68 @@ export async function runNonInteractive(
        * helper returns (main-turn → emitStructuredSuccess(); drain-turn
        * → return so the post-drain code emits success).
        */
+      const handledProviderToolCallIds =
+        geminiClient.getHistoryFunctionResponseIds();
+
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => void,
       ): Promise<Part[]> => {
         const toolResponseParts: Part[] = [];
+        const structuredOutputActive =
+          config.getJsonSchema() &&
+          batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
         const seenBatchCallIds = new Set<string>();
+        const duplicateBatchRequests: ToolCallRequestInfo[] = [];
         const uniqueBatchRequests = batchRequests.filter((request) => {
           if (request.callId) {
             if (seenBatchCallIds.has(request.callId)) {
+              if (
+                structuredOutputActive &&
+                request.name === ToolNames.STRUCTURED_OUTPUT
+              ) {
+                return true;
+              }
               debugLogger.debug(
                 `Dropping duplicate non-interactive tool callId=${request.callId} name=${request.name}`,
               );
+              duplicateBatchRequests.push(request);
               return false;
             }
             seenBatchCallIds.add(request.callId);
           }
           return true;
         });
+        const respondedRequests = new Set<ToolCallRequestInfo>();
+        const executableBatchRequests: ToolCallRequestInfo[] = [];
+        const duplicatePendingResponses: Part[] = [];
+
+        for (const requestInfo of uniqueBatchRequests) {
+          if (!requestInfo.providerCallId) {
+            executableBatchRequests.push(requestInfo);
+            continue;
+          }
+
+          if (!handledProviderToolCallIds.has(requestInfo.providerCallId)) {
+            handledProviderToolCallIds.add(requestInfo.providerCallId);
+            executableBatchRequests.push(requestInfo);
+            continue;
+          }
+
+          const toolResponse =
+            createDuplicateProviderToolCallResponse(requestInfo);
+          debugLogger.debug(
+            `[runNonInteractive] Suppressing duplicate provider tool-call id: ${requestInfo.providerCallId} (tool: ${requestInfo.name})`,
+          );
+          respondedRequests.add(requestInfo);
+          adapter.emitToolResult(requestInfo, toolResponse);
+          duplicatePendingResponses.push(...toolResponse.responseParts);
+        }
+
+        // Duplicate responses must always reach the model. They pair with a
+        // tool call the provider already emitted, even when structured_output
+        // is the only executable sibling in this batch.
+        toolResponseParts.push(...duplicatePendingResponses);
 
         // Pre-scan: when --json-schema is active and the model emitted
         // a `structured_output` call alongside other tools in the same
@@ -781,21 +826,18 @@ export async function runNonInteractive(
         // suppress every non-structured sibling. See the multi-shape
         // examples in the main loop's prior comment for the
         // [bad/good/side-effect] permutations.
-        let requestsToExecute = uniqueBatchRequests;
-        if (
-          config.getJsonSchema() &&
-          uniqueBatchRequests.some(
-            (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
-          )
-        ) {
-          requestsToExecute = uniqueBatchRequests.filter(
+        let requestsToExecute = executableBatchRequests;
+        if (structuredOutputActive) {
+          requestsToExecute = executableBatchRequests.filter(
             (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
           );
         }
-        const executedCallIds = new Set<string>();
+        const executedRequests = new Set<ToolCallRequestInfo>(
+          respondedRequests,
+        );
 
         for (const requestInfo of requestsToExecute) {
-          executedCallIds.add(requestInfo.callId);
+          executedRequests.add(requestInfo);
 
           const inputFormat =
             typeof config.getInputFormat === 'function'
@@ -919,8 +961,8 @@ export async function runNonInteractive(
         // emitted event log pairs every tool_use with a tool_result
         // AND the retry-turn payload (when reached) doesn't leave
         // Anthropic / OpenAI staring at unpaired tool_use blocks.
-        const unexecutedCalls = uniqueBatchRequests.filter(
-          (r) => !executedCallIds.has(r.callId),
+        const unexecutedCalls = executableBatchRequests.filter(
+          (r) => !executedRequests.has(r),
         );
         if (unexecutedCalls.length > 0) {
           const skippedOutput = suppressedOutputBody(
@@ -945,6 +987,13 @@ export async function runNonInteractive(
             });
             toolResponseParts.push(...responseParts);
           }
+        }
+
+        for (const requestInfo of duplicateBatchRequests) {
+          const toolResponse =
+            createDuplicateProviderToolCallResponse(requestInfo);
+          adapter.emitToolResult(requestInfo, toolResponse);
+          toolResponseParts.push(...toolResponse.responseParts);
         }
 
         return toolResponseParts;

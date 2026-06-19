@@ -90,6 +90,12 @@ export const formatDuration = (
 
   if (totalSeconds < 60) {
     const formatted = totalSeconds.toFixed(1);
+    // toFixed can round up across the minute boundary (e.g. 59.95s -> "60.0"),
+    // which is not a valid sub-minute reading. Render it as the minute it
+    // rounds to, matching formatDuration(60000) === '1m'.
+    if (parseFloat(formatted) >= 60) {
+      return '1m';
+    }
     if (options?.hideTrailingZeros && formatted.endsWith('.0')) {
       return `${formatted.slice(0, -2)}s`;
     }

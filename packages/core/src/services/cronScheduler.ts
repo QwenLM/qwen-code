@@ -425,10 +425,10 @@ export class CronScheduler {
   }
 
   /**
-   * Returns the number of active jobs.
+   * Returns the number of active jobs and wakeups.
    */
   get size(): number {
-    return this.jobs.size;
+    return this.jobs.size + this.wakeups.size;
   }
 
   /**

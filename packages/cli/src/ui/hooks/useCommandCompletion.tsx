@@ -40,9 +40,11 @@ export interface UseCommandCompletionReturn {
   setActiveSuggestionIndex: React.Dispatch<React.SetStateAction<number>>;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   resetCompletionState: () => void;
+  dismissCompletion: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
   handleAutocomplete: (indexToUse: number) => void;
+  completionMode: CompletionMode;
   /** Inline ghost text for mid-input slash commands (not at line start). */
   midInputGhostText: {
     text: string;
@@ -63,26 +65,6 @@ export function useCommandCompletion(
   active: boolean = true,
   recentCommands?: RecentSlashCommands,
 ): UseCommandCompletionReturn {
-  const {
-    suggestions,
-    activeSuggestionIndex,
-    visibleStartIndex,
-    showSuggestions,
-    isLoadingSuggestions,
-    isPerfectMatch,
-
-    setSuggestions,
-    setShowSuggestions,
-    setActiveSuggestionIndex,
-    setIsLoadingSuggestions,
-    setIsPerfectMatch,
-    setVisibleStartIndex,
-
-    resetCompletionState,
-    navigateUp,
-    navigateDown,
-  } = useCompletion();
-
   const cursorRow = buffer.cursor[0];
   const cursorCol = buffer.cursor[1];
 
@@ -147,6 +129,28 @@ export function useCommandCompletion(
       };
     }, [cursorRow, cursorCol, buffer.lines]);
 
+  const {
+    suggestions,
+    activeSuggestionIndex,
+    visibleStartIndex,
+    showSuggestions,
+    isLoadingSuggestions,
+    isPerfectMatch,
+    dismissed,
+
+    setSuggestions,
+    setShowSuggestions,
+    setActiveSuggestionIndex,
+    setIsLoadingSuggestions,
+    setIsPerfectMatch,
+    setVisibleStartIndex,
+
+    resetCompletionState,
+    dismissCompletion,
+    navigateUp,
+    navigateDown,
+  } = useCompletion({ query });
+
   useAtCompletion({
     enabled: completionMode === CompletionMode.AT,
     pattern: query || '',
@@ -181,6 +185,11 @@ export function useCommandCompletion(
       resetCompletionState();
       return;
     }
+    // If the user explicitly dismissed the dropdown (e.g., via Enter accept),
+    // do not re-open it until the query changes again.
+    if (dismissed) {
+      return;
+    }
     // Show suggestions if we are loading OR if there are results to display.
     setShowSuggestions(isLoadingSuggestions || suggestions.length > 0);
   }, [
@@ -189,6 +198,7 @@ export function useCommandCompletion(
     isLoadingSuggestions,
     reverseSearchActive,
     active,
+    dismissed,
     resetCompletionState,
     setShowSuggestions,
   ]);
@@ -322,9 +332,11 @@ export function useCommandCompletion(
     setActiveSuggestionIndex,
     setShowSuggestions,
     resetCompletionState,
+    dismissCompletion,
     navigateUp,
     navigateDown,
     handleAutocomplete,
+    completionMode,
     midInputGhostText,
   };
 }
