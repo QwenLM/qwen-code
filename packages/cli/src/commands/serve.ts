@@ -32,6 +32,47 @@ function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
 }
 
+/**
+ * Open the Web Shell in a browser once the daemon is listening. Extracted from
+ * the `serve` handler so it is unit-testable. Best-effort:
+ *  - gated on `--open`, the UI actually being mounted (`webShellMounted`), and
+ *    `shouldLaunchBrowser()` (false in CI / SSH / headless);
+ *  - wildcard bind hosts (`0.0.0.0` / `[::]`) are rewritten to loopback so the
+ *    URL is client-addressable;
+ *  - the token rides in the URL fragment (`#token=`), which is never sent to
+ *    the server, and the daemon's already-resolved (trimmed) token is used so
+ *    it matches what the server authenticates against;
+ *  - any launch failure is logged, never thrown, so it can't take down the
+ *    already-listening daemon.
+ *
+ * Exported for tests.
+ */
+export async function maybeOpenWebShellBrowser(
+  handle: { url: string; webShellMounted: boolean; resolvedToken?: string },
+  open: boolean,
+): Promise<void> {
+  if (!open || !handle.webShellMounted || !shouldLaunchBrowser()) return;
+  try {
+    const target = new URL(handle.url);
+    // Node's URL returns the IPv6 wildcard as `[::]` (bracketed), never `::`.
+    if (target.hostname === '0.0.0.0' || target.hostname === '[::]') {
+      target.hostname = '127.0.0.1';
+    }
+    if (handle.resolvedToken) {
+      target.hash = `token=${encodeURIComponent(handle.resolvedToken)}`;
+      writeStderrLine(
+        'qwen serve: --open passes the token in the browser launch command ' +
+          '(visible via `ps` / /proc); on a multi-user host open the URL manually instead.',
+      );
+    }
+    await openBrowserSecurely(target.toString());
+  } catch (browserErr) {
+    writeStderrLine(
+      `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}`,
+    );
+  }
+}
+
 interface ServeArgs {
   port: number;
   hostname: string;
@@ -474,48 +515,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
       });
-      // Open the Web Shell in a browser once the listener is up. Gated on
-      // `handle.webShellMounted` so we never point a browser at an API-only
-      // daemon (assets absent or --no-web). `shouldLaunchBrowser()` suppresses
-      // this in CI / SSH / headless. The whole block is wrapped in its own
-      // try/catch: openBrowserSecurely can throw (URL validation, unsupported
-      // platform), and the outer catch calls process.exit(1) — a failed
-      // browser launch must NOT take down the already-listening daemon.
-      if (argv.open && handle.webShellMounted && shouldLaunchBrowser()) {
-        try {
-          const target = new URL(handle.url);
-          // `handle.url` carries the raw bind host; a wildcard bind is not
-          // client-addressable, so send the browser to loopback instead.
-          if (
-            target.hostname === '0.0.0.0' ||
-            target.hostname === '::' ||
-            target.hostname === '[::]'
-          ) {
-            target.hostname = '127.0.0.1';
-          }
-          // Use the server's already-resolved (trimmed) token rather than
-          // re-deriving it from argv/env — keeps the browser's token in
-          // lockstep with what the daemon authenticates against, with no
-          // duplicated env-var name or trim logic.
-          if (handle.resolvedToken) {
-            // Use the URL fragment (#token=), not a query param: the fragment
-            // is never sent to the server (kept out of access logs / Referer)
-            // and the Web Shell reads it client-side. It is still visible in
-            // the browser-launcher's argv (ps / /proc), so a one-time-code
-            // exchange remains the real fix for multi-user hosts.
-            target.hash = `token=${encodeURIComponent(handle.resolvedToken)}`;
-            writeStderrLine(
-              'qwen serve: --open passes the token in the browser launch command ' +
-                '(visible via `ps` / /proc); on a multi-user host open the URL manually instead.',
-            );
-          }
-          await openBrowserSecurely(target.toString());
-        } catch (browserErr) {
-          writeStderrLine(
-            `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}`,
-          );
-        }
-      }
+      // Open the Web Shell in a browser once the listener is up (best-effort;
+      // never throws — see maybeOpenWebShellBrowser).
+      await maybeOpenWebShellBrowser(handle, argv.open);
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${err instanceof Error ? err.message : String(err)}`,

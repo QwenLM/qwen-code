@@ -11,6 +11,7 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { isServeDebugMode } from './debugMode.js';
 
 /**
  * Content-Security-Policy for the Web Shell HTML shell.
@@ -32,6 +33,10 @@ export const WEB_SHELL_CSP = [
   "img-src 'self' data: blob:",
   "connect-src 'self'",
   "worker-src 'self' blob:",
+  // base-uri does NOT fall back to default-src; lock it so an injected <base>
+  // (the SPA renders AI-generated markdown) cannot repoint relative URLs to an
+  // attacker origin.
+  "base-uri 'none'",
   "frame-ancestors 'none'",
 ].join('; ');
 
@@ -108,7 +113,12 @@ function createSendIndex(webShellDir: string): (res: Response) => void {
       .status(200)
       .set('Content-Security-Policy', WEB_SHELL_CSP)
       .set('X-Frame-Options', 'DENY')
+      .set('X-Content-Type-Options', 'nosniff')
       .set('Referrer-Policy', 'no-referrer')
+      .set(
+        'Permissions-Policy',
+        'camera=(), microphone=(), geolocation=(), payment=()',
+      )
       .set('Cache-Control', 'no-cache');
     res.sendFile(indexPath, { cacheControl: false }, (err) => {
       if (!err) return;
@@ -162,7 +172,14 @@ export function mountWebShellAssets(
   // with a 200 index.html. (express.static's own `fallthrough: false` can't be
   // used: it forwards a 404 error to the catch-all error handler, which turns
   // it into a 500.)
-  app.use('/assets', (_req: Request, res: Response) => {
+  app.use('/assets', (req: Request, res: Response) => {
+    // Quiet by default (a redeploy can briefly 404 many stale chunks); surface
+    // it under serve debug mode so a white-screen shell has a diagnostic trail.
+    if (isServeDebugMode()) {
+      writeStderrLine(
+        `qwen serve: Web Shell asset not found: ${req.originalUrl}`,
+      );
+    }
     res.status(404).type('text/plain').send('Not found');
   });
   app.get('/', (_req: Request, res: Response) => sendIndex(res));
@@ -192,6 +209,13 @@ export function mountWebShellSpaFallback(
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (!isDocumentNavigation(req)) return next();
+    // Debug-only: lets an operator see deep-link navigations falling through to
+    // the shell vs. hitting real routes (routing-misconfig / proxy diagnosis).
+    if (isServeDebugMode()) {
+      writeStderrLine(
+        `qwen serve: Web Shell SPA fallback served for ${req.method} ${req.originalUrl}`,
+      );
+    }
     sendIndex(res);
   });
 }
