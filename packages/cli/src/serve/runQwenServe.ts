@@ -353,6 +353,13 @@ export interface RunHandle {
    * points a browser at an API-only daemon.
    */
   webShellMounted: boolean;
+  /**
+   * The bearer token the daemon actually authenticates against (already
+   * trimmed), or undefined when none is configured. `--open` reads this so the
+   * URL it hands the browser always matches the server's value instead of
+   * re-deriving it from argv/env.
+   */
+  resolvedToken?: string;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
@@ -1025,7 +1032,9 @@ export async function runQwenServe(
       }
     }
   }
-  const webShellMounted = !!webShellDir && opts.serveWebShell !== false;
+  // webShellDir is already undefined whenever serveWebShell === false, so this
+  // collapses to "did we resolve real assets".
+  const webShellMounted = !!webShellDir;
 
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
   // via `deps.boundWorkspace`. That field is the pre-canonicalized
@@ -1253,6 +1262,7 @@ export async function runQwenServe(
         url,
         bridge,
         webShellMounted,
+        resolvedToken: token,
         close: () => {
           // Idempotent: cache the in-flight (or settled) close promise so
           // overlapping calls (e.g. test harness + signal handler firing

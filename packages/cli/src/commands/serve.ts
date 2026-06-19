@@ -493,23 +493,17 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ) {
             target.hostname = '127.0.0.1';
           }
-          // Trim to match runQwenServe's own token normalization — otherwise a
-          // trailing newline from `$(cat token.txt)` makes the browser's token
-          // mismatch the server's trimmed value and 401 every API call.
-          const rawBrowserToken =
-            argv.token || process.env['QWEN_SERVER_TOKEN'];
-          const browserToken =
-            typeof rawBrowserToken === 'string' &&
-            rawBrowserToken.trim().length > 0
-              ? rawBrowserToken.trim()
-              : undefined;
-          if (browserToken) {
+          // Use the server's already-resolved (trimmed) token rather than
+          // re-deriving it from argv/env — keeps the browser's token in
+          // lockstep with what the daemon authenticates against, with no
+          // duplicated env-var name or trim logic.
+          if (handle.resolvedToken) {
             // Use the URL fragment (#token=), not a query param: the fragment
             // is never sent to the server (kept out of access logs / Referer)
             // and the Web Shell reads it client-side. It is still visible in
             // the browser-launcher's argv (ps / /proc), so a one-time-code
             // exchange remains the real fix for multi-user hosts.
-            target.hash = `token=${encodeURIComponent(browserToken)}`;
+            target.hash = `token=${encodeURIComponent(handle.resolvedToken)}`;
             writeStderrLine(
               'qwen serve: --open passes the token in the browser launch command ' +
                 '(visible via `ps` / /proc); on a multi-user host open the URL manually instead.',
