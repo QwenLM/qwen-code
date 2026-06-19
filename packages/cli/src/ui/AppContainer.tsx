@@ -1519,11 +1519,19 @@ export const AppContainer = (props: AppContainerProps) => {
   const speculationRef = useRef<SpeculationState>(IDLE_SPECULATION);
   const suggestionAbortRef = useRef<AbortController | null>(null);
 
-  // Dismiss callback — clears suggestion + aborts in-flight generation/speculation
-  const dismissPromptSuggestion = useCallback(() => {
-    setPromptSuggestion(null);
+  // Aborts in-flight suggestion generation/speculation only. It deliberately
+  // does NOT clear `promptSuggestion`, so the placeholder can restore the
+  // suggestion when the buffer becomes empty again (user types then deletes).
+  // Named "abort" (not "dismiss") precisely because the suggestion text
+  // survives — see #5145 review.
+  const abortPromptSuggestion = useCallback(() => {
     suggestionAbortRef.current?.abort();
     suggestionAbortRef.current = null;
+    // Also abort the speculation so it doesn't continue running after abort.
+    if (speculationRef.current.status !== 'idle') {
+      abortSpeculation(speculationRef.current).catch(() => {});
+      speculationRef.current = IDLE_SPECULATION;
+    }
   }, []);
 
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
@@ -2144,9 +2152,11 @@ export const AppContainer = (props: AppContainerProps) => {
     geminiClient,
   ]);
 
-  // Generate prompt suggestions when streaming completes
+  // Generate prompt suggestions when streaming completes. Enabled by default:
+  // `mergeSettings` doesn't apply the schema `default: true`, so the runtime
+  // gate must treat an unset value as enabled. Only an explicit `false` opts out.
   const followupSuggestionsEnabled =
-    settings.merged.ui?.enableFollowupSuggestions === true;
+    settings.merged.ui?.enableFollowupSuggestions !== false;
 
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
@@ -2256,9 +2266,10 @@ export const AppContainer = (props: AppContainerProps) => {
     settingInputRequests,
   ]);
 
-  // Abort speculation when promptSuggestion is cleared (new turn, feature toggle, or
-  // user-initiated dismiss via typing/paste). InputPrompt calls onPromptSuggestionDismiss
-  // on user input, which clears promptSuggestion, triggering this effect to abort speculation.
+  // Abort speculation when promptSuggestion is cleared (new turn or feature toggle).
+  // promptSuggestion is only cleared when the model responds or the feature is disabled;
+  // user typing/paste no longer dismisses it — the AbortController in InputPrompt handles
+  // that path, so this effect only fires on state changes from non-user-input sources.
   useEffect(() => {
     if (!promptSuggestion && speculationRef.current.status !== 'idle') {
       abortSpeculation(speculationRef.current).catch(() => {});
@@ -3438,7 +3449,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setSessionName,
       // Prompt suggestion
       promptSuggestion,
-      dismissPromptSuggestion,
+      abortPromptSuggestion,
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
@@ -3571,7 +3582,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setSessionName,
       // Prompt suggestion
       promptSuggestion,
-      dismissPromptSuggestion,
+      abortPromptSuggestion,
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,

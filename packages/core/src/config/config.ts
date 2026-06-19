@@ -774,6 +774,7 @@ export interface ConfigParameters {
   approvalMode?: ApprovalMode;
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
+  showResponseTokensPerSecond?: boolean;
   telemetry?: TelemetrySettings;
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
@@ -975,6 +976,8 @@ export interface ConfigParameters {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+  /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
+  settingsWatcher?: { stopWatching(): void };
 }
 
 function normalizeConfigOutputFormat(
@@ -1220,6 +1223,7 @@ export class Config {
   private planGateEntryCounter = 0;
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
+  private readonly showResponseTokensPerSecond: boolean;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
@@ -1336,6 +1340,7 @@ export class Config {
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -1403,6 +1408,8 @@ export class Config {
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.accessibility = params.accessibility ?? {};
+    this.showResponseTokensPerSecond =
+      params.showResponseTokensPerSecond ?? false;
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
@@ -1582,6 +1589,7 @@ export class Config {
     this.projectHooks = params.projectHooks;
     // Legacy: fall back to merged hooks if new fields are not provided
     this.hooks = params.hooks;
+    this.settingsWatcher = params.settingsWatcher;
     this.memoryManager = new MemoryManager();
   }
 
@@ -2656,6 +2664,8 @@ export class Config {
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
+      this.contentGeneratorConfig.toolResultContentFormat =
+        config.toolResultContentFormat;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -2675,6 +2685,10 @@ export class Config {
       if ('splitToolMedia' in sources) {
         this.contentGeneratorConfigSources['splitToolMedia'] =
           sources['splitToolMedia'];
+      }
+      if ('toolResultContentFormat' in sources) {
+        this.contentGeneratorConfigSources['toolResultContentFormat'] =
+          sources['toolResultContentFormat'];
       }
       return;
     }
@@ -2971,6 +2985,10 @@ export class Config {
    */
   async shutdown(): Promise<void> {
     try {
+      // Stop the settings watcher regardless of initialization state —
+      // it is started before Config.initialize() and would leak otherwise.
+      this.settingsWatcher?.stopWatching();
+
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
         return;
@@ -3774,6 +3792,10 @@ export class Config {
 
   getAccessibility(): AccessibilitySettings {
     return this.accessibility;
+  }
+
+  getShowResponseTokensPerSecond(): boolean {
+    return this.showResponseTokensPerSecond;
   }
 
   getTelemetryEnabled(): boolean {
