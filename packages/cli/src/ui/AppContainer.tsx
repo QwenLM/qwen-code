@@ -1155,6 +1155,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openApprovalModeDialog,
       quit: (messages: HistoryItem[]) => {
         setQuittingMessages(messages);
+        // Signal the client to skip background memory tasks (extract, dream,
+        // skill review) so the process can exit without spawning new agent
+        // work during the exit window.
+        config.getGeminiClient()?.requestShutdown();
         setTimeout(async () => {
           await runExitCleanup();
           process.exit(0);
@@ -1206,6 +1210,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       openDiffDialog,
+      config,
     ],
   );
 

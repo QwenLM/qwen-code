@@ -211,6 +211,7 @@ export class GeminiClient {
   private skillsModifiedInSession = false;
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
+  private shutdownRequested = false;
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -594,6 +595,15 @@ export class GeminiClient {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
     });
+  }
+
+  /**
+   * Signal that shutdown is imminent. Subsequent calls to background memory
+   * tasks (extract, dream, skill review) will be skipped so the process can
+   * exit cleanly without spawning new work.
+   */
+  requestShutdown(): void {
+    this.shutdownRequested = true;
   }
 
   /**
@@ -1380,6 +1390,15 @@ export class GeminiClient {
   private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
   ): void {
+    // During shutdown, skip all background memory tasks so the process
+    // can exit cleanly without spawning new work.
+    if (this.shutdownRequested) {
+      debugLogger.debug(
+        'Skipping background memory tasks: shutdown requested.',
+      );
+      return;
+    }
+
     // autoSkill counts tool calls and can trigger on both UserQuery and
     // ToolResult turns so the threshold can fire mid-session.
     if (
