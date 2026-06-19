@@ -207,7 +207,7 @@ export function saveTrustedFolders(
         const updated = applyUpdates(
           parsed as Record<string, unknown>,
           trustedFoldersFile.config as Record<string, unknown>,
-          false,
+          true,
         );
         const preservedContent = stringify(updated, null, 2);
 
@@ -228,7 +228,7 @@ export function saveTrustedFolders(
       trustedFoldersFile.path,
       content,
       // noFollow: refuse to follow any pre-placed symlink at the
-      // config path - a redirected write could either leak the
+      // config path — a redirected write could either leak the
       // trusted-folder list to an attacker target or leave the user's
       // real config silently stale. Matches the credential write
       // sites' security posture (sharedTokenManager, oauth-token-storage,
