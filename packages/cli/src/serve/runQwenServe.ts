@@ -969,6 +969,8 @@ export async function runQwenServe(
       bridge.queryWorkspaceStatus(method, idle),
     invokeWorkspaceCommand: (method, params, invokeOpts) =>
       bridge.invokeWorkspaceCommand(method, params, invokeOpts),
+    refreshExtensionsForAllSessions: () =>
+      bridge.refreshExtensionsForAllSessions(),
     publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
   });
 

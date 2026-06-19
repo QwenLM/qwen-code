@@ -4549,6 +4549,16 @@ class QwenAgent implements Agent {
               ? { autoUpdate: ext.installMetadata.autoUpdate }
               : {}),
             capabilities,
+            updateState: ext.installMetadata ? 'unknown' : 'not updatable',
+            details: {
+              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
+              commands: ext.commands ?? [],
+              skills: ext.skills?.map((skill) => skill.name) ?? [],
+              agents: ext.agents?.map((agent) => agent.name) ?? [],
+              contextFiles: ext.contextFiles,
+              settings:
+                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
+            },
           };
         },
       );
@@ -5965,6 +5975,23 @@ class QwenAgent implements Agent {
           originatorClientId,
         );
         return result as unknown as Record<string, unknown>;
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
+        const sessionId = params['sessionId'] as string;
+        const session = this.sessionOrThrow(sessionId);
+        const extensionManager = session.getConfig().getExtensionManager();
+        await extensionManager.refreshCache();
+        try {
+          await extensionManager.refreshTools();
+        } catch (err) {
+          debugLogger.warn(
+            `Extension tool refresh failed for session ${sessionId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        await session.sendAvailableCommandsUpdate();
+        return { ok: true };
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;

@@ -139,6 +139,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
+  workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
 } as const;
 
 export type ServeStatus =
@@ -872,6 +873,26 @@ export interface ServeExtensionCapabilities {
   hasSettings: boolean;
 }
 
+export type ServeExtensionUpdateState =
+  | 'checking for updates'
+  | 'updated, needs restart'
+  | 'updating'
+  | 'updated'
+  | 'update available'
+  | 'up to date'
+  | 'error'
+  | 'not updatable'
+  | 'unknown';
+
+export interface ServeExtensionDetails {
+  mcpServers: string[];
+  commands: string[];
+  skills: string[];
+  agents: string[];
+  contextFiles: string[];
+  settings: string[];
+}
+
 export interface ServeExtensionEntry {
   kind: 'extension';
   id: string;
@@ -885,7 +906,9 @@ export interface ServeExtensionEntry {
   originSource?: ServeExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  updateState?: ServeExtensionUpdateState;
   capabilities: ServeExtensionCapabilities;
+  details?: ServeExtensionDetails;
 }
 
 export interface ServeWorkspaceExtensionsStatus {

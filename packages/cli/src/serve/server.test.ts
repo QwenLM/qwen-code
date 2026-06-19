@@ -38,10 +38,14 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
+  ExtensionManager,
+  ExtensionUpdateState,
   SessionService,
   Storage,
   TrustGateError,
+  type Extension,
 } from '@qwen-code/qwen-code-core';
+import * as qwenCore from '@qwen-code/qwen-code-core';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -494,6 +498,21 @@ interface FakeBridge extends AcpSessionBridge {
   workspacePreflightCalls: number;
   workspaceHooksCalls: number;
   workspaceExtensionsCalls: number;
+  extensionEvents: Array<{
+    refreshed: number;
+    failed: number;
+    status?:
+      | 'installed'
+      | 'enabled'
+      | 'disabled'
+      | 'updated'
+      | 'uninstalled'
+      | 'failed';
+    source?: string;
+    name?: string;
+    version?: string;
+    error?: string;
+  }>;
   sessionContextCalls: string[];
   sessionContextUsageCalls: string[];
   sessionSupportedCommandsCalls: string[];
@@ -597,6 +616,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspacePreflightCalls = 0;
   let workspaceHooksCalls = 0;
   let workspaceExtensionsCalls = 0;
+  const extensionEvents: FakeBridge['extensionEvents'] = [];
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
@@ -928,6 +948,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionPermissionVotes,
     listCalls,
     workspaceMcpToolsCalls,
+    extensionEvents,
     sessionContextCalls,
     sessionContextUsageCalls,
     sessionSupportedCommandsCalls,
@@ -1098,6 +1119,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getWorkspaceExtensionsStatus() {
       workspaceExtensionsCalls += 1;
       return workspaceExtensionsImpl();
+    },
+    async refreshExtensionsForAllSessions(data) {
+      extensionEvents.push({ ...data, refreshed: 1, failed: 0 });
+      return { refreshed: 1, failed: 0 };
+    },
+    broadcastExtensionsChanged(data) {
+      extensionEvents.push(data);
     },
     async getSessionContextStatus(sessionId) {
       sessionContextCalls.push(sessionId);
@@ -2135,37 +2163,8 @@ describe('createServeApp', () => {
       expect(bridge.sessionHooksCalls).toEqual(['s-1']);
     });
 
-    it('returns workspace extensions status from the bridge', async () => {
-      const extensions: ServeWorkspaceExtensionsStatus = {
-        v: 1,
-        workspaceCwd: WS_BOUND,
-        initialized: true,
-        extensions: [
-          {
-            kind: 'extension',
-            id: 'abc123',
-            name: 'test-ext',
-            version: '1.0.0',
-            isActive: true,
-            path: '/home/user/.qwen/extensions/test-ext',
-            source: 'https://github.com/org/test-ext',
-            installType: 'git',
-            capabilities: {
-              mcpServerCount: 1,
-              skillCount: 2,
-              agentCount: 0,
-              hookCount: 0,
-              commandCount: 1,
-              contextFileCount: 1,
-              channelCount: 0,
-              hasSettings: false,
-            },
-          },
-        ],
-      };
-      const bridge = fakeBridge({
-        workspaceExtensionsImpl: async () => extensions,
-      });
+    it('returns workspace extensions status without depending on a live session', async () => {
+      const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
@@ -2176,8 +2175,1420 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(extensions);
-      expect(bridge.workspaceExtensionsCalls).toBe(1);
+      expect(res.body).toMatchObject({
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+      });
+      expect(Array.isArray(res.body.extensions)).toBe(true);
+      expect(bridge.workspaceExtensionsCalls).toBe(0);
+    });
+
+    it('caches local workspace extension status briefly', async () => {
+      const restore = mockExtensionManagerMethods();
+      try {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const first = await request(app)
+          .get('/workspace/extensions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const second = await request(app)
+          .get('/workspace/extensions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(first.status).toBe(200);
+        expect(second.status).toBe(200);
+        expect(
+          vi.mocked(ExtensionManager.prototype.refreshCache),
+        ).toHaveBeenCalledTimes(1);
+      } finally {
+        restore();
+      }
+    });
+
+    it('redacts extension source URLs in workspace extension status', async () => {
+      const restore = mockExtensionManagerMethods({
+        getLoadedExtensions: () => [
+          {
+            ...testExtension('private-ext'),
+            installMetadata: {
+              source: 'https://user:token@example.com/private-ext',
+              originSource: 'QwenCode',
+            },
+          },
+        ],
+      });
+      try {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .get('/workspace/extensions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.extensions[0]).toMatchObject({
+          source: 'https://***REDACTED***@example.com/private-ext',
+          originSource: 'QwenCode',
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    const testExtension = (name = 'test-ext'): Extension =>
+      ({
+        name,
+        config: { version: '1.2.3' },
+        installMetadata: { source: `https://example.com/${name}` },
+        contextFiles: [],
+        commands: [],
+      }) as unknown as Extension;
+
+    const mockExtensionManagerMethods = (overrides?: {
+      refreshCache?: () => Promise<void>;
+      installExtension?: () => Promise<Extension>;
+      getLoadedExtensions?: () => Extension[];
+      enableExtension?: () => Promise<void>;
+      disableExtension?: () => Promise<void>;
+      uninstallExtension?: () => Promise<void>;
+      checkForAllExtensionUpdates?: (
+        cb: (name: string, state: ExtensionUpdateState) => void,
+      ) => Promise<void>;
+      updateExtension?: () => Promise<{ updatedVersion?: string } | undefined>;
+    }) => {
+      const spies = [
+        vi
+          .spyOn(ExtensionManager.prototype, 'refreshCache')
+          .mockImplementation(
+            overrides?.refreshCache ?? (async () => undefined),
+          ),
+        vi
+          .spyOn(ExtensionManager.prototype, 'installExtension')
+          .mockImplementation(
+            overrides?.installExtension ??
+              (async () => testExtension('installed-ext')),
+          ),
+        vi
+          .spyOn(ExtensionManager.prototype, 'getLoadedExtensions')
+          .mockImplementation(
+            overrides?.getLoadedExtensions ??
+              (() => [testExtension('test-ext')]),
+          ),
+        vi
+          .spyOn(ExtensionManager.prototype, 'enableExtension')
+          .mockImplementation(
+            overrides?.enableExtension ?? (async () => undefined),
+          ),
+        vi
+          .spyOn(ExtensionManager.prototype, 'disableExtension')
+          .mockImplementation(
+            overrides?.disableExtension ?? (async () => undefined),
+          ),
+        vi
+          .spyOn(ExtensionManager.prototype, 'uninstallExtension')
+          .mockImplementation(
+            overrides?.uninstallExtension ?? (async () => undefined),
+          ),
+        vi
+          .spyOn(ExtensionManager.prototype, 'checkForAllExtensionUpdates')
+          .mockImplementation(
+            overrides?.checkForAllExtensionUpdates ??
+              (async (cb) => {
+                cb('test-ext', ExtensionUpdateState.UPDATE_AVAILABLE);
+              }),
+          ),
+        vi
+          .spyOn(ExtensionManager.prototype, 'updateExtension')
+          .mockImplementation(
+            overrides?.updateExtension ??
+              (async () => ({
+                name: 'test-ext',
+                originalVersion: '1.2.3',
+                updatedVersion: '1.2.4',
+              })),
+          ),
+      ];
+      return () => {
+        for (const spy of spies) {
+          spy.mockRestore();
+        }
+      };
+    };
+
+    it('rejects extension install without a registered workspace client id', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ source: 'owner/repo', consent: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('missing_client_id');
+    });
+
+    it('rejects extension install from an unknown workspace client id', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-2')
+        .send({ source: 'owner/repo', consent: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+    });
+
+    it('queues extension install and refreshes active sessions', async () => {
+      let requestSettingError: string | undefined;
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          const manager = this as unknown as {
+            requestSetting?: (setting: { envVar: string }) => Promise<string>;
+          };
+          try {
+            await manager.requestSetting?.({ envVar: 'API_KEY' });
+          } catch (error) {
+            requestSettingError =
+              error instanceof Error ? error.message : String(error);
+          }
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({
+            source: 'https://example.com/installed-ext',
+            ref: 'v1.2.3',
+            autoUpdate: true,
+            allowPreRelease: true,
+            consent: true,
+          });
+
+        expect(res.status).toBe(202);
+        expect(res.body).toEqual({ accepted: true });
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'installed',
+            source: 'https://example.com/installed-ext',
+            name: 'installed-ext',
+            version: '1.2.3',
+            refreshed: 1,
+            failed: 0,
+          });
+        });
+        expect(
+          vi.mocked(ExtensionManager.prototype.installExtension),
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            ref: 'v1.2.3',
+            autoUpdate: true,
+            allowPreRelease: true,
+          }),
+          expect.any(Function),
+        );
+        expect(requestSettingError).toContain(
+          'requires interactive configuration',
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('broadcasts a failed extension install with redacted error details', async () => {
+      const restore = mockExtensionManagerMethods({
+        installExtension: async () => {
+          throw new Error('https://user:token@example.com/private-ext failed');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({
+            source: 'https://example.com/private-ext',
+            consent: true,
+          });
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            source: 'https://example.com/private-ext',
+            refreshed: 0,
+            failed: 0,
+            error: 'https://***REDACTED***@example.com/private-ext failed',
+          });
+        });
+        expect(bridge.extensionEvents.at(-1)?.error).not.toContain('token');
+      } finally {
+        restore();
+      }
+    });
+
+    it('does not report a successful extension install as failed when session refresh fails', async () => {
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        bridge.refreshExtensionsForAllSessions = async () => {
+          throw new Error('refresh broke');
+        };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({
+            source: 'https://example.com/installed-ext',
+            consent: true,
+          });
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'installed',
+            source: 'https://example.com/installed-ext',
+            name: 'installed-ext',
+            refreshed: 0,
+            failed: 1,
+            error: 'refresh broke',
+          });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('rejects extension mutations when the operation queue is full', async () => {
+      let releaseInstall: (() => void) | undefined;
+      const installBlocker = new Promise<void>((resolve) => {
+        releaseInstall = resolve;
+      });
+      const restore = mockExtensionManagerMethods({
+        installExtension: async () => {
+          await installBlocker;
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const install = () =>
+          request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({
+              source: 'https://example.com/installed-ext',
+              consent: true,
+            });
+
+        const accepted = await Promise.all(
+          Array.from({ length: 10 }, () => install()),
+        );
+        const rejected = await install();
+
+        expect(accepted.every((res) => res.status === 202)).toBe(true);
+        expect(rejected.status).toBe(429);
+        expect(rejected.body).toMatchObject({
+          code: 'extension_queue_full',
+        });
+        releaseInstall?.();
+        await vi.waitFor(() => {
+          expect(
+            bridge.extensionEvents.filter(
+              (event) => event.status === 'installed',
+            ),
+          ).toHaveLength(10);
+        });
+      } finally {
+        releaseInstall?.();
+        restore();
+      }
+    });
+
+    it('requires explicit consent for extension install', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ source: 'owner/repo' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        'Extension installation requires explicit consent',
+      );
+    });
+
+    it('rejects an empty extension install ref', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ source: 'owner/repo', ref: '', consent: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('`ref` must be a string');
+    });
+
+    it('validates extension install option types', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ source: 'owner/repo', ref: 123, consent: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('`ref` must be a string');
+    });
+
+    it('broadcasts failed local extension installs over the daemon endpoint', async () => {
+      const localExtensionDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-local-extension-'),
+      );
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ source: localExtensionDir, consent: true });
+
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(bridge.extensionEvents.at(-1)).toMatchObject({
+          status: 'failed',
+          source: localExtensionDir,
+          error:
+            'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+        });
+      });
+    });
+
+    it('treats Windows drive paths as local extension sources', async () => {
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const source = 'C:\\Users\\test\\qwen-local-extension';
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source, consent: true });
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            source,
+            error: `Install source not found: ${source}`,
+          });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('rejects extension source hosts on blocked networks', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          source: 'http://169.254.169.254/latest/meta-data',
+          consent: true,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('`source` host is not allowed');
+    });
+
+    it('rejects extension source URLs with unsupported protocols', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      for (const source of [
+        'http://example.com/repo',
+        'ftp://example.com/repo',
+        'file:///tmp/repo',
+      ]) {
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({
+            source,
+            consent: true,
+          });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('`source` must use https or ssh');
+      }
+    });
+
+    it('rejects extension ssh source hosts with legacy private IP encodings', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      for (const source of [
+        'git@0177.0.0.1:owner/repo.git',
+        'git@0177.1:owner/repo.git',
+        'git@0x7f.1:owner/repo.git',
+        'git@127.0x1:owner/repo.git',
+        'git@0x7f000001:owner/repo.git',
+        'git@2130706433:owner/repo.git',
+      ]) {
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source, consent: true });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('`source` host is not allowed');
+      }
+    });
+
+    it('rejects extension ssh source hosts with bracketed private IPv6 literals', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      for (const source of [
+        'git@[::1]:owner/repo.git',
+        'git@[fd00::1]:owner/repo.git',
+        'git@[fe80::1]:owner/repo.git',
+      ]) {
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source, consent: true });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('`source` host is not allowed');
+      }
+    });
+
+    it('rejects extension install refs that look like git options', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          source: 'https://example.com/repo',
+          ref: '--upload-pack=/bin/sh',
+          consent: true,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('`ref` must not start with "-"');
+    });
+
+    it('rejects extension source URLs with credentials', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          source: 'https://user:pass@example.com/repo',
+          consent: true,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('`source` must not include credentials');
+    });
+
+    it('broadcasts failed npm extension install with ref', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ source: '@scope/ext', ref: 'v1', consent: true });
+
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(bridge.extensionEvents.at(-1)).toMatchObject({
+          status: 'failed',
+          source: '@scope/ext',
+          error: '--ref is not applicable for npm extensions.',
+        });
+      });
+    });
+
+    it('broadcasts failed registry use for non-npm extension installs', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          source: 'https://example.com/repo',
+          registry: 'https://registry.example.com',
+          consent: true,
+        });
+
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(bridge.extensionEvents.at(-1)).toMatchObject({
+          status: 'failed',
+          source: 'https://example.com/repo',
+          error: '--registry is only applicable for npm extensions.',
+        });
+      });
+    });
+
+    it('rejects non-https npm registries', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          source: '@scope/ext',
+          registry: 'http://registry.example.com',
+          consent: true,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('`registry` must use https');
+    });
+
+    it('rejects invalid npm registry URLs', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          source: '@scope/ext',
+          registry: 'not a url',
+          consent: true,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('`registry` must be a valid URL');
+    });
+
+    it('rejects npm registries on blocked networks', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          source: '@scope/ext',
+          registry: 'https://169.254.169.254',
+          consent: true,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('`registry` host is not allowed');
+    });
+
+    it('rejects npm registries with credentials', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/install')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          source: '@scope/ext',
+          registry: 'https://user:pass@registry.example.com',
+          consent: true,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('`registry` must not include credentials');
+    });
+
+    it('returns extension update states from check-updates', async () => {
+      const restore = mockExtensionManagerMethods({
+        checkForAllExtensionUpdates: async (cb) => {
+          cb('test-ext', ExtensionUpdateState.UP_TO_DATE);
+          cb('other-ext', ExtensionUpdateState.NOT_UPDATABLE);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/check-updates')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+          states: {
+            'test-ext': ExtensionUpdateState.UP_TO_DATE,
+            'other-ext': ExtensionUpdateState.NOT_UPDATABLE,
+          },
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('serializes check-updates behind queued extension mutations', async () => {
+      let releaseInstall: (() => void) | undefined;
+      const calls: string[] = [];
+      const restore = mockExtensionManagerMethods({
+        installExtension: async () => {
+          calls.push('install:start');
+          await new Promise<void>((resolve) => {
+            releaseInstall = resolve;
+          });
+          calls.push('install:end');
+          return testExtension('installed-ext');
+        },
+        checkForAllExtensionUpdates: async (cb) => {
+          calls.push('check-updates');
+          cb('test-ext', ExtensionUpdateState.UP_TO_DATE);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({
+            source: 'https://example.com/installed-ext',
+            consent: true,
+          });
+        await vi.waitFor(() => {
+          expect(calls).toEqual(['install:start']);
+        });
+
+        const checkUpdates = request(app)
+          .post('/workspace/extensions/check-updates')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({})
+          .then((response) => response);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(calls).toEqual(['install:start']);
+
+        releaseInstall?.();
+        const res = await checkUpdates;
+        expect(res.status).toBe(200);
+        expect(calls).toEqual([
+          'install:start',
+          'install:end',
+          'check-updates',
+        ]);
+      } finally {
+        releaseInstall?.();
+        restore();
+      }
+    });
+
+    it('validates extension enable scope', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/test-ext/enable')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ scope: 'team' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '`scope` must be either "user" or "workspace"',
+      );
+    });
+
+    it('queues extension enable and disable mutations', async () => {
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const enable = await request(app)
+          .post('/workspace/extensions/TEST-EXT/enable')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ scope: 'workspace' });
+        expect(enable.status).toBe(202);
+
+        const disable = await request(app)
+          .post('/workspace/extensions/TEST-EXT/disable')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ scope: 'user' });
+        expect(disable.status).toBe(202);
+
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                status: 'enabled',
+                name: 'test-ext',
+                refreshed: 1,
+                failed: 0,
+              }),
+              expect.objectContaining({
+                status: 'disabled',
+                name: 'test-ext',
+                refreshed: 1,
+                failed: 0,
+              }),
+            ]),
+          );
+        });
+        expect(
+          vi.mocked(ExtensionManager.prototype.enableExtension),
+        ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+        expect(
+          vi.mocked(ExtensionManager.prototype.disableExtension),
+        ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+      } finally {
+        restore();
+      }
+    });
+
+    it('refreshes extensions for all sessions on request', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/refresh')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ refreshed: 1, failed: 0 });
+      expect(bridge.extensionEvents.at(-1)).toMatchObject({
+        refreshed: 1,
+        failed: 0,
+      });
+    });
+
+    it('serializes extension refresh behind queued mutations', async () => {
+      let releaseInstall: (() => void) | undefined;
+      const restore = mockExtensionManagerMethods({
+        installExtension: async () => {
+          await new Promise<void>((resolve) => {
+            releaseInstall = resolve;
+          });
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({
+            source: 'https://example.com/installed-ext',
+            consent: true,
+          });
+        await vi.waitFor(() => {
+          expect(
+            vi.mocked(ExtensionManager.prototype.installExtension),
+          ).toHaveBeenCalled();
+        });
+
+        const refresh = request(app)
+          .post('/workspace/extensions/refresh')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({})
+          .then((response) => response);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(bridge.extensionEvents).toEqual([]);
+
+        releaseInstall?.();
+        const res = await refresh;
+        expect(res.status).toBe(200);
+        expect(bridge.extensionEvents).toEqual([
+          expect.objectContaining({ status: 'installed' }),
+          expect.objectContaining({ refreshed: 1, failed: 0 }),
+        ]);
+      } finally {
+        releaseInstall?.();
+        restore();
+      }
+    });
+
+    it('rejects extension update from an unknown workspace client id', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/workspace/extensions/test-ext/update')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-2')
+        .send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+    });
+
+    it('queues extension update when an update is available', async () => {
+      const restore = mockExtensionManagerMethods();
+      const checkForExtensionUpdate = vi
+        .spyOn(qwenCore, 'checkForExtensionUpdate')
+        .mockResolvedValue(ExtensionUpdateState.UPDATE_AVAILABLE);
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/test-ext/update')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'updated',
+            name: 'test-ext',
+            version: '1.2.4',
+            refreshed: 1,
+            failed: 0,
+          });
+        });
+        expect(checkForExtensionUpdate).toHaveBeenCalledTimes(1);
+        expect(
+          vi.mocked(ExtensionManager.prototype.checkForAllExtensionUpdates),
+        ).not.toHaveBeenCalled();
+      } finally {
+        checkForExtensionUpdate.mockRestore();
+        restore();
+      }
+    });
+
+    it('broadcasts failed extension update when the extension is missing', async () => {
+      const restore = mockExtensionManagerMethods({
+        getLoadedExtensions: () => [],
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/missing-ext/update')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            name: 'missing-ext',
+            refreshed: 0,
+            failed: 0,
+            error: 'Extension "missing-ext" not found',
+          });
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('broadcasts failed extension update when no update is available', async () => {
+      const restore = mockExtensionManagerMethods();
+      const checkForExtensionUpdate = vi
+        .spyOn(qwenCore, 'checkForExtensionUpdate')
+        .mockResolvedValue(ExtensionUpdateState.UP_TO_DATE);
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/test-ext/update')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            name: 'test-ext',
+            error: 'Extension "test-ext" has no update',
+          });
+        });
+      } finally {
+        checkForExtensionUpdate.mockRestore();
+        restore();
+      }
+    });
+
+    it('broadcasts failed extension update when update check fails', async () => {
+      const restore = mockExtensionManagerMethods();
+      const checkForExtensionUpdate = vi
+        .spyOn(qwenCore, 'checkForExtensionUpdate')
+        .mockRejectedValue(
+          new Error('https://user:token@example.com/check failed'),
+        );
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/test-ext/update')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            name: 'test-ext',
+            error:
+              'Update check failed for extension "test-ext": https://***REDACTED***@example.com/check failed',
+          });
+        });
+      } finally {
+        checkForExtensionUpdate.mockRestore();
+        restore();
+      }
+    });
+
+    it('rejects extension uninstall without a registered workspace client id', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .delete('/workspace/extensions/test-ext')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('missing_client_id');
+    });
+
+    it('queues extension uninstall mutations', async () => {
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .delete('/workspace/extensions/TEST-EXT')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1');
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'uninstalled',
+            name: 'test-ext',
+            refreshed: 1,
+            failed: 0,
+          });
+        });
+        expect(
+          vi.mocked(ExtensionManager.prototype.uninstallExtension),
+        ).toHaveBeenCalledWith('test-ext', false, WS_BOUND);
+      } finally {
+        restore();
+      }
+    });
+
+    it('queues extension uninstall mutations by source URL', async () => {
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .delete('/workspace/extensions/https%3A%2F%2Fexample.com%2Ftest-ext')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1');
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'uninstalled',
+            name: 'test-ext',
+            refreshed: 1,
+            failed: 0,
+          });
+        });
+        expect(
+          vi.mocked(ExtensionManager.prototype.uninstallExtension),
+        ).toHaveBeenCalledWith('test-ext', false, WS_BOUND);
+      } finally {
+        restore();
+      }
+    });
+
+    it('does not treat plain extension names as install source lookups', async () => {
+      const restore = mockExtensionManagerMethods({
+        getLoadedExtensions: () => [
+          {
+            ...testExtension('source-only'),
+            installMetadata: { source: 'plain-name' },
+          },
+        ],
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .delete('/workspace/extensions/plain-name')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1');
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            name: 'plain-name',
+            error: 'Extension "plain-name" not found',
+          });
+        });
+        expect(
+          vi.mocked(ExtensionManager.prototype.uninstallExtension),
+        ).not.toHaveBeenCalled();
+      } finally {
+        restore();
+      }
+    });
+
+    it('does not throw when source lookup sees extensions without install metadata', async () => {
+      const restore = mockExtensionManagerMethods({
+        getLoadedExtensions: () => [
+          {
+            ...testExtension('no-metadata'),
+            installMetadata: undefined,
+          },
+        ],
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .delete('/workspace/extensions/https%3A%2F%2Fexample.com%2Fmissing')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1');
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            name: 'https://example.com/missing',
+            error: 'Extension "https://example.com/missing" not found',
+          });
+        });
+      } finally {
+        restore();
+      }
     });
 
     it('returns read-only session snapshots from the bridge', async () => {

@@ -144,6 +144,34 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.serverName} restart refused: ${event.reason}`,
         '33',
       );
+    case 'workspace.extensions.changed':
+      if (event.status === 'failed') {
+        return terminalLine(
+          'ext',
+          `extension action failed${
+            event.name
+              ? ` ${event.name}`
+              : event.source
+                ? ` ${event.source}`
+                : ''
+          }: ${event.error ?? 'unknown error'}`,
+          '31',
+        );
+      }
+      if (event.status === 'installed') {
+        return terminalLine(
+          'ext',
+          `installed ${event.name ?? event.source ?? 'extension'}${
+            event.version ? ` v${event.version}` : ''
+          } (${event.refreshed} refreshed, ${event.failed} failed)`,
+          '36',
+        );
+      }
+      return terminalLine(
+        'ext',
+        `extensions refreshed (${event.refreshed} ok, ${event.failed} failed)`,
+        '36',
+      );
     case 'auth.device_flow.started':
       return terminalLine(
         'auth',

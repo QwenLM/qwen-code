@@ -6139,4 +6139,116 @@ describe('sessionLanguage multi-session propagation', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it('refreshes extension commands for the live session', async () => {
+    const extensionManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshTools: vi.fn().mockResolvedValue(undefined),
+    };
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-ext'),
+      getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+    });
+    const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-ext'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          sendAvailableCommandsUpdate,
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/ext', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
+        sessionId: 's-ext',
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('still sends available commands update when extension tool refresh fails', async () => {
+    const extensionManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshTools: vi.fn().mockRejectedValue(new Error('bad tool schema')),
+    };
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-ext'),
+      getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+    });
+    const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-ext'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          sendAvailableCommandsUpdate,
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/ext', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
+        sessionId: 's-ext',
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 });
