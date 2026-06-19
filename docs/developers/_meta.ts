@@ -22,6 +22,8 @@ export default {
   tools: 'Tools',
   'qwen-serve-protocol': 'qwen serve HTTP protocol',
   'blaze-runtime-extraction': 'Blaze Runtime Extraction',
+  'blaze-runtime-local-smoke-test': 'Blaze Runtime Local Smoke Test',
+  'blaze-runtime-local-stabilization': 'Blaze Runtime Local Stabilization',
   'blaze-runtime-sandbox-mvp-handoff': 'Blaze Runtime Sandbox MVP Handoff',
   daemon: 'Daemon Mode (Developer Deep Dive)',
 

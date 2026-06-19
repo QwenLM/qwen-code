@@ -91,7 +91,7 @@ mkdir -p /tmp/blaze-runtime-workspace
 ```bash
 export BLAZE_RUNTIME_TOKEN="local-dev-token"
 export BLAZE_RUNTIME_ENTRY="$PWD/dist/blaze-runtime.js"
-export BLAZE_DP_TOKEN="ory_at_aBSJKmphiz6T_iXkqH__ovST9vofbEg5oRmG7CxTxCs.dMKaaM2P_KlV721_xRZD8rWivYx2s9KU20_F8vp1ubQ"
+export BLAZE_DP_TOKEN="<your-dp-token>"
 
 node scripts/blaze-runtime-entry.js serve \
   --port 4170 \
@@ -99,6 +99,11 @@ node scripts/blaze-runtime-entry.js serve \
   --workspace /tmp/blaze-runtime-workspace \
   --require-auth
 ```
+
+> Важно: реальные значения `BLAZE_DP_TOKEN`, `DP_TOKEN`, `BLAZE_DP_JWT`,
+> `NESSY_CLI_DP_AUTH_TOKEN` и `BLAZE_RUNTIME_TOKEN` нельзя сохранять в markdown,
+> git history, CI logs или issue/PR comments. В отчетах используй только
+> placeholders вроде `<your-dp-token>` и `<redacted>`.
 
 ### 3.4. Флаги запуска
 
