@@ -902,6 +902,72 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 
+  it('does not report a path when a kept read_file result for the same file remains', () => {
+    const history: Content[] = [
+      fileCall('old', 'read_file', '/proj/same.ts'),
+      fileResult('old', 'read_file', 'old long content '.repeat(50)),
+      fileCall('keep', 'read_file', '/proj/same.ts'),
+      fileResult('keep', 'read_file', 'newer full content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('does not report a path when a pending kept result for the same file remains', () => {
+    const history: Content[] = [
+      fileCall('old', 'read_file', '/proj/same.ts'),
+      fileResult('old', 'read_file', 'old long content '.repeat(50)),
+      fileCall('keep', 'read_file', '/proj/same.ts'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 10,
+      },
+      {
+        sizeOnly: true,
+        pendingContent: fileResult('keep', 'read_file', 'newer full content'),
+      },
+    );
+
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('does not let a kept reused id protect ambiguous candidate paths', () => {
+    const history: Content[] = [
+      fileCall('dup', 'read_file', '/proj/first.ts'),
+      fileResult('dup', 'read_file', 'first old content '.repeat(50)),
+      fileCall('dup', 'read_file', '/proj/second.ts'),
+      fileResult('dup', 'read_file', 'second kept content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect([...result.meta!.evictedReadPaths].sort()).toEqual([
+      '/proj/first.ts',
+      '/proj/second.ts',
+    ]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
   it('disarms ALL paths sharing a reused functionCall.id (mimo F1)', () => {
     // Pathological/resumed history reuses one id across two files.
     // The blanked result must disarm BOTH candidate paths — keeping
