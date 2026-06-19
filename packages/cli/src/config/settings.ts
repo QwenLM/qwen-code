@@ -61,6 +61,63 @@ function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
   return current?.mergeStrategy;
 }
 
+/**
+ * Creates a deep copy of settings with userOnly settings removed.
+ * Used to strip workspace-level values for settings that should only be configured at user scope.
+ */
+function removeUserOnlySettings(settings: Settings): Settings {
+  // Use a local type that allows string indexing
+  type SettingsWithIndex = Settings & { [key: string]: unknown };
+
+  const result: SettingsWithIndex = {};
+  const schema = getSettingsSchema();
+
+  for (const [key, value] of Object.entries(settings)) {
+    // Type assertion to access schema by string key
+    const settingDef = (schema as Record<string, unknown>)[key] as
+      | SettingDefinition
+      | undefined;
+
+    // If this setting is userOnly, skip it (don't include in result)
+    if (settingDef?.userOnly === true) {
+      continue;
+    }
+
+    // Handle nested objects
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      settingDef?.properties
+    ) {
+      const nestedSettings = value as Record<string, unknown>;
+      const filteredNested: Record<string, unknown> = {};
+
+      for (const [nestedKey, nestedValue] of Object.entries(nestedSettings)) {
+        const nestedDef = settingDef.properties?.[nestedKey];
+
+        // If this nested setting is userOnly, skip it
+        if (nestedDef?.userOnly === true) {
+          continue;
+        }
+
+        // Note: userOnly is only supported at depth ≤ 2 (e.g., ui.fortuneCommand).
+        // The schema is exactly 2 levels deep, and recursive filtering beyond that
+        // would fail because getSettingsSchema() returns only top-level keys.
+        filteredNested[nestedKey] = nestedValue;
+      }
+
+      if (Object.keys(filteredNested).length > 0) {
+        result[key] = filteredNested;
+      }
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return result as Settings;
+}
+
 export type { Settings, MemoryImportFormat };
 
 export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
@@ -439,18 +496,21 @@ function mergeSettings(
     ? tagMcpServerScope(workspace, 'workspace')
     : ({} as Settings);
 
+  // Remove userOnly settings from workspace to prevent workspace from overriding them
+  const filteredWorkspace = removeUserOnlySettings(safeWorkspace);
+
   // Settings are merged with the following precedence (last one wins for
   // single values):
   // 1. System Defaults
   // 2. User Settings
-  // 3. Workspace Settings
+  // 3. Workspace Settings (excluding userOnly settings)
   // 4. System Settings (as overrides)
   return customDeepMerge(
     getMergeStrategyForPath,
     {}, // Start with an empty object
     systemDefaults,
     user,
-    safeWorkspace,
+    filteredWorkspace,
     tagMcpServerScope(system, 'system'),
   ) as Settings;
 }

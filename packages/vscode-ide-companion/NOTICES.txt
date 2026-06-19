@@ -198,6 +198,12 @@ This file contains third-party software notices and license terms.
 
 
 ============================================================
+@qwen-code/sdk@undefined
+(https://github.com/QwenLM/qwen-code.git)
+
+License text not found.
+
+@qwen-code/webui@undefined
 @modelcontextprotocol/sdk@1.29.0
 (git+https://github.com/modelcontextprotocol/typescript-sdk.git)
 
@@ -224,7 +230,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-============================================================
 @hono/node-server@1.19.14
 (https://github.com/honojs/node-server.git)
 
@@ -251,7 +256,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-============================================================
 ajv@8.20.0
 (No repository found)
 

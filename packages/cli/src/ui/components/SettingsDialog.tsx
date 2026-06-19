@@ -129,7 +129,7 @@ export function SettingsDialog({
   }, [selectedScope, settings, globalPendingChanges]);
 
   const generateSettingsItems = () => {
-    const settingKeys = getDialogSettingKeys();
+    const settingKeys = getDialogSettingKeys(selectedScope);
 
     return settingKeys.map((key: string) => {
       const definition = getSettingDefinition(key);

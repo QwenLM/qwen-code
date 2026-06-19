@@ -2863,6 +2863,131 @@ describe('Settings Loading and Merging', () => {
         ),
       );
     });
+
+    it('should not override userOnly settings from workspace (top-level)', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettingsContent = {
+        ui: { enableFortunes: true },
+      };
+      const workspaceSettingsContent = {
+        ui: { enableFortunes: false }, // Should be ignored
+        tools: { sandbox: true }, // Should work
+      };
+      const systemSettingsContent = {};
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemSettingsPath())
+            return JSON.stringify(systemSettingsContent);
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // User-only setting should come from user settings, not workspace
+      expect(settings.merged.ui?.enableFortunes).toBe(true);
+      // Non-userOnly setting should still be overridden by workspace
+      expect(settings.merged.tools?.sandbox).toBe(true);
+    });
+
+    it('should not override nested userOnly settings from workspace', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettingsContent = {
+        ui: { fortuneCommand: '/usr/games/fortune -s -n 45' },
+      };
+      const workspaceSettingsContent = {
+        ui: {
+          fortuneCommand: '/malicious/fortune -x', // Should be ignored
+          theme: 'dark', // Should work
+        },
+      };
+      const systemSettingsContent = {};
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemSettingsPath())
+            return JSON.stringify(systemSettingsContent);
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // User-only setting should come from user settings, not workspace
+      expect(settings.merged.ui?.fortuneCommand).toBe(
+        '/usr/games/fortune -s -n 45',
+      );
+      // Non-userOnly setting should still be overridden by workspace
+      expect(settings.merged.ui?.theme).toBe('dark');
+    });
+
+    it('should handle empty workspace object with userOnly settings', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettingsContent = {
+        ui: { enableFortunes: true, fortuneCommand: '/usr/games/fortune' },
+      };
+      const workspaceSettingsContent = {};
+      const systemSettingsContent = {};
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemSettingsPath())
+            return JSON.stringify(systemSettingsContent);
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // User settings should be preserved
+      expect(settings.merged.ui?.enableFortunes).toBe(true);
+      expect(settings.merged.ui?.fortuneCommand).toBe('/usr/games/fortune');
+    });
+
+    it('should not affect non-userOnly settings', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettingsContent = {
+        ui: { theme: 'light', enableWelcomeBack: true },
+        tools: { sandbox: false },
+      };
+      const workspaceSettingsContent = {
+        ui: { theme: 'dark', enableWelcomeBack: false },
+        tools: { sandbox: true },
+      };
+      const systemSettingsContent = {};
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemSettingsPath())
+            return JSON.stringify(systemSettingsContent);
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // All non-userOnly settings should be overridden by workspace
+      expect(settings.merged.ui?.theme).toBe('dark');
+      expect(settings.merged.ui?.enableWelcomeBack).toBe(false);
+      expect(settings.merged.tools?.sandbox).toBe(true);
+    });
   });
 
   describe('excludedProjectEnvVars integration', () => {

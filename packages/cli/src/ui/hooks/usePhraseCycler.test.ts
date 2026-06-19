@@ -13,12 +13,28 @@ import {
 import * as i18n from '../../i18n/index.js';
 
 const MOCK_WITTY_PHRASES = ['Phrase 1', 'Phrase 2', 'Phrase 3'];
+const MOCK_FORTUNE_QUOTE = 'The early bird catches the worm.';
+
+vi.mock('./fortune.js', () => ({
+  getFortuneQuote: vi.fn(),
+}));
+
+vi.mock('../../config/constants.js', () => ({
+  DEFAULT_FORTUNE_COMMAND: 'fortune -s -n 45',
+}));
 
 describe('usePhraseCycler', () => {
-  beforeEach(() => {
+  let mockGetFortuneQuote: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
     vi.useFakeTimers();
     vi.spyOn(i18n, 'ta').mockReturnValue(MOCK_WITTY_PHRASES);
     vi.spyOn(i18n, 't').mockImplementation((key) => key);
+    const fortuneModule = await import('./fortune.js');
+    mockGetFortuneQuote =
+      fortuneModule.getFortuneQuote as unknown as ReturnType<typeof vi.fn>;
+    mockGetFortuneQuote.mockReset();
+    mockGetFortuneQuote.mockResolvedValue(MOCK_FORTUNE_QUOTE);
   });
 
   afterEach(() => {
@@ -49,10 +65,17 @@ describe('usePhraseCycler', () => {
   });
 
   it('should cycle through witty phrases when isActive is true and not waiting', () => {
+    // Mock Math.random to guarantee different phrases
+    let randomCall = 0;
+    vi.spyOn(Math, 'random').mockImplementation(() => {
+      const val = randomCall++ % MOCK_WITTY_PHRASES.length;
+      return val / MOCK_WITTY_PHRASES.length;
+    });
+
     const { result } = renderHook(() => usePhraseCycler(true, false));
     // Initial phrase should be one of the witty phrases
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
-    const _initialPhrase = result.current;
+    const initialPhrase = result.current;
 
     act(() => {
       vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
@@ -60,11 +83,14 @@ describe('usePhraseCycler', () => {
     // Phrase should change and be one of the witty phrases
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
 
-    const _secondPhrase = result.current;
+    const secondPhrase = result.current;
     act(() => {
       vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
     });
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
+
+    // Verify phrases changed
+    expect(secondPhrase).not.toBe(initialPhrase);
   });
 
   it('should reset to a witty phrase when isActive becomes true after being false (and not waiting)', () => {
@@ -145,7 +171,7 @@ describe('usePhraseCycler', () => {
 
     expect(result.current).toBe(customPhrases[1]);
 
-    rerender({ isActive: true, isWaiting: false, customPhrases: undefined });
+    rerender({ isActive: true, isWaiting: false, customPhrases: [] });
 
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
   });
@@ -187,6 +213,193 @@ describe('usePhraseCycler', () => {
 
     // Go back to active cycling - should pick a random witty phrase
     rerender({ isActive: true, isWaiting: false });
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+  });
+
+  it('should not use fortune when enableFortunes is false', () => {
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, false),
+    );
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+    expect(mockGetFortuneQuote).not.toHaveBeenCalled();
+  });
+
+  it('should not use fortune when fortuneCommand is empty string', () => {
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, ''),
+    );
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+    expect(mockGetFortuneQuote).not.toHaveBeenCalled();
+  });
+
+  it('should not use fortune when fortuneCommand is whitespace only', () => {
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '   '),
+    );
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+    expect(mockGetFortuneQuote).not.toHaveBeenCalled();
+  });
+
+  it('should not call clearInterval on unmount when no interval is active', () => {
+    const { unmount } = renderHook(() => usePhraseCycler(false, false));
+    const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
+    unmount();
+    expect(clearIntervalSpy).not.toHaveBeenCalled();
+  });
+
+  it('should use fortune quote when enableFortunes is true', async () => {
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
+    );
+
+    // Wait for the async fortune call to complete
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current).toBe(MOCK_FORTUNE_QUOTE);
+    expect(mockGetFortuneQuote).toHaveBeenCalledWith('/usr/games/fortune');
+  });
+
+  it('should fall back to random phrase when fortune command fails', async () => {
+    mockGetFortuneQuote.mockResolvedValue(null);
+
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
+    );
+
+    // Wait for the async fortune call to complete
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+  });
+
+  it('should use custom fortune command when provided', async () => {
+    const customCommand = '/usr/local/bin/my-fortune';
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, customCommand),
+    );
+
+    // Wait for the async fortune call to complete
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current).toBe(MOCK_FORTUNE_QUOTE);
+    expect(mockGetFortuneQuote).toHaveBeenCalledWith(customCommand);
+  });
+
+  it('should cycle fortune quotes every interval when enabled', async () => {
+    const differentQuotes = ['Quote 1', 'Quote 2', 'Quote 3'];
+    let quoteIndex = 0;
+    mockGetFortuneQuote.mockImplementation(
+      async () => differentQuotes[quoteIndex++ % differentQuotes.length],
+    );
+
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
+    );
+
+    // Wait for initial fortune call
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current).toBe(differentQuotes[0]);
+
+    // Advance time to trigger next interval
+    act(() => {
+      vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
+    });
+
+    // Wait for async call
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current).toBe(differentQuotes[1]);
+  });
+
+  it('should fall back to a witty phrase when fortune command throws an error', async () => {
+    mockGetFortuneQuote.mockRejectedValue(
+      new Error('Fortune command not found'),
+    );
+
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
+    );
+
+    // Wait for the async fortune call to complete and catch error
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+  });
+
+  it('should fall back to a witty phrase when fortune command throws on interval update', async () => {
+    // First call succeeds, second call throws
+    mockGetFortuneQuote
+      .mockResolvedValueOnce(MOCK_FORTUNE_QUOTE)
+      .mockRejectedValueOnce(new Error('Timeout'));
+
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
+    );
+
+    // Wait for initial fortune call
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current).toBe(MOCK_FORTUNE_QUOTE);
+
+    // Advance time to trigger interval update
+    act(() => {
+      vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
+    });
+
+    // Wait for async call to fail and fallback
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+  });
+
+  it('should discard stale fortune quote updates when effect re-runs before promise resolves', async () => {
+    // Mock a slow fortune promise that resolves after effect cleanup
+    let resolvePromise: (value: string) => void;
+    const slowPromise = new Promise<string>((resolve) => {
+      resolvePromise = resolve;
+    });
+    mockGetFortuneQuote.mockReturnValue(slowPromise);
+
+    const { result, rerender } = renderHook(
+      ({ isActive }) =>
+        usePhraseCycler(isActive, false, undefined, true, '/usr/games/fortune'),
+      { initialProps: { isActive: true } },
+    );
+
+    // Wait for the initial fortune call to start
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Verify fortune was called
+    expect(mockGetFortuneQuote).toHaveBeenCalledTimes(1);
+
+    // Rerender with isActive=false to trigger effect cleanup (new generation)
+    // The old promise is still pending
+    rerender({ isActive: false });
+
+    // Now resolve the old (stale) promise
+    await act(async () => {
+      resolvePromise!('Stale Fortune Quote');
+    });
+
+    // The stale update should be discarded, so phrase should remain as the initial witty phrase
+    // (not the stale fortune quote)
+    expect(result.current).not.toBe('Stale Fortune Quote');
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
   });
 });

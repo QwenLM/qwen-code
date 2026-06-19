@@ -13,6 +13,7 @@ import type {
   ChatCompressionSettings,
   ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
+import { DEFAULT_FORTUNE_COMMAND } from './constants.js';
 import {
   ApprovalMode,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
@@ -116,6 +117,13 @@ export interface SettingDefinition {
    * SettingDefinition `type` field cannot express.
    */
   jsonSchemaOverride?: Record<string, unknown>;
+  /**
+   * When true, this setting can only be configured at the user scope.
+   * Workspace-level values are ignored during merge. Use for settings
+   * that should not be overridable by workspace (e.g., security-sensitive
+   * or user-preference settings).
+   */
+  userOnly?: boolean;
 }
 
 /**
@@ -752,6 +760,28 @@ const SETTINGS_SCHEMA = {
         default: [] as string[],
         description: 'Custom witty phrases to display during loading.',
         showInDialog: false,
+      },
+      enableFortunes: {
+        type: 'boolean',
+        label: 'Enable Fortune Quotes',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Display random fortune quotes during loading instead of static phrases. Requires the `fortune` command to be installed.',
+        showInDialog: true,
+        userOnly: true,
+      },
+      fortuneCommand: {
+        type: 'string',
+        label: 'Fortune Command',
+        category: 'UI',
+        requiresRestart: false,
+        default: DEFAULT_FORTUNE_COMMAND,
+        description:
+          'Command to execute for fortune quotes. Uses PATH lookup (no absolute path needed). Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable.',
+        showInDialog: true,
+        userOnly: true,
       },
       enableWelcomeBack: {
         type: 'boolean',

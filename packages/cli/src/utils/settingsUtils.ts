@@ -5,11 +5,8 @@
  */
 
 import * as fs from 'node:fs';
-import type {
-  Settings,
-  SettingScope,
-  LoadedSettings,
-} from '../config/settings.js';
+import { SettingScope } from '../config/settings.js';
+import type { Settings, LoadedSettings } from '../config/settings.js';
 import type {
   SettingDefinition,
   SettingsSchema,
@@ -311,10 +308,18 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
 
 /**
  * Get all setting keys that should be shown in the dialog, sorted by display order
+ * @param scope - Optional scope to filter by. If 'Workspace', filters out userOnly settings.
  */
-export function getDialogSettingKeys(): string[] {
+export function getDialogSettingKeys(scope?: SettingScope): string[] {
   const dialogSettings = Object.values(getFlattenedSchema())
     .filter((definition) => definition.showInDialog === true)
+    // Filter out userOnly settings when in workspace scope
+    .filter((definition) => {
+      if (scope === SettingScope.Workspace && definition.userOnly === true) {
+        return false;
+      }
+      return true;
+    })
     .map((definition) => definition.key);
 
   // Sort by explicit order; settings not in the order array appear at the end

@@ -244,6 +244,16 @@
             "type": "string"
           }
         },
+        "enableFortunes": {
+          "description": "Display random fortune quotes during loading instead of static phrases. Requires the `fortune` command to be installed. **User-only setting**: This setting can only be configured in user settings, not in workspace settings.",
+          "type": "boolean",
+          "default": false
+        },
+        "fortuneCommand": {
+          "description": "Command to execute for fortune quotes. Uses PATH lookup (no absolute path needed). Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable. **User-only setting**: This setting can only be configured in user settings, not in workspace settings.",
+          "type": "string",
+          "default": "fortune -s -n 45"
+        },
         "enableWelcomeBack": {
           "description": "Show welcome back dialog when returning to a project with conversation history. Choosing \"Start new chat session\" suppresses the dialog for that project until the project summary changes.",
           "type": "boolean",
