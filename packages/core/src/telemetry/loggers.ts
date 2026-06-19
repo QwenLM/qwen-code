@@ -1144,6 +1144,9 @@ export function logPromptSuggestion(
   if (event.accept_method) {
     attributes['accept_method'] = event.accept_method;
   }
+  if (event.accept_source) {
+    attributes['accept_source'] = event.accept_source;
+  }
   if (event.time_to_accept_ms !== undefined) {
     attributes['time_to_accept_ms'] = event.time_to_accept_ms;
   }

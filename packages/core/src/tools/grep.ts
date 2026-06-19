@@ -6,7 +6,6 @@
 
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
-import { EOL } from 'node:os';
 import { spawn } from 'node:child_process';
 import { globStream } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -300,8 +299,11 @@ class GrepToolInvocation extends BaseToolInvocation<
 
   /**
    * Parses the standard output of grep-like commands (git grep, system grep).
-   * Expects format: filePath:lineNumber:lineContent
-   * Handles colons within file paths and line content correctly.
+   * Primary formats are null-delimited:
+   * - git grep -z -n: filePath\0lineNumber\0lineContent\n
+   * - grep --null -n: filePath\0lineNumber:lineContent\n
+   * Also accepts legacy colon-delimited output as a fallback.
+   * Handles colons within file paths and line content correctly for null-delimited output.
    * @param {string} output The raw stdout string.
    * @param {string} basePath The absolute directory the search was run from, for relative paths.
    * @returns {GrepMatch[]} Array of match objects.
@@ -310,27 +312,11 @@ class GrepToolInvocation extends BaseToolInvocation<
     const results: GrepMatch[] = [];
     if (!output) return results;
 
-    const lines = output.split(EOL); // Use OS-specific end-of-line
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-
-      // Find the index of the first colon.
-      const firstColonIndex = line.indexOf(':');
-      if (firstColonIndex === -1) continue; // Malformed
-
-      // Find the index of the second colon, searching *after* the first one.
-      const secondColonIndex = line.indexOf(':', firstColonIndex + 1);
-      if (secondColonIndex === -1) continue; // Malformed
-
-      // Extract parts based on the found colon indices
-      const filePathRaw = line.substring(0, firstColonIndex);
-      const lineNumberStr = line.substring(
-        firstColonIndex + 1,
-        secondColonIndex,
-      );
-      const lineContent = line.substring(secondColonIndex + 1);
-
+    const pushMatch = (
+      filePathRaw: string,
+      lineNumberStr: string,
+      lineContent: string,
+    ) => {
       const lineNumber = parseInt(lineNumberStr, 10);
 
       if (!isNaN(lineNumber)) {
@@ -344,6 +330,74 @@ class GrepToolInvocation extends BaseToolInvocation<
           line: lineContent.replace(/\r$/, ''),
         });
       }
+    };
+
+    if (output.includes('\0')) {
+      let index = 0;
+      while (index < output.length) {
+        const pathEnd = output.indexOf('\0', index);
+        if (pathEnd === -1) break;
+
+        const nextNewline = output.indexOf('\n', index);
+        if (nextNewline !== -1 && nextNewline < pathEnd) {
+          debugLogger.debug(
+            `Skipping unframed grep output line: ${output.substring(
+              index,
+              nextNewline,
+            )}`,
+          );
+          index = nextNewline + 1;
+          continue;
+        }
+
+        const filePathRaw = output.substring(index, pathEnd);
+        const afterPath = pathEnd + 1;
+        const nextNull = output.indexOf('\0', afterPath);
+        let lineEnd = output.indexOf('\n', afterPath);
+        if (lineEnd === -1) lineEnd = output.length;
+
+        if (nextNull !== -1 && nextNull < lineEnd) {
+          // git grep -z -n emits: path\0lineNumber\0lineContent\n
+          const lineNumberStr = output.substring(afterPath, nextNull);
+          let contentEnd = output.indexOf('\n', nextNull + 1);
+          if (contentEnd === -1) contentEnd = output.length;
+          const lineContent = output.substring(nextNull + 1, contentEnd);
+          pushMatch(filePathRaw, lineNumberStr, lineContent);
+          index = contentEnd + 1;
+          continue;
+        }
+
+        // grep --null -n emits: path\0lineNumber:lineContent\n
+        const rest = output.substring(afterPath, lineEnd);
+        const separator = rest.indexOf(':');
+        if (separator !== -1) {
+          pushMatch(
+            filePathRaw,
+            rest.substring(0, separator),
+            rest.substring(separator + 1),
+          );
+        } else {
+          debugLogger.debug(
+            `Skipping malformed grep --null record for ${filePathRaw}`,
+          );
+        }
+        index = lineEnd + 1;
+      }
+      return results;
+    }
+
+    // Legacy/non-current callers may still pass colon-delimited grep output.
+    const lines = output.split('\n');
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      const normalizedLine = line.replace(/\r$/, '');
+      const match = normalizedLine.match(/^(.+?):(\d+):(.*)$/);
+      if (!match) continue; // Malformed
+
+      const [, filePathRaw, lineNumberStr, lineContent] = match;
+      pushMatch(filePathRaw, lineNumberStr, lineContent);
     }
     return results;
   }
@@ -386,6 +440,7 @@ class GrepToolInvocation extends BaseToolInvocation<
           'grep',
           '--untracked',
           '-n',
+          '-z',
           '-E',
           '--ignore-case',
           pattern,
@@ -434,7 +489,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       const { available: grepAvailable } = isCommandAvailable('grep');
       if (grepAvailable) {
         strategyUsed = 'system grep';
-        const grepArgs = ['-r', '-n', '-H', '-E'];
+        const grepArgs = ['-r', '-n', '-H', '-E', '--null'];
         // Extract directory names from exclusion patterns for grep --exclude-dir
         const globExcludes = this.fileExclusions.getGlobExcludes();
         const commonExcludes = globExcludes
@@ -629,9 +684,10 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
               'File or directory to search in. Defaults to current working directory.',
           },
           limit: {
-            type: 'number',
+            type: 'integer',
+            minimum: 1,
             description:
-              'Limit output to first N matching lines. Optional - shows all matches if not specified.',
+              'Limit output to first N matching lines. Must be a positive integer. Optional - shows all matches if not specified.',
           },
         },
         required: ['pattern'],
@@ -648,6 +704,13 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: GrepToolParams,
   ): string | null {
+    if (
+      params.limit !== undefined &&
+      (!Number.isInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'limit must be a positive integer';
+    }
+
     // Validate pattern is a valid regex
     try {
       new RegExp(params.pattern);
