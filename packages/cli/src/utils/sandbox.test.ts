@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { isContainerPathWithinWorkdir } from './sandbox-path.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
+import { parseSandboxMountSpec } from './sandboxMounts.js';
 
 describe('isContainerPathWithinWorkdir', () => {
   it('allows the workdir itself', () => {
@@ -74,5 +75,59 @@ describe('parseSandboxImageName', () => {
         'registry.example.com/team/qwen-code-sandbox:dev@sha256:abcdef',
       ),
     ).toBe('qwen-code-sandbox-dev');
+  });
+});
+
+describe('parseSandboxMountSpec', () => {
+  it('defaults container path and options', () => {
+    expect(parseSandboxMountSpec('/host/path')).toEqual({
+      from: '/host/path',
+      to: '/host/path',
+      opts: 'ro',
+    });
+  });
+
+  it('parses explicit container path and options', () => {
+    expect(parseSandboxMountSpec('/host/path:/container/path:rw')).toEqual({
+      from: '/host/path',
+      to: '/container/path',
+      opts: 'rw',
+    });
+  });
+
+  it('defaults an empty container path to the host path', () => {
+    expect(parseSandboxMountSpec('/host/path::rw')).toEqual({
+      from: '/host/path',
+      to: '/host/path',
+      opts: 'rw',
+    });
+  });
+
+  it('keeps the drive-letter colon in Windows host paths', () => {
+    expect(
+      parseSandboxMountSpec('C:\\Users\\me:/workspace:rw', 'win32'),
+    ).toEqual({
+      from: 'C:\\Users\\me',
+      to: '/workspace',
+      opts: 'rw',
+    });
+  });
+
+  it('keeps the drive-letter colon in Windows host paths with forward slashes', () => {
+    expect(parseSandboxMountSpec('C:/Users/me:/workspace:rw', 'win32')).toEqual(
+      {
+        from: 'C:/Users/me',
+        to: '/workspace',
+        opts: 'rw',
+      },
+    );
+  });
+
+  it('keeps a bare Windows host path intact', () => {
+    expect(parseSandboxMountSpec('C:\\Users\\me', 'win32')).toEqual({
+      from: 'C:\\Users\\me',
+      to: 'C:\\Users\\me',
+      opts: 'ro',
+    });
   });
 });
