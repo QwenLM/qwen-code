@@ -197,9 +197,26 @@ edit.
 When the flag is absent, **none** of this code path is reached — same binary, same
 default behavior.
 
+## ✅ Milestone 1 — VERIFIED on a real machine (pkix)
+
+Text turns render in the **rich** terminal TUI driven by a daemon-hosted session:
+`qwen --attach-daemon <url> --daemon-token <tok>` attaches via `DaemonAppContainer`
+→ `AppContainer` with the `useDaemonStreamAdapter` (B-prime) → real `<App/>`.
+Streamed thought + reply render, the turn completes, **multi-turn works on the same
+session**, and the frames are daemon SSE frames (not a local agent).
+
+**Critical protocol finding (cost us a stuck spinner):** this codebase's daemon
+(**0.17.x**) signals turn completion via the **`prompt()` HTTP response**
+(`stopReason`), NOT a `turn_complete` **SSE frame** — the frame is a 0.18+ addition
+(our earlier capture used the global `qwen 0.18.1`, which misled us). The hook
+**synthesizes** a `turn_complete` when `prompt()` resolves (and re-subscribes when
+the SSE idle-closes between turns). Verification recipe: run the TUI attached with
+`QWEN_DAEMON_STREAM_DEBUG=<file>`; the log shows
+`prompt() resolved → frame type=turn_complete -> state=idle committed=1`.
+
 ## Phasing inside Phase 2 ("grows")
 
-Built + unit-tested here (24 tests total):
+Built + unit-tested here (now 25 daemon tests):
 
 - `projectDaemonEvent.ts` (16 tests) — the pure reducer folding daemon frames
   into the UI's history/streaming/tool/permission shapes.
@@ -209,9 +226,11 @@ Built + unit-tested here (24 tests total):
   `useGeminiStream` contract + a permission action. Decoupled via a structural
   `DaemonSessionDriver` (no `@qwen-code/sdk` dep), so it's fakeable in tests.
 
-1. **Slice 1 — text round-trip.** ✅ _Projection + hook done_ (origin-aware user
-   echo, streamed thought + message, `turn_complete`, usage, `submitQuery` local
-   echo + `prompt`, `cancel`). Remaining: render it (AppContainer wiring).
+1. **Slice 1 — text round-trip.** ✅ **DONE + rendered + verified on pkix** (see
+   Milestone 1 above). Origin-aware user echo, streamed thought + message,
+   completion via `prompt()`-resolution synthesis, multi-turn re-subscribe, the
+   `--attach-daemon` flag, `DaemonAppContainer`, and the `useStream` swap in
+   `AppContainer` all working in the rich TUI.
 2. **Slice 2 — tool approval.** ✅ _Projection + hook gate done_
    (`tool_call`/`tool_call_update` → `tool_group`; `permission_request` →
    Confirming + `activePermission`; `respondToPermission` posts the vote;
