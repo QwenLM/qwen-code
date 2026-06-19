@@ -395,8 +395,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // entry rather than advancing from whatever index the user picked.
       resetHistoryNavRef.current();
 
-      // Dismiss follow-up suggestion after submit
+      // Dismiss follow-up suggestion after submit. `followup.dismiss()` only
+      // resets the controller; `onPromptSuggestionDismiss` also clears the
+      // persisted `promptSuggestion` prop so the placeholder doesn't leak a
+      // stale suggestion after synchronous commands (e.g. /clear, /help) that
+      // never trigger the streaming-transition effect in AppContainer.
       followup.dismiss();
+      onPromptSuggestionDismiss?.();
 
       // Clear attachments after submit
       setAttachments([]);
@@ -418,6 +423,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       config,
       pendingPastes,
       followup,
+      onPromptSuggestionDismiss,
     ],
   );
 
@@ -535,6 +541,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setAgentTabBarFocused,
   ]);
 
+  // Single source of truth for "is there a suggestion the user can accept right
+  // now": the live followup suggestion if visible, otherwise the persisted
+  // `promptSuggestion` prop (type-then-delete / pre-show-delay). Tab/Right/Enter
+  // accept, the typing-dismiss guards, and the placeholder all derive from this
+  // so they can never drift apart.
+  const availableSuggestion: string | null =
+    followup.state.isVisible || promptSuggestion
+      ? (followup.state.suggestion ?? promptSuggestion ?? null)
+      : null;
+
   const handleInput = useCallback(
     (key: Key): boolean => {
       // When the Arena tab bar or background pill has focus, block
@@ -650,7 +666,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (key.paste) {
         // Dismiss follow-up suggestion when user starts typing/pasting
-        if (buffer.text.length === 0 && followup.state.isVisible) {
+        if (buffer.text.length === 0 && availableSuggestion) {
           followup.dismiss();
           onPromptSuggestionDismiss?.();
         }
@@ -991,10 +1007,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !showCompletionSuggestions &&
         !reverseSearchActive &&
         !commandSearchActive &&
-        followup.state.isVisible &&
-        followup.state.suggestion
+        availableSuggestion
       ) {
-        followup.accept('tab');
+        // Use the normal accept path. When the followup controller has no live
+        // suggestion (e.g. after type-then-delete), `fallbackText` carries the
+        // still-available placeholder text so telemetry is logged either way.
+        followup.accept('tab', { fallbackText: promptSuggestion ?? undefined });
+        // Clear the persisted `promptSuggestion` prop too, otherwise it survives
+        // the accept and reappears as a ghost placeholder once the buffer is
+        // cleared without submitting (e.g. Ctrl+U).
+        onPromptSuggestionDismiss?.();
         return true;
       }
 
@@ -1004,10 +1026,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.ctrl &&
         !key.meta &&
         buffer.text.length === 0 &&
-        followup.state.isVisible &&
-        followup.state.suggestion
+        availableSuggestion
       ) {
-        followup.accept('right');
+        followup.accept('right', {
+          fallbackText: promptSuggestion ?? undefined,
+        });
+        onPromptSuggestionDismiss?.();
         return true;
       }
 
@@ -1255,19 +1279,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (keyMatchers[Command.SUBMIT](key)) {
-        // Accept and submit prompt suggestion on Enter when input is truly empty
-        if (
-          buffer.text.length === 0 &&
-          followup.state.isVisible &&
-          followup.state.suggestion
-        ) {
-          const text = followup.state.suggestion;
-          // Skip onAccept (buffer.insert) — we pass the text directly to
-          // handleSubmitAndClear which clears the buffer synchronously.
-          // Without skipOnAccept the microtask in accept() would re-insert
-          // the suggestion into the buffer after it was already cleared.
-          followup.accept('enter', { skipOnAccept: true });
-          handleSubmitAndClear(text);
+        // When buffer is empty and a suggestion is available, Enter fills the
+        // buffer instead of submitting — matching Tab/Right-arrow behavior.
+        // This prevents accidental execution of destructive slash commands
+        // (/clear, /quit) and aligns with Claude Code's design: suggestion
+        // acceptance requires explicit Tab or arrow-key action.
+        if (buffer.text.length === 0 && availableSuggestion) {
+          followup.accept('enter', {
+            fallbackText: promptSuggestion ?? undefined,
+          });
+          onPromptSuggestionDismiss?.();
           return true;
         }
         if (buffer.text.trim()) {
@@ -1360,7 +1381,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Dismiss follow-up suggestion only on printable character input
       if (
         buffer.text.length === 0 &&
-        followup.state.isVisible &&
+        availableSuggestion &&
         key.sequence &&
         key.sequence.length === 1 &&
         !key.ctrl &&
@@ -1442,7 +1463,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       enterBgDetailFromPanel,
       setBgSelectedIndex,
       followup,
+      availableSuggestion,
       onPromptSuggestionDismiss,
+      promptSuggestion,
       exportCompletion,
       isHistoryRestoredText,
       showCompletionSuggestions,
@@ -1595,9 +1618,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // consumed (ACCEPT_SUGGESTION_REVERSE_SEARCH). When they are active with no
   // matches, Tab is not consumed — so the bare `reverseSearchActive` /
   // `commandSearchActive` flags are intentionally NOT included here.
+  // Mirror exactly when the Tab/Right/Enter handlers actually consume the key:
+  // the buffer must be empty and a suggestion must be available (either from the
+  // followup controller or the `promptSuggestion` prop after type-then-delete).
+  // Tying this to `buffer.text.length === 0` — the same gate the handlers use —
+  // keeps Windows Tab approval-mode cycling correct: as soon as the user types,
+  // this drops to false; deleting back to empty restores it.
   const hasTabConsumer =
     shouldShowSuggestions ||
-    (followup.state.isVisible && Boolean(followup.state.suggestion)) ||
+    (buffer.text.length === 0 && Boolean(availableSuggestion)) ||
     Boolean(completion.midInputGhostText?.acceptText);
 
   // Narrow signal — autocomplete dropdown only. Composer hides Footer /
@@ -1706,11 +1735,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         onSubmit={handleSubmitAndClear}
         onKeypress={handleInput}
         showCursor={showCursor}
-        placeholder={
-          followup.state.isVisible && followup.state.suggestion
-            ? followup.state.suggestion
-            : placeholder
-        }
+        placeholder={availableSuggestion ?? placeholder}
         prefix={prefixNode}
         prefixWidth={prefixWidth}
         borderColor={borderColor}

@@ -7865,7 +7865,7 @@ describe('Session', () => {
       expect(execute).not.toHaveBeenCalled();
       const { parts } = result;
       expect(parts).toHaveLength(1);
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(result.stopAfterPermissionCancel).toBe(false);
       expect(parts[0].functionResponse?.id).toBe('shell_1__qwen_dup_2');
       expect(parts[0].functionResponse?.response).toEqual({
         error: expect.stringContaining(
@@ -7936,7 +7936,7 @@ describe('Session', () => {
 
       expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
       const { parts } = result;
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(result.stopAfterPermissionCancel).toBe(false);
       expect(parts[0].functionResponse?.id).toBe('todo_1__qwen_dup_2');
       expect(parts[0].functionResponse?.response).toEqual({
         error: expect.stringContaining(
@@ -8016,7 +8016,7 @@ describe('Session', () => {
 
       expect(execute).toHaveBeenCalledTimes(2);
       const { parts } = result;
-      expect(result.stopAfterUserQuestionCancel).toBe(false);
+      expect(result.stopAfterPermissionCancel).toBe(false);
       expect(parts.map((part) => part.functionResponse?.id)).toEqual([
         'call_a',
         'dup_mid__qwen_dup_2',
@@ -8254,6 +8254,23 @@ describe('Session', () => {
           ([method]) => method === 'qwen/notify/session/prompt-suggestion',
         ),
       ).toBeUndefined();
+    });
+
+    it('emits when the setting is unset (on by default)', async () => {
+      // Regression for #5145 review: the schema default isn't applied by
+      // mergeSettings, so an unset value must be treated as enabled — only an
+      // explicit `false` opts out.
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {};
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(generateMock).toHaveBeenCalled();
+      });
     });
 
     it('does not emit in PLAN approval mode', async () => {
