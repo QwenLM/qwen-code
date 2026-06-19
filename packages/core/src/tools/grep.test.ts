@@ -154,6 +154,20 @@ describe('GrepTool', () => {
       expect(grepTool.validateToolParams(params)).toBeNull();
     });
 
+    it('should return null for a positive integer limit', () => {
+      const params: GrepToolParams = { pattern: 'hello', limit: 2 };
+      expect(grepTool.validateToolParams(params)).toBeNull();
+    });
+
+    it.each([
+      [0, 'params/limit must be >= 1'],
+      [-1, 'params/limit must be >= 1'],
+      [1.5, 'params/limit must be integer'],
+    ])('should return error for invalid limit %s', (limit, expectedError) => {
+      const params: GrepToolParams = { pattern: 'hello', limit };
+      expect(grepTool.validateToolParams(params)).toBe(expectedError);
+    });
+
     it('should return error if pattern is missing', () => {
       const params = { path: '.' } as unknown as GrepToolParams;
       expect(grepTool.validateToolParams(params)).toBe(
@@ -658,8 +672,7 @@ describe('GrepTool', () => {
       expect(result.returnDisplay).toBe('Found 30 matches');
     });
 
-    it('should not validate limit parameter', () => {
-      // limit parameter has no validation constraints in the new implementation
+    it('should validate a positive limit parameter', () => {
       const params = { pattern: 'test', limit: 5 };
       const error = grepTool.validateToolParams(params as GrepToolParams);
       expect(error).toBeNull();
