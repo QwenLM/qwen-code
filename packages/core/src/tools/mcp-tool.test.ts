@@ -220,6 +220,52 @@ describe('DiscoveredMCPTool', () => {
     );
 
     it.each([
+      { isErrorValue: true, description: 'true (bool)' },
+      { isErrorValue: 'true', description: '"true" (str)' },
+    ])(
+      'should return a structured error if callable tool reports top-level isError ${description}',
+      async ({ isErrorValue }) => {
+        const tool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+        );
+        const params = { param: 'topLevelIsErrorCase' };
+        const functionCall = {
+          name: serverToolName,
+          args: params,
+        };
+        const mockMcpToolResponseParts: Part[] = [
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: {
+                isError: isErrorValue,
+                content: [{ type: 'text', text: 'failed' }],
+              },
+            },
+          },
+        ];
+        mockCallTool.mockResolvedValue(mockMcpToolResponseParts);
+        const expectedErrorMessage = `MCP tool '${
+          serverToolName
+        }' reported tool error for function call: ${safeJsonStringify(
+          functionCall,
+        )} with response: ${safeJsonStringify(mockMcpToolResponseParts)}`;
+        const invocation = tool.build(params);
+        const result = await invocation.execute(new AbortController().signal);
+
+        expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+        expect(result.llmContent).toBe(expectedErrorMessage);
+        expect(result.returnDisplay).toContain(
+          `Error: MCP tool '${serverToolName}' reported an error.`,
+        );
+      },
+    );
+
+    it.each([
       { isErrorValue: false, description: 'false (bool)' },
       { isErrorValue: 'false', description: '"false" (str)' },
     ])(
@@ -270,6 +316,38 @@ describe('DiscoveredMCPTool', () => {
           { text: stringifiedResponseContent },
         ]);
         expect(toolResult.returnDisplay).toBe(stringifiedResponseContent);
+      },
+    );
+
+    it.each([
+      { isErrorValue: false, description: 'false (bool)' },
+      { isErrorValue: 'false', description: '"false" (str)' },
+    ])(
+      'should consider top-level isError ${description} to be a success',
+      async ({ isErrorValue }) => {
+        const params = { param: 'topLevelIsErrorFalseCase' };
+        const successMessage = 'top-level false is success';
+        const mockMcpToolResponseParts: Part[] = [
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: {
+                isError: isErrorValue,
+                content: [{ type: 'text', text: successMessage }],
+              },
+            },
+          },
+        ];
+        mockCallTool.mockResolvedValue(mockMcpToolResponseParts);
+
+        const invocation = tool.build(params);
+        const toolResult = await invocation.execute(
+          new AbortController().signal,
+        );
+
+        expect(toolResult.error).toBeUndefined();
+        expect(toolResult.llmContent).toEqual([{ text: successMessage }]);
+        expect(toolResult.returnDisplay).toBe(successMessage);
       },
     );
 

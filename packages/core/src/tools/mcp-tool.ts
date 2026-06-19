@@ -184,10 +184,15 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
 
     if (response) {
-      const error = (response as { error?: McpError })?.error;
-      const isError = error?.isError;
+      const typedResponse = response as { error?: McpError } & McpError;
+      const topLevelIsError = typedResponse.isError;
+      if (topLevelIsError === true || topLevelIsError === 'true') {
+        return true;
+      }
 
-      if (error && (isError === true || isError === 'true')) {
+      const error = typedResponse.error;
+      const isError = error?.isError;
+      if (isError === true || isError === 'true') {
         return true;
       }
     }
