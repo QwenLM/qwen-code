@@ -1781,7 +1781,13 @@ describe('createServeApp', () => {
         .set('Accept', 'text/html');
       expect(shell.status).toBe(200);
       expect(shell.text).toContain('<div id="root">');
-      const api = await request(app).get('/capabilities').set('Host', host);
+      // Even with an attacker-controlled Accept: text/html, the authed route
+      // wins (401): the SPA fallback runs only after the API routes, so it
+      // can't coax the 200 shell out of a gated endpoint.
+      const api = await request(app)
+        .get('/capabilities')
+        .set('Host', host)
+        .set('Accept', 'text/html');
       expect(api.status).toBe(401);
     });
   });

@@ -44,6 +44,14 @@ function verifyBundleArtifacts(rootDir, distDir) {
     path.join(distDir, 'cli.js'),
     path.join(distDir, 'vendor'),
     path.join(distDir, 'bundled', 'qc-helper', 'docs'),
+    // The Web Shell ships with the published package ("Web Shell out of the
+    // box"). Gate on it here so a build that skipped the web-shell workspace
+    // (e.g. `npm ci --ignore-scripts` bypassing the root `prepare`) fails
+    // loudly during packaging instead of silently publishing an API-only CLI
+    // whose `GET /` 404s. copy_bundle_assets.js stays warn-and-skip for
+    // --cli-only dev bundles; this is the release gate.
+    path.join(distDir, 'web-shell', 'index.html'),
+    path.join(distDir, 'web-shell', 'assets'),
   ];
 
   if (!fs.existsSync(distDir)) {

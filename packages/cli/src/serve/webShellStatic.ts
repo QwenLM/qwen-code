@@ -96,35 +96,19 @@ export function isDocumentNavigation(req: Request): boolean {
 }
 
 /**
- * Mount the Web Shell single-page app on the daemon.
- *
- * Three layers, all registered BEFORE `bearerAuth` (the static shell carries
- * no secrets and a browser cannot attach an `Authorization` header to a
- * `<script src>` subresource or an address-bar navigation, so gating it would
- * just break the UI; the front-end's own API calls still carry the bearer via
- * `getDaemonAuthHeaders()`):
- *
- *  1. `GET /assets/*` — hashed, immutable build chunks (long-cache).
- *  2. `GET /` — the HTML shell, always (so `curl /` shows the UI too).
- *  3. SPA fallback — for deep-link navigations like `/session/<id>`; only
- *     claims document navigations, everything else falls through unchanged so
- *     the existing JSON 404 / API behaviour is preserved.
- *
- * Caller must have already verified `webShellDir` exists.
+ * Build the `index.html` responder for a Web Shell dir. Sets the security
+ * headers + a no-cache policy (a redeploy changes the hashed asset names
+ * index.html references, so a stale shell would point at missing chunks; the
+ * asset files themselves are immutable).
  */
-export function registerWebShell(app: Application, webShellDir: string): void {
+function createSendIndex(webShellDir: string): (res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
-  const assetsDir = path.join(webShellDir, 'assets');
-
-  const sendIndex = (res: Response): void => {
+  return (res: Response): void => {
     res
       .status(200)
       .set('Content-Security-Policy', WEB_SHELL_CSP)
       .set('X-Frame-Options', 'DENY')
       .set('Referrer-Policy', 'no-referrer')
-      // The shell must never be cached stale: a redeploy changes the hashed
-      // asset names it references, so a cached index.html would point at
-      // chunks that no longer exist. Asset files themselves are immutable.
       .set('Cache-Control', 'no-cache');
     res.sendFile(indexPath, { cacheControl: false }, (err) => {
       if (!err) return;
@@ -139,40 +123,68 @@ export function registerWebShell(app: Application, webShellDir: string): void {
         res.status(500).type('text/plain').send('Failed to load Web Shell');
       } else {
         // Failed mid-stream (truncated/corrupt index.html): end the
-        // half-written response instead of leaving the client hanging on a
-        // 200 with a partial body.
+        // half-written response instead of leaving the client on a 200 with a
+        // partial body.
         res.end();
       }
     });
   };
+}
 
-  // Layer 1: hashed asset chunks. `fallthrough: true` (default) lets an
-  // unknown /assets/* path continue to the SPA fallback / 404 instead of
-  // ending the chain here.
+/**
+ * Mount the Web Shell static assets BEFORE `bearerAuth`. The shell carries no
+ * secrets and a browser cannot attach an `Authorization` header to a
+ * `<script src>` subresource or an address-bar navigation, so gating these
+ * would just break the UI. The front-end's own API calls still carry the
+ * bearer via `getDaemonAuthHeaders()`.
+ *
+ *  - `GET /assets/*` — hashed, immutable build chunks (long-cache).
+ *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
+ *
+ * Caller must have already verified `webShellDir` exists.
+ */
+export function mountWebShellAssets(
+  app: Application,
+  webShellDir: string,
+): void {
+  const sendIndex = createSendIndex(webShellDir);
+  // `fallthrough: true` (default) lets an unknown /assets/* path continue to
+  // the SPA fallback / 404 instead of ending the chain here.
   app.use(
     '/assets',
-    express.static(assetsDir, {
+    express.static(path.join(webShellDir, 'assets'), {
       index: false,
       immutable: true,
       maxAge: '1y',
     }),
   );
-
-  // Layer 2: the shell at the site root.
   app.get('/', (_req: Request, res: Response) => sendIndex(res));
+}
 
-  // Layer 3: SPA deep-link fallback. GET/HEAD document navigations only;
-  // anything else (API fetches, non-GET) falls through untouched.
+/**
+ * Mount the SPA deep-link fallback (for navigations like `/session/<id>`).
+ * Registered AFTER all API routes — just before the error handler — so real
+ * routes, INCLUDING their `bearerAuth` 401s, always win and only genuine 404
+ * misses fall through to the shell.
+ *
+ * This is what keeps a token-gated daemon honest: a navigation with an
+ * attacker-controlled `Accept: text/html` to an authed route (e.g.
+ * `/capabilities`, `/health` on a non-loopback bind) hits that route's real
+ * response / 401, not this shell. Because real routes run first, no per-path
+ * denylist is needed.
+ *
+ * Only GET/HEAD document navigations are claimed; API fetches send
+ * `Accept: application/json`, fail `isDocumentNavigation`, and fall through to
+ * the standard JSON 404.
+ */
+export function mountWebShellSpaFallback(
+  app: Application,
+  webShellDir: string,
+): void {
+  const sendIndex = createSendIndex(webShellDir);
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (!isDocumentNavigation(req)) return next();
-    // Don't shadow the daemon's own browser-reachable endpoints. On
-    // non-loopback binds /health and /demo are registered AFTER bearerAuth
-    // (i.e. after this pre-auth fallback), so without this guard a browser
-    // navigation to them would receive index.html instead of their real
-    // response. API routes send Accept: application/json and already fail
-    // isDocumentNavigation, so they need no listing here.
-    if (req.path === '/health' || req.path === '/demo') return next();
     sendIndex(res);
   });
 }
