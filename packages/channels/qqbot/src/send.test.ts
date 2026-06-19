@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { isValidChatId, hasMarkdownSyntax, splitText } from './QQChannel.js';
 
 const {
@@ -105,6 +105,10 @@ vi.mock('@qwen-code/channel-base', () => ({
 const { QQChannel } = await import('./QQChannel.js');
 type QQChannelOptions = ConstructorParameters<typeof QQChannel>[3];
 type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 /** Create a mock Response-like object for sendQQMessage. */
 function mockResponse(
@@ -469,6 +473,39 @@ describe('sendMessage', () => {
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
     expect(mockFetchAccessToken).toHaveBeenCalled();
+  });
+
+  it('keeps retrying scheduled token refresh failures until one succeeds', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['tokenExpiresAt'] = Date.now() + 120_000;
+    mockFetchAccessToken
+      .mockRejectedValueOnce(new Error('token endpoint down'))
+      .mockRejectedValueOnce(new Error('still down'))
+      .mockResolvedValueOnce({
+        accessToken: 'recovered-token',
+        expiresIn: 7200,
+      });
+
+    (chp['scheduleTokenRefresh'] as () => void).call(ch);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(3);
+    expect(chp['accessToken']).toBe('recovered-token');
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(3);
+
+    ch.disconnect();
   });
 
   it('catches thrown sendQQMessage errors and stops sending', async () => {
