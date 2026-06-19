@@ -11,7 +11,9 @@ export function getWebDaemonConfig(): WebDaemonConfig {
   const params = new URLSearchParams(window.location.search);
   const baseUrl = resolveBaseUrl(params.get('daemon') ?? undefined);
   const token = params.get('token') ?? undefined;
-  const initialSessionId = params.get('session') ?? undefined;
+  const initialSessionId =
+    params.get('session') ||
+    readSessionIdFromPathname(window.location.pathname);
   const clientId = params.get('clientId') ?? undefined;
 
   return {
@@ -20,6 +22,18 @@ export function getWebDaemonConfig(): WebDaemonConfig {
     ...(initialSessionId ? { initialSessionId } : {}),
     ...(clientId ? { clientId } : {}),
   };
+}
+
+export function readSessionIdFromPathname(
+  pathname: string,
+): string | undefined {
+  const match = /^\/session\/([^/]+)$/.exec(pathname);
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
 }
 
 function resolveBaseUrl(input: string | undefined): string {

@@ -3,7 +3,11 @@ import { WebShell } from '@qwen-code/web-shell';
 import { useConnection, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { ConnectionDiagnostics } from '../diagnostics/ConnectionDiagnostics';
 
-export function ChatPane() {
+interface ChatPaneProps {
+  onSessionIdChange: (sessionId: string) => void;
+}
+
+export function ChatPane({ onSessionIdChange }: ChatPaneProps) {
   const connection = useConnection();
   const workspace = useWorkspace();
 
@@ -11,6 +15,7 @@ export function ChatPane() {
     <WebShell
       className="web-chat-shell"
       theme="light"
+      onSessionIdChange={onSessionIdChange}
       renderWelcomeHeader={({ currentModel, cwd }) => (
         <WebChatWelcome
           currentModel={currentModel}

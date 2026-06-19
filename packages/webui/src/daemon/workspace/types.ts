@@ -42,6 +42,7 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
   DaemonSessionSummary,
+  SessionMetadataResult,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
 } from '@qwen-code/sdk/daemon';
@@ -140,6 +141,11 @@ export interface DaemonWorkspaceActions {
     notFound: string[];
     errors: Array<{ sessionId: string; error: string }>;
   }>;
+  renameSession(
+    sessionId: string,
+    displayName: string,
+  ): Promise<SessionMetadataResult>;
+  releaseSession(sessionId: string): Promise<void>;
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;

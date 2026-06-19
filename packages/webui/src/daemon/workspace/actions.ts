@@ -58,6 +58,22 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async renameSession(sessionId: string, displayName: string) {
+      const client = requireClient(getClient, 'Rename session failed');
+      return withActionTimeout(
+        client.updateSessionMetadata(sessionId, { displayName }),
+        'Rename session timed out',
+      );
+    },
+
+    async releaseSession(sessionId: string) {
+      const client = requireClient(getClient, 'Release session failed');
+      return withActionTimeout(
+        client.closeSession(sessionId),
+        'Release session timed out',
+      );
+    },
+
     async loadMcpStatus() {
       const client = requireClient(getClient, 'Load MCP status failed');
       return withActionTimeout(

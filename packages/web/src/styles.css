@@ -700,11 +700,16 @@ pre {
   background: rgba(255, 255, 255, 0.86);
   border: 1px solid var(--web-border);
   border-radius: 16px;
+  box-shadow: var(--web-shadow-soft);
   display: flex;
   gap: 16px;
   justify-content: space-between;
   padding: 14px;
-  box-shadow: var(--web-shadow-soft);
+}
+
+.web-card.current {
+  border-color: rgba(78, 141, 108, 0.45);
+  box-shadow: 0 12px 32px rgba(78, 141, 108, 0.12);
 }
 
 .web-card-main {
@@ -724,6 +729,33 @@ pre {
 .web-card-main p {
   font-size: 12px;
   line-height: 1.55;
+}
+
+.web-session-title-row,
+.web-inline-edit {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.web-session-badge {
+  background: rgba(78, 141, 108, 0.12);
+  border: 1px solid rgba(78, 141, 108, 0.2);
+  border-radius: 999px;
+  color: #2f684d;
+  font-size: 11px;
+  padding: 2px 7px;
+}
+
+.web-inline-edit input {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--web-border-strong);
+  border-radius: 10px;
+  color: var(--web-text);
+  font: inherit;
+  min-width: 220px;
+  padding: 7px 9px;
 }
 
 .web-card-main h3,

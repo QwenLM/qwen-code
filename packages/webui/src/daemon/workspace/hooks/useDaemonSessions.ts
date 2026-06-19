@@ -39,13 +39,29 @@ export function useDaemonSessions(options: DaemonResourceOptions = {}) {
     },
     [workspace.actions, reload],
   );
+  const renameSession = useCallback(
+    async (sessionId: string, displayName: string) => {
+      const res = await workspace.actions.renameSession(sessionId, displayName);
+      reload();
+      return res;
+    },
+    [workspace.actions, reload],
+  );
+  const releaseSession = useCallback(
+    async (sessionId: string) => {
+      await workspace.actions.releaseSession(sessionId);
+      reload();
+    },
+    [workspace.actions, reload],
+  );
   return {
     ...result,
     sessions: result.data ?? [],
     loadSession: sessionActions?.loadSession,
     resumeSession: sessionActions?.resumeSession,
     newSession: sessionActions?.newSession,
-    releaseSession: sessionActions?.releaseSession,
+    renameSession,
+    releaseSession,
     deleteSession,
     deleteSessions,
   };
