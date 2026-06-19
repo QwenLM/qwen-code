@@ -2660,6 +2660,8 @@ export class Config {
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
+      this.contentGeneratorConfig.toolResultContentFormat =
+        config.toolResultContentFormat;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -2679,6 +2681,10 @@ export class Config {
       if ('splitToolMedia' in sources) {
         this.contentGeneratorConfigSources['splitToolMedia'] =
           sources['splitToolMedia'];
+      }
+      if ('toolResultContentFormat' in sources) {
+        this.contentGeneratorConfigSources['toolResultContentFormat'] =
+          sources['toolResultContentFormat'];
       }
       return;
     }

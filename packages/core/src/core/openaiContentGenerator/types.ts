@@ -48,6 +48,9 @@ export interface RequestContext {
   // user message for strict OpenAI-compat servers. See ContentGeneratorConfig
   // for details.
   splitToolMedia?: boolean;
+  // Default keeps tool result text as content parts; "string" is an opt-in
+  // compatibility mode for older OpenAI-compatible tool templates.
+  toolResultContentFormat?: ContentGeneratorConfig['toolResultContentFormat'];
   /**
    * Per-stream mutable state for cumulative-delta normalization on the visible
    * content channel. Initialised lazily on first use. Must NOT be shared or

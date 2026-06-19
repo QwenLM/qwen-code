@@ -4091,6 +4091,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['toolResultContentFormat']: 'string',
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -4100,6 +4101,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        toolResultContentFormat: { kind: 'settings' },
       },
     });
 
@@ -4119,6 +4121,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['toolResultContentFormat']).toBe('string');
 
     // Verify sources are also updated
     const sources = config.getContentGeneratorConfigSources();
@@ -4128,6 +4131,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['toolResultContentFormat']?.kind).toBe('settings');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {
