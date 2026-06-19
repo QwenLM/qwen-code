@@ -4324,6 +4324,82 @@ hello
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
 
+    it('should halt via the always-on turn cap before the skipLoopDetection gate', async () => {
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // The always-on cap trips on the first event — it runs before (and
+      // independently of) the gated detectors.
+      const loopDetector = client['loopDetector'];
+      const alwaysOnSpy = vi
+        .spyOn(loopDetector, 'checkAlwaysOnSafeties')
+        .mockReturnValue(true);
+      const deterministicSpy = vi.spyOn(
+        loopDetector,
+        'addAndCheckDeterministicToolCallLoop',
+      );
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      // `run` is invoked as `turn.run(...)`, so `this` is the live Turn —
+      // populate pendingToolCalls the way the real Turn.run does as it streams
+      // ToolCallRequest chunks, so the halt's clear runs against a non-empty
+      // array (not a trivially-empty one).
+      mockTurnRunFn.mockImplementation(async function* (this: {
+        pendingToolCalls: unknown[];
+      }) {
+        this.pendingToolCalls.push(
+          { name: 'read_file', args: { path: 'a.ts' } },
+          { name: 'read_file', args: { path: 'b.ts' } },
+        );
+        yield { type: 'content', value: 'looping' };
+      });
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger the cap' }],
+        new AbortController().signal,
+        'prompt-id-cap',
+        { type: SendMessageType.UserQuery },
+      );
+      const events = [];
+      let result = await stream.next();
+      while (!result.done) {
+        events.push(result.value);
+        result = await stream.next();
+      }
+      const returnedTurn = result.value as
+        | { pendingToolCalls: unknown[] }
+        | undefined;
+
+      // Always-on cap fires and short-circuits before the gated detectors run.
+      expect(alwaysOnSpy).toHaveBeenCalled();
+      expect(deterministicSpy).not.toHaveBeenCalled();
+      const loopEvent = events.find(
+        (e) => e.type === GeminiEventType.LoopDetected,
+      );
+      expect(loopEvent?.value?.loopType).toBe(LoopType.TURN_TOOL_CALL_CAP);
+      // The two pending calls collected before the cap tripped are dropped, so
+      // the halt doesn't spawn a continuation that re-trips the cap and
+      // double-prints the message.
+      expect(returnedTurn?.pendingToolCalls).toHaveLength(0);
+      // The mid-stream memory prefetch is cancelled.
+      expect(abortHandlerInvoked).toBe(true);
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
     it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {
       // Self-inflicted-regression guard for the round-4 finding:
       // the bottom-of-try `normalCompletion = true` doesn't cover the
@@ -6220,6 +6296,7 @@ Other open files:
 
       // Replace loop detector with spies
       const ldMock = {
+        checkAlwaysOnSafeties: vi.fn().mockReturnValue(false),
         addAndCheckDeterministicToolCallLoop: vi.fn().mockReturnValue(false),
         addAndCheckHeuristicLoops: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -6249,7 +6326,8 @@ Other open files:
         // consume stream
       }
 
-      // Assert - neither detector path runs when skipLoopDetection is true
+      // Assert - always-on safeties still run, but opt-in detectors don't
+      expect(ldMock.checkAlwaysOnSafeties).toHaveBeenCalled();
       expect(
         ldMock.addAndCheckDeterministicToolCallLoop,
       ).not.toHaveBeenCalled();
@@ -8063,4 +8141,123 @@ Other open files:
     });
     /* eslint-enable @typescript-eslint/no-explicit-any */
   });
+
+  describe('#5147 shutdown gate', () => {
+    /**
+     * C1: requestShutdown() makes runManagedAutoMemoryBackgroundTasks a
+     * no-op. We drive the private method directly: before shutdown it
+     * schedules extract + dream; after shutdown it schedules neither.
+     */
+    it('skips background memory tasks after shutdown is requested', () => {
+      const scheduleExtractSpy = vi.fn().mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
+      });
+      const scheduleDreamSpy = vi
+        .fn()
+        .mockResolvedValue({ status: 'skipped', skippedReason: 'locked' });
+
+      const mgr = {
+        scheduleExtract: scheduleExtractSpy,
+        scheduleDream: scheduleDreamSpy,
+        recall: vi.fn(),
+        scheduleSkillReview: vi
+          .fn()
+          .mockReturnValue({ status: 'skipped', skippedReason: 'disabled' }),
+      };
+
+      const client = new GeminiClient(makeMockConfigForShutdown(mgr));
+      // Avoid needing a real chat — the method calls getHistoryShallow().
+      (
+        client as unknown as { getHistoryShallow: () => unknown[] }
+      ).getHistoryShallow = () => [];
+
+      const runBgTasks = (
+        client as unknown as {
+          runManagedAutoMemoryBackgroundTasks: (t: SendMessageType) => void;
+        }
+      ).runManagedAutoMemoryBackgroundTasks.bind(client);
+
+      // Before shutdown: a completed UserQuery turn schedules extract + dream.
+      runBgTasks(SendMessageType.UserQuery);
+      expect(scheduleExtractSpy).toHaveBeenCalledTimes(1);
+      expect(scheduleDreamSpy).toHaveBeenCalledTimes(1);
+
+      scheduleExtractSpy.mockClear();
+      scheduleDreamSpy.mockClear();
+
+      // After shutdown: the gate short-circuits before any scheduling.
+      client.requestShutdown();
+      runBgTasks(SendMessageType.UserQuery);
+      expect(scheduleExtractSpy).not.toHaveBeenCalled();
+      expect(scheduleDreamSpy).not.toHaveBeenCalled();
+    });
+
+    /**
+     * C2: requestShutdown() is idempotent — calling it multiple times
+     * should not throw or have side effects.
+     */
+    it('is idempotent when called multiple times', () => {
+      const mgr = {
+        scheduleExtract: vi.fn(),
+        scheduleDream: vi.fn(),
+        recall: vi.fn(),
+        scheduleSkillReview: vi
+          .fn()
+          .mockReturnValue({ status: 'skipped', skippedReason: 'disabled' }),
+      };
+      const cfg = makeMockConfigForShutdown(mgr);
+      const client = new GeminiClient(cfg);
+
+      // Should not throw on first call
+      expect(() => client.requestShutdown()).not.toThrow();
+      // Should not throw on second call
+      expect(() => client.requestShutdown()).not.toThrow();
+      // Should not throw on third call
+      expect(() => client.requestShutdown()).not.toThrow();
+    });
+  });
 });
+
+function makeMockConfigForShutdown(
+  mgr: Record<string, ReturnType<typeof vi.fn>>,
+): Config {
+  return {
+    isBareMode: vi.fn().mockReturnValue(false),
+    getGeminiClient: vi.fn().mockReturnValue(undefined),
+    getProjectRoot: vi.fn().mockReturnValue('/project'),
+    getSessionId: vi.fn().mockReturnValue('session-1'),
+    getMemoryManager: vi.fn().mockReturnValue(mgr),
+    getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+    getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
+    getAutoSkillEnabled: vi.fn().mockReturnValue(false),
+    getModel: vi.fn().mockReturnValue('test-model'),
+    getBaseLlmClient: vi.fn().mockReturnValue({
+      generateContent: vi.fn(),
+    }),
+    getContentGenerator: vi.fn().mockReturnValue({
+      generateContent: vi.fn(),
+    }),
+    getToolRegistry: vi.fn().mockReturnValue({
+      getDeclarations: vi.fn().mockReturnValue([]),
+      getTools: vi.fn().mockReturnValue([]),
+    }),
+    getPromptRegistry: vi.fn().mockReturnValue({
+      getDeclarations: vi.fn().mockReturnValue([]),
+    }),
+    getFileReadCache: vi.fn().mockReturnValue({
+      clear: vi.fn(),
+    }),
+    getExtensionLoader: vi.fn().mockReturnValue(undefined),
+    getWorkspaceContext: vi.fn().mockReturnValue(undefined),
+    getDebugMode: vi.fn().mockReturnValue(false),
+    getApprovalMode: vi.fn().mockReturnValue('default'),
+    logEvent: vi.fn(),
+    getTelemetryService: vi.fn().mockReturnValue(undefined),
+    getHookSystem: vi.fn().mockReturnValue(undefined),
+    getMaxSessionTurns: vi.fn().mockReturnValue(100),
+    getChatRecordingService: vi.fn().mockReturnValue(undefined),
+    isInteractive: vi.fn().mockReturnValue(false),
+    getStdinReader: vi.fn().mockReturnValue(undefined),
+  } as unknown as Config;
+}

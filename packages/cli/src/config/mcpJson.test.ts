@@ -31,6 +31,17 @@ describe('loadProjectMcpServers', () => {
     expect(result.errors).toEqual([]);
   });
 
+  it('returns a fresh empty result when .mcp.json is absent', () => {
+    const first = loadProjectMcpServers(dir);
+    first.servers['stale'] = { command: 'node' };
+    first.errors.push('stale error');
+
+    const second = loadProjectMcpServers(dir);
+    expect(second.servers).toEqual({});
+    expect(second.errors).toEqual([]);
+    expect(second).not.toBe(first);
+  });
+
   it('loads servers and tags each with scope: project', () => {
     write(
       JSON.stringify({

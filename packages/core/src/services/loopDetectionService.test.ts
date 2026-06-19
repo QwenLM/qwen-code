@@ -14,6 +14,7 @@ import type {
 } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
+import { LoopType } from '../telemetry/types.js';
 import { LoopDetectionService } from './loopDetectionService.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
@@ -27,6 +28,9 @@ const CONTENT_CHUNK_SIZE = 50;
 // Mirrored from loopDetectionService.ts. Kept local so the test is
 // self-describing and failures point to the constant that changed.
 const FILE_READ_WINDOW = 15;
+const GLOBAL_DUPLICATE_THRESHOLD = 6;
+const ALTERNATING_PATTERN_CYCLES = 3;
+const TURN_TOOL_CALL_CAP = 100;
 
 describe('LoopDetectionService', () => {
   let service: LoopDetectionService;
@@ -1019,6 +1023,344 @@ describe('LoopDetectionService', () => {
         );
         expect(isLoop).toBe(false);
       }
+    });
+  });
+
+  describe('Turn Tool Call Cap (Always-On Circuit Breaker)', () => {
+    it('should not fire when total calls are below the cap', () => {
+      service.reset('');
+      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+        const isLoop = service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('any_tool', { i }),
+        );
+        expect(isLoop).toBe(false);
+      }
+    });
+
+    it('should fire on the call that exceeds the cap', () => {
+      service.reset('');
+      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('any_tool', { i }),
+        );
+      }
+      const isLoop = service.checkAlwaysOnSafeties(
+        createToolCallRequestEvent('any_tool', { extra: true }),
+      );
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+      // The turn cap reports its own loop type, not consecutive-identical.
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'turn_tool_call_cap',
+        }),
+      );
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
+    it('should fire regardless of disabledForSession', () => {
+      service.reset('');
+      service.disableForSession();
+      // disableForSession prevents heuristic checks, but not the turn cap
+      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('any_tool', { i }),
+        );
+      }
+      const isLoop = service.checkAlwaysOnSafeties(
+        createToolCallRequestEvent('any_tool', { extra: true }),
+      );
+      // disabledForSession blocks non-ToolCallRequest events in
+      // checkAlwaysOnSafeties, but this IS a ToolCallRequest so the cap
+      // still fires.
+      expect(isLoop).toBe(true);
+    });
+
+    const retryEvent = {
+      type: GeminiEventType.Retry,
+    } as ServerGeminiStreamEvent;
+    const finishedEvent = {
+      type: GeminiEventType.Finished,
+      value: { reason: 'STOP' },
+    } as unknown as ServerGeminiStreamEvent;
+
+    it('rolls back a failed attempt on retry so its calls do not count', () => {
+      service.reset('');
+      // Attempt makes 60 calls, then the API retries (no round-trip committed
+      // yet, so the rollback floor is 0).
+      for (let i = 0; i < 60; i++) {
+        service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
+      }
+      service.checkAlwaysOnSafeties(retryEvent);
+      // The 60 discarded calls must not count: a full cap's worth of fresh
+      // calls stays under the limit, and only the (cap+1)-th fires.
+      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', { j: i }),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { last: true }),
+        ),
+      ).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves committed round-trip counts when a later attempt retries', () => {
+      service.reset('');
+      // Round-trip 1: 60 calls, then Finished commits them as the floor.
+      for (let i = 0; i < 60; i++) {
+        service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
+      }
+      service.checkAlwaysOnSafeties(finishedEvent);
+      // Round-trip 2: 30 calls, then a retry discards only these 30.
+      for (let i = 0; i < 30; i++) {
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { k: i }),
+        );
+      }
+      service.checkAlwaysOnSafeties(retryEvent);
+      // Total is back to the committed 60 (NOT zero): 40 more reach exactly the
+      // cap without firing, and the next call trips it.
+      for (let i = 0; i < TURN_TOOL_CALL_CAP - 60; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', { m: i }),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { last: true }),
+        ),
+      ).toBe(true);
+    });
+
+    it('still accumulates across committed round-trips to trip the cap', () => {
+      service.reset('');
+      let fired = false;
+      // 11 calls/round-trip; the cap (100) is crossed partway through.
+      for (let rt = 0; rt < 12 && !fired; rt++) {
+        for (let i = 0; i < 11 && !fired; i++) {
+          fired = service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', { rt, i }),
+          );
+        }
+        if (!fired) {
+          service.checkAlwaysOnSafeties(finishedEvent);
+        }
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+  });
+
+  describe('Global Tool Call Duplicate Detection', () => {
+    it('should not fire when same call appears fewer than threshold times', () => {
+      service.reset('');
+      const event = createToolCallRequestEvent('stuck_tool', {
+        param: 'same',
+      });
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        const isLoop = service.addAndCheckHeuristicLoops(event);
+        expect(isLoop).toBe(false);
+      }
+    });
+
+    it('should fire when same (tool, args) appears threshold times non-consecutively', () => {
+      service.reset('');
+      const stuckEvent = createToolCallRequestEvent('stuck_tool', {
+        param: 'same',
+      });
+      const otherEvents = [
+        createToolCallRequestEvent('other_a', { x: 1 }),
+        createToolCallRequestEvent('other_b', { y: 2 }),
+        createToolCallRequestEvent('other_c', { z: 3 }),
+      ];
+
+      // Interleave: stuck, other_a, stuck, other_b, stuck, other_c, ...
+      // GLOBAL_DUPLICATE_THRESHOLD total stuck calls with different calls between
+      let otherIdx = 0;
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        expect(service.addAndCheckHeuristicLoops(stuckEvent)).toBe(false);
+        expect(
+          service.addAndCheckHeuristicLoops(
+            otherEvents[otherIdx % otherEvents.length],
+          ),
+        ).toBe(false);
+        otherIdx++;
+      }
+      // The threshold-th stuck call should fire
+      const isLoop = service.addAndCheckHeuristicLoops(stuckEvent);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'global_tool_call_duplicate',
+        }),
+      );
+      // getLastLoopType() is the getter the client uses to populate the
+      // bubbled LoopDetected event, so assert it too — not just the logged one.
+      expect(service.getLastLoopType()).toBe(
+        LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      );
+    });
+
+    it('should not fire for different (tool, args) pairs', () => {
+      service.reset('');
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD; i++) {
+        const isLoop = service.addAndCheckHeuristicLoops(
+          createToolCallRequestEvent('stuck_tool', { param: i }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('should fire for consecutive identical calls via both detectors', () => {
+      // The heuristic path also runs checkGlobalDuplicate on every
+      // ToolCallRequest, so a consecutive run of 5 identical calls trips
+      // the consecutive detector first (threshold 5 < global 6). This test
+      // verifies the global path would also fire if the consecutive
+      // detector were disabled.
+      service.reset('');
+      const event = createToolCallRequestEvent('stuck_tool', {
+        param: 'same',
+      });
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        service.addAndCheckHeuristicLoops(event);
+      }
+      const isLoop = service.addAndCheckHeuristicLoops(event);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'global_tool_call_duplicate',
+        }),
+      );
+    });
+
+    it('does not count a retried replay toward the global-duplicate threshold', () => {
+      service.reset('');
+      const stuck = createToolCallRequestEvent('stuck_tool', { param: 'same' });
+      const retry = { type: GeminiEventType.Retry } as ServerGeminiStreamEvent;
+      // Failed attempt streams (threshold - 3) identical calls, then retries.
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 3; i++) {
+        expect(service.addAndCheckHeuristicLoops(stuck)).toBe(false);
+      }
+      service.addAndCheckHeuristicLoops(retry);
+      // The replay streams the same calls again. Without the Retry reset the
+      // pre- and post-retry counts would sum to the threshold and false-fire.
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 3; i++) {
+        expect(service.addAndCheckHeuristicLoops(stuck)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Alternating Tool Call Pattern Detection', () => {
+    it('should fire for a clean ABABAB alternating pattern', () => {
+      service.reset('');
+      const eventA = createToolCallRequestEvent('tool_a', { param: 'a' });
+      const eventB = createToolCallRequestEvent('tool_b', { param: 'b' });
+
+      // ALTERNATING_PATTERN_CYCLES cycles = 2*CYCLES calls. Build up to
+      // one call short of the trigger.
+      const totalCycles = ALTERNATING_PATTERN_CYCLES;
+      for (let i = 0; i < totalCycles - 1; i++) {
+        expect(service.addAndCheckHeuristicLoops(eventA)).toBe(false);
+        expect(service.addAndCheckHeuristicLoops(eventB)).toBe(false);
+      }
+      // First call of the final cycle
+      expect(service.addAndCheckHeuristicLoops(eventA)).toBe(false);
+      // Second call of the final cycle completes the pattern
+      const isLoop = service.addAndCheckHeuristicLoops(eventB);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'alternating_tool_call_pattern',
+        }),
+      );
+      expect(service.getLastLoopType()).toBe(
+        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
+      );
+    });
+
+    it('should not fire when calls alternate but with varying keys', () => {
+      service.reset('');
+      // Alternating tool names but different args each time → different
+      // keys → no clean ABAB because the keys keep changing.
+      const totalCycles = ALTERNATING_PATTERN_CYCLES + 2;
+      for (let i = 0; i < totalCycles; i++) {
+        expect(
+          service.addAndCheckHeuristicLoops(
+            createToolCallRequestEvent('tool_a', { param: i }),
+          ),
+        ).toBe(false);
+        expect(
+          service.addAndCheckHeuristicLoops(
+            createToolCallRequestEvent('tool_b', { param: i }),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('should not fire for a single tool repeated (consecutive, not alternating)', () => {
+      service.reset('');
+      const event = createToolCallRequestEvent('tool_a', { param: 'a' });
+      const totalCalls = 2 * ALTERNATING_PATTERN_CYCLES;
+      for (let i = 0; i < totalCalls; i++) {
+        // The consecutive identical detector would fire at threshold 5,
+        // but we only check the heuristic path here. At 6 calls the
+        // global duplicate detector fires. This test just confirms the
+        // alternating detector doesn't false-positive on a repeated key.
+        service.addAndCheckHeuristicLoops(event);
+      }
+      // Either global_duplicate or consecutive_identical fires — we just
+      // verify the alternating pattern detector didn't fire.
+      const logged = vi.mocked(loggers.logLoopDetected).mock.calls;
+      const alternatingFired = logged.some((call) => {
+        const event = call[1] as unknown as Record<string, unknown>;
+        return 'loop_type' in event
+          ? event['loop_type'] === 'alternating_tool_call_pattern'
+          : false;
+      });
+      expect(alternatingFired).toBe(false);
+    });
+
+    it('should reset alternating window after a different third pattern', () => {
+      service.reset('');
+      const eventA = createToolCallRequestEvent('tool_a', { param: 'a' });
+      const eventB = createToolCallRequestEvent('tool_b', { param: 'b' });
+      const eventC = createToolCallRequestEvent('tool_c', { param: 'c' });
+
+      // Build up ABAB
+      service.addAndCheckHeuristicLoops(eventA);
+      service.addAndCheckHeuristicLoops(eventB);
+      service.addAndCheckHeuristicLoops(eventA);
+      service.addAndCheckHeuristicLoops(eventB);
+      // Insert C to break the pattern
+      service.addAndCheckHeuristicLoops(eventC);
+      // Restart ABAB from here — need 6 calls (3 cycles) after the break
+      service.addAndCheckHeuristicLoops(eventA);
+      service.addAndCheckHeuristicLoops(eventB);
+      service.addAndCheckHeuristicLoops(eventA);
+      service.addAndCheckHeuristicLoops(eventB);
+      expect(service.addAndCheckHeuristicLoops(eventA)).toBe(false);
+      const isLoop = service.addAndCheckHeuristicLoops(eventB);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'alternating_tool_call_pattern',
+        }),
+      );
     });
   });
 });

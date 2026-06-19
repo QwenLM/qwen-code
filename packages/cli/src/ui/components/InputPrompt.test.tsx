@@ -18,7 +18,10 @@ import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type { UseShellHistoryReturn } from '../hooks/useShellHistory.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import type { UseCommandCompletionReturn } from '../hooks/useCommandCompletion.js';
-import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import {
+  useCommandCompletion,
+  CompletionMode,
+} from '../hooks/useCommandCompletion.js';
 import type { UseInputHistoryReturn } from '../hooks/useInputHistory.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
@@ -289,9 +292,11 @@ describe('InputPrompt', () => {
       visibleStartIndex: 0,
       isPerfectMatch: false,
       midInputGhostText: null,
+      completionMode: CompletionMode.IDLE,
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       resetCompletionState: vi.fn(),
+      dismissCompletion: vi.fn(),
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
@@ -379,7 +384,10 @@ describe('InputPrompt', () => {
     // generous buffer (renderWithProviders cold start can be 100-200ms).
     const SUGGESTION_VISIBLE_WAIT_MS = 700;
 
-    it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
+    // Regression: Enter on suggestion should fill buffer, NOT submit — matches
+    // Tab/Right-arrow behavior and Claude Code's design. This prevents accidental
+    // execution of destructive slash commands (/clear, /quit).
+    it('fills buffer on Enter when suggestion is available (does not submit)', async () => {
       vi.useFakeTimers();
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
@@ -392,11 +400,9 @@ describe('InputPrompt', () => {
         });
         await flush();
 
-        expect(props.onSubmit).toHaveBeenCalledWith('commit this');
-        // Enter path must NOT call buffer.insert — it passes text directly to
-        // handleSubmitAndClear. Calling insert would re-fill the buffer after
-        // it was already cleared (the microtask race bug).
-        expect(mockBuffer.insert).not.toHaveBeenCalled();
+        // Enter on suggestion should fill buffer, NOT submit
+        expect(props.onSubmit).not.toHaveBeenCalled();
+        expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
       } finally {
         vi.useRealTimers();
         unmount();
@@ -452,6 +458,210 @@ describe('InputPrompt', () => {
         unmount();
       }
     });
+
+    // Regression for #5145: the `promptSuggestion` prop fallback path must work
+    // when `followup.state.suggestion` is null (e.g. after user typed and
+    // deleted — the followup controller was dismissed but the placeholder
+    // text is still available via the prop).
+    //
+    // These tests deliberately advance LESS than SUGGESTION_DELAY_MS (300ms),
+    // so the followup controller's show-timer never fires and
+    // `followup.state.suggestion` stays null — exercising the prop fallback
+    // branch rather than the normal visible-suggestion path. (Earlier versions
+    // waited 700ms here, which silently tested the normal flow instead.)
+    describe('promptSuggestion prop fallback (when followup.state.suggestion is null)', () => {
+      // Comfortably under the 300ms SUGGESTION_DELAY_MS so the controller's
+      // state.suggestion remains null.
+      const BEFORE_SUGGESTION_VISIBLE_MS = 100;
+
+      it('accepts promptSuggestion via Tab when followup.state.suggestion is null', async () => {
+        vi.useFakeTimers();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} promptSuggestion="commit this" />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\t');
+          });
+          await flush();
+
+          // Tab should insert the suggestion text into the buffer
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('accepts promptSuggestion via Right arrow when followup.state.suggestion is null', async () => {
+        vi.useFakeTimers();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} promptSuggestion="commit this" />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\x1b[C'); // right arrow
+          });
+          await flush();
+
+          // Right arrow should insert the suggestion text into the buffer
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('fills buffer on Enter (does not submit) when followup.state.suggestion is null', async () => {
+        vi.useFakeTimers();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} promptSuggestion="commit this" />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\r');
+          });
+          await flush();
+
+          // Enter on suggestion should fill buffer, NOT submit (matches Tab/Right-arrow behavior)
+          expect(props.onSubmit).not.toHaveBeenCalled();
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+    });
+
+    // Regression for #5145 (doudouOUC Critical #1/#2, confirmed by wenshao's
+    // re-verification): accepting or submitting must clear the persisted
+    // `promptSuggestion` via onPromptSuggestionDismiss. Otherwise the prop
+    // survives, and the next time the buffer empties `availableSuggestion`
+    // re-derives from it and the just-accepted/submitted suggestion reappears
+    // as a ghost placeholder. Typing (#1380) and paste (#665) already clear it;
+    // accept and submit must match.
+    describe('clears promptSuggestion on accept/submit (no ghost placeholder)', () => {
+      // Under the 300ms SUGGESTION_DELAY_MS so the accept goes through the
+      // promptSuggestion fallback path (followup.state.suggestion stays null).
+      const BEFORE_SUGGESTION_VISIBLE_MS = 100;
+
+      it('calls onPromptSuggestionDismiss when Tab accepts the suggestion', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\t');
+          });
+          await flush();
+
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('calls onPromptSuggestionDismiss when Right arrow accepts the suggestion', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\x1b[C'); // right arrow
+          });
+          await flush();
+
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('calls onPromptSuggestionDismiss when Enter accepts the suggestion', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\r');
+          });
+          await flush();
+
+          // Enter accepts into the buffer (does not submit) and clears the prop.
+          expect(props.onSubmit).not.toHaveBeenCalled();
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('calls onPromptSuggestionDismiss when a typed message is submitted', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        mockBuffer.text = 'ship it';
+        mockBuffer.lines = ['ship it'];
+        mockBuffer.cursor = [0, 'ship it'.length];
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\r');
+          });
+          await flush();
+
+          // Submitting a non-empty buffer clears the stale suggestion too, so a
+          // synchronous slash command (/clear, /help) can't leave a ghost.
+          expect(props.onSubmit).toHaveBeenCalledWith('ship it');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+    });
   });
 
   // Regression for #4171: `onTabConsumerChange` (consumed by AppContainer
@@ -475,6 +685,50 @@ describe('InputPrompt', () => {
       await wait(SUGGESTION_VISIBLE_WAIT_MS);
 
       expect(onTabConsumerChange).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    // Regression for #5145: `hasTabConsumer` must be true when ONLY
+    // `promptSuggestion` prop is set (followup.state.suggestion is null),
+    // so Windows Tab approval-mode cycling is blocked even before the
+    // followup controller's debounce fires.
+    it('reports true immediately when promptSuggestion prop is set (no followup debounce needed)', async () => {
+      const onTabConsumerChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          promptSuggestion="commit this"
+          onTabConsumerChange={onTabConsumerChange}
+        />,
+      );
+      // Must report true immediately — no need to wait for followup debounce
+      // because `hasTabConsumer` includes `Boolean(promptSuggestion)`.
+      expect(onTabConsumerChange).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    // Regression for #5145 (wenshao review): `hasTabConsumer` is now gated on
+    // `buffer.text.length === 0` instead of the old sticky `suggestionDismissed`
+    // flag, so it reacts to the *current* buffer. With a promptSuggestion present
+    // but a NON-empty buffer (the user is mid-typing), Tab must NOT be consumed —
+    // Windows approval-mode cycling stays enabled. The old `Boolean(promptSuggestion)`
+    // gate wrongly reported true here. The complementary empty-buffer → true
+    // direction (i.e. restored after deleting back to empty) is pinned by
+    // "reports true immediately when promptSuggestion prop is set" above.
+    it('reports false when a promptSuggestion is set but the buffer is non-empty', async () => {
+      mockBuffer.text = 'commit';
+      const onTabConsumerChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          promptSuggestion="commit this"
+          onTabConsumerChange={onTabConsumerChange}
+        />,
+      );
+      await wait();
+
+      expect(onTabConsumerChange).toHaveBeenCalledWith(false);
+      expect(onTabConsumerChange).not.toHaveBeenCalledWith(true);
       unmount();
     });
 
@@ -763,13 +1017,14 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
     expect(mockCommandCompletion.navigateDown).not.toHaveBeenCalled();
 
-    // Ctrl+P should navigate history, not completion
-    // Two-step edge: pre-position cursor at col 0 so Ctrl+P directly triggers history
+    // Ctrl+P should navigate completion while suggestions are visible.
+    // Two-step edge: pre-position cursor at col 0 so a fallthrough would
+    // directly trigger history.
     mockBuffer.visualCursor = [0, 0];
     stdin.write('\u0010'); // Ctrl+P
     await wait();
-    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
-    expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(2);
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -794,13 +1049,14 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
     expect(mockCommandCompletion.navigateUp).not.toHaveBeenCalled();
 
-    // Ctrl+N should navigate history, not completion
-    // Two-step edge: pre-position cursor at end so Ctrl+N directly triggers history
+    // Ctrl+N should navigate completion while suggestions are visible.
+    // Two-step edge: pre-position cursor at end so a fallthrough would
+    // directly trigger history.
     mockBuffer.visualCursor = [0, '/mem'.length];
     stdin.write('\u000E'); // Ctrl+N
     await wait();
-    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
-    expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(2);
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -1226,6 +1482,39 @@ describe('InputPrompt', () => {
     expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
     expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json');
     expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should keep cycling export formats with Ctrl+P/N after arrow navigation fills input', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[B');
+    await wait();
+    stdin.write('\u000E');
+    await wait();
+    stdin.write('\u0010');
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(4, '/export md');
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
     unmount();
   });
 
@@ -1888,6 +2177,72 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should dismiss completion on Enter after accepting @path suggestion', async () => {
+    // @path completion: pressing Enter should dismiss the completion
+    // (set dismissed flag + reset state) so the dropdown stays closed
+    // even if the @ token re-glob and produces new suggestions.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Enter should accept the suggestion and dismiss completion.
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should autocomplete @path on Tab without submitting or resetting completion', async () => {
+    // Tab means "complete the suggestion, do NOT execute". This is the
+    // standard shell convention. Completion state should NOT reset on Tab
+    // so the user can continue navigating deeper into directories.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Tab should autocomplete but NOT submit and NOT reset completion.
+    stdin.write('\t');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.resetCompletionState).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should reset history navigation after submitting on Enter', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
@@ -1941,6 +2296,7 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
     unmount();
   });
@@ -3354,7 +3710,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it.skip('expands and collapses long suggestion via Right/Left arrows', async () => {
+    it('expands and collapses long suggestion via Right/Left arrows', async () => {
       props.shellModeActive = false;
       const longValue = 'l'.repeat(200);
 
@@ -3373,20 +3729,22 @@ describe('InputPrompt', () => {
       await wait();
 
       stdin.write('\x12');
-      await wait();
-
-      expect(clean(stdout.lastFrame())).toContain('→');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('→');
+      });
 
       stdin.write('\u001B[C');
-      await wait();
-      expect(clean(stdout.lastFrame())).toContain('←');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('←');
+      });
       expect(stdout.lastFrame()).toMatchSnapshot(
         'command-search-expanded-match',
       );
 
       stdin.write('\u001B[D');
-      await wait();
-      expect(clean(stdout.lastFrame())).toContain('→');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('→');
+      });
       expect(stdout.lastFrame()).toMatchSnapshot(
         'command-search-collapsed-match',
       );

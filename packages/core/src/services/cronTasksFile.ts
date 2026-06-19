@@ -13,11 +13,8 @@ import * as path from 'node:path';
 import { Mutex } from 'async-mutex';
 
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 import { getProjectHash } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
-
-const debugLogger = createDebugLogger('CRON_TASKS_FILE');
 
 export interface DurableCronTask {
   id: string;
@@ -105,21 +102,14 @@ export async function readCronTasks(
       `Expected a JSON array in ${filePath} — fix or delete the file; refusing to treat it as an empty schedule.`,
     );
   }
-  const valid = parsed.filter(isValidTask);
-  // A single malformed entry in an otherwise-valid array is dropped here,
-  // and the next update persists the filtered list — silently losing what
-  // the user hand-edited. Can't carry unknown shapes through the typed
-  // pipeline yet (tracked as follow-up), so at least surface the drop.
-  if (valid.length !== parsed.length) {
-    debugLogger.warn(
-      `Dropped ${parsed.length - valid.length} invalid task entr${
-        parsed.length - valid.length === 1 ? 'y' : 'ies'
-      } from ${filePath}; a later write will persist without ${
-        parsed.length - valid.length === 1 ? 'it' : 'them'
-      }.`,
-    );
+  for (const [index, task] of parsed.entries()) {
+    if (!isValidTask(task)) {
+      throw new Error(
+        `Invalid task entry at index ${index} in ${filePath} — fix or delete the entry; refusing to drop it from the schedule.`,
+      );
+    }
   }
-  return valid;
+  return parsed;
 }
 
 export async function writeCronTasks(

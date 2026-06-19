@@ -9,13 +9,27 @@ import {
   asKnownDaemonEvent,
   createDaemonAuthState,
   createDaemonSessionViewState,
+  DAEMON_KNOWN_EVENT_TYPE_VALUES,
   isDaemonEventType,
+  MID_TURN_MESSAGE_INJECTED_EVENT,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
+
+describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
+  it('is the wire literal and a registered known event type', () => {
+    // The same const is imported by the daemon publisher (acp-bridge) and the
+    // browser consumer (webui), so this also pins THEIR matching. Changing the
+    // wire string is a deliberate protocol change and must update this literal.
+    expect(MID_TURN_MESSAGE_INJECTED_EVENT).toBe('mid_turn_message_injected');
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
+      MID_TURN_MESSAGE_INJECTED_EVENT,
+    );
+  });
+});
 
 describe('daemon event schema', () => {
   it('narrows known daemon events by discriminator', () => {

@@ -17,9 +17,13 @@ import { MANAGEMENT_STEPS, type ExtensionAction } from './types.js';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
-import { t } from '../../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../../i18n/index.js';
 import type { Extension, Config } from '@qwen-code/qwen-code-core';
-import { SettingScope, createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  SettingScope,
+  createDebugLogger,
+  getExtensionDisplayName,
+} from '@qwen-code/qwen-code-core';
 import { ExtensionUpdateState } from '../../state/extensions.js';
 import { getErrorMessage } from '../../../utils/errors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
@@ -155,7 +159,10 @@ export function ExtensionsManagerDialog({
       // Show success message
       setSuccessMessage(
         t('Extension "{{name}}" updated successfully.', {
-          name: selectedExtension.name,
+          name: getExtensionDisplayName(
+            selectedExtension,
+            getCurrentLanguage(),
+          ),
         }),
       );
 
@@ -242,7 +249,10 @@ export function ExtensionsManagerDialog({
         const actionKey = newState ? 'enabled' : 'disabled';
         setSuccessMessage(
           t(`Extension "{{name}}" ${actionKey} successfully.`, {
-            name: selectedExtension.name,
+            name: getExtensionDisplayName(
+              selectedExtension,
+              getCurrentLanguage(),
+            ),
           }),
         );
         setErrorMessage(null);
@@ -257,7 +267,10 @@ export function ExtensionsManagerDialog({
         setErrorMessage(
           t('Failed to {{action}} extension "{{name}}": {{error}}', {
             action: newState ? 'enable' : 'disable',
-            name: selectedExtension.name,
+            name: getExtensionDisplayName(
+              selectedExtension,
+              getCurrentLanguage(),
+            ),
             error: getErrorMessage(error),
           }),
         );
@@ -336,7 +349,9 @@ export function ExtensionsManagerDialog({
         case MANAGEMENT_STEPS.EXTENSION_LIST:
           return t('Manage Extensions');
         case MANAGEMENT_STEPS.ACTION_SELECTION:
-          return selectedExtension?.name || t('Choose Action');
+          return selectedExtension
+            ? getExtensionDisplayName(selectedExtension, getCurrentLanguage())
+            : t('Choose Action');
         case MANAGEMENT_STEPS.EXTENSION_DETAIL:
           return t('Extension Details');
         case MANAGEMENT_STEPS.DISABLE_SCOPE_SELECT:
@@ -473,7 +488,12 @@ export function ExtensionsManagerDialog({
             <Text>
               {updateInProgress
                 ? t('Updating {{name}}...', {
-                    name: selectedExtension?.name || '',
+                    name: selectedExtension
+                      ? getExtensionDisplayName(
+                          selectedExtension,
+                          getCurrentLanguage(),
+                        )
+                      : '',
                   })
                 : t('Update complete!')}
             </Text>

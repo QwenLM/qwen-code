@@ -384,7 +384,7 @@ describe('todo_write tool rendering', () => {
 
   it('expands to the full list on click', () => {
     const container = renderTodoTool(makeTodoTool());
-    expandTool(container, 'TodoWrite');
+    expandTool(container, 'TodoList');
     expect(container.textContent).toContain('First task');
     expect(container.textContent).toContain('Second task');
     expect(container.textContent).toContain('Third task');

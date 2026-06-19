@@ -27,6 +27,8 @@ import type {
   AutoModeOutcome,
   GoalTerminalEvent,
   TurnInterruption,
+  ToolCallRequestInfo,
+  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -37,6 +39,7 @@ import {
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   ORPHAN_TOOL_USE_REPAIR_REASON,
   convertToFunctionResponse,
+  createDuplicateProviderToolCallResponse,
   createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
@@ -100,6 +103,7 @@ import {
   setGoalTerminalObserver,
   sessionIdContext,
   dedupeToolCallsById,
+  getProviderToolCallId,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -179,17 +183,22 @@ type AutoCompressionSendResult =
 
 type RunToolResult = {
   parts: Part[];
-  stopAfterUserQuestionCancel: boolean;
+  stopAfterPermissionCancel: boolean;
 };
 
-const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
-  'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.';
+const PERMISSION_CANCEL_SKIP_MESSAGE =
+  'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.';
 
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
 // means the client silently drops unknown methods; without a deadline the
 // await would wedge the prompt turn forever.
 const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
+// Secondary deadline for recovering a drain whose response arrives AFTER the
+// 2s race timeout: within this window the late answer is re-injected on the next
+// batch; beyond it (e.g. degraded transport) it is dropped rather than pushed
+// into an unrelated turn's context.
+const MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS = 30_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
 const MAX_MID_TURN_DRAIN_ITEMS = 10;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
@@ -406,6 +415,11 @@ interface BackgroundNotificationQueueItem {
   toolUseId?: string;
 }
 
+interface CronQueueItem {
+  prompt: string;
+  source: 'cron' | 'loop';
+}
+
 const MAX_NOTIFICATION_QUEUE = 20;
 
 export function computeInitialTurnFromHistory(
@@ -460,6 +474,7 @@ export async function fireSessionPermissionDeniedForAutoMode(
           callId,
           getAutoModePermissionDeniedReason(decision),
           signal,
+          callId,
         );
     } catch (hookError) {
       debugLogger.warn(
@@ -652,7 +667,7 @@ export class Session implements SessionContext {
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state
-  private cronQueue: string[] = [];
+  private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
   private cronAbortController: AbortController | null = null;
   private cronCompletion: Promise<void> | null = null;
@@ -661,6 +676,11 @@ export class Session implements SessionContext {
   private lastPromptTokenCountChat: GeminiChat | null = null;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
+  // Messages from a drain that the daemon answered but we timed out waiting for
+  // (the daemon already spliced + SSE-published them). Re-injected on the next
+  // batch so a transient stall can't silently lose them. See
+  // `#drainMidTurnUserMessages`.
+  private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -1065,7 +1085,6 @@ export class Session implements SessionContext {
     try {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
-      void this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -1073,6 +1092,12 @@ export class Session implements SessionContext {
       return result;
     } finally {
       this.pendingPrompt = null;
+      // Start the scheduler in finally, not the success path: a turn can arm
+      // a wakeup via LoopWakeup and then throw on a later step. Gated on
+      // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
+      // cron job) is actually pending — otherwise the loop dies silently on
+      // any post-arm error.
+      void this.#startCronSchedulerIfNeeded();
       resolveCompletion();
       this.pendingPromptCompletion = null;
     }
@@ -1155,7 +1180,10 @@ export class Session implements SessionContext {
    */
   #maybeEmitFollowupSuggestion(result: PromptResponse): void {
     if (result.stopReason !== 'end_turn') return;
-    if (this.settings.merged.ui?.enableFollowupSuggestions !== true) return;
+    // Enabled by default — only an explicit `false` opts out. The schema
+    // `default: true` isn't applied at runtime by `mergeSettings`, so an unset
+    // value must be treated as enabled here.
+    if (this.settings.merged.ui?.enableFollowupSuggestions === false) return;
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) return;
 
     const chat = this.config.getGeminiClient()?.getChat();
@@ -2103,8 +2131,8 @@ ${this.pendingWorktreeNotice}
               promptId,
               functionCalls,
             );
-            if (toolRun.stopAfterUserQuestionCancel) {
-              await this.#preserveCancelledAskUserQuestionToolRun(
+            if (toolRun.stopAfterPermissionCancel) {
+              await this.#preserveCancelledPermissionToolRun(
                 toolRun,
                 pendingSend.signal,
               );
@@ -2277,7 +2305,7 @@ ${this.pendingWorktreeNotice}
     }
   }
 
-  async #preserveCancelledAskUserQuestionToolRun(
+  async #preserveCancelledPermissionToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
@@ -2401,7 +2429,16 @@ ${this.pendingWorktreeNotice}
   }
 
   async #drainMidTurnUserMessages(abortSignal: AbortSignal): Promise<Part[]> {
-    if (this.midTurnDrainUnavailable) return [];
+    // Flush anything recovered from a PRIOR timed-out drain first: the daemon
+    // splices + SSE-publishes synchronously, so on a timeout the browser has
+    // already deduped those messages — discarding the late response would lose
+    // them from both queues. We stash them (see the timeout branch) and
+    // re-inject them here on the next batch.
+    const recovered = this.#takeRecoveredMidTurnMessages();
+
+    if (this.midTurnDrainUnavailable) {
+      return this.#buildMidTurnParts(recovered, abortSignal);
+    }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
@@ -2422,49 +2459,10 @@ ${this.pendingWorktreeNotice}
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      const drainedMessages = parseMidTurnDrainResponse(response);
-      const drainedParts: Part[] = [];
-      for (const message of drainedMessages) {
-        const displayText =
-          message.kind === 'text' ? message.message : message.displayText;
-        let rawParts: Part[];
-        try {
-          rawParts =
-            message.kind === 'text'
-              ? [{ text: message.message }]
-              : await withTimeoutSignal(
-                  abortSignal,
-                  MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                  (signal) => this.#resolvePrompt(message.content, signal),
-                );
-        } catch (messageError) {
-          if (abortSignal.aborted) return drainedParts;
-          const errorMessage = this.#formatError(messageError);
-          debugLogger.warn(
-            `Failed to resolve mid-turn message: ${errorMessage}`,
-          );
-          rawParts = [
-            {
-              text: displayText,
-            },
-          ];
-          if (
-            message.kind === 'structured' &&
-            hasInlineMediaContentBlock(message.content)
-          ) {
-            rawParts.push({
-              text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT,
-            });
-          }
-        }
-        const parts = prefixMidTurnUserMessageParts(rawParts, displayText);
-        this.config
-          .getChatRecordingService()
-          ?.recordMidTurnUserMessage(parts, displayText);
-        drainedParts.push(...parts);
-      }
-
-      return drainedParts;
+      return this.#buildMidTurnParts(
+        [...recovered, ...parseMidTurnDrainResponse(response)],
+        abortSignal,
+      );
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so
@@ -2484,9 +2482,14 @@ ${this.pendingWorktreeNotice}
       const isTimeout = error instanceof MidTurnDrainTimeoutError;
       if (isTimeout) {
         this.midTurnDrainTimeoutStrikes += 1;
-        // The lost race leaves the request pending; if the client settles it
-        // later, a rejection must not surface as an unhandled rejection.
-        drainPromise?.catch(() => {});
+        // The lost race leaves the drain request pending. The daemon answers it
+        // by splicing the queue + publishing the SSE echo (so the browser has
+        // already deduped), then returns the messages we just timed out waiting
+        // for. Recover that late response and inject it on the next batch instead
+        // of discarding it (which would lose the messages from both queues —
+        // silent loss). `#recoverLateDrain` bounds the wait and swallows a late
+        // rejection.
+        if (drainPromise) void this.#recoverLateDrain(drainPromise);
       }
       // Repeated timeouts are also permanent: a conforming client answers
       // (or rejects with -32601) immediately, so sustained silence means the
@@ -2507,8 +2510,108 @@ ${this.pendingWorktreeNotice}
       debugLogger.warn(
         `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
-      return [];
+      // Even on a failed/timed-out drain, still inject anything recovered from
+      // an EARLIER timeout so a transient stall never strands those messages.
+      return this.#buildMidTurnParts(recovered, abortSignal);
     }
+  }
+
+  /** Read and clear the buffer of messages recovered from a timed-out drain. */
+  #takeRecoveredMidTurnMessages(): DrainedMidTurnMessage[] {
+    if (this.midTurnRecoveredMessages.length === 0) return [];
+    const out = this.midTurnRecoveredMessages;
+    this.midTurnRecoveredMessages = [];
+    return out;
+  }
+
+  /**
+   * After a drain times out, the request is still pending; the daemon settles it
+   * shortly after (it splices + SSE-publishes synchronously, so the browser has
+   * already deduped). Recover that late response for the next batch instead of
+   * discarding it, but bound the wait with a secondary deadline so a response
+   * that only arrives long after the turn isn't pushed into an unrelated
+   * context. A late rejection is swallowed (no unhandled rejection).
+   */
+  async #recoverLateDrain(
+    pending: ReturnType<AgentSideConnection['extMethod']>,
+  ): Promise<void> {
+    // Swallow a late rejection regardless of which branch of the race wins.
+    pending.catch(() => {});
+    const expired = Symbol('mid-turn-recovery-expired');
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<typeof expired>((resolve) => {
+      timer = setTimeout(
+        () => resolve(expired),
+        MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    });
+    let late: unknown;
+    try {
+      late = await Promise.race([pending, deadline]);
+    } catch {
+      return; // late rejection — nothing to recover
+    } finally {
+      clearTimeout(timer);
+    }
+    if (late === expired) {
+      debugLogger.warn(
+        `[mid-turn] dropped a drain response that arrived after the ${MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS}ms recovery deadline [session ${this.sessionId}]`,
+      );
+      return;
+    }
+    const lateMessages = parseMidTurnDrainResponse(late);
+    if (lateMessages.length > 0) {
+      debugLogger.debug(
+        `[mid-turn] recovered ${lateMessages.length} message(s) from a timed-out drain [session ${this.sessionId}]`,
+      );
+      this.midTurnRecoveredMessages.push(...lateMessages);
+    }
+  }
+
+  /**
+   * Resolve each drained mid-turn message (text or structured content) into
+   * agent-visible `Part`s and record it once to the chat transcript. Recording
+   * happens on injection (here), so a message recovered from an earlier
+   * timed-out drain is still recorded exactly once.
+   */
+  async #buildMidTurnParts(
+    messages: DrainedMidTurnMessage[],
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    const parts: Part[] = [];
+    for (const message of messages) {
+      const displayText =
+        message.kind === 'text' ? message.message : message.displayText;
+      let rawParts: Part[];
+      try {
+        rawParts =
+          message.kind === 'text'
+            ? [{ text: message.message }]
+            : await withTimeoutSignal(
+                abortSignal,
+                MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+                (signal) => this.#resolvePrompt(message.content, signal),
+              );
+      } catch (messageError) {
+        if (abortSignal.aborted) return parts;
+        const errorMessage = this.#formatError(messageError);
+        debugLogger.warn(`Failed to resolve mid-turn message: ${errorMessage}`);
+        rawParts = [{ text: displayText }];
+        if (
+          message.kind === 'structured' &&
+          hasInlineMediaContentBlock(message.content)
+        ) {
+          rawParts.push({ text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT });
+        }
+      }
+      const built = prefixMidTurnUserMessageParts(rawParts, displayText);
+      this.config
+        .getChatRecordingService()
+        ?.recordMidTurnUserMessage(built, displayText);
+      parts.push(...built);
+    }
+    return parts;
   }
 
   /**
@@ -2544,9 +2647,12 @@ ${this.pendingWorktreeNotice}
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start((job: { prompt: string }) => {
+    scheduler.start((job: { prompt: string; cronExpr?: string }) => {
       if (this.cronDisabledByTokenLimit) return;
-      this.cronQueue.push(job.prompt);
+      this.cronQueue.push({
+        prompt: job.prompt,
+        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+      });
       void this.#drainCronQueue();
     });
   }
@@ -2571,8 +2677,8 @@ ${this.pendingWorktreeNotice}
 
     try {
       while (this.cronQueue.length > 0) {
-        const prompt = this.cronQueue.shift()!;
-        await this.#executeCronPrompt(prompt);
+        const item = this.cronQueue.shift()!;
+        await this.#executeCronPrompt(item);
       }
     } finally {
       this.cronProcessing = false;
@@ -2598,14 +2704,15 @@ ${this.pendingWorktreeNotice}
    * Executes a single cron-fired prompt: echoes it as a user message with
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
    */
-  async #executeCronPrompt(prompt: string): Promise<void> {
+  async #executeCronPrompt(item: CronQueueItem): Promise<void> {
     // Same session-ID binding rationale as #executePrompt.
     return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeCronPromptInner(prompt),
+      this.#executeCronPromptInner(item),
     );
   }
 
-  async #executeCronPromptInner(prompt: string): Promise<void> {
+  async #executeCronPromptInner(item: CronQueueItem): Promise<void> {
+    const { prompt } = item;
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
@@ -2630,7 +2737,7 @@ ${this.pendingWorktreeNotice}
               await this.sendUpdate({
                 sessionUpdate: 'user_message_chunk',
                 content: { type: 'text', text: prompt },
-                _meta: { source: 'cron' },
+                _meta: { source: item.source },
               });
 
               // Prepend session-level system reminders (same rationale as the
@@ -2722,8 +2829,8 @@ ${this.pendingWorktreeNotice}
                     promptId,
                     functionCalls,
                   );
-                  if (toolRun.stopAfterUserQuestionCancel) {
-                    await this.#preserveCancelledAskUserQuestionToolRun(
+                  if (toolRun.stopAfterPermissionCancel) {
+                    await this.#preserveCancelledPermissionToolRun(
                       toolRun,
                       ac.signal,
                     );
@@ -2744,7 +2851,9 @@ ${this.pendingWorktreeNotice}
               debugLogger.error('Error processing cron prompt:', error);
               const msg =
                 error instanceof Error ? error.message : String(error);
-              await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
+              await this.messageEmitter.emitAgentMessage(
+                `[${item.source} error] ${msg}`,
+              );
             } finally {
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
@@ -2772,9 +2881,12 @@ ${this.pendingWorktreeNotice}
     this.cronDisabledByTokenLimit = true;
     this.cronQueue = [];
     if (!this.config.isCronEnabled()) return;
-    this.config.getCronScheduler().stop();
+    // disable() (not stop()): the breaker is permanent for the session, so
+    // LoopWakeup must reject re-arms that would never fire, not just halt the
+    // tick (which a later pending wakeup would otherwise silently restart).
+    this.config.getCronScheduler().disable();
     void this.#emitAgentDiagnosticMessageSafely(
-      'Cron jobs disabled for the rest of this session due to token limit. Restart the session to re-enable.',
+      'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
       'Failed to emit cron-disabled diagnostic',
     );
   }
@@ -3035,8 +3147,8 @@ ${this.pendingWorktreeNotice}
                 promptId,
                 functionCalls,
               );
-              if (toolRun.stopAfterUserQuestionCancel) {
-                await this.#preserveCancelledAskUserQuestionToolRun(
+              if (toolRun.stopAfterPermissionCancel) {
+                await this.#preserveCancelledPermissionToolRun(
                   toolRun,
                   ac.signal,
                 );
@@ -3388,15 +3500,101 @@ ${this.pendingWorktreeNotice}
     functionCalls: FunctionCall[],
   ): Promise<RunToolResult> {
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
-    type Batch = { concurrent: boolean; calls: FunctionCall[] };
+    type ExecutableBatch = {
+      kind: 'execute';
+      concurrent: boolean;
+      calls: FunctionCall[];
+    };
+    type DuplicateBatch = {
+      kind: 'duplicate';
+      request: ToolCallRequestInfo;
+      response: ToolCallResponseInfo;
+    };
+    type Batch = ExecutableBatch | DuplicateBatch;
     const batches: Batch[] = [];
+    const handledProviderToolCallIds = new Set(
+      this.#getCurrentChat().getHistoryFunctionResponseIds(),
+    );
+
+    const pushDuplicateBatch = (request: ToolCallRequestInfo): void => {
+      const response = createDuplicateProviderToolCallResponse(request);
+      debugLogger.debug(
+        `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +
+          `${request.providerCallId} (tool: ${request.name})`,
+      );
+      batches.push({ kind: 'duplicate', request, response });
+    };
+
+    const emitDuplicateBatch = async (batch: DuplicateBatch): Promise<void> => {
+      const { request, response } = batch;
+      if (request.name === ToolNames.TODO_WRITE) {
+        const provenance = ToolCallEmitter.resolveToolProvenance(request.name);
+        await this.sendUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: response.callId,
+          status: 'failed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: response.error?.message ?? String(response.resultDisplay),
+              },
+            },
+          ],
+          rawOutput: response.resultDisplay,
+          _meta: {
+            toolName: request.name,
+            provenance: provenance.provenance,
+            ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+          },
+        });
+      } else {
+        await this.toolCallEmitter.emitResult({
+          callId: response.callId,
+          toolName: request.name,
+          args: request.args,
+          message: response.responseParts,
+          resultDisplay: response.resultDisplay,
+          error: response.error,
+          success: false,
+        });
+      }
+      this.config
+        .getChatRecordingService()
+        ?.recordToolResult(response.responseParts, {
+          callId: response.callId,
+          status: 'error',
+          resultDisplay: response.resultDisplay,
+          error: response.error,
+          errorType: response.errorType,
+        });
+    };
+
     for (const fc of dedupedFunctionCalls) {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      if (providerCallId) {
+        if (handledProviderToolCallIds.has(providerCallId)) {
+          const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+          pushDuplicateBatch({
+            callId,
+            providerCallId,
+            name: fc.name ?? 'unknown_tool',
+            args: (fc.args ?? {}) as Record<string, unknown>,
+            isClientInitiated: false,
+            prompt_id: promptId,
+          });
+          continue;
+        }
+        handledProviderToolCallIds.add(providerCallId);
+      }
+
       const isAgent = fc.name === ToolNames.AGENT;
       const last = batches[batches.length - 1];
-      if (isAgent && last?.concurrent) {
+      if (isAgent && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
       } else {
-        batches.push({ concurrent: isAgent, calls: [fc] });
+        batches.push({ kind: 'execute', concurrent: isAgent, calls: [fc] });
       }
     }
 
@@ -3408,10 +3606,10 @@ ${this.pendingWorktreeNotice}
         functionResponse: {
           id: callId,
           name: toolName,
-          response: { error: ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE },
+          response: { error: PERMISSION_CANCEL_SKIP_MESSAGE },
         },
       };
-      const error = new Error(ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE);
+      const error = new Error(PERMISSION_CANCEL_SKIP_MESSAGE);
       try {
         this.config.getChatRecordingService()?.recordToolResult([part], {
           callId,
@@ -3447,7 +3645,7 @@ ${this.pendingWorktreeNotice}
     const runBounded = async (
       calls: FunctionCall[],
       runAbortSignal: AbortSignal,
-      onStopAfterUserQuestionCancel?: () => void,
+      onStopAfterPermissionCancel?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
       const parsed = parseInt(
@@ -3463,7 +3661,7 @@ ${this.pendingWorktreeNotice}
         if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
           results[idx] = {
             parts: [await recordSkippedToolCall(calls[idx])],
-            stopAfterUserQuestionCancel: false,
+            stopAfterPermissionCancel: false,
           };
           continue;
         }
@@ -3471,7 +3669,7 @@ ${this.pendingWorktreeNotice}
           runAbortSignal,
           promptId,
           calls[idx],
-          onStopAfterUserQuestionCancel,
+          onStopAfterPermissionCancel,
         )
           .then((r) => {
             results[idx] = r;
@@ -3490,9 +3688,14 @@ ${this.pendingWorktreeNotice}
 
     const parts: Part[] = [];
     for (const batch of batches) {
+      if (batch.kind === 'duplicate') {
+        await emitDuplicateBatch(batch);
+        parts.push(...batch.response.responseParts);
+        continue;
+      }
       if (batch.concurrent && batch.calls.length > 1) {
         const batchAbortController = new AbortController();
-        let batchStopAfterUserQuestionCancel = false;
+        let batchStopAfterPermissionCancel = false;
         const propagateAbort = () => {
           batchAbortController.abort(abortSignal.reason);
         };
@@ -3503,8 +3706,8 @@ ${this.pendingWorktreeNotice}
             once: true,
           });
         }
-        const stopBatchAfterUserQuestionCancel = () => {
-          batchStopAfterUserQuestionCancel = true;
+        const stopBatchAfterPermissionCancel = () => {
+          batchStopAfterPermissionCancel = true;
           batchAbortController.abort(USER_CANCEL_ABORT_REASON);
         };
         let results: RunToolResult[];
@@ -3512,8 +3715,8 @@ ${this.pendingWorktreeNotice}
           results = await runBounded(
             batch.calls,
             batchAbortController.signal,
-            stopBatchAfterUserQuestionCancel,
-            () => batchStopAfterUserQuestionCancel,
+            stopBatchAfterPermissionCancel,
+            () => batchStopAfterPermissionCancel,
           );
         } finally {
           abortSignal.removeEventListener('abort', propagateAbort);
@@ -3521,24 +3724,24 @@ ${this.pendingWorktreeNotice}
         let shouldStop = false;
         for (const r of results) {
           parts.push(...r.parts);
-          shouldStop ||= r.stopAfterUserQuestionCancel;
+          shouldStop ||= r.stopAfterPermissionCancel;
         }
         if (shouldStop) {
           await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
-          return { parts, stopAfterUserQuestionCancel: true };
+          return { parts, stopAfterPermissionCancel: true };
         }
       } else {
         for (const fc of batch.calls) {
           const r = await this.runTool(abortSignal, promptId, fc);
           parts.push(...r.parts);
-          if (r.stopAfterUserQuestionCancel) {
+          if (r.stopAfterPermissionCancel) {
             await appendSkippedAfter(parts, fc);
-            return { parts, stopAfterUserQuestionCancel: true };
+            return { parts, stopAfterPermissionCancel: true };
           }
         }
       }
     }
-    return { parts, stopAfterUserQuestionCancel: false };
+    return { parts, stopAfterPermissionCancel: false };
   }
 
   /**
@@ -3580,7 +3783,7 @@ ${this.pendingWorktreeNotice}
     abortSignal: AbortSignal,
     promptId: string,
     fc: FunctionCall,
-    onStopAfterUserQuestionCancel?: () => void,
+    onStopAfterPermissionCancel?: () => void,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -3588,9 +3791,17 @@ ${this.pendingWorktreeNotice}
     const startTime = Date.now();
     let spanError: string | undefined;
     let activeToolAbortSignal = abortSignal;
-    let nestedAskUserQuestionCancelled = false;
+    let nestedPermissionCancelled = false;
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
+    let subAgentCleanupFunctions: Array<() => void> = [];
+
+    const cleanupAgentToolResources = () => {
+      subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+      subAgentCleanupFunctions = [];
+      removeAgentToolAbortPropagation?.();
+      removeAgentToolAbortPropagation = undefined;
+    };
 
     const errorResponse = (error: Error) => {
       const durationMs = Date.now() - startTime;
@@ -3625,10 +3836,10 @@ ${this.pendingWorktreeNotice}
     const earlyErrorResponse = async (
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
-      opts?: { stopAfterUserQuestionCancel?: boolean },
+      opts?: { stopAfterPermissionCancel?: boolean },
     ) => {
       spanError = error.message;
-      removeAgentToolAbortPropagation?.();
+      cleanupAgentToolResources();
       if (toolName !== ToolNames.TODO_WRITE) {
         await this.toolCallEmitter.emitError(callId, toolName, error);
       }
@@ -3643,7 +3854,7 @@ ${this.pendingWorktreeNotice}
       });
       return {
         parts: errorParts,
-        stopAfterUserQuestionCancel: opts?.stopAfterUserQuestionCancel ?? false,
+        stopAfterPermissionCancel: opts?.stopAfterPermissionCancel ?? false,
       };
     };
 
@@ -3705,9 +3916,6 @@ ${this.pendingWorktreeNotice}
           }
         }
 
-        // Track cleanup functions for sub-agent event listeners
-        let subAgentCleanupFunctions: Array<() => void> = [];
-
         // Generate tool_use_id for hook tracking (aligned with core path)
         const toolUseId = generateToolUseId();
 
@@ -3741,9 +3949,9 @@ ${this.pendingWorktreeNotice}
               parentToolCallId,
               subagentType,
               () => {
-                nestedAskUserQuestionCancelled = true;
+                nestedPermissionCancelled = true;
                 agentToolAbortController?.abort(USER_CANCEL_ABORT_REASON);
-                onStopAfterUserQuestionCancel?.();
+                onStopAfterPermissionCancel?.();
               },
             );
 
@@ -4042,24 +4250,74 @@ ${this.pendingWorktreeNotice}
                   _meta: { toolName },
                 },
               };
+              const stopAfterPermissionCancel = () => {
+                onStopAfterPermissionCancel?.();
+                return earlyErrorResponse(
+                  new Error(`Tool "${toolName}" was canceled by the user.`),
+                  toolName,
+                  { stopAfterPermissionCancel: true },
+                );
+              };
 
-              const output = (await this.client.requestPermission(
-                params,
-              )) as RequestPermissionResponse & {
+              let output: RequestPermissionResponse & {
                 answers?: Record<string, string>;
               };
-              const outcome =
-                output.outcome.outcome === 'cancelled'
-                  ? ToolConfirmationOutcome.Cancel
-                  : z
-                      .nativeEnum(ToolConfirmationOutcome)
-                      .parse(output.outcome.optionId);
+              let outcome: ToolConfirmationOutcome;
+              try {
+                output = (await this.client.requestPermission(
+                  params,
+                )) as RequestPermissionResponse & {
+                  answers?: Record<string, string>;
+                };
+                outcome =
+                  output.outcome.outcome === 'cancelled'
+                    ? ToolConfirmationOutcome.Cancel
+                    : z
+                        .nativeEnum(ToolConfirmationOutcome)
+                        .parse(output.outcome.optionId);
+              } catch (error) {
+                debugLogger.error(
+                  `Permission request failed for tool ${toolName}:`,
+                  error,
+                );
+                try {
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.Cancel,
+                  );
+                } catch (confirmError) {
+                  debugLogger.error(
+                    `Failed to cancel tool ${toolName} after permission request failure:`,
+                    confirmError,
+                  );
+                }
+                onStopAfterPermissionCancel?.();
+                return earlyErrorResponse(
+                  new Error(
+                    `Permission request failed for "${toolName}": ${this.#formatError(
+                      error,
+                    )}`,
+                  ),
+                  toolName,
+                  { stopAfterPermissionCancel: true },
+                );
+              }
 
               recordAutoModeFallbackResolution(outcome);
 
-              await confirmationDetails.onConfirm(outcome, {
-                answers: output.answers,
-              });
+              try {
+                await confirmationDetails.onConfirm(outcome, {
+                  answers: output.answers,
+                });
+              } catch (error) {
+                if (outcome !== ToolConfirmationOutcome.Cancel) {
+                  throw error;
+                }
+                debugLogger.error(
+                  `Failed to confirm cancellation for tool ${toolName}:`,
+                  error,
+                );
+                return stopAfterPermissionCancel();
+              }
 
               // Persist permission rules when user explicitly chose "Always Allow".
               // This branch is only reached for tools that went through
@@ -4097,21 +4355,11 @@ ${this.pendingWorktreeNotice}
 
               switch (outcome) {
                 case ToolConfirmationOutcome.Cancel:
-                  if (toolName === ToolNames.ASK_USER_QUESTION) {
-                    onStopAfterUserQuestionCancel?.();
-                  }
                   // Route through earlyErrorResponse so spanError carries the
                   // cancellation reason (plain errorResponse leaves it unset,
                   // which makes endToolSpan fall back to the generic 'tool
                   // error' message) and the declined call is still recorded.
-                  return earlyErrorResponse(
-                    new Error(`Tool "${toolName}" was canceled by the user.`),
-                    toolName,
-                    {
-                      stopAfterUserQuestionCancel:
-                        toolName === ToolNames.ASK_USER_QUESTION,
-                    },
-                  );
+                  return stopAfterPermissionCancel();
                 case ToolConfirmationOutcome.ProceedOnce:
                 case ToolConfirmationOutcome.ProceedAlways:
                 case ToolConfirmationOutcome.ProceedAlwaysProject:
@@ -4154,6 +4402,7 @@ ${this.pendingWorktreeNotice}
               toolUseId,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             if (!preHookResult.shouldProceed) {
@@ -4210,8 +4459,7 @@ ${this.pendingWorktreeNotice}
           }
 
           // Clean up event listeners
-          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-          removeAgentToolAbortPropagation?.();
+          cleanupAgentToolResources();
 
           // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
           // approval mode inside execute() without going through the user-confirmation
@@ -4258,7 +4506,7 @@ ${this.pendingWorktreeNotice}
             messageBusForTool &&
             !toolResult.error &&
             !aborted &&
-            !nestedAskUserQuestionCancelled
+            !nestedPermissionCancelled
           ) {
             // Use the same response shape as core (llmContent/returnDisplay)
             const toolResponse = {
@@ -4273,6 +4521,7 @@ ${this.pendingWorktreeNotice}
               toolUseId,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             // If hook indicates to stop, return an error response
@@ -4308,6 +4557,7 @@ ${this.pendingWorktreeNotice}
               isInterrupt,
               permissionMode,
               activeToolAbortSignal,
+              callId,
             );
 
             // Log additional context if provided
@@ -4390,12 +4640,11 @@ ${this.pendingWorktreeNotice}
           }
           return {
             parts: responseParts,
-            stopAfterUserQuestionCancel: nestedAskUserQuestionCancelled,
+            stopAfterPermissionCancel: nestedPermissionCancelled,
           };
         } catch (e) {
           // Ensure cleanup on error
-          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-          removeAgentToolAbortPropagation?.();
+          cleanupAgentToolResources();
 
           const error = e instanceof Error ? e : new Error(String(e));
           spanError = error.message;
@@ -4415,6 +4664,7 @@ ${this.pendingWorktreeNotice}
               isInterrupt,
               String(approvalMode),
               activeToolAbortSignal,
+              callId,
             );
 
             // Log additional context if provided
@@ -4450,7 +4700,7 @@ ${this.pendingWorktreeNotice}
 
           return {
             parts: errorResponse(error),
-            stopAfterUserQuestionCancel: nestedAskUserQuestionCancelled,
+            stopAfterPermissionCancel: nestedPermissionCancelled,
           };
         }
       }); // end runInToolSpanContext

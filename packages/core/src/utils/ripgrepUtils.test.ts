@@ -4,11 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { getBuiltinRipgrep } from './ripgrepUtils.js';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  _resetRipgrepUtilsCachesForTest,
+  getBuiltinRipgrep,
+  resolveRipgrep,
+} from './ripgrepUtils.js';
+import { fileExists } from './fileUtils.js';
+import { isCommandAvailable } from './shell-utils.js';
 import path from 'node:path';
 
+vi.mock('./fileUtils.js', () => ({
+  fileExists: vi.fn(),
+}));
+
+vi.mock('./shell-utils.js', () => ({
+  execCommand: vi.fn(),
+  isCommandAvailable: vi.fn(),
+}));
+
 describe('ripgrepUtils', () => {
+  beforeEach(() => {
+    _resetRipgrepUtilsCachesForTest();
+    vi.mocked(fileExists).mockReset();
+    vi.mocked(isCommandAvailable).mockReset();
+  });
+
   describe('getBuiltinRipgrep', () => {
     it('should return path with .exe extension on Windows', () => {
       const originalPlatform = process.platform;
@@ -130,6 +151,37 @@ describe('ripgrepUtils', () => {
       // Restore original values
       Object.defineProperty(process, 'platform', { value: originalPlatform });
       Object.defineProperty(process, 'arch', { value: originalArch });
+    });
+  });
+
+  describe('resolveRipgrep', () => {
+    it('keeps builtin and system selections cached separately', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(isCommandAvailable).mockReturnValue({
+        available: true,
+        error: undefined,
+      });
+
+      await expect(resolveRipgrep(true)).resolves.toMatchObject({
+        mode: 'builtin',
+      });
+      await expect(resolveRipgrep(false)).resolves.toEqual({
+        mode: 'system',
+        command: 'rg',
+      });
+    });
+
+    it('falls back to system ripgrep when builtin is enabled but unavailable', async () => {
+      vi.mocked(fileExists).mockResolvedValue(false);
+      vi.mocked(isCommandAvailable).mockReturnValue({
+        available: true,
+        error: undefined,
+      });
+
+      await expect(resolveRipgrep(true)).resolves.toEqual({
+        mode: 'system',
+        command: 'rg',
+      });
     });
   });
 });

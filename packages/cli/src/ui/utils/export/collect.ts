@@ -611,7 +611,7 @@ class ExportSessionContext implements SessionContext {
       toolCall: {
         toolCallId: uuid, // Use the same uuid as toolCallId for plan updates
         kind: 'todowrite',
-        title: 'TodoWrite',
+        title: 'TodoList',
         status: 'completed',
         content: todoContent,
         timestamp: Date.parse(timestamp),
