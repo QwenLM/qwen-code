@@ -1132,5 +1132,15 @@ describe('RipGrepTool', () => {
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('ask');
     });
+
+    it('should return ask for tilde paths outside workspace', async () => {
+      const params: RipGrepToolParams = {
+        pattern: 'hello',
+        path: '~/outside-workspace',
+      };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
   });
 });

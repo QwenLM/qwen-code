@@ -9,7 +9,11 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
-import { resolveAndValidatePath, unescapePath } from '../utils/paths.js';
+import {
+  resolveAndValidatePath,
+  resolvePath,
+  unescapePath,
+} from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
@@ -149,7 +153,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       return 'allow'; // Default workspace directory
     }
     const workspaceContext = this.config.getWorkspaceContext();
-    const resolvedPath = path.resolve(
+    const resolvedPath = resolvePath(
       this.config.getTargetDir(),
       this.params.path,
     );
