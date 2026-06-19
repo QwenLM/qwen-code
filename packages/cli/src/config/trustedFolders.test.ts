@@ -260,7 +260,7 @@ describe('Trusted Folders Loading', () => {
     expect(writtenContent).toContain('"/new/path": "TRUST_FOLDER"');
   });
 
-  it('saveTrustedFolders should preserve disk-only entries when updating a different path', () => {
+  it('saveTrustedFolders should remove stale disk-only entries when syncing trusted folders', () => {
     const userPath = getTrustedFoldersPath();
     const dirPath = path.dirname(userPath);
     const originalContent = `{
@@ -285,8 +285,8 @@ describe('Trusted Folders Loading', () => {
 
     expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
     const writtenContent = vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1];
-    expect(writtenContent).toContain('// keep this one');
-    expect(writtenContent).toContain('"/keep/path": "TRUST_FOLDER"');
+    expect(writtenContent).not.toContain('// keep this one');
+    expect(writtenContent).not.toContain('"/keep/path": "TRUST_FOLDER"');
     expect(writtenContent).toContain('"/new/path": "TRUST_FOLDER"');
   });
 
