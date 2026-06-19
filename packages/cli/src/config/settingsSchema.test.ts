@@ -324,6 +324,16 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should define context.importFormat as tree or flat', () => {
+      const importFormat = getSettingsSchema().context?.properties.importFormat;
+
+      expect(importFormat.type).toBe('enum');
+      expect(importFormat.options).toEqual([
+        { value: 'tree', label: 'Tree' },
+        { value: 'flat', label: 'Flat' },
+      ]);
+    });
+
     it('should have loadFromIncludeDirectories setting in schema', () => {
       expect(
         getSettingsSchema().context?.properties.loadFromIncludeDirectories,
