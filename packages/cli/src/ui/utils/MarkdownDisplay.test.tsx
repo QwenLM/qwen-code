@@ -37,6 +37,65 @@ describe('<MarkdownDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
+  it('renders inline math without rewriting non-math dollar text', () => {
+    const text = 'Energy $E = mc^2$ costs $20 and $30.';
+    const { lastFrame } = renderWithProviders(
+      <MarkdownDisplay {...baseProps} text={text} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Energy E = mc² costs $20 and $30.');
+  });
+
+  it('renders block math with terminal layout', () => {
+    const text = '$$\n\\frac{a+b}{c+d}\n$$';
+    const { lastFrame } = renderWithProviders(
+      <MarkdownDisplay {...baseProps} text={text} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('a+b');
+    expect(output).toContain('───');
+    expect(output).toContain('c+d');
+  });
+
+  it('does not render math inside fenced code blocks', () => {
+    const text = '```latex\n$E = mc^2$\n```';
+    const { lastFrame } = renderWithProviders(
+      <MarkdownDisplay {...baseProps} text={text} />,
+    );
+    expect(lastFrame()).toContain('$E = mc^2$');
+  });
+
+  it('handles manual math verification text with an unclosed code fence', () => {
+    const text = [
+      '> Please output the following markdown exactly:',
+      '',
+      'Inline: $E = mc^2$, $\\alpha + \\beta \\leq \\gamma$',
+      '',
+      '$$',
+      '\\frac{\\partial_t u}{\\Delta u + \\xi}',
+      '$$',
+      '',
+      '$$',
+      '\\begin{cases}',
+      'x^2 & x \\geq 0 \\\\',
+      '-x & x < 0',
+      '\\end{cases}',
+      '$$',
+      '',
+      '```latex',
+      '$E = mc^2$',
+      '',
+      'Also keep this non-math text unchanged: price is $20 and shell variable is $PATH.',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Inline: E = mc², α + β ≤ γ');
+    expect(output).toContain('$E = mc^2$');
+    expect(output).toContain('price is $20');
+  });
+
   const lineEndings = [
     { name: 'Windows', eol: '\r\n' },
     { name: 'Unix', eol: '\n' },
@@ -410,6 +469,27 @@ Another paragraph.
       expect(output).not.toContain('$\\alpha$');
     });
 
+    it('renders richer inline math inside markdown table cells', () => {
+      const text = `
+| Formula | Meaning |
+|---------|---------|
+| $E = mc^2$ | energy |
+| $\\frac{a+b}{c+d}$ | ratio |
+| $\\sqrt{x^2 + \\beta}$ | root |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+
+      expect(output).toContain('E = mc²');
+      expect(output).toContain('(a+b)/(c+d)');
+      expect(output).toContain('√(x² + β)');
+      expect(output).toContain('energy');
+      expect(output).toContain('ratio');
+      expect(output).toContain('root');
+    });
+
     it('keeps pipes inside markdown table math spans in the same cell', () => {
       const text = `
 | Expression | Meaning |
@@ -465,7 +545,8 @@ $$
       const output = lastFrame();
       expect(output).toContain('x² + α');
       expect(output).toContain('LaTeX block · source: /copy latex 1');
-      expect(output).toContain('Σᵢ₌₁ⁿ xᵢ');
+      expect(output).toContain('∑  xᵢ');
+      expect(output).toContain('i=1');
     });
 
     it('does not treat ordinary dollar amounts as inline math', () => {

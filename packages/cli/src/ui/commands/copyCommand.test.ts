@@ -592,6 +592,36 @@ describe('copyCommand', () => {
     });
   });
 
+  it('should copy inline LaTeX from markdown table cells', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '| Formula | Meaning |',
+              '|---------|---------|',
+              '| $E = mc^2$ | energy |',
+              '| $\\frac{a+b}{c+d}$ | ratio |',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, 'inline-latex 2');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('\\frac{a+b}{c+d}');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Inline LaTeX expression 2 copied to the clipboard',
+    });
+  });
+
   it('should not copy inline LaTeX from code fences or display math blocks', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 

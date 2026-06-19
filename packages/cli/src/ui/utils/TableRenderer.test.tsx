@@ -43,6 +43,7 @@ describe('<TableRenderer />', () => {
     rows: string[][],
     contentWidth = 80,
     aligns?: ColumnAlign[],
+    enableInlineMath = false,
   ) => {
     const { lastFrame } = renderWithProviders(
       <TableRenderer
@@ -50,6 +51,7 @@ describe('<TableRenderer />', () => {
         rows={rows}
         contentWidth={contentWidth}
         aligns={aligns}
+        enableInlineMath={enableInlineMath}
       />,
     );
     return lastFrame() ?? '';
@@ -296,6 +298,19 @@ describe('<TableRenderer />', () => {
 
     expect(output).toContain('bold');
     expect(output).toContain('code');
+  });
+
+  it('uses shared inline math detection in cells', () => {
+    const output = renderTable(
+      ['Formula', 'Value'],
+      [[String.raw`$ x $`, 'price $20 and $PATH']],
+      80,
+      undefined,
+      true,
+    );
+
+    expect(stripAnsi(output)).toContain('x');
+    expect(stripAnsi(output)).toContain('price $20 and $PATH');
   });
 
   it('handles empty cells', () => {

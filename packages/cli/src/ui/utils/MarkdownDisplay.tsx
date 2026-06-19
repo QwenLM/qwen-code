@@ -12,7 +12,7 @@ import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
-import { renderInlineLatex } from './latexRenderer.js';
+import { renderBlockLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
 
 interface MarkdownDisplayProps {
@@ -753,7 +753,7 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
     }
   }
 
-  const rendered = renderInlineLatex(content.join(' '));
+  const renderedLines = renderBlockLatex(content.join('\n'));
   return (
     <Box
       paddingLeft={MATH_BLOCK_PREFIX_PADDING}
@@ -764,9 +764,11 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
       <Text bold color={theme.text.accent}>
         LaTeX block · source: {sourceCopyCommand}
       </Text>
-      <Text color={theme.text.accent} wrap="wrap">
-        {rendered}
-      </Text>
+      {renderedLines.map((line, index) => (
+        <Text key={index} color={theme.text.accent} wrap="wrap">
+          {line}
+        </Text>
+      ))}
     </Box>
   );
 };

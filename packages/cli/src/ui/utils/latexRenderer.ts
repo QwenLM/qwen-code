@@ -4,6 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  renderTerminalMathBlock,
+  renderTerminalMathInline,
+} from './TerminalMathRenderer.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('LATEX_RENDERER');
+const MAX_LOGGED_INPUT_CHARS = 200;
+
 const COMMAND_REPLACEMENTS: Record<string, string> = {
   '\\alpha': 'α',
   '\\beta': 'β',
@@ -193,7 +202,43 @@ function replaceBraceCommand(
   return output;
 }
 
-export function renderInlineLatex(input: string, depth = 0): string {
+export function renderInlineLatex(input: string): string {
+  try {
+    return renderTerminalMathInline(input);
+  } catch (error) {
+    debugLogger.error(
+      `Terminal inline math render failed for input "${summarizeLatexInput(input)}"; falling back.`,
+      error,
+    );
+    return renderInlineLatexFallback(input);
+  }
+}
+
+export function renderBlockLatex(input: string): string[] {
+  try {
+    return renderTerminalMathBlock(input);
+  } catch (error) {
+    debugLogger.error(
+      `Terminal block math render failed for input "${summarizeLatexInput(input)}"; falling back.`,
+      error,
+    );
+    return [renderInlineLatexFallback(input)];
+  }
+}
+
+function summarizeLatexInput(input: string): string {
+  const sanitized = Array.from(input)
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f || code === 0x9b ? ' ' : char;
+    })
+    .join('');
+  return sanitized.length > MAX_LOGGED_INPUT_CHARS
+    ? `${sanitized.slice(0, MAX_LOGGED_INPUT_CHARS)}...`
+    : sanitized;
+}
+
+function renderInlineLatexFallback(input: string, depth = 0): string {
   let output = input.trim();
   if (depth > MAX_RENDER_DEPTH) {
     return output;
@@ -204,17 +249,18 @@ export function renderInlineLatex(input: string, depth = 0): string {
     'frac',
     2,
     ([numerator, denominator]) =>
-      `${renderInlineLatex(numerator ?? '', depth + 1)}/${renderInlineLatex(
-        denominator ?? '',
+      `${renderInlineLatexFallback(
+        numerator ?? '',
         depth + 1,
-      )}`,
+      )}/${renderInlineLatexFallback(denominator ?? '', depth + 1)}`,
   );
 
   output = replaceBraceCommand(
     output,
     'sqrt',
     1,
-    ([radicand]) => `√(${renderInlineLatex(radicand ?? '', depth + 1)})`,
+    ([radicand]) =>
+      `√(${renderInlineLatexFallback(radicand ?? '', depth + 1)})`,
   );
 
   output = output.replace(
@@ -238,6 +284,5 @@ export function renderInlineLatex(input: string, depth = 0): string {
     .replace(/\\(?:left|right)\./g, '')
     .replace(/\\left|\\right/g, '')
     .replace(/\\,/g, ' ')
-    .replace(/\s+/g, ' ')
     .trim();
 }
