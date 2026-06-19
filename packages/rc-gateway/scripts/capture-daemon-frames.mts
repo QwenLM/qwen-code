@@ -21,6 +21,15 @@
  *     CAPTURE_PROMPT="Create a file named hello.txt containing the word hi" \
  *     CAPTURE_OUT=/tmp/daemon-perm-frames.json npx tsx scripts/capture-daemon-frames.mts
  *
+ * If a `qwen serve` is ALREADY running (e.g. the daemon a --attach-daemon TUI
+ * connects to), attach to it instead of spawning — avoids `spawn qwen` PATH /
+ * permission problems and captures against the exact daemon you're using:
+ *   CAPTURE_ATTACH_URL=http://127.0.0.1:<port> CAPTURE_ATTACH_TOKEN=<token> \
+ *     CAPTURE_APPROVAL_MODE=default CAPTURE_PROMPT="…a write/shell task…" \
+ *     CAPTURE_OUT=/tmp/daemon-perm-frames.json npx tsx scripts/capture-daemon-frames.mts
+ * (When spawning, set CAPTURE_QWEN_BIN to the fork's bin if a bare `qwen` isn't
+ * on PATH / executable.)
+ *
  * Writes the full frame log to $CAPTURE_OUT (default /tmp/daemon-frames.json)
  * and prints a type histogram. SAFE: any `permission_request` is immediately
  * DECLINED (`outcome: { outcome: 'cancelled' }`), so a tool the model proposes
@@ -55,8 +64,31 @@ function short(v: unknown, n = 240): string {
   }
 }
 
-const handle = await startDaemon({ port: PORT, readyTimeoutMs: 15000 });
-console.error(`[capture] daemon healthy on :${PORT}`);
+// Two ways to get a daemon:
+//  - ATTACH to an already-running one (set CAPTURE_ATTACH_URL [+ _TOKEN]); the
+//    capture creates its own fresh session and never touches the daemon's
+//    lifecycle. Use this when a `qwen serve` is already up (e.g. the one your
+//    --attach-daemon TUI connects to) — it sidesteps `spawn qwen` PATH/permission
+//    issues entirely.
+//  - SPAWN a throwaway daemon (default). The launcher is `qwen` on PATH unless
+//    CAPTURE_QWEN_BIN points at the right executable (e.g. an absolute path to
+//    the fork's bin when a bare `qwen` isn't on PATH / not executable).
+const ATTACH_URL = process.env['CAPTURE_ATTACH_URL'];
+const handle = ATTACH_URL
+  ? await startDaemon({
+      attach: { url: ATTACH_URL, token: process.env['CAPTURE_ATTACH_TOKEN'] ?? '' },
+      readyTimeoutMs: 15000,
+    })
+  : await startDaemon({
+      qwenBin: process.env['CAPTURE_QWEN_BIN'] ?? 'qwen',
+      port: PORT,
+      readyTimeoutMs: 15000,
+    });
+console.error(
+  ATTACH_URL
+    ? `[capture] attached to daemon at ${ATTACH_URL}`
+    : `[capture] daemon healthy on :${PORT}`,
+);
 
 const sc = await DaemonSessionClient.createOrAttach(handle.daemon, {});
 console.error(
