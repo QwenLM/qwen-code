@@ -19,11 +19,14 @@ import type { DaemonFrame } from './projectDaemonEvent.js';
  * `events()` subscription and assert the hook's projected state, plus record
  * prompt/cancel/permission calls.
  */
-function makeFakeDriver(opts: { clientId?: string; throwOnce?: string } = {}) {
+function makeFakeDriver(
+  opts: { clientId?: string; throwOnce?: string; manualPrompt?: boolean } = {},
+) {
   const queue: DaemonFrame[] = [];
   let wake: (() => void) | null = null;
   let ended = false;
   let eventsCalls = 0;
+  let resolvePrompt: ((v: unknown) => void) | null = null;
   const prompts: Array<{ prompt: Array<{ type: 'text'; text: string }> }> = [];
   const permissions: Array<{
     requestId: string;
@@ -35,6 +38,7 @@ function makeFakeDriver(opts: { clientId?: string; throwOnce?: string } = {}) {
   const driver: DaemonSessionDriver & {
     push: (f: DaemonFrame) => void;
     end: () => void;
+    finishPrompt: (result?: unknown) => void;
     stats: () => {
       eventsCalls: number;
       prompts: typeof prompts;
@@ -66,6 +70,12 @@ function makeFakeDriver(opts: { clientId?: string; throwOnce?: string } = {}) {
     },
     async prompt(req) {
       prompts.push(req);
+      if (opts.manualPrompt) {
+        return new Promise((resolve) => {
+          resolvePrompt = resolve;
+        });
+      }
+      return { stopReason: 'end_turn' };
     },
     async cancel() {
       cancels += 1;
@@ -83,6 +93,10 @@ function makeFakeDriver(opts: { clientId?: string; throwOnce?: string } = {}) {
       ended = true;
       wake?.();
       wake = null;
+    },
+    finishPrompt(result: unknown = { stopReason: 'end_turn' }) {
+      resolvePrompt?.(result);
+      resolvePrompt = null;
     },
     stats() {
       return {
@@ -152,6 +166,61 @@ describe('useDaemonStream', () => {
       expect(result.current.streamingState).toBe(StreamingState.Idle),
     );
     expect(added).toContainEqual({ type: 'gemini', text: 'PONG' });
+    expect(result.current.pendingHistoryItems).toEqual([]);
+  });
+
+  it('finalizes the turn when prompt() resolves — no turn_complete frame (0.17.x)', async () => {
+    // The fork's daemon signals completion via the prompt() HTTP response, not a
+    // turn_complete SSE frame. The hook must finalize (commit + Idle) on resolve.
+    const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    const committed: HistoryItemWithoutId[] = [];
+    const addItem = vi.fn((item: HistoryItemWithoutId) => {
+      committed.push(item);
+      return committed.length;
+    });
+    const { result } = renderHook(() => useDaemonStream(driver, addItem));
+
+    let p: Promise<void> = Promise.resolve();
+    act(() => {
+      p = result.current.submitQuery('hey');
+    });
+    // Stream the reply WITHOUT any turn_complete frame.
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Going' },
+          },
+          'me',
+        ),
+      );
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: ' well' },
+          },
+          'me',
+        ),
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.pendingHistoryItems).toEqual([
+        { type: 'gemini', text: 'Going well' },
+      ]),
+    );
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+    // The daemon's prompt() HTTP call resolves with the turn's stopReason.
+    await act(async () => {
+      driver.finishPrompt({ stopReason: 'end_turn' });
+      await p;
+    });
+
+    expect(committed).toContainEqual({ type: 'user', text: 'hey' });
+    expect(committed).toContainEqual({ type: 'gemini', text: 'Going well' });
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
     expect(result.current.pendingHistoryItems).toEqual([]);
   });
 

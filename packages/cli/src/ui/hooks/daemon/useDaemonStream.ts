@@ -137,6 +137,36 @@ export function useDaemonStream(
   const addItemRef = useRef(addItem);
   addItemRef.current = addItem;
 
+  // Fold one frame into the projection and reflect it in the UI. Shared by the
+  // event loop and the prompt()-resolution finalizer.
+  const applyFrame = useCallback((frame: DaemonFrame) => {
+    const { state, committed } = projectDaemonEvent(stateRef.current, frame);
+    const su = (frame.data as { update?: { sessionUpdate?: string } })?.update
+      ?.sessionUpdate;
+    dbg(
+      `frame type=${frame.type}${su ? `/${su}` : ''} oc=${frame.originatorClientId ?? '∅'} -> state=${state.streamingState} committed=${committed.length}`,
+    );
+    stateRef.current = state;
+    for (const item of committed) addItemRef.current(item, now());
+    streamingResponseLengthRef.current = state.pendingText.length;
+    setSnapshot(state);
+  }, []);
+
+  // Finalize the in-flight turn (commit pending text, return to Idle).
+  //
+  // IMPORTANT: this codebase's daemon (0.17.x) signals turn completion via the
+  // prompt() HTTP RESPONSE (`stopReason`), NOT a `turn_complete` SSE frame — so
+  // we synthesize one when prompt() resolves (and when the SSE closes mid-turn).
+  // Newer daemons (0.18+) also emit the frame; the duplicate is a harmless no-op
+  // (pending already cleared → Idle).
+  const finalizeTurn = useCallback(
+    (stopReason?: unknown) => {
+      if (stateRef.current.streamingState === StreamingState.Idle) return;
+      applyFrame({ type: 'turn_complete', data: { stopReason } });
+    },
+    [applyFrame],
+  );
+
   useEffect(() => {
     const ac = new AbortController();
     let disposed = false;
@@ -147,22 +177,16 @@ export function useDaemonStream(
           dbg(`subscribe attempt=${attempt} clientId=${driver.clientId}`);
           for await (const frame of driver.events({ signal: ac.signal })) {
             if (disposed) break;
-            const { state, committed } = projectDaemonEvent(
-              stateRef.current,
-              frame,
-            );
-            const su = (frame.data as { update?: { sessionUpdate?: string } })
-              ?.update?.sessionUpdate;
-            dbg(
-              `frame type=${frame.type}${su ? `/${su}` : ''} oc=${frame.originatorClientId ?? '∅'} -> state=${state.streamingState} committed=${committed.length}`,
-            );
-            stateRef.current = state;
-            for (const item of committed) addItemRef.current(item, now());
-            streamingResponseLengthRef.current = state.pendingText.length;
-            setSnapshot(state);
+            applyFrame(frame);
           }
-          dbg('stream ended normally');
-          break; // stream ended normally
+          dbg('stream ended');
+          if (disposed || ac.signal.aborted) break;
+          // The daemon may close the SSE when idle (0.17.x closes per-turn/idle).
+          // Finalize any in-flight turn, then re-subscribe so the session keeps
+          // working across reconnects (resume picks up after the last event id).
+          finalizeTurn();
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
         } catch (err) {
           if (disposed || ac.signal.aborted) {
             dbg(`stream aborted (disposed=${disposed})`);
@@ -188,7 +212,7 @@ export function useDaemonStream(
       disposed = true;
       ac.abort();
     };
-  }, [driver]);
+  }, [driver, applyFrame, finalizeTurn]);
 
   const submitQuery = useCallback(
     async (query: string) => {
@@ -196,10 +220,14 @@ export function useDaemonStream(
       // self-echo (matched by originatorClientId === our clientId).
       addItemRef.current({ type: 'user', text: query }, now());
       dbg(`submitQuery len=${query.length}`);
-      await driver.prompt({ prompt: [{ type: 'text', text: query }] });
+      const result = await driver.prompt({
+        prompt: [{ type: 'text', text: query }],
+      });
       dbg('prompt() resolved');
+      // 0.17.x completion signal: prompt() resolves with the turn's stopReason.
+      finalizeTurn((result as { stopReason?: unknown } | null)?.stopReason);
     },
-    [driver],
+    [driver, finalizeTurn],
   );
 
   const cancelOngoingRequest = useCallback(() => {
