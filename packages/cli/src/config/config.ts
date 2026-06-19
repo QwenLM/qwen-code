@@ -1893,6 +1893,8 @@ export async function loadCliConfig(
       ...settings.ui?.accessibility,
       screenReader,
     },
+    showResponseTokensPerSecond:
+      settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
@@ -1950,8 +1952,7 @@ export async function loadCliConfig(
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
-    skipWorkflowUsageWarning:
-      settings.model?.skipWorkflowUsageWarning ?? false,
+    skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,

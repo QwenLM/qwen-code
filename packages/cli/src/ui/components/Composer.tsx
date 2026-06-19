@@ -106,6 +106,7 @@ export const Composer = () => {
           candidatesTokens={agentTokens}
           streamingCharsRef={streamingResponseLengthRef}
           isStreaming={isStreaming}
+          showResponseTokensPerSecond={config.getShowResponseTokensPerSecond()}
           isReceivingContent={isReceivingContent}
         />
       )}

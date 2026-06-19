@@ -38,12 +38,15 @@ import { StreamingState } from '../types.js';
 vi.mock('./LoadingIndicator.js', () => ({
   LoadingIndicator: ({
     currentLoadingPhrase,
+    showResponseTokensPerSecond,
   }: {
     currentLoadingPhrase?: string;
+    showResponseTokensPerSecond?: boolean;
   }) => (
     <Text>
       LoadingIndicator
       {currentLoadingPhrase ? `: ${currentLoadingPhrase}` : ''}
+      {showResponseTokensPerSecond ? ': show t/s' : ''}
     </Text>
   ),
 }));
@@ -152,6 +155,7 @@ const createMockConfig = (overrides = {}) => ({
   getTargetDir: vi.fn(() => '/test/dir'),
   getDebugMode: vi.fn(() => false),
   getAccessibility: vi.fn(() => ({})),
+  getShowResponseTokensPerSecond: vi.fn(() => false),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
   ...overrides,
@@ -199,6 +203,20 @@ describe('Composer', () => {
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
       expect(output).toContain('LoadingIndicator: Analyzing');
+    });
+
+    it('passes the response token rate setting to LoadingIndicator', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        currentLoadingPhrase: 'Analyzing',
+      });
+      const config = createMockConfig({
+        getShowResponseTokensPerSecond: vi.fn(() => true),
+      });
+
+      const { lastFrame } = renderComposer(uiState, config);
+
+      expect(lastFrame()).toContain('LoadingIndicator: Analyzing: show t/s');
     });
 
     // ─── Narrow-terminal suppression (suppressBottomLoadingIndicator) ───
