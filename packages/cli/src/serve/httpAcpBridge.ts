@@ -1210,6 +1210,22 @@ const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 // `BridgeOptions.maxPendingPermissionsPerSession`.
 const DEFAULT_MAX_PENDING_PER_SESSION = 64;
 
+/**
+ * Concatenate the text of an ACP prompt's content blocks (the user's typed
+ * message). Non-text blocks (images, resources) are ignored — used only to
+ * synthesize the `user_message_chunk` handoff echo, which is text-only. Returns
+ * '' when there is no text (the caller then publishes no echo).
+ */
+function extractPromptText(prompt: PromptRequest['prompt']): string {
+  if (!Array.isArray(prompt)) return '';
+  return prompt
+    .map((block) => {
+      const b = block as { type?: unknown; text?: unknown };
+      return b?.type === 'text' && typeof b.text === 'string' ? b.text : '';
+    })
+    .join('');
+}
+
 export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const defaultSessionScope = opts.sessionScope ?? 'single';
   // `undefined` → default 20 (intentionally tight per #3803 N≈50 cliff).
@@ -2691,6 +2707,30 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           delete entry.activePromptOriginatorClientId;
         } else {
           entry.activePromptOriginatorClientId = originatorClientId;
+        }
+        // Broadcast the user's prompt to OTHER subscribers so a handed-off
+        // client (e.g. the terminal watching a prompt typed on the phone)
+        // renders it. The ACP child emits NO `user_message_chunk` on a normal
+        // prompt (only on history-replay/cron), so synthesize one here, in the
+        // same `session_update` envelope the child uses, tagged with the
+        // submitter's `originatorClientId` — the submitter drops its own echo
+        // (originatorClientId === ownClientId) and other clients render it.
+        // Published BEFORE `connection.prompt()` so it precedes the agent's
+        // frames, and it lands in the replay ring for late/re-subscribing
+        // clients. Empty/non-text prompts publish nothing (no blank echo).
+        const promptText = extractPromptText(normalized.prompt);
+        if (promptText) {
+          entry.events.publish({
+            type: 'session_update',
+            data: {
+              sessionId,
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: promptText },
+              },
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
         }
         const promptPromise = entry.connection
           .prompt(normalized)

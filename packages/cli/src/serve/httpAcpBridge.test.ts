@@ -2500,6 +2500,82 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('broadcasts a user_message_chunk echo tagged with the submitter (handoff)', async () => {
+      // The 0.17.x ACP child emits NO user_message_chunk on a normal prompt, so
+      // a handed-off client (e.g. the terminal watching a prompt typed on the
+      // phone) never sees the prompt text. The bridge synthesizes the echo,
+      // tagged with the submitter's clientId — the submitter drops its own echo
+      // (originatorClientId === ownClientId) and OTHER clients render it. The
+      // echo is published BEFORE connection.prompt(), so it precedes agent frames.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const subAbort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: subAbort.signal })
+        [Symbol.asyncIterator]();
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'hi from phone' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      const first = (await it.next()).value!;
+      expect(first.type).toBe('session_update');
+      expect(first.data).toMatchObject({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hi from phone' },
+        },
+      });
+      expect(first.originatorClientId).toBe(session.clientId);
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('does not broadcast a user echo when the prompt carries no text', async () => {
+      // Guard: an empty / non-text prompt must not publish a blank echo.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const subAbort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: subAbort.signal })
+        [Symbol.asyncIterator]();
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        { sessionId: session.sessionId, prompt: [] },
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      // The default fake agent emits no frames; with no echo published, the
+      // subscription stays quiet. Race against a short timeout and assert the
+      // timeout wins (nothing was published).
+      let timer: NodeJS.Timeout | undefined;
+      const race = await Promise.race([
+        it.next().then((r) => ({ kind: 'event' as const, r })),
+        new Promise<{ kind: 'timeout' }>((res) => {
+          timer = setTimeout(() => res({ kind: 'timeout' }), 200);
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      expect(race.kind).toBe('timeout');
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
     it('overrides a stale sessionId in the body with the routing id', async () => {
       const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {
