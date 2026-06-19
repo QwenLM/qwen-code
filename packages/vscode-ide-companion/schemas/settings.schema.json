@@ -219,6 +219,17 @@
           "type": "boolean",
           "default": false
         },
+        "history": {
+          "description": "History display settings.",
+          "type": "object",
+          "properties": {
+            "collapseOnResume": {
+              "description": "Whether to collapse history by default when resuming a session.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
         "showLineNumbers": {
           "description": "Show line numbers in the code output.",
           "type": "boolean",

@@ -7,6 +7,7 @@
 import {
   useCallback,
   useMemo,
+  useLayoutEffect,
   useEffect,
   useRef,
   useState,
@@ -93,6 +94,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'delete',
   'branch',
   'btw',
+  'history',
 ]);
 
 export interface SlashCommandProcessorActions {
@@ -108,7 +110,7 @@ export interface SlashCommandProcessorActions {
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
-  handleResume: (sessionId: string) => void;
+  handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
   openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
@@ -133,6 +135,7 @@ export interface SlashCommandProcessorActions {
 export const useSlashCommandProcessor = (
   config: Config | null,
   settings: LoadedSettings,
+  history: HistoryItem[],
   addItem: UseHistoryManagerReturn['addItem'],
   clearItems: UseHistoryManagerReturn['clearItems'],
   loadHistory: UseHistoryManagerReturn['loadHistory'],
@@ -149,6 +152,13 @@ export const useSlashCommandProcessor = (
   updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
 ) => {
+  // Ref avoids adding `history` to the commandContext useMemo deps,
+  // which would cause a full context rebuild on every history append.
+  const historyRef = useRef(history);
+  useLayoutEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
   const [recentCommands, setRecentCommands] = useState<
@@ -322,6 +332,9 @@ export const useSlashCommandProcessor = (
         logger,
       },
       ui: {
+        get history() {
+          return historyRef.current;
+        },
         addItem,
         clear: () => {
           cancelBtw();
@@ -331,6 +344,7 @@ export const useSlashCommandProcessor = (
           setSessionName?.(null);
         },
         loadHistory,
+        refreshStatic,
         setDebugMessage: actions.setDebugMessage,
         pendingItem,
         setPendingItem,
@@ -765,7 +779,7 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
-                        actions.handleResume(result.sessionId);
+                        await actions.handleResume(result.sessionId);
                       } else {
                         actions.openResumeDialog(result.matchedSessions);
                       }

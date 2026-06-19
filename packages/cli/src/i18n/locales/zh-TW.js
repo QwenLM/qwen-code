@@ -1815,6 +1815,24 @@ export default {
   '\u2191 tabs \u00B7 r to cycle dates \u00B7 esc to close':
     '\u2191 tab 切換標籤 \u00B7 r 切換時間範圍 \u00B7 esc 關閉',
 
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    '恢復會話時預設摺疊歷史記錄',
+  'Set history to expand by default when resuming a session':
+    '恢復會話時預設展開歷史記錄',
+  'Expand the currently collapsed history transcript': '展開當前摺疊的歷史記錄',
+  'Control history display preferences and visibility':
+    '控制歷史記錄顯示偏好和可見性',
+  'History will be collapsed by default for future resumed sessions.':
+    '未來恢復的會話將預設摺疊歷史記錄。',
+  'History will be expanded by default for future resumed sessions.':
+    '未來恢復的會話將預設展開歷史記錄。',
+  'History is already expanded in this session.': '當前會話的歷史記錄已展開。',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    '用法：/history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    '歷史記錄已摺疊：{{n}} 條訊息已隱藏。使用 /history expand-now 展開。',
+
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型註冊表中）',
   'start server': '啟動伺服器',
