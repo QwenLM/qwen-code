@@ -14,14 +14,25 @@
  *   CAPTURE_PROMPT="List the files here using your tools" \
  *     CAPTURE_OUT=/tmp/daemon-tool-frames.json npx tsx scripts/capture-daemon-frames.mts
  *
+ * To capture a REAL `permission_request` (the approval slice's ground truth),
+ * force a GATING approval mode and prompt for a non-read tool — reads are
+ * auto-approved, writes/shell gate in `default`/`plan`:
+ *   CAPTURE_APPROVAL_MODE=default \
+ *     CAPTURE_PROMPT="Create a file named hello.txt containing the word hi" \
+ *     CAPTURE_OUT=/tmp/daemon-perm-frames.json npx tsx scripts/capture-daemon-frames.mts
+ *
  * Writes the full frame log to $CAPTURE_OUT (default /tmp/daemon-frames.json)
  * and prints a type histogram. SAFE: any `permission_request` is immediately
- * DECLINED (`outcome: cancelled`), so a tool the model proposes never executes —
- * we only capture the request shape.
+ * DECLINED (`outcome: { outcome: 'cancelled' }`), so a tool the model proposes
+ * never executes — we only capture the request shape.
  */
 import { writeFileSync } from 'node:fs';
 import { startDaemon } from '../src/daemonSupervisor.js';
-import { DaemonSessionClient } from '@qwen-code/sdk';
+import {
+  DaemonSessionClient,
+  DAEMON_APPROVAL_MODES,
+  type DaemonApprovalMode,
+} from '@qwen-code/sdk';
 
 const PORT = Number(process.env['CAPTURE_PORT'] ?? 4195);
 const OUT = process.env['CAPTURE_OUT'] ?? '/tmp/daemon-frames.json';
@@ -53,6 +64,33 @@ console.error(
 );
 console.error(`[capture] OUR clientId = ${sc.clientId}`);
 
+// Optionally force a gating approval mode so a non-read tool produces a real
+// `permission_request` to capture. `default`/`plan` are non-privileged, so the
+// daemon's trust-folder gate accepts them even in an untrusted workspace.
+const APPROVAL_MODE = process.env['CAPTURE_APPROVAL_MODE'];
+if (APPROVAL_MODE) {
+  if (!(DAEMON_APPROVAL_MODES as readonly string[]).includes(APPROVAL_MODE)) {
+    console.error(
+      `[capture] ignoring CAPTURE_APPROVAL_MODE='${APPROVAL_MODE}' — not one of ${DAEMON_APPROVAL_MODES.join(', ')}`,
+    );
+  } else {
+    try {
+      const res = await handle.daemon.setSessionApprovalMode(
+        sc.sessionId,
+        APPROVAL_MODE as DaemonApprovalMode,
+        { clientId: sc.clientId },
+      );
+      console.error(
+        `[capture] approval mode -> ${short(res)} (requested ${APPROVAL_MODE})`,
+      );
+    } catch (e) {
+      console.error(
+        `[capture] setSessionApprovalMode failed: ${(e as Error)?.message ?? e}`,
+      );
+    }
+  }
+}
+
 const ac = new AbortController();
 let lastFrameAt = Date.now();
 let sawAgentFrame = false;
@@ -81,7 +119,9 @@ const consumer = (async () => {
       console.error(`[capture] DECLINING permission_request ${reqId}`);
       if (reqId) {
         await sc
-          .respondToSessionPermission(reqId, { outcome: 'cancelled' })
+          .respondToSessionPermission(reqId, {
+            outcome: { outcome: 'cancelled' },
+          })
           .catch((e) =>
             console.error('[capture] decline failed:', (e as Error)?.message),
           );
