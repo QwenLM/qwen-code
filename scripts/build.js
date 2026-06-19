@@ -47,7 +47,8 @@ const cliOnly = process.argv.includes('--cli-only');
 // 7. webui (shared UI components - used by vscode companion)
 // 8. sdk (build-time devDep on acp-bridge for shared constants)
 // 9. web-shell (depends on webui and sdk)
-// 10. vscode-ide-companion (depends on webui)
+// 10. web (depends on web-shell, webui, and sdk)
+// 11. vscode-ide-companion (depends on webui)
 const buildOrder = [
   'packages/core',
   'packages/web-templates',
@@ -65,6 +66,7 @@ const buildOrder = [
         'packages/webui',
         'packages/sdk-typescript',
         'packages/web-shell',
+        'packages/web',
         'packages/vscode-ide-companion',
       ]),
 ];
