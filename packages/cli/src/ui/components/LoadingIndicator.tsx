@@ -31,6 +31,8 @@ interface LoadingIndicatorProps {
   streamingCharsRef?: React.RefObject<number>;
   /** Whether to poll `streamingCharsRef` (true during Responding/WaitingForConfirmation). */
   isStreaming?: boolean;
+  /** Show live response speed next to the token counter. */
+  showResponseTokensPerSecond?: boolean;
   /**
    * True when receiving content (shows ↓ arrow), false when waiting for API
    * response (shows ↑ arrow).
@@ -46,6 +48,7 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   candidatesTokens,
   streamingCharsRef,
   isStreaming,
+  showResponseTokensPerSecond = false,
   isReceivingContent = true,
 }) => {
   const streamingState = useStreamingContext();
@@ -82,12 +85,19 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   const tokenStr = showTokens
     ? ` · ${tokenArrow} ${formatTokenCount(outputTokens)} tokens`
     : '';
+  const tokenRateStr =
+    showTokens &&
+    showResponseTokensPerSecond &&
+    isReceivingContent &&
+    elapsedTime > 0
+      ? ` · ${formatTokensPerSecond(outputTokens / elapsedTime)}`
+      : '';
 
   const cancelAndTimerContent =
     streamingState !== StreamingState.WaitingForConfirmation
       ? t('({{time}}{{tokens}} · esc to cancel)', {
           time: timeStr,
-          tokens: tokenStr,
+          tokens: `${tokenStr}${tokenRateStr}`,
         })
       : null;
 
@@ -130,3 +140,16 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
     </Box>
   );
 };
+
+function formatTokensPerSecond(tokensPerSecond: number): string {
+  if (!Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) {
+    return '0 t/s';
+  }
+
+  const rounded =
+    tokensPerSecond >= 10
+      ? Math.round(tokensPerSecond).toString()
+      : tokensPerSecond.toFixed(1);
+
+  return `${rounded} t/s`;
+}
