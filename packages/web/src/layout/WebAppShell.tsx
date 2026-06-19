@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { useConnection, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { TaskRail } from '../features/task-rail/TaskRail';
 import { Sidebar } from './Sidebar';
 import type { WebViewId } from './views';
 import { WEB_VIEWS } from './views';
@@ -59,12 +60,7 @@ export function WebAppShell({
           className={showTaskRail ? 'web-workspace chat-mode' : 'web-workspace'}
         >
           <section className="web-content">{children}</section>
-          {showTaskRail ? (
-            <TaskRail
-              daemonStatus={connection.status}
-              workspaceStatus={workspace.status}
-            />
-          ) : null}
+          {showTaskRail ? <TaskRail /> : null}
         </div>
       </main>
     </div>
@@ -113,39 +109,4 @@ function StatusPill({
 
 function toStatusDetails(rows: Array<[string, string | undefined]>) {
   return rows.filter((row): row is [string, string] => Boolean(row[1]));
-}
-
-function TaskRail({
-  daemonStatus,
-  workspaceStatus,
-}: {
-  daemonStatus: string;
-  workspaceStatus: string;
-}) {
-  return (
-    <aside className="web-task-rail" aria-label="任务流程">
-      <div className="web-task-rail-header">
-        <h2>任务流程</h2>
-        <span>实时</span>
-      </div>
-      <section className="web-task-section">
-        <h3>协办</h3>
-        <div className="web-task-chip">
-          <span>Daemon {daemonStatus}</span>
-        </div>
-      </section>
-      <section className="web-task-section">
-        <h3>产物</h3>
-        <p>当前会话生成的文件、预览和导出会在这里沉淀。</p>
-      </section>
-      <section className="web-task-section">
-        <h3>技能 / MCP</h3>
-        <p>Workspace {workspaceStatus}，可在左侧工具与技能页查看详情。</p>
-      </section>
-      <section className="web-task-section">
-        <h3>需要处理</h3>
-        <p>暂无待处理事项。</p>
-      </section>
-    </aside>
-  );
 }

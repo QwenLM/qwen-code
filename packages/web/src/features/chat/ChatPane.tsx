@@ -1,13 +1,15 @@
-import type { ReactNode } from 'react';
+import type { ReactNode, Ref } from 'react';
 import { WebShell } from '@qwen-code/web-shell';
+import type { WebShellComposerApi } from '@qwen-code/web-shell';
 import { useConnection, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { ConnectionDiagnostics } from '../diagnostics/ConnectionDiagnostics';
 
 interface ChatPaneProps {
+  composerRef?: Ref<WebShellComposerApi>;
   onSessionIdChange: (sessionId: string) => void;
 }
 
-export function ChatPane({ onSessionIdChange }: ChatPaneProps) {
+export function ChatPane({ composerRef, onSessionIdChange }: ChatPaneProps) {
   const connection = useConnection();
   const workspace = useWorkspace();
 
@@ -15,6 +17,7 @@ export function ChatPane({ onSessionIdChange }: ChatPaneProps) {
     <WebShell
       className="web-chat-shell"
       theme="light"
+      composerRef={composerRef}
       onSessionIdChange={onSessionIdChange}
       renderWelcomeHeader={({ currentModel, cwd }) => (
         <WebChatWelcome
