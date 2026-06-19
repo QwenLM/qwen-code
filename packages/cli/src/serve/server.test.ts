@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync, promises as fsp } from 'node:fs';
+import { existsSync, realpathSync, promises as fsp } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -19,6 +19,7 @@ import {
   resolvePromptDeadlineMs,
 } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
+import { resolveWebShellDir, isDocumentNavigation } from './webShellStatic.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
   getAdvertisedServeFeatures,
@@ -1616,6 +1617,190 @@ describe('createServeApp', () => {
         current: 'v1',
         supported: ['v1'],
       });
+    });
+  });
+
+  describe('Web Shell static serving', () => {
+    let webShellDir: string;
+    const INDEX_HTML =
+      '<!doctype html><html><head><title>Qwen Code Web terminal</title>' +
+      '<script type="module" src="/assets/app.js"></script></head>' +
+      '<body><div id="root"></div></body></html>';
+    const host = `127.0.0.1:${baseOpts.port}`;
+
+    beforeEach(async () => {
+      webShellDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-webshell-'));
+      await fsp.writeFile(path.join(webShellDir, 'index.html'), INDEX_HTML);
+      await fsp.mkdir(path.join(webShellDir, 'assets'));
+      await fsp.writeFile(
+        path.join(webShellDir, 'assets', 'app.js'),
+        'export const x = 1;\n',
+      );
+    });
+
+    afterEach(async () => {
+      await fsp.rm(webShellDir, { recursive: true, force: true });
+    });
+
+    it('serves the shell at the root with security headers', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app).get('/').set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+      expect(res.headers['content-security-policy']).toContain(
+        "frame-ancestors 'none'",
+      );
+      expect(res.headers['content-security-policy']).toContain(
+        "connect-src 'self'",
+      );
+      expect(res.headers['x-frame-options']).toBe('DENY');
+      expect(res.headers['referrer-policy']).toBe('no-referrer');
+      expect(res.headers['cache-control']).toContain('no-cache');
+    });
+
+    it('serves hashed asset chunks from /assets', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app).get('/assets/app.js').set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('export const x');
+    });
+
+    it('returns 404 (not the shell) for a missing asset', async () => {
+      // fallthrough:false — a stale/renamed chunk must 404, not fall through to
+      // the SPA fallback and get a 200 index.html, even on a browser nav.
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/assets/missing-chunk.js')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(404);
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('falls back to the shell for SPA deep-link navigations', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
+    it('leaves non-navigation API misses as JSON 404s', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/no/such/route')
+        .set('Host', host)
+        .set('Accept', 'application/json');
+      expect(res.status).toBe(404);
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('does not mount the UI when serveWebShell is false', async () => {
+      const app = createServeApp({ ...baseOpts, serveWebShell: false }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
+        .get('/')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('stays API-only when no webShellDir is injected', async () => {
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('does not serve the shell for POST navigations (method guard)', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .post('/session/abc')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('falls back to the shell on a sec-fetch navigation signal', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/session/deep')
+        .set('Host', host)
+        .set('Accept', '*/*')
+        .set('Sec-Fetch-Mode', 'navigate');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
+    it('does not shadow /health on a browser navigation (Critical #1)', async () => {
+      // Non-loopback + requireAuth registers /health POST-auth. A browser
+      // navigation (Accept text/html) must fall THROUGH the SPA fallback to
+      // bearerAuth (401), not receive the shell. Without the /health guard the
+      // pre-auth fallback would return index.html instead.
+      const app = createServeApp(
+        { ...baseOpts, hostname: '0.0.0.0', token: 'secret', requireAuth: true },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app)
+        .get('/health')
+        .set('Host', '0.0.0.0:4170')
+        .set('Accept', 'text/html');
+      expect(res.text).not.toContain('<div id="root">');
+    });
+
+    it('returns 500 when index.html is unreadable after mount', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      await fsp.rm(path.join(webShellDir, 'index.html'));
+      const res = await request(app).get('/').set('Host', host);
+      expect(res.status).toBe(500);
+    });
+
+    it('isDocumentNavigation recognizes each navigation signal', () => {
+      const nav = (headers: Record<string, string>) =>
+        isDocumentNavigation({ headers } as never);
+      expect(nav({ 'sec-fetch-mode': 'navigate' })).toBe(true);
+      expect(nav({ 'sec-fetch-dest': 'document' })).toBe(true);
+      expect(nav({ accept: 'text/html,application/xhtml+xml' })).toBe(true);
+      expect(nav({ accept: 'application/json' })).toBe(false);
+      expect(nav({})).toBe(false);
+    });
+
+    it('resolveWebShellDir returns undefined or a dir with index.html + assets', () => {
+      const dir = resolveWebShellDir();
+      if (dir !== undefined) {
+        expect(existsSync(path.join(dir, 'index.html'))).toBe(true);
+        expect(existsSync(path.join(dir, 'assets'))).toBe(true);
+      }
+    });
+
+    it('serves the shell pre-auth while the API stays token-gated', async () => {
+      // Pins the central contract: the shell is registered BEFORE bearerAuth,
+      // so a browser navigation with no Authorization still loads it, while
+      // API routes remain gated. If registerWebShell ever moves below
+      // bearerAuth, the first assertion breaks.
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const shell = await request(app)
+        .get('/')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(shell.status).toBe(200);
+      expect(shell.text).toContain('<div id="root">');
+      // Even with an attacker-controlled Accept: text/html, the authed route
+      // wins (401): the SPA fallback runs only after the API routes, so it
+      // can't coax the 200 shell out of a gated endpoint.
+      const api = await request(app)
+        .get('/capabilities')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(api.status).toBe(401);
     });
   });
 

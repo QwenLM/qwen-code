@@ -22,6 +22,12 @@ import {
 import type { LoadedSettings } from '../../config/settings.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 
+const MAIN_MODEL_CONFIGURATION_HINT =
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model without arguments to choose from configured models.';
+
+const FAST_MODEL_CONFIGURATION_HINT =
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --fast without a model to choose from configured models.';
+
 function persistSetting(
   settings: LoadedSettings,
   path: string,
@@ -81,7 +87,9 @@ function formatUnavailableModelMessage(
   return (
     `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
     `${availableModelsLine}\n` +
-    'Configure models in settings.modelProviders or run /model to select an available model.'
+    (kind === 'Fast model'
+      ? FAST_MODEL_CONFIGURATION_HINT
+      : MAIN_MODEL_CONFIGURATION_HINT)
   );
 }
 
@@ -100,7 +108,7 @@ function formatUnavailableFastModelMessage(
   return (
     `Fast model '${modelName}' is not configured for any auth type.\n` +
     `${availableModelsLine}\n` +
-    'Configure models in settings.modelProviders or run /model to select an available model.'
+    FAST_MODEL_CONFIGURATION_HINT
   );
 }
 

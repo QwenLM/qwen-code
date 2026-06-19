@@ -305,10 +305,7 @@ export class WebFetchTool extends BaseDeclarativeTool<
     if (!params.url || params.url.trim() === '') {
       return "The 'url' parameter cannot be empty.";
     }
-    if (
-      !params.url.startsWith('http://') &&
-      !params.url.startsWith('https://')
-    ) {
+    if (!/^https?:\/\//i.test(params.url)) {
       return "The 'url' must be a valid URL starting with http:// or https://.";
     }
     if (!params.prompt || params.prompt.trim() === '') {

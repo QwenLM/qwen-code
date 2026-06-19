@@ -84,6 +84,17 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should preserve equals signs in env values', async () => {
+    await parser.parseAsync('add my-server /path/to/server -e TOKEN=a=b=c');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        command: '/path/to/server',
+        env: { TOKEN: 'a=b=c' },
+      }),
+    });
+  });
+
   it('should auto-detect http transport when commandOrUrl is an https URL', async () => {
     await parser.parseAsync('add http-server https://example.com/mcp');
 
