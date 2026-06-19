@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import type { SessionListItem } from '@qwen-code/qwen-code-core';
 import { filterSessions, truncateText } from './sessionPickerUtils.js';
+import { getCachedStringWidth } from './textUtils.js';
 
 function s(overrides: Partial<SessionListItem>): SessionListItem {
   return {
@@ -54,6 +55,23 @@ describe('sessionPickerUtils', () => {
 
     it('returns only the first line even if there are multiple line breaks', () => {
       expect(truncateText('hello\n\nworld', 20)).toBe('hello');
+    });
+
+    it('truncates CJK text by display width', () => {
+      const result = truncateText('修复登录问题'.repeat(8), 20);
+      expect(getCachedStringWidth(result)).toBeLessThanOrEqual(20);
+      expect(result).toBe('修复登录问题修复...');
+    });
+
+    it('does not split complex emoji grapheme clusters', () => {
+      expect(truncateText('🇨🇳abcdef', 2)).toBe('🇨🇳');
+      expect(truncateText('👩🏽abcdef', 6)).toBe('👩🏽a...');
+      expect(truncateText('👨‍👩‍👧‍👦abcdef', 6)).toBe('👨‍👩‍👧‍👦a...');
+    });
+
+    it('returns an empty string for non-positive widths', () => {
+      expect(truncateText('abcdef', 0)).toBe('');
+      expect(truncateText('abcdef', -1)).toBe('');
     });
   });
 

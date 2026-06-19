@@ -26,12 +26,15 @@ import type {
   AutoModeDecision,
   AutoModeOutcome,
   GoalTerminalEvent,
+  ToolCallRequestInfo,
+  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
   convertToFunctionResponse,
+  createDuplicateProviderToolCallResponse,
   createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
@@ -95,6 +98,7 @@ import {
   setGoalTerminalObserver,
   sessionIdContext,
   dedupeToolCallsById,
+  getProviderToolCallId,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -174,11 +178,11 @@ type AutoCompressionSendResult =
 
 type RunToolResult = {
   parts: Part[];
-  stopAfterUserQuestionCancel: boolean;
+  stopAfterPermissionCancel: boolean;
 };
 
-const ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE =
-  'Skipped because ask_user_question was cancelled before the user answered; user input is required before continuing.';
+const PERMISSION_CANCEL_SKIP_MESSAGE =
+  'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.';
 
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
@@ -404,6 +408,11 @@ interface BackgroundNotificationQueueItem {
   status: string;
   kind: 'agent' | 'monitor' | 'shell';
   toolUseId?: string;
+}
+
+interface CronQueueItem {
+  prompt: string;
+  source: 'cron' | 'loop';
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
@@ -641,7 +650,7 @@ export class Session implements SessionContext {
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state
-  private cronQueue: string[] = [];
+  private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
   private cronAbortController: AbortController | null = null;
   private cronCompletion: Promise<void> | null = null;
@@ -1084,7 +1093,6 @@ export class Session implements SessionContext {
     try {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
-      void this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -1092,6 +1100,12 @@ export class Session implements SessionContext {
       return result;
     } finally {
       this.pendingPrompt = null;
+      // Start the scheduler in finally, not the success path: a turn can arm
+      // a wakeup via LoopWakeup and then throw on a later step. Gated on
+      // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
+      // cron job) is actually pending — otherwise the loop dies silently on
+      // any post-arm error.
+      void this.#startCronSchedulerIfNeeded();
       resolveCompletion();
       this.pendingPromptCompletion = null;
     }
@@ -1536,8 +1550,8 @@ export class Session implements SessionContext {
                     promptId,
                     functionCalls,
                   );
-                  if (toolRun.stopAfterUserQuestionCancel) {
-                    await this.#preserveCancelledAskUserQuestionToolRun(
+                  if (toolRun.stopAfterPermissionCancel) {
+                    await this.#preserveCancelledPermissionToolRun(
                       toolRun,
                       pendingSend.signal,
                     );
@@ -1810,8 +1824,8 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            if (toolRun.stopAfterUserQuestionCancel) {
-              await this.#preserveCancelledAskUserQuestionToolRun(
+            if (toolRun.stopAfterPermissionCancel) {
+              await this.#preserveCancelledPermissionToolRun(
                 toolRun,
                 pendingSend.signal,
               );
@@ -1984,7 +1998,7 @@ export class Session implements SessionContext {
     }
   }
 
-  async #preserveCancelledAskUserQuestionToolRun(
+  async #preserveCancelledPermissionToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
@@ -2326,9 +2340,12 @@ export class Session implements SessionContext {
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start((job: { prompt: string }) => {
+    scheduler.start((job: { prompt: string; cronExpr?: string }) => {
       if (this.cronDisabledByTokenLimit) return;
-      this.cronQueue.push(job.prompt);
+      this.cronQueue.push({
+        prompt: job.prompt,
+        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+      });
       void this.#drainCronQueue();
     });
   }
@@ -2353,8 +2370,8 @@ export class Session implements SessionContext {
 
     try {
       while (this.cronQueue.length > 0) {
-        const prompt = this.cronQueue.shift()!;
-        await this.#executeCronPrompt(prompt);
+        const item = this.cronQueue.shift()!;
+        await this.#executeCronPrompt(item);
       }
     } finally {
       this.cronProcessing = false;
@@ -2380,14 +2397,15 @@ export class Session implements SessionContext {
    * Executes a single cron-fired prompt: echoes it as a user message with
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
    */
-  async #executeCronPrompt(prompt: string): Promise<void> {
+  async #executeCronPrompt(item: CronQueueItem): Promise<void> {
     // Same session-ID binding rationale as #executePrompt.
     return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeCronPromptInner(prompt),
+      this.#executeCronPromptInner(item),
     );
   }
 
-  async #executeCronPromptInner(prompt: string): Promise<void> {
+  async #executeCronPromptInner(item: CronQueueItem): Promise<void> {
+    const { prompt } = item;
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
@@ -2412,7 +2430,7 @@ export class Session implements SessionContext {
               await this.sendUpdate({
                 sessionUpdate: 'user_message_chunk',
                 content: { type: 'text', text: prompt },
-                _meta: { source: 'cron' },
+                _meta: { source: item.source },
               });
 
               // Prepend session-level system reminders (same rationale as the
@@ -2504,8 +2522,8 @@ export class Session implements SessionContext {
                     promptId,
                     functionCalls,
                   );
-                  if (toolRun.stopAfterUserQuestionCancel) {
-                    await this.#preserveCancelledAskUserQuestionToolRun(
+                  if (toolRun.stopAfterPermissionCancel) {
+                    await this.#preserveCancelledPermissionToolRun(
                       toolRun,
                       ac.signal,
                     );
@@ -2526,7 +2544,9 @@ export class Session implements SessionContext {
               debugLogger.error('Error processing cron prompt:', error);
               const msg =
                 error instanceof Error ? error.message : String(error);
-              await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
+              await this.messageEmitter.emitAgentMessage(
+                `[${item.source} error] ${msg}`,
+              );
             } finally {
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
@@ -2554,9 +2574,12 @@ export class Session implements SessionContext {
     this.cronDisabledByTokenLimit = true;
     this.cronQueue = [];
     if (!this.config.isCronEnabled()) return;
-    this.config.getCronScheduler().stop();
+    // disable() (not stop()): the breaker is permanent for the session, so
+    // LoopWakeup must reject re-arms that would never fire, not just halt the
+    // tick (which a later pending wakeup would otherwise silently restart).
+    this.config.getCronScheduler().disable();
     void this.#emitAgentDiagnosticMessageSafely(
-      'Cron jobs disabled for the rest of this session due to token limit. Restart the session to re-enable.',
+      'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
       'Failed to emit cron-disabled diagnostic',
     );
   }
@@ -2817,8 +2840,8 @@ export class Session implements SessionContext {
                 promptId,
                 functionCalls,
               );
-              if (toolRun.stopAfterUserQuestionCancel) {
-                await this.#preserveCancelledAskUserQuestionToolRun(
+              if (toolRun.stopAfterPermissionCancel) {
+                await this.#preserveCancelledPermissionToolRun(
                   toolRun,
                   ac.signal,
                 );
@@ -3170,15 +3193,101 @@ export class Session implements SessionContext {
     functionCalls: FunctionCall[],
   ): Promise<RunToolResult> {
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
-    type Batch = { concurrent: boolean; calls: FunctionCall[] };
+    type ExecutableBatch = {
+      kind: 'execute';
+      concurrent: boolean;
+      calls: FunctionCall[];
+    };
+    type DuplicateBatch = {
+      kind: 'duplicate';
+      request: ToolCallRequestInfo;
+      response: ToolCallResponseInfo;
+    };
+    type Batch = ExecutableBatch | DuplicateBatch;
     const batches: Batch[] = [];
+    const handledProviderToolCallIds = new Set(
+      this.#getCurrentChat().getHistoryFunctionResponseIds(),
+    );
+
+    const pushDuplicateBatch = (request: ToolCallRequestInfo): void => {
+      const response = createDuplicateProviderToolCallResponse(request);
+      debugLogger.debug(
+        `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +
+          `${request.providerCallId} (tool: ${request.name})`,
+      );
+      batches.push({ kind: 'duplicate', request, response });
+    };
+
+    const emitDuplicateBatch = async (batch: DuplicateBatch): Promise<void> => {
+      const { request, response } = batch;
+      if (request.name === ToolNames.TODO_WRITE) {
+        const provenance = ToolCallEmitter.resolveToolProvenance(request.name);
+        await this.sendUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: response.callId,
+          status: 'failed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: response.error?.message ?? String(response.resultDisplay),
+              },
+            },
+          ],
+          rawOutput: response.resultDisplay,
+          _meta: {
+            toolName: request.name,
+            provenance: provenance.provenance,
+            ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+          },
+        });
+      } else {
+        await this.toolCallEmitter.emitResult({
+          callId: response.callId,
+          toolName: request.name,
+          args: request.args,
+          message: response.responseParts,
+          resultDisplay: response.resultDisplay,
+          error: response.error,
+          success: false,
+        });
+      }
+      this.config
+        .getChatRecordingService()
+        ?.recordToolResult(response.responseParts, {
+          callId: response.callId,
+          status: 'error',
+          resultDisplay: response.resultDisplay,
+          error: response.error,
+          errorType: response.errorType,
+        });
+    };
+
     for (const fc of dedupedFunctionCalls) {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      if (providerCallId) {
+        if (handledProviderToolCallIds.has(providerCallId)) {
+          const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+          pushDuplicateBatch({
+            callId,
+            providerCallId,
+            name: fc.name ?? 'unknown_tool',
+            args: (fc.args ?? {}) as Record<string, unknown>,
+            isClientInitiated: false,
+            prompt_id: promptId,
+          });
+          continue;
+        }
+        handledProviderToolCallIds.add(providerCallId);
+      }
+
       const isAgent = fc.name === ToolNames.AGENT;
       const last = batches[batches.length - 1];
-      if (isAgent && last?.concurrent) {
+      if (isAgent && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
       } else {
-        batches.push({ concurrent: isAgent, calls: [fc] });
+        batches.push({ kind: 'execute', concurrent: isAgent, calls: [fc] });
       }
     }
 
@@ -3190,10 +3299,10 @@ export class Session implements SessionContext {
         functionResponse: {
           id: callId,
           name: toolName,
-          response: { error: ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE },
+          response: { error: PERMISSION_CANCEL_SKIP_MESSAGE },
         },
       };
-      const error = new Error(ASK_USER_QUESTION_CANCEL_SKIP_MESSAGE);
+      const error = new Error(PERMISSION_CANCEL_SKIP_MESSAGE);
       try {
         this.config.getChatRecordingService()?.recordToolResult([part], {
           callId,
@@ -3229,7 +3338,7 @@ export class Session implements SessionContext {
     const runBounded = async (
       calls: FunctionCall[],
       runAbortSignal: AbortSignal,
-      onStopAfterUserQuestionCancel?: () => void,
+      onStopAfterPermissionCancel?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
       const parsed = parseInt(
@@ -3245,7 +3354,7 @@ export class Session implements SessionContext {
         if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
           results[idx] = {
             parts: [await recordSkippedToolCall(calls[idx])],
-            stopAfterUserQuestionCancel: false,
+            stopAfterPermissionCancel: false,
           };
           continue;
         }
@@ -3253,7 +3362,7 @@ export class Session implements SessionContext {
           runAbortSignal,
           promptId,
           calls[idx],
-          onStopAfterUserQuestionCancel,
+          onStopAfterPermissionCancel,
         )
           .then((r) => {
             results[idx] = r;
@@ -3272,9 +3381,14 @@ export class Session implements SessionContext {
 
     const parts: Part[] = [];
     for (const batch of batches) {
+      if (batch.kind === 'duplicate') {
+        await emitDuplicateBatch(batch);
+        parts.push(...batch.response.responseParts);
+        continue;
+      }
       if (batch.concurrent && batch.calls.length > 1) {
         const batchAbortController = new AbortController();
-        let batchStopAfterUserQuestionCancel = false;
+        let batchStopAfterPermissionCancel = false;
         const propagateAbort = () => {
           batchAbortController.abort(abortSignal.reason);
         };
@@ -3285,8 +3399,8 @@ export class Session implements SessionContext {
             once: true,
           });
         }
-        const stopBatchAfterUserQuestionCancel = () => {
-          batchStopAfterUserQuestionCancel = true;
+        const stopBatchAfterPermissionCancel = () => {
+          batchStopAfterPermissionCancel = true;
           batchAbortController.abort(USER_CANCEL_ABORT_REASON);
         };
         let results: RunToolResult[];
@@ -3294,8 +3408,8 @@ export class Session implements SessionContext {
           results = await runBounded(
             batch.calls,
             batchAbortController.signal,
-            stopBatchAfterUserQuestionCancel,
-            () => batchStopAfterUserQuestionCancel,
+            stopBatchAfterPermissionCancel,
+            () => batchStopAfterPermissionCancel,
           );
         } finally {
           abortSignal.removeEventListener('abort', propagateAbort);
@@ -3303,24 +3417,24 @@ export class Session implements SessionContext {
         let shouldStop = false;
         for (const r of results) {
           parts.push(...r.parts);
-          shouldStop ||= r.stopAfterUserQuestionCancel;
+          shouldStop ||= r.stopAfterPermissionCancel;
         }
         if (shouldStop) {
           await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
-          return { parts, stopAfterUserQuestionCancel: true };
+          return { parts, stopAfterPermissionCancel: true };
         }
       } else {
         for (const fc of batch.calls) {
           const r = await this.runTool(abortSignal, promptId, fc);
           parts.push(...r.parts);
-          if (r.stopAfterUserQuestionCancel) {
+          if (r.stopAfterPermissionCancel) {
             await appendSkippedAfter(parts, fc);
-            return { parts, stopAfterUserQuestionCancel: true };
+            return { parts, stopAfterPermissionCancel: true };
           }
         }
       }
     }
-    return { parts, stopAfterUserQuestionCancel: false };
+    return { parts, stopAfterPermissionCancel: false };
   }
 
   /**
@@ -3362,7 +3476,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     promptId: string,
     fc: FunctionCall,
-    onStopAfterUserQuestionCancel?: () => void,
+    onStopAfterPermissionCancel?: () => void,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -3370,9 +3484,17 @@ export class Session implements SessionContext {
     const startTime = Date.now();
     let spanError: string | undefined;
     let activeToolAbortSignal = abortSignal;
-    let nestedAskUserQuestionCancelled = false;
+    let nestedPermissionCancelled = false;
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
+    let subAgentCleanupFunctions: Array<() => void> = [];
+
+    const cleanupAgentToolResources = () => {
+      subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+      subAgentCleanupFunctions = [];
+      removeAgentToolAbortPropagation?.();
+      removeAgentToolAbortPropagation = undefined;
+    };
 
     const errorResponse = (error: Error) => {
       const durationMs = Date.now() - startTime;
@@ -3407,10 +3529,10 @@ export class Session implements SessionContext {
     const earlyErrorResponse = async (
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
-      opts?: { stopAfterUserQuestionCancel?: boolean },
+      opts?: { stopAfterPermissionCancel?: boolean },
     ) => {
       spanError = error.message;
-      removeAgentToolAbortPropagation?.();
+      cleanupAgentToolResources();
       if (toolName !== ToolNames.TODO_WRITE) {
         await this.toolCallEmitter.emitError(callId, toolName, error);
       }
@@ -3425,7 +3547,7 @@ export class Session implements SessionContext {
       });
       return {
         parts: errorParts,
-        stopAfterUserQuestionCancel: opts?.stopAfterUserQuestionCancel ?? false,
+        stopAfterPermissionCancel: opts?.stopAfterPermissionCancel ?? false,
       };
     };
 
@@ -3487,9 +3609,6 @@ export class Session implements SessionContext {
           }
         }
 
-        // Track cleanup functions for sub-agent event listeners
-        let subAgentCleanupFunctions: Array<() => void> = [];
-
         // Generate tool_use_id for hook tracking (aligned with core path)
         const toolUseId = generateToolUseId();
 
@@ -3523,9 +3642,9 @@ export class Session implements SessionContext {
               parentToolCallId,
               subagentType,
               () => {
-                nestedAskUserQuestionCancelled = true;
+                nestedPermissionCancelled = true;
                 agentToolAbortController?.abort(USER_CANCEL_ABORT_REASON);
-                onStopAfterUserQuestionCancel?.();
+                onStopAfterPermissionCancel?.();
               },
             );
 
@@ -3824,24 +3943,74 @@ export class Session implements SessionContext {
                   _meta: { toolName },
                 },
               };
+              const stopAfterPermissionCancel = () => {
+                onStopAfterPermissionCancel?.();
+                return earlyErrorResponse(
+                  new Error(`Tool "${toolName}" was canceled by the user.`),
+                  toolName,
+                  { stopAfterPermissionCancel: true },
+                );
+              };
 
-              const output = (await this.client.requestPermission(
-                params,
-              )) as RequestPermissionResponse & {
+              let output: RequestPermissionResponse & {
                 answers?: Record<string, string>;
               };
-              const outcome =
-                output.outcome.outcome === 'cancelled'
-                  ? ToolConfirmationOutcome.Cancel
-                  : z
-                      .nativeEnum(ToolConfirmationOutcome)
-                      .parse(output.outcome.optionId);
+              let outcome: ToolConfirmationOutcome;
+              try {
+                output = (await this.client.requestPermission(
+                  params,
+                )) as RequestPermissionResponse & {
+                  answers?: Record<string, string>;
+                };
+                outcome =
+                  output.outcome.outcome === 'cancelled'
+                    ? ToolConfirmationOutcome.Cancel
+                    : z
+                        .nativeEnum(ToolConfirmationOutcome)
+                        .parse(output.outcome.optionId);
+              } catch (error) {
+                debugLogger.error(
+                  `Permission request failed for tool ${toolName}:`,
+                  error,
+                );
+                try {
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.Cancel,
+                  );
+                } catch (confirmError) {
+                  debugLogger.error(
+                    `Failed to cancel tool ${toolName} after permission request failure:`,
+                    confirmError,
+                  );
+                }
+                onStopAfterPermissionCancel?.();
+                return earlyErrorResponse(
+                  new Error(
+                    `Permission request failed for "${toolName}": ${this.#formatError(
+                      error,
+                    )}`,
+                  ),
+                  toolName,
+                  { stopAfterPermissionCancel: true },
+                );
+              }
 
               recordAutoModeFallbackResolution(outcome);
 
-              await confirmationDetails.onConfirm(outcome, {
-                answers: output.answers,
-              });
+              try {
+                await confirmationDetails.onConfirm(outcome, {
+                  answers: output.answers,
+                });
+              } catch (error) {
+                if (outcome !== ToolConfirmationOutcome.Cancel) {
+                  throw error;
+                }
+                debugLogger.error(
+                  `Failed to confirm cancellation for tool ${toolName}:`,
+                  error,
+                );
+                return stopAfterPermissionCancel();
+              }
 
               // Persist permission rules when user explicitly chose "Always Allow".
               // This branch is only reached for tools that went through
@@ -3879,21 +4048,11 @@ export class Session implements SessionContext {
 
               switch (outcome) {
                 case ToolConfirmationOutcome.Cancel:
-                  if (toolName === ToolNames.ASK_USER_QUESTION) {
-                    onStopAfterUserQuestionCancel?.();
-                  }
                   // Route through earlyErrorResponse so spanError carries the
                   // cancellation reason (plain errorResponse leaves it unset,
                   // which makes endToolSpan fall back to the generic 'tool
                   // error' message) and the declined call is still recorded.
-                  return earlyErrorResponse(
-                    new Error(`Tool "${toolName}" was canceled by the user.`),
-                    toolName,
-                    {
-                      stopAfterUserQuestionCancel:
-                        toolName === ToolNames.ASK_USER_QUESTION,
-                    },
-                  );
+                  return stopAfterPermissionCancel();
                 case ToolConfirmationOutcome.ProceedOnce:
                 case ToolConfirmationOutcome.ProceedAlways:
                 case ToolConfirmationOutcome.ProceedAlwaysProject:
@@ -3993,8 +4152,7 @@ export class Session implements SessionContext {
           }
 
           // Clean up event listeners
-          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-          removeAgentToolAbortPropagation?.();
+          cleanupAgentToolResources();
 
           // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
           // approval mode inside execute() without going through the user-confirmation
@@ -4041,7 +4199,7 @@ export class Session implements SessionContext {
             messageBusForTool &&
             !toolResult.error &&
             !aborted &&
-            !nestedAskUserQuestionCancelled
+            !nestedPermissionCancelled
           ) {
             // Use the same response shape as core (llmContent/returnDisplay)
             const toolResponse = {
@@ -4175,12 +4333,11 @@ export class Session implements SessionContext {
           }
           return {
             parts: responseParts,
-            stopAfterUserQuestionCancel: nestedAskUserQuestionCancelled,
+            stopAfterPermissionCancel: nestedPermissionCancelled,
           };
         } catch (e) {
           // Ensure cleanup on error
-          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-          removeAgentToolAbortPropagation?.();
+          cleanupAgentToolResources();
 
           const error = e instanceof Error ? e : new Error(String(e));
           spanError = error.message;
@@ -4236,7 +4393,7 @@ export class Session implements SessionContext {
 
           return {
             parts: errorResponse(error),
-            stopAfterUserQuestionCancel: nestedAskUserQuestionCancelled,
+            stopAfterPermissionCancel: nestedPermissionCancelled,
           };
         }
       }); // end runInToolSpanContext

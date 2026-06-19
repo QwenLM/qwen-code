@@ -12,7 +12,7 @@ import { ExtensionStorage } from './storage.js';
 import type { ExtensionConfig } from './extensionManager.js';
 import prompts from 'prompts';
 import { EXTENSION_SETTINGS_FILENAME } from './variables.js';
-import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
+import { HybridTokenStorage } from '../mcp/token-storage/hybrid-token-storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('EXT_SETTINGS');
@@ -85,7 +85,7 @@ export async function maybePromptForSettings(
   // The user can change the scope later using the `settings set` command.
   const scope = ExtensionSettingScope.USER;
   const envFilePath = getEnvFilePath(extensionName, scope);
-  const keychain = new KeychainTokenStorage(
+  const keychain = new HybridTokenStorage(
     getKeychainStorageName(extensionName, extensionId, scope),
   );
 
@@ -160,7 +160,7 @@ export async function getScopedEnvContents(
   scope: ExtensionSettingScope,
 ): Promise<Record<string, string>> {
   const { name: extensionName } = extensionConfig;
-  const keychain = new KeychainTokenStorage(
+  const keychain = new HybridTokenStorage(
     getKeychainStorageName(extensionName, extensionId, scope),
   );
   const envFilePath = getEnvFilePath(extensionName, scope);
@@ -232,7 +232,7 @@ export async function updateSetting(
   }
 
   const newValue = await requestSetting(settingToUpdate);
-  const keychain = new KeychainTokenStorage(
+  const keychain = new HybridTokenStorage(
     getKeychainStorageName(extensionName, extensionId, scope),
   );
 
@@ -303,7 +303,7 @@ function getSettingsChanges(
 
 async function clearSettings(
   envFilePath: string,
-  keychain: KeychainTokenStorage,
+  keychain: HybridTokenStorage,
 ) {
   if (fsSync.existsSync(envFilePath)) {
     await fs.writeFile(envFilePath, '');

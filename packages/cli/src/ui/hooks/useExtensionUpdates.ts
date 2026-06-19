@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ExtensionManager } from '@qwen-code/qwen-code-core';
+import {
+  type ExtensionManager,
+  getExtensionDisplayName,
+} from '@qwen-code/qwen-code-core';
+import { getCurrentLanguage } from '../../i18n/index.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import {
   ExtensionUpdateState,
@@ -291,7 +295,7 @@ export const useExtensionUpdates = (
             addItem(
               {
                 type: MessageType.INFO,
-                text: `Extension "${extension.name}" successfully updated: ${result.originalVersion} → ${result.updatedVersion}.`,
+                text: `Extension "${getExtensionDisplayName(extension, getCurrentLanguage())}" successfully updated: ${result.originalVersion} → ${result.updatedVersion}.`,
               },
               Date.now(),
             );

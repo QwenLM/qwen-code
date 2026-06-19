@@ -4186,6 +4186,38 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
+    it('should not truncate non-integer length constraints', () => {
+      const params = {
+        type: 'object',
+        properties: {
+          text: {
+            type: 'string',
+            minLength: '1.5',
+            maxLength: '   ',
+          },
+          items: {
+            type: 'array',
+            minItems: '10px',
+            maxItems: '1.5',
+          },
+        },
+      };
+
+      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const properties = result?.['properties'] as Record<string, unknown>;
+
+      expect(properties?.['text']).toEqual({
+        type: 'string',
+        minLength: '1.5',
+        maxLength: '   ',
+      });
+      expect(properties?.['items']).toEqual({
+        type: 'array',
+        minItems: '10px',
+        maxItems: '1.5',
+      });
+    });
+
     it('should handle nested objects', () => {
       const params = {
         type: 'object',

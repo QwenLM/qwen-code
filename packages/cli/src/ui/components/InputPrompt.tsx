@@ -17,7 +17,10 @@ import { cpSlice, cpLen } from '../utils/textUtils.js';
 import chalk from 'chalk';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
-import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import {
+  useCommandCompletion,
+  CompletionMode,
+} from '../hooks/useCommandCompletion.js';
 import { useExportCompletion } from '../hooks/useExportCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -288,6 +291,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   });
 
   const resetCompletionState = completion.resetCompletionState;
+  const dismissCompletion = completion.dismissCompletion;
   const resetReverseSearchCompletionState =
     reverseSearchCompletion.resetCompletionState;
   const resetCommandSearchCompletionState =
@@ -1044,6 +1048,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               ? completion.suggestions[targetIndex]
               : undefined;
           acceptActiveCompletionSuggestion();
+          // On Enter for @folder paths, dismiss the completion so the
+          // dropdown stays closed. Folder paths don't append a trailing
+          // space by design, so the @ completion pattern re-matches and
+          // re-shows the dropdown. Gate on AT mode + isDirectory to avoid
+          // suppressing slash-command sub-suggestions.
+          if (
+            key.name === 'return' &&
+            accepted?.isDirectory &&
+            completion.completionMode === CompletionMode.AT
+          ) {
+            dismissCompletion();
+          }
           // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`
           // matches BOTH Tab and Enter (see keyBindings.ts and the
           // identical caveat at lines 861-862). Without the
@@ -1386,6 +1402,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       reverseSearchCompletion,
       handleClipboardImage,
       resetCompletionState,
+      dismissCompletion,
       escPressCount,
       showEscapePrompt,
       resetEscapeState,
@@ -1654,6 +1671,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     </Text>
   );
 
+  // Calculate prefix width for physical cursor positioning
+  const prefixWidth = shellModeActive
+    ? reverseSearchActive
+      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
+      : 2 // "! " = 2 chars
+    : commandSearchActive
+      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
+      : approvalMode === ApprovalMode.YOLO
+        ? 2 // "* " = 2 chars
+        : 2; // "> " = 2 chars
+
   return (
     <>
       {attachments.length > 0 && (
@@ -1684,6 +1712,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             : placeholder
         }
         prefix={prefixNode}
+        prefixWidth={prefixWidth}
         borderColor={borderColor}
         topRightLabel={uiState.sessionName || undefined}
         isActive={!isEmbeddedShellFocused}
