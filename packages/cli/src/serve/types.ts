@@ -123,6 +123,12 @@ export interface ServeOptions {
    */
   enableSessionShell?: boolean;
   /**
+   * Serve the built Web Shell SPA at the daemon root (default true). Set
+   * false (the CLI's `--no-web`) for an API-only daemon. No effect when the
+   * Web Shell assets aren't present in the build.
+   */
+  serveWebShell?: boolean;
+  /**
    * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
    * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so

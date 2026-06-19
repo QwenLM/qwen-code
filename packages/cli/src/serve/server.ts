@@ -104,6 +104,10 @@ import {
   type ServeOptions,
 } from './types.js';
 import { getDemoHtml } from './demo.js';
+import {
+  mountWebShellAssets,
+  mountWebShellSpaFallback,
+} from './webShellStatic.js';
 import { mountWorkspaceMemoryRoutes } from './workspaceMemory.js';
 import { mountWorkspaceAgentsRoutes } from './workspaceAgents.js';
 import {
@@ -595,6 +599,16 @@ function parseAuthProviderInstallRequest(
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /**
+   * Directory of the built Web Shell SPA (`index.html` + `assets/`). When
+   * set (and `opts.serveWebShell !== false`), `createServeApp` mounts the
+   * UI at the daemon root before `bearerAuth`. Production `runQwenServe`
+   * resolves this via `resolveWebShellDir()` and injects it here; direct
+   * embeds / tests opt in by passing a fixture dir, so the default
+   * `createServeApp` (no injection) stays API-only and existing route tests
+   * are unaffected.
+   */
+  webShellDir?: string;
   /**
    * Qwen Code version advertised to web/SDK clients. Production passes the
    * resolved CLI package version; tests/direct embeds may omit it.
@@ -1302,6 +1316,22 @@ export function createServeApp(
       });
       next();
     });
+  }
+
+  // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
+  // static shell carries no secrets and a browser cannot attach an
+  // Authorization header to a `<script src>` subresource or an address-bar
+  // navigation, so gating it would just break the UI — the front-end's own
+  // API calls still carry the bearer (getDaemonAuthHeaders) and every API
+  // route below stays token-gated. The SPA deep-link fallback is registered
+  // LATER (after all API routes, see mountWebShellSpaFallback) so authed
+  // routes win over the shell. The assets dir is resolved by the caller
+  // (runQwenServe) and injected via deps.webShellDir; `--no-web` sets
+  // opts.serveWebShell=false to opt out.
+  const webShellDir =
+    opts.serveWebShell !== false ? deps.webShellDir : undefined;
+  if (webShellDir) {
+    mountWebShellAssets(app, webShellDir);
   }
 
   app.use(bearerAuth(opts.token));
@@ -3803,6 +3833,15 @@ export function createServeApp(
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;
+  }
+
+  // Web Shell SPA deep-link fallback — registered AFTER every API route (and
+  // just before the error handler) so real routes, including their bearerAuth
+  // 401s, always win; only genuine 404 misses fall through to the shell. This
+  // is what keeps an attacker-controlled `Accept: text/html` from coaxing the
+  // 200 shell out of an authed route.
+  if (webShellDir) {
+    mountWebShellSpaFallback(app, webShellDir);
   }
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
