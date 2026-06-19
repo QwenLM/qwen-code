@@ -539,20 +539,24 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
           );
-          // Retry fetchToken directly instead of going through
-          // scheduleTokenRefresh (which would add another ~60s of
-          // delay from the stale tokenExpiresAt).
-          this.tokenRefreshTimer = setTimeout(() => {
-            if (this.disposed) return;
-            this.fetchToken().catch(() => {
-              process.stderr.write(
-                `[QQ:${this.name}] Token refresh failed again after retry\n`,
-              );
-            });
-          }, 60_000);
+          this.scheduleTokenRefreshRetry();
         });
       }, delay);
     }
+  }
+
+  private scheduleTokenRefreshRetry(): void {
+    if (this.disposed) return;
+    this.stopTokenRefresh();
+    this.tokenRefreshTimer = setTimeout(() => {
+      this.fetchToken().catch((e) => {
+        if (this.disposed) return;
+        process.stderr.write(
+          `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
+        );
+        this.scheduleTokenRefreshRetry();
+      });
+    }, 60_000);
   }
 
   private stopTokenRefresh(): void {
