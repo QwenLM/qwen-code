@@ -32,8 +32,11 @@ import {
 import { NotificationType } from '../hooks/types.js';
 import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
-
-const debugLogger = createDebugLogger('TOOL_SCHEDULER');
+import {
+  truncateLlmContent,
+  truncateToolOutput,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+} from '../utils/truncation.js';
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
@@ -51,18 +54,28 @@ import type {
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
-import { escapeSystemReminderTags, escapeXml } from '../utils/xml.js';
+import {
+  collectAvailableSkillEntries,
+  renderAvailableSkillsBlock,
+  type AvailableSkillEntry,
+} from '../tools/skill-utils.js';
+import { escapeSystemReminderTags } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
+  isAlreadyTruncated,
+  persistAndTruncateToolResult,
+} from '../utils/truncation.js';
+import {
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
 } from './permission-helpers.js';
 import {
   evaluatePermissionFlow,
+  getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
   isAutoEditApproved,
@@ -71,6 +84,7 @@ import {
   applyAutoModeDecision,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
+  shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
@@ -115,6 +129,63 @@ import {
   type HookSpanMetadata,
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
+
+const debugLogger = createDebugLogger('TOOL_SCHEDULER');
+
+function dedupeRequestsByCallId(
+  requests: ToolCallRequestInfo[],
+): ToolCallRequestInfo[] {
+  const seenCallIds = new Set<string>();
+  const deduped: ToolCallRequestInfo[] = [];
+  for (const request of requests) {
+    if (request.callId) {
+      if (seenCallIds.has(request.callId)) {
+        debugLogger.debug(
+          `dedupeRequestsByCallId: dropping duplicate callId=${request.callId} name=${request.name}`,
+        );
+        continue;
+      }
+      seenCallIds.add(request.callId);
+    }
+    deduped.push(request);
+  }
+  return deduped;
+}
+
+// Gap between the persistence gate and per-tool truncation thresholds.
+// Tools that self-truncate to ~25K add headers bringing output to ~25.4K;
+// the headroom ensures the gate only fires for genuinely un-truncated output
+// and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
+const GATE_HEADROOM = 3000;
+const GATE_EXEMPT_TOOLS = new Set(['read_file']);
+
+function extractTextFromPartListUnion(c: PartListUnion): string {
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    const parts = toParts(c);
+    return parts.map((p) => p.text ?? '').join('\n');
+  }
+  if (c && typeof c === 'object') {
+    if ('text' in c) {
+      const text = (c as { text?: string }).text;
+      if (typeof text === 'string') return text;
+    }
+    if ('functionResponse' in c) {
+      const fr = (
+        c as {
+          functionResponse?: { response?: Record<string, unknown> };
+        }
+      ).functionResponse;
+      const resp = fr?.response;
+      if (resp) {
+        if (typeof resp['output'] === 'string') return resp['output'];
+        if (typeof resp['content'] === 'string') return resp['content'];
+      }
+    }
+  }
+  return '';
+}
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -210,6 +281,7 @@ async function safelyFirePostToolUseFailureHook(
   errorMessage: string,
   isInterrupt: boolean,
   permissionMode?: string,
+  tool_call_id?: string,
 ): ReturnType<typeof firePostToolUseFailureHook> {
   try {
     return await firePostToolUseFailureHook(
@@ -220,6 +292,8 @@ async function safelyFirePostToolUseFailureHook(
       errorMessage,
       isInterrupt,
       permissionMode,
+      undefined,
+      tool_call_id,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -684,6 +758,24 @@ function toParts(input: PartListUnion): Part[] {
   return parts;
 }
 
+/**
+ * Per-message offload: when a batch of tool results collectively exceeds the
+ * budget, the largest results are spilled to disk and replaced with a small
+ * preview + recoverable pointer. This is the preview size used for that spill.
+ */
+const BATCH_OFFLOAD_PREVIEW_CHARS = 2000;
+
+/** Total model-facing string output across a completed call's responseParts. */
+function batchResponseOutputSize(call: CompletedToolCall): number {
+  if (call.status !== 'success') return 0;
+  let size = 0;
+  for (const part of call.response.responseParts) {
+    const output = part.functionResponse?.response?.['output'];
+    if (typeof output === 'string') size += output.length;
+  }
+  return size;
+}
+
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
 /** Directive injected when a tool call repeatedly fails validation. */
@@ -759,6 +851,11 @@ function toPostToolBatchToolCall(
     tool_name: call.request.name,
     tool_input: call.request.args,
     tool_use_id: call.request.callId,
+    tool_call_id: call.request.callId,
+    // Note: tool_use_id here is also populated from call.request.callId, so
+    // tool_call_id duplicates the same value under a different name. The
+    // semantics of tool_use_id are inconsistent across hook events (synthetic
+    // in Pre/Post/Failure, API ID in PostToolBatch).
     status: call.status,
     tool_response: serializeToolResponse(call.response),
   };
@@ -1362,6 +1459,7 @@ export class CoreToolScheduler {
             this.finalizeToolSpan(callId);
           }
           this.callIdToPostToolBatchSignal.delete(callId);
+          this.autoModeFallbackCallIds.delete(callId);
         } catch (e) {
           debugLogger.warn(
             `drainSpansForBatch: failed to drain ${callId}: ${e instanceof Error ? e.message : String(e)}`,
@@ -1593,7 +1691,9 @@ export class CoreToolScheduler {
           'Cannot schedule new tool calls while other tool calls are actively running (executing or awaiting approval).',
         );
       }
-      const requestsToProcess = Array.isArray(request) ? request : [request];
+      const requestsToProcess = dedupeRequestsByCallId(
+        Array.isArray(request) ? request : [request],
+      );
 
       // Prune validation retry state per-tool, not wholesale. Keys are
       // "<toolName>:<errorMessage>"; retain counters only for tools actually
@@ -1708,7 +1808,7 @@ export class CoreToolScheduler {
           reqInfo.prompt_id,
         );
         if (invocationOrError instanceof Error) {
-          const baseError = reqInfo.wasOutputTruncated
+          const displayError = reqInfo.wasOutputTruncated
             ? new Error(
                 `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
               )
@@ -1717,7 +1817,7 @@ export class CoreToolScheduler {
           // Track validation retry for loop detection. Counts accumulate per
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
-          const errorKey = `${reqInfo.name}:${baseError.message}`;
+          const errorKey = `${reqInfo.name}:${invocationOrError.message}`;
           const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
           for (const key of this.validationRetryCounts.keys()) {
             if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
@@ -1728,8 +1828,10 @@ export class CoreToolScheduler {
 
           const finalError =
             count >= VALIDATION_RETRY_LOOP_THRESHOLD
-              ? new Error(`${baseError.message}${RETRY_LOOP_STOP_DIRECTIVE}`)
-              : baseError;
+              ? new Error(
+                  `${invocationOrError.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
+                )
+              : displayError;
 
           newToolCalls.push({
             status: 'error',
@@ -1837,8 +1939,24 @@ export class CoreToolScheduler {
           const approvalMode = this.config.getApprovalMode();
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
           const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
+          const isEnterPlanModeTool =
+            canonicalName === ToolNames.ENTER_PLAN_MODE;
 
-          if (finalPermission === 'allow') {
+          const forceAutoReviewForAllow =
+            approvalMode === ApprovalMode.AUTO &&
+            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+          const confirmationPermission = getEffectivePermissionForConfirmation(
+            finalPermission,
+            forceAutoReviewForAllow,
+          );
+
+          if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+            debugLogger.info(
+              `Auto mode: L4 allow overridden by protected-write guard for ${canonicalName}`,
+            );
+          }
+
+          if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
             // Auto-approve: tool is inherently safe (read-only) or PM allows.
             // In AUTO mode, also reset denialTracking so an L4 allow-rule
             // match counts as a successful call and clears any in-flight
@@ -1919,15 +2037,22 @@ export class CoreToolScheduler {
               !this.config.getDisableAllHooks() &&
               shouldFirePermissionDeniedForAutoMode(decision, outcome)
             ) {
-              await this.config
-                .getHookSystem?.()
-                ?.firePermissionDeniedEvent(
-                  canonicalName,
-                  toolParams,
-                  reqInfo.callId,
-                  getAutoModePermissionDeniedReason(decision),
-                  signal,
+              try {
+                await this.config
+                  .getHookSystem?.()
+                  ?.firePermissionDeniedEvent(
+                    canonicalName,
+                    toolParams,
+                    reqInfo.callId,
+                    getAutoModePermissionDeniedReason(decision),
+                    signal,
+                    reqInfo.callId,
+                  );
+              } catch (hookError) {
+                debugLogger.warn(
+                  `PermissionDenied hook failed for tool ${reqInfo.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
                 );
+              }
             }
             switch (outcome.kind) {
               case 'approved':
@@ -1982,7 +2107,11 @@ export class CoreToolScheduler {
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
           if (
-            !needsConfirmation(finalPermission, approvalMode, canonicalName)
+            !needsConfirmation(
+              confirmationPermission,
+              approvalMode,
+              canonicalName,
+            )
           ) {
             this.setToolCallOutcome(
               reqInfo.callId,
@@ -2002,6 +2131,7 @@ export class CoreToolScheduler {
                 isExitPlanModeTool,
                 isAskUserQuestionTool,
                 confirmationDetails,
+                isEnterPlanModeTool,
               )
             ) {
               this.setStatusInternal(reqInfo.callId, 'error', {
@@ -2878,6 +3008,8 @@ export class CoreToolScheduler {
             toolInput,
             toolUseId,
             permissionMode,
+            undefined, // signal
+            callId, // Original API call ID (e.g., call_xxx)
           ),
         (r) =>
           r.hookError
@@ -2960,6 +3092,10 @@ export class CoreToolScheduler {
     // throws (e.g. shell setup failure) flow into the same catch as async
     // rejections — otherwise execSpan leaks unended and failure hooks
     // are skipped.
+    const sleepInhibitorHandle = acquireSleepInhibitor(
+      this.config,
+      `Qwen Code is executing tool ${canonicalName}`,
+    );
     try {
       let promise: Promise<ToolResult>;
       if (invocation instanceof ShellToolInvocation) {
@@ -3034,6 +3170,7 @@ export class CoreToolScheduler {
                 cancelMessage,
                 true,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3056,8 +3193,15 @@ export class CoreToolScheduler {
 
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
-        const contentLength =
+        let contentLength: number | undefined =
           typeof content === 'string' ? content.length : undefined;
+
+        // Deferred metadata: PostToolUse hook context and skill/rule reminders
+        // are captured here and appended AFTER the model-facing truncation
+        // below, so the head/tail truncator never bisects a <system-reminder>
+        // envelope or hook-injected context.
+        let postToolUseAdditionalContext: string | undefined;
+        let reminderEnvelope: string | undefined;
 
         // PostToolUse Hook
         if (hooksEnabled && messageBus) {
@@ -3076,6 +3220,8 @@ export class CoreToolScheduler {
                 toolResponse,
                 toolUseId,
                 permissionMode,
+                undefined, // signal
+                callId, // Original API call ID (e.g., call_xxx)
               ),
             (r) =>
               r.hookError
@@ -3097,12 +3243,10 @@ export class CoreToolScheduler {
                   },
           );
 
-          // Append additional context from hook if provided
+          // Capture additional context from hook; appended after the
+          // model-facing truncation below.
           if (postHookResult.additionalContext) {
-            content = appendAdditionalContext(
-              content,
-              postHookResult.additionalContext,
-            );
+            postToolUseAdditionalContext = postHookResult.additionalContext;
           }
 
           // Check if hook requested to stop execution
@@ -3129,6 +3273,14 @@ export class CoreToolScheduler {
             return;
           }
         }
+
+        // Universal post-execution truncation gate — persists oversized
+        // tool results to disk before system-reminders are appended.
+        content = await this.maybePersistLargeToolResult(
+          callId,
+          toolName,
+          content,
+        );
 
         // Collect filesystem paths the tool just touched. Different tools
         // use different parameter names: `file_path` (read/edit/write),
@@ -3169,45 +3321,172 @@ export class CoreToolScheduler {
             if (rulesCtx) reminderBlocks.push(rulesCtx);
           }
 
-          // Skill activation runs in a single batch over all candidate
-          // paths so `notifyChangeListeners` (and therefore
-          // `SkillTool.refreshSkills` / `geminiClient.setTools()`) fires
-          // exactly once for this tool call, regardless of how many
-          // paths produced new activations. The await is load-bearing:
-          // matchAndActivateByPaths only resolves after the listener
-          // chain settles, so the activation reminder we append below
-          // never lands in a turn where <available_skills> is still
-          // stale.
+          // Skill activation runs in a single batch over all candidate paths so
+          // the SkillManager change listener (`SkillTool.refreshSkills`) fires
+          // once for this tool call. The await is load-bearing:
+          // matchAndActivateByPaths resolves only after the listener chain
+          // settles, so by the time we append the reminder below the runtime sets
+          // already accept the newly activated skill (validateToolParams).
+          // Visibility comes from THIS tail reminder (and the startup snapshot),
+          // NOT from the tool description — which is now static and never
+          // re-rendered. refreshSkills no longer calls setTools(), so activation
+          // does not mutate the prompt-cache prefix.
           const activatedSkills =
             await skillManager?.matchAndActivateByPaths(candidatePaths);
-          if (activatedSkills && activatedSkills.length > 0) {
-            // Subagents share the parent's SkillManager but may have a
-            // restricted toolsList that excludes SkillTool entirely.
-            // Telling such a context "skill X is now available via the
-            // Skill tool" is misleading — the subagent can't invoke it
-            // and would waste a turn trying. Gate the reminder on
-            // whether the active tool registry actually exposes
-            // SkillTool to the model.
+          if (activatedSkills && activatedSkills.length > 0 && skillManager) {
+            // Subagents share the parent's SkillManager but may run with a
+            // restricted toolsList that excludes SkillTool. Announcing a skill
+            // such a context can't invoke wastes a turn, so gate on whether the
+            // active registry actually exposes SkillTool to the model.
             const hasSkillTool = !!this.toolRegistry.getTool(ToolNames.SKILL);
             if (hasSkillTool) {
-              // Escape skill names defensively: validateSkillName already
-              // excludes `<>&` for parsed file-based skills, but
-              // extension skills (extension.skills array) bypass that
-              // validator. A crafted extension name would otherwise
-              // close the <system-reminder> envelope early.
-              const names = activatedSkills.map(escapeXml).join(', ');
-              reminderBlocks.push(
-                `The following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.`,
-              );
+              // Render the just-activated skills with their description/whenToUse
+              // (the full listing is no longer in the tool description, so the
+              // model needs enough here to decide whether to invoke them). Source
+              // entries from the shared collector — which applies the same
+              // disabled / disable-model-invocation filtering — and keep only the
+              // file-based ones that were just activated.
+              // renderAvailableSkillsBlock XML-escapes every untrusted field, so
+              // a crafted extension name cannot break out of the reminder.
+              let activatedEntries: AvailableSkillEntry[] = [];
+              try {
+                const collected = await collectAvailableSkillEntries(
+                  skillManager,
+                  this.config,
+                );
+                const activatedSet = new Set(activatedSkills);
+                activatedEntries = collected.entries.filter(
+                  (e) => e.level !== undefined && activatedSet.has(e.name),
+                );
+              } catch (error) {
+                debugLogger.warn(
+                  'coreToolScheduler: collectAvailableSkillEntries failed in activation path',
+                  error,
+                );
+                activatedEntries = activatedSkills.map((name) => ({
+                  name,
+                  description: '',
+                  level: 'project' as const,
+                }));
+              }
+              if (activatedEntries.length > 0) {
+                reminderBlocks.push(
+                  `The following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
+                    activatedEntries,
+                  )}\n</available_skills>`,
+                );
+                // Record the announced keys so the client's per-turn drain
+                // (drainSkillAndCommandReminders) marks them as announced and
+                // does not re-announce them in the same turn's tail reminder.
+                // Without this, a subagent activation on a shared SkillManager
+                // would land in the subagent's discarded transcript while the
+                // parent's drain sees a genuinely-new key and duplicates.
+                this.config.addInlineAnnouncedSkillKeys(
+                  activatedEntries.map((e) => `skill:${e.name}`),
+                );
+              }
             }
           }
 
           if (reminderBlocks.length > 0) {
             const body = escapeSystemReminderTags(reminderBlocks.join('\n\n'));
-            content = appendAdditionalContext(
-              content,
-              `<system-reminder>\n${body}\n</system-reminder>`,
-            );
+            // Capture; appended after the model-facing truncation below.
+            reminderEnvelope = `<system-reminder>\n${body}\n</system-reminder>`;
+          }
+        }
+
+        // --- Model-facing output truncation ---
+        // 1) Truncate the raw tool output FIRST (per-tool budget if the tool
+        //    declares one, else the global threshold), so the head/tail
+        //    truncator never bisects the hook/skill metadata appended below.
+        // Read the per-tool budget from the already-resolved tool instance.
+        // schedule() resolved scheduledCall.tool from the CANONICAL name, so
+        // this also covers legacy aliases (e.g. 'task' → agent) that
+        // getTool(toolName) — keyed by the raw request name — would miss,
+        // silently dropping maxOutputChars / truncateKeep.
+        const limitsTool = scheduledCall.tool;
+        const perToolMax = limitsTool.maxOutputChars;
+        const perToolKeep = limitsTool.truncateKeep;
+        // Per-tool budgets are char-only (mirror CC's maxResultSizeChars): when
+        // a tool declares its own char budget, the global LINE cap must not
+        // undercut it — otherwise read-file's Infinity exemption (self-managed
+        // paging) and grep's char budget get silently capped at 1000 lines.
+        const perToolLines =
+          perToolMax !== undefined ? Number.POSITIVE_INFINITY : undefined;
+        const promptIdForTruncation = scheduledCall.request.prompt_id;
+        try {
+          const truncated = await truncateLlmContent(
+            this.config,
+            toolName,
+            content,
+            { threshold: perToolMax, lines: perToolLines, keep: perToolKeep },
+            promptIdForTruncation,
+          );
+          content = truncated.content;
+        } catch (truncErr) {
+          // A truncation/IO failure must never demote a successful tool call
+          // to an error — keep the content and warn.
+          debugLogger.warn(
+            `TRUNCATION failed for ${toolName}: ${
+              truncErr instanceof Error ? truncErr.message : String(truncErr)
+            }`,
+          );
+        }
+
+        // 2) Append the deferred metadata now that the body is bounded.
+        if (postToolUseAdditionalContext) {
+          content = appendAdditionalContext(
+            content,
+            postToolUseAdditionalContext,
+          );
+        }
+        if (reminderEnvelope) {
+          content = appendAdditionalContext(content, reminderEnvelope);
+        }
+
+        // 3) Combined second pass: if metadata was appended and the assembled
+        //    string blew past a doubled budget, bound it once more. Skip when
+        //    the body was already persisted (contains the sentinel) to avoid
+        //    nesting truncation headers. Only the string path is bounded here;
+        //    Part[] outputs (e.g. MCP) rely on the per-message batch budget as
+        //    their second-level bound — re-truncating a Part[] would mean
+        //    re-merging text parts, not worth it for the rare large-metadata case.
+        if (
+          (postToolUseAdditionalContext || reminderEnvelope) &&
+          typeof content === 'string' &&
+          !content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)
+        ) {
+          const baseThreshold =
+            perToolMax ?? this.config.getTruncateToolOutputThreshold();
+          // Match the first pass's char-only semantics for per-tool budgets;
+          // only the global path keeps a (doubled) line cap.
+          const combinedLines =
+            perToolMax !== undefined
+              ? Number.POSITIVE_INFINITY
+              : this.config.getTruncateToolOutputLines() * 2;
+          if (content.length > baseThreshold * 2) {
+            try {
+              const recombined = await truncateToolOutput(
+                this.config,
+                toolName,
+                content,
+                {
+                  threshold: baseThreshold * 2,
+                  lines: combinedLines,
+                  keep: perToolKeep,
+                },
+                promptIdForTruncation,
+              );
+              content = recombined.content;
+            } catch (truncErr) {
+              debugLogger.warn(
+                `TRUNCATION (combined) failed for ${toolName}: ${
+                  truncErr instanceof Error
+                    ? truncErr.message
+                    : String(truncErr)
+                }`,
+              );
+            }
           }
         }
 
@@ -3224,6 +3503,11 @@ export class CoreToolScheduler {
               : (safeJsonStringify(content) ?? ''),
           );
         }
+
+        // Recompute AFTER truncation so it reflects the model-facing length,
+        // consistent with the batch-offload path (which also updates it).
+        contentLength =
+          typeof content === 'string' ? content.length : undefined;
 
         const response = convertToFunctionResponse(toolName, callId, content);
         const successResponse: ToolCallResponseInfo = {
@@ -3270,6 +3554,7 @@ export class CoreToolScheduler {
                 toolResult.error!.message,
                 false,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3278,6 +3563,22 @@ export class CoreToolScheduler {
           if (failureHookResult.additionalContext) {
             errorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
+        }
+
+        // Truncate oversized error messages (e.g., large stderr)
+        const errorGateThreshold =
+          this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
+        if (
+          errorMessage.length > errorGateThreshold &&
+          !isAlreadyTruncated(errorMessage)
+        ) {
+          const persistResult = await persistAndTruncateToolResult(
+            callId,
+            toolName,
+            errorMessage,
+            this.config,
+          );
+          errorMessage = persistResult.content;
         }
 
         addToolResultAttributes(
@@ -3339,6 +3640,7 @@ export class CoreToolScheduler {
                 cancelMessage,
                 true,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3377,6 +3679,7 @@ export class CoreToolScheduler {
                 errorMessage,
                 false,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3409,6 +3712,8 @@ export class CoreToolScheduler {
           TOOL_SPAN_STATUS_TOOL_EXCEPTION,
         );
       }
+    } finally {
+      sleepInhibitorHandle.release();
     }
   }
 
@@ -3502,6 +3807,11 @@ export class CoreToolScheduler {
           );
         }
 
+        // Per-message budget: offload the largest results if the batch's
+        // combined model-facing output exceeds the budget, before recording
+        // and notifying so both consumers see the same (bounded) version.
+        completedCalls = await this.applyBatchOutputBudget(completedCalls);
+
         for (const call of completedCalls) {
           logToolCall(this.config, new ToolCallEvent(call));
         }
@@ -3524,6 +3834,47 @@ export class CoreToolScheduler {
         }
       }
     }
+  }
+
+  private async maybePersistLargeToolResult(
+    callId: string,
+    toolName: string,
+    content: PartListUnion,
+  ): Promise<PartListUnion> {
+    if (GATE_EXEMPT_TOOLS.has(toolName)) return content;
+
+    const text = extractTextFromPartListUnion(content);
+    if (!text || isAlreadyTruncated(text)) return content;
+
+    const gateThreshold =
+      this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
+    if (text.length <= gateThreshold) return content;
+
+    const result = await persistAndTruncateToolResult(
+      callId,
+      toolName,
+      text,
+      this.config,
+    );
+
+    if (result.outputFile) {
+      debugLogger.debug(
+        `Persisted ${toolName} result (${result.bytesWritten} bytes) to ${result.outputFile}`,
+      );
+    }
+
+    // Preserve non-text parts (media) when content is Part[]
+    if (Array.isArray(content)) {
+      const mediaParts = content.filter(
+        (p) =>
+          (p as { inlineData?: unknown }).inlineData ||
+          (p as { fileData?: unknown }).fileData,
+      );
+      const stubPart: Part = { text: result.content };
+      return mediaParts.length > 0 ? [stubPart, ...mediaParts] : [stubPart];
+    }
+
+    return result.content;
   }
 
   /**
@@ -3551,6 +3902,106 @@ export class CoreToolScheduler {
         errorType: call.response.errorType,
       });
     }
+  }
+
+  /**
+   * Per-message tool-result budget. When the combined model-facing output of a
+   * completed batch exceeds `toolOutputBatchBudget`, the largest results are
+   * offloaded to disk (greedily, largest first) until the batch is back under
+   * budget. Idempotent: already-persisted / media-bearing results are skipped.
+   */
+  private async applyBatchOutputBudget(
+    completedCalls: CompletedToolCall[],
+  ): Promise<CompletedToolCall[]> {
+    const budget =
+      this.config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
+    if (!Number.isFinite(budget)) return completedCalls;
+
+    const sizes = completedCalls.map(batchResponseOutputSize);
+    let total = sizes.reduce((sum, size) => sum + size, 0);
+    if (total <= budget) return completedCalls;
+
+    // Offload the largest results first until back under budget.
+    const order = completedCalls
+      .map((_, i) => i)
+      .sort((a, b) => sizes[b] - sizes[a]);
+
+    const result = [...completedCalls];
+    let offloaded = 0;
+    for (const i of order) {
+      if (total <= budget) break;
+      const replaced = await this.offloadCallOutput(result[i]);
+      if (!replaced) continue;
+      total -= sizes[i] - batchResponseOutputSize(replaced);
+      result[i] = replaced;
+      offloaded++;
+    }
+    if (offloaded > 0) {
+      debugLogger.info(
+        `Batch output budget (${budget} chars): offloaded ${offloaded} largest result(s) to disk.`,
+      );
+    }
+    if (total > budget) {
+      // Could not get under budget — e.g. a single per-tool result whose
+      // ceiling (MCP's 500k) exceeds the 200k batch budget, or results already
+      // persisted (sentinel-bearing) and therefore skipped. Surface it instead
+      // of silently exceeding the per-message budget.
+      debugLogger.warn(
+        `Batch output budget (${budget} chars) still exceeded after offloading ${offloaded}: ${total} chars across ${completedCalls.length} result(s).`,
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Spill a single completed call's text output to disk, replacing it with a
+   * small preview + recoverable pointer. Returns null (skip) for non-success,
+   * multi-part, media-bearing, or already-persisted results.
+   */
+  private async offloadCallOutput(
+    call: CompletedToolCall,
+  ): Promise<CompletedToolCall | null> {
+    if (call.status !== 'success') return null;
+    const parts = call.response.responseParts;
+    if (parts.length !== 1) return null;
+    const fr = parts[0]?.functionResponse;
+    if (!fr) return null;
+    const output = fr.response?.['output'];
+    if (typeof output !== 'string') return null;
+    if (fr.parts && fr.parts.length > 0) return null; // media present
+    if (output.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return null; // already
+    if (output.startsWith('<persisted-output>')) return null;
+
+    let truncated: { content: string; outputFile?: string };
+    try {
+      truncated = await truncateToolOutput(
+        this.config,
+        call.request.name,
+        output,
+        { threshold: BATCH_OFFLOAD_PREVIEW_CHARS },
+        call.request.prompt_id,
+      );
+    } catch {
+      return null; // offload failure must not break the batch
+    }
+    if (!truncated.outputFile) return null;
+
+    return {
+      ...call,
+      response: {
+        ...call.response,
+        responseParts: [
+          {
+            functionResponse: {
+              id: fr.id,
+              name: fr.name,
+              response: { output: truncated.content },
+            },
+          },
+        ],
+        contentLength: truncated.content.length,
+      },
+    };
   }
 
   private notifyToolCallsUpdate(): void {
@@ -3592,7 +4043,120 @@ export class CoreToolScheduler {
           pendingTool.request.name,
           toolParams,
         );
-        const { finalPermission } = flowResult;
+        const { finalPermission, pmForcedAsk, pmCtx } = flowResult;
+
+        const forceAutoReviewForAllow =
+          this.config.getApprovalMode() === ApprovalMode.AUTO &&
+          shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+
+        if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+          debugLogger.info(
+            `Auto mode: pending L4 allow overridden by protected-write guard for ${pendingTool.request.name}`,
+          );
+          const denialState = this.config.getAutoModeDenialState();
+          const fallback = shouldFallback(denialState);
+          const messages =
+            this.config
+              .getGeminiClient?.()
+              ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+          const decision = await evaluateAutoMode({
+            ctx: pmCtx,
+            pmForcedAsk,
+            toolParams,
+            messages,
+            config: this.config,
+            signal,
+            skipClassifierReason: fallback.fallback
+              ? fallback.reason
+              : undefined,
+          });
+
+          const outcome = applyAutoModeDecision(
+            decision,
+            this.config,
+            denialState,
+          );
+          if (
+            !this.config.getDisableAllHooks() &&
+            shouldFirePermissionDeniedForAutoMode(decision, outcome)
+          ) {
+            try {
+              await this.config
+                .getHookSystem?.()
+                ?.firePermissionDeniedEvent(
+                  pendingTool.request.name,
+                  toolParams,
+                  pendingTool.request.callId,
+                  getAutoModePermissionDeniedReason(decision),
+                  signal,
+                  pendingTool.request.callId,
+                );
+            } catch (hookError) {
+              debugLogger.warn(
+                `PermissionDenied hook failed for pending tool ${pendingTool.request.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
+              );
+            }
+          }
+          switch (outcome.kind) {
+            case 'approved':
+              this.setToolCallOutcome(
+                pendingTool.request.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(pendingTool.request.callId, 'scheduled');
+              this.finalizeBlockedSpan(
+                pendingTool.request.callId,
+                'auto_approved',
+                'auto',
+              );
+              break;
+            case 'blocked': {
+              this.setStatusInternal(
+                pendingTool.request.callId,
+                'error',
+                createErrorResponse(
+                  pendingTool.request,
+                  new Error(outcome.errorMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+              );
+              this.finalizeBlockedSpan(
+                pendingTool.request.callId,
+                'error',
+                'auto',
+              );
+              const toolSpan = this.toolSpans.get(pendingTool.request.callId);
+              if (toolSpan) {
+                setToolSpanFailure(
+                  toolSpan,
+                  TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                  TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                );
+                this.finalizeToolSpan(pendingTool.request.callId);
+              }
+              break;
+            }
+            case 'fallback':
+              if (fallback.fallback) {
+                this.autoModeFallbackCallIds.add(pendingTool.request.callId);
+                debugLogger.warn(
+                  `Auto mode fallback for pending tool (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                );
+              }
+              break;
+            default: {
+              const _exhaustive: never = outcome;
+              void _exhaustive;
+            }
+          }
+          if (
+            outcome.kind === 'approved' ||
+            outcome.kind === 'blocked' ||
+            outcome.kind === 'fallback'
+          ) {
+            continue;
+          }
+        }
 
         if (finalPermission === 'allow') {
           this.setToolCallOutcome(

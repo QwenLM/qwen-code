@@ -12,6 +12,7 @@ import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js'
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
+import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -313,6 +314,18 @@ export class ModelsConfig {
   }
 
   /**
+   * Get the display name for a model by its id.
+   * Looks up the model in the registry using the current authType and returns
+   * its resolved name. Falls back to the raw model id when the model is not
+   * found in the registry (e.g. runtime models or unknown models).
+   */
+  getModelDisplayName(modelId: string): string {
+    if (!this.currentAuthType) return modelId;
+    const resolved = this.modelRegistry.getModel(this.currentAuthType, modelId);
+    return resolved?.name ?? modelId;
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Supports both registry models and raw model IDs.
    */
@@ -501,12 +514,6 @@ export class ModelsConfig {
   }
 
   /**
-   * Prefix used to identify RuntimeModelSnapshot IDs.
-   * Chosen to avoid conflicts with real model IDs which may contain `-` or `:`.
-   */
-  private static readonly RUNTIME_SNAPSHOT_PREFIX = '$runtime|';
-
-  /**
    * Build a RuntimeModelSnapshot ID from authType and modelId.
    * The format is: `$runtime|${authType}|${modelId}`
    *
@@ -521,7 +528,7 @@ export class ModelsConfig {
     authType: AuthType,
     modelId: string,
   ): string {
-    return `${ModelsConfig.RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
+    return `${RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
   }
 
   /**
@@ -540,7 +547,7 @@ export class ModelsConfig {
    */
   private extractRuntimeModelSnapshotId(modelId: string): string | undefined {
     // Check if modelId starts with the runtime snapshot prefix
-    if (modelId.startsWith(ModelsConfig.RUNTIME_SNAPSHOT_PREFIX)) {
+    if (modelId.startsWith(RUNTIME_SNAPSHOT_PREFIX)) {
       // Verify the snapshot exists
       if (this.runtimeModelSnapshots.has(modelId)) {
         return modelId;
@@ -999,6 +1006,21 @@ export class ModelsConfig {
           ? { ...this.generationConfigSources['apiKey'] }
           : undefined
         : undefined;
+      const baseUrlSource = this.generationConfigSources['baseUrl'];
+      const shouldPreserveResolvedBaseUrl =
+        isUnchanged &&
+        !!this._generationConfig.baseUrl &&
+        (baseUrlSource?.kind === 'cli' ||
+          baseUrlSource?.kind === 'env' ||
+          baseUrlSource?.kind === 'settings');
+      const savedBaseUrl = shouldPreserveResolvedBaseUrl
+        ? this._generationConfig.baseUrl
+        : undefined;
+      const savedBaseUrlSource = shouldPreserveResolvedBaseUrl
+        ? baseUrlSource
+          ? { ...baseUrlSource }
+          : undefined
+        : undefined;
 
       this.applyResolvedModelDefaults(resolved);
 
@@ -1008,6 +1030,12 @@ export class ModelsConfig {
         this._generationConfig.apiKey = savedApiKey;
         if (savedApiKeySource) {
           this.generationConfigSources['apiKey'] = savedApiKeySource;
+        }
+      }
+      if (savedBaseUrl) {
+        this._generationConfig.baseUrl = savedBaseUrl;
+        if (savedBaseUrlSource) {
+          this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
         }
       }
 

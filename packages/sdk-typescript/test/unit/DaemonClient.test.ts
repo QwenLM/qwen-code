@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   DaemonClient,
   DaemonHttpError,
+  DaemonPendingPromptLimitError,
   abortTimeout,
   composeAbortSignals,
+  normalizePendingPromptLimit,
 } from '../../src/daemon/DaemonClient.js';
 import {
   DaemonCapabilityMissingError,
@@ -20,6 +22,7 @@ import type {
   DaemonCapabilities,
   DaemonSessionContextStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTasksStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspacePreflightStatus,
@@ -48,11 +51,25 @@ function sseResponse(frames: string): Response {
   });
 }
 
+function pendingSseResponse(): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(': keepalive\n\n'));
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
 interface CapturedRequest {
   url: string;
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  signal?: AbortSignal | null;
 }
 
 function recordingFetch(
@@ -74,7 +91,13 @@ function recordingFetch(
         h.forEach((v, k) => (headers[k.toLowerCase()] = v));
       }
       const body = typeof init?.body === 'string' ? init.body : null;
-      const captured: CapturedRequest = { url, method, headers, body };
+      const captured: CapturedRequest = {
+        url,
+        method,
+        headers,
+        body,
+        signal: init?.signal ?? null,
+      };
       calls.push(captured);
       return reply(captured);
     },
@@ -83,6 +106,26 @@ function recordingFetch(
 }
 
 describe('DaemonClient', () => {
+  describe('normalizePendingPromptLimit', () => {
+    it('defaults undefined to 5', () => {
+      expect(normalizePendingPromptLimit(undefined)).toBe(5);
+    });
+
+    it.each([[null], [0], [Infinity]])('disables cap for %s', (value) => {
+      expect(normalizePendingPromptLimit(value)).toBe(Infinity);
+    });
+
+    it('passes through positive integers', () => {
+      expect(normalizePendingPromptLimit(7)).toBe(7);
+    });
+
+    it.each([[-1], [1.5], [Number.NaN]])('throws for %s', (value) => {
+      expect(() => normalizePendingPromptLimit(value)).toThrow(
+        /bad maxPendingPromptsPerSession/,
+      );
+    });
+  });
+
   describe('health', () => {
     it('GETs /health and returns the body', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -432,6 +475,44 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('GETs /workspace/mcp/:server/tools with URL encoding', async () => {
+      const toolsStatus = {
+        v: 1,
+        serverName: 'my server',
+        tools: [{ name: 'tool-a', description: 'A tool' }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, toolsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceMcpTools('my server')).resolves.toEqual(
+        toolsStatus,
+      );
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/mcp/my%20server/tools'],
+      ]);
+    });
+
+    it('GETs /workspace/tools and returns the tools envelope', async () => {
+      const toolsStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        acpChannelLive: false,
+        tools: [{ name: 'Bash', enabled: true }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, toolsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceTools()).resolves.toEqual(toolsStatus);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/tools'],
+      ]);
+    });
+
     it('GETs session status routes with encoded session ids', async () => {
       const context: DaemonSessionContextStatus = {
         v: 1,
@@ -451,12 +532,21 @@ describe('DaemonClient', () => {
         ],
         availableSkills: ['review'],
       };
+      const tasks: DaemonSessionTasksStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        now: 1_700_000_000_000,
+        tasks: [],
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/with%2Fslash/context')) {
           return jsonResponse(200, context);
         }
         if (req.url.endsWith('/session/with%2Fslash/supported-commands')) {
           return jsonResponse(200, supportedCommands);
+        }
+        if (req.url.endsWith('/session/with%2Fslash/tasks')) {
+          return jsonResponse(200, tasks);
         }
         return jsonResponse(500, { error: `unexpected ${req.url}` });
       });
@@ -468,11 +558,16 @@ describe('DaemonClient', () => {
       await expect(
         client.sessionSupportedCommands('with/slash', 'client-1'),
       ).resolves.toEqual(supportedCommands);
+      await expect(
+        client.sessionTasks('with/slash', 'client-1'),
+      ).resolves.toEqual(tasks);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
+        ['GET', 'http://daemon/session/with%2Fslash/tasks'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
       ]);
@@ -497,9 +592,82 @@ describe('DaemonClient', () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { status: 'ok' }),
       );
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      await client.health();
-      expect(calls[0]?.headers['authorization']).toBeUndefined();
+      // Defensive: an inherited test-runner export of QWEN_SERVER_TOKEN
+      // would otherwise activate the PR 27 env fallback and turn this
+      // assertion into a false positive ("got Bearer <leaked-value>"
+      // instead of the expected `undefined`). Snapshot + restore in a
+      // try/finally so the rest of the suite sees the same env state.
+      const ORIGINAL = process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['QWEN_SERVER_TOKEN'];
+      try {
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBeUndefined();
+      } finally {
+        if (ORIGINAL === undefined) delete process.env['QWEN_SERVER_TOKEN'];
+        else process.env['QWEN_SERVER_TOKEN'] = ORIGINAL;
+      }
+    });
+
+    describe('QWEN_SERVER_TOKEN env fallback (PR 27 / #4175 v0.16-alpha)', () => {
+      const ORIGINAL = process.env['QWEN_SERVER_TOKEN'];
+      afterEach(() => {
+        if (ORIGINAL === undefined) delete process.env['QWEN_SERVER_TOKEN'];
+        else process.env['QWEN_SERVER_TOKEN'] = ORIGINAL;
+      });
+
+      it('uses QWEN_SERVER_TOKEN when no explicit token is passed', async () => {
+        process.env['QWEN_SERVER_TOKEN'] = 'env-token-abc';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBe('Bearer env-token-abc');
+      });
+
+      it('explicit opts.token wins over env', async () => {
+        process.env['QWEN_SERVER_TOKEN'] = 'env-token-loses';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'explicit-wins',
+          fetch,
+        });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBe('Bearer explicit-wins');
+      });
+
+      it('treats empty / whitespace-only env var as unset', async () => {
+        // A stale `export QWEN_SERVER_TOKEN=""` would otherwise let the
+        // Authorization header through as `Bearer ` (no token), which
+        // the daemon rejects but is confusing to debug. PR 27 collapses
+        // empty / whitespace-only onto the same "unset" branch as
+        // truly-unset; verify both shapes here.
+        process.env['QWEN_SERVER_TOKEN'] = '   ';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBeUndefined();
+      });
+
+      it('strips leading/trailing whitespace from env var', async () => {
+        // Matches the daemon-side `--token` trim behavior — handy for
+        // `export QWEN_SERVER_TOKEN="$(cat token.txt)"` where `cat`
+        // produces a trailing newline that would otherwise corrupt
+        // the Authorization header value.
+        process.env['QWEN_SERVER_TOKEN'] = '  trimmed-value  \n';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBe('Bearer trimmed-value');
+      });
     });
   });
 
@@ -713,6 +881,323 @@ describe('DaemonClient', () => {
           ctrl.signal,
         ),
       ).rejects.toThrow();
+    });
+
+    it('rejects locally when a session reaches the pending prompt cap', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          return pendingSseResponse();
+        }
+        if (req.url.endsWith('/session/s-1/cancel')) {
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+      const ctrl = new AbortController();
+      const first = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'first' }] },
+          ctrl.signal,
+        )
+        .catch((err: unknown) => err);
+
+      await vi.waitFor(() => {
+        expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      });
+      const secondCtrl = new AbortController();
+      const second = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'second' }] },
+          secondCtrl.signal,
+        )
+        .catch((err: unknown) => err);
+      try {
+        const secondResult = await Promise.race<unknown>([
+          second,
+          new Promise((resolve) => setTimeout(() => resolve('timed-out'), 50)),
+        ]);
+        expect(secondResult).toBeInstanceOf(DaemonPendingPromptLimitError);
+        expect((secondResult as Error).message).toContain('"s-1"');
+        expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+      } finally {
+        ctrl.abort();
+        secondCtrl.abort();
+        await first;
+        await second;
+      }
+    });
+
+    it('maps server prompt queue full responses to the pending prompt limit error', async () => {
+      const { fetch } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(503, {
+            code: 'prompt_queue_full',
+            error: 'queue full',
+            sessionId: 's-1',
+            limit: 5,
+            pendingCount: 5,
+          });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 0,
+      });
+
+      const result = await client
+        .prompt('s-1', { prompt: [{ type: 'text', text: 'hi' }] })
+        .catch((err: unknown) => err);
+
+      expect(result).toBeInstanceOf(DaemonPendingPromptLimitError);
+      expect(result).toMatchObject({
+        sessionId: 's-1',
+        limit: 5,
+        pendingCount: 5,
+      });
+    });
+
+    it('maps server prompt queue full responses on non-blocking prompts', async () => {
+      const { fetch } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(503, {
+            code: 'prompt_queue_full',
+            error: 'queue full',
+            sessionId: 's-1',
+            limit: 7,
+            pendingCount: 7,
+          });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+      });
+
+      const result = await client
+        .promptNonBlocking('s-1', {
+          prompt: [{ type: 'text', text: 'hi' }],
+        })
+        .catch((err: unknown) => err);
+
+      expect(result).toBeInstanceOf(DaemonPendingPromptLimitError);
+      expect(result).toMatchObject({
+        sessionId: 's-1',
+        limit: 7,
+        pendingCount: 7,
+      });
+    });
+
+    it('does not reserve a local prompt slot for a pre-aborted signal', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          return pendingSseResponse();
+        }
+        if (req.url.endsWith('/session/s-1/cancel')) {
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+      const aborted = new AbortController();
+      aborted.abort();
+
+      await expect(
+        client.prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'pre-aborted' }] },
+          aborted.signal,
+        ),
+      ).rejects.toThrow();
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(0);
+
+      const activeAbort = new AbortController();
+      const active = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'active' }] },
+          activeAbort.signal,
+        )
+        .catch((err: unknown) => err);
+      await vi.waitFor(() => {
+        expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+
+      activeAbort.abort();
+      await active;
+    });
+
+    it('releases the local pending prompt slot after turn completion', async () => {
+      let nextPromptId = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          nextPromptId += 1;
+          return jsonResponse(202, {
+            promptId: `p-${nextPromptId}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          const promptId = `p-${nextPromptId}`;
+          return sseResponse(
+            `id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"${promptId}","stopReason":"end_turn"}}\n\n`,
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'first' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'second' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
+    });
+
+    it('releases the local pending prompt slot after turn_error', async () => {
+      let nextPromptId = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          nextPromptId += 1;
+          return jsonResponse(202, {
+            promptId: `p-${nextPromptId}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          const promptId = `p-${nextPromptId}`;
+          const eventType = promptId === 'p-1' ? 'turn_error' : 'turn_complete';
+          const data =
+            promptId === 'p-1'
+              ? { promptId, message: 'failed', code: 'turn_failed' }
+              : { promptId, stopReason: 'end_turn' };
+          return sseResponse(
+            `id: 1\nevent: ${eventType}\ndata: ${JSON.stringify({
+              id: 1,
+              v: 1,
+              type: eventType,
+              data,
+            })}\n\n`,
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'first' }] }),
+      ).rejects.toThrow('failed');
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'second' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
+    });
+
+    it('releases the local pending prompt slot when SSE ends', async () => {
+      let nextPromptId = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          nextPromptId += 1;
+          return jsonResponse(202, {
+            promptId: `p-${nextPromptId}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          if (nextPromptId === 1) return sseResponse('');
+          return sseResponse(
+            'id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"p-2","stopReason":"end_turn"}}\n\n',
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'first' }] }),
+      ).rejects.toThrow('SSE stream ended');
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'second' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
+    });
+
+    it('releases the local pending prompt slot after caller abort', async () => {
+      let nextPromptId = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          nextPromptId += 1;
+          return jsonResponse(202, {
+            promptId: `p-${nextPromptId}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          if (nextPromptId === 1) return pendingSseResponse();
+          return sseResponse(
+            'id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"p-2","stopReason":"end_turn"}}\n\n',
+          );
+        }
+        if (req.url.endsWith('/session/s-1/cancel')) {
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+      const ctrl = new AbortController();
+      const first = client.prompt(
+        's-1',
+        { prompt: [{ type: 'text', text: 'first' }] },
+        ctrl.signal,
+      );
+      await vi.waitFor(() => {
+        expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      });
+
+      ctrl.abort();
+      await expect(first).rejects.toThrow();
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'second' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
     });
   });
 
@@ -1001,6 +1486,53 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('deleteSessionsData', () => {
+    it('POSTs to /sessions/delete with sessionIds in body and returns result', async () => {
+      const result = {
+        removed: ['s-1', 's-2'],
+        notFound: ['s-3'],
+        errors: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.deleteSessionsData(['s-1', 's-2', 's-3']);
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/sessions/delete');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1', 's-2', 's-3'],
+      });
+    });
+
+    it('sends client identity header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { removed: [], notFound: [], errors: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.deleteSessionsData(['s-1'], 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('sends Content-Type application/json', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { removed: [], notFound: [], errors: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.deleteSessionsData(['s-1']);
+      expect(calls[0]?.headers['content-type']).toBe('application/json');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'boom' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.deleteSessionsData(['s-1'])).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+  });
+
   describe('updateSessionMetadata', () => {
     it('sends PATCH to /session/:id/metadata and returns effective metadata', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -1270,6 +1802,164 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('recapSession (#4175 follow-up)', () => {
+    it('POSTs an empty body and returns the typed recap', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          recap:
+            'Debugging the auth retry race. Next: add deterministic timing.',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.recapSession('s-1');
+      expect(result).toEqual({
+        sessionId: 's-1',
+        recap: 'Debugging the auth retry race. Next: add deterministic timing.',
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/recap');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('returns recap:null verbatim when the daemon reports best-effort failure', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's-1', recap: null }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.recapSession('s-1');
+      expect(result.recap).toBeNull();
+    });
+
+    it('URL-encodes the session id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's/1', recap: 'x' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.recapSession('s/1');
+      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/recap');
+    });
+
+    it('forwards X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's-1', recap: 'x' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.recapSession('s-1', { clientId: 'client-1' });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('forwards the AbortSignal so callers can cancel mid-flight', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's-1', recap: 'x' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ctrl = new AbortController();
+      await client.recapSession('s-1', { signal: ctrl.signal });
+      expect(calls[0]?.signal).toBe(ctrl.signal);
+    });
+
+    it('throws on 404 when session is unknown', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, {
+          error: 'session not found',
+          code: 'session_not_found',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.recapSession('s-1')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+  });
+
+  describe('enqueueMidTurnMessage (web-shell mid-turn drain)', () => {
+    it('POSTs the message and returns accepted:true', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.enqueueMidTurnMessage(
+        's-1',
+        'also check tests',
+      );
+      expect(result).toEqual({ accepted: true });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        message: 'also check tests',
+      });
+    });
+
+    it('returns accepted:false verbatim when the session is idle', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, { accepted: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.enqueueMidTurnMessage('s-1', 'late');
+      expect(result.accepted).toBe(false);
+    });
+
+    it('URL-encodes the session id, forwards client id, and propagates the abort signal', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ctrl = new AbortController();
+      await client.enqueueMidTurnMessage('s/1', 'hi', {
+        clientId: 'client-1',
+        signal: ctrl.signal,
+      });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/mid-turn-message',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      // `fetchWithTimeout` composes the caller signal with its timeout
+      // controller, so the forwarded signal is not identical to `ctrl.signal`,
+      // but aborting the caller's signal must still propagate to the request
+      // (this is what cancels a late mid-turn push at turn settle).
+      const forwarded = calls[0]?.signal;
+      expect(forwarded).toBeDefined();
+      expect(forwarded?.aborted).toBe(false);
+      ctrl.abort();
+      expect(forwarded?.aborted).toBe(true);
+    });
+
+    it('times out a hung daemon instead of hanging forever', async () => {
+      // Regression guard for the `fetchWithTimeout` switch: a daemon that never
+      // responds must reject (not wedge the void-ed caller in actions.ts). The
+      // mock honours the abort signal like a real fetch, so the timeout's abort
+      // settles it; before the switch this would hang on `transport.fetch`.
+      const fetch = ((_url: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        })) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 20,
+      });
+      await expect(
+        client.enqueueMidTurnMessage('s-1', 'hi'),
+      ).rejects.toBeDefined();
+    });
+
+    it('throws on 404 when the session is unknown', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, {
+          error: 'session not found',
+          code: 'session_not_found',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.enqueueMidTurnMessage('s-1', 'hi'),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
   describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
     it('POSTs the enabled flag and URL-encodes the tool name', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -1370,6 +2060,18 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('MCP restart timeout coupling (#4330)', () => {
+    it('SDK default timeout equals server deadline + client headroom', async () => {
+      const { MCP_RESTART_SERVER_DEADLINE_MS, MCP_RESTART_CLIENT_HEADROOM_MS } =
+        await import('@qwen-code/acp-bridge/mcpTimeouts');
+      const expected =
+        MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
+      expect(expected).toBe(330_000);
+      expect(MCP_RESTART_SERVER_DEADLINE_MS).toBe(300_000);
+      expect(MCP_RESTART_CLIENT_HEADROOM_MS).toBeGreaterThanOrEqual(10_000);
+    });
+  });
+
   describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
     it('POSTs an empty body and returns the typed result on success', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -1438,6 +2140,45 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
+    it('forwards entryIndex and returns pool entry results', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          entries: [
+            { entryIndex: 3, restarted: true, durationMs: 42 },
+            { entryIndex: 4, restarted: false, reason: 'in_flight' },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.restartMcpServer('docs', { entryIndex: 3 });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/mcp/docs/restart?entryIndex=3',
+      );
+      expect('entries' in result).toBe(true);
+      if (!('entries' in result)) throw new Error('expected entry results');
+      expect(result.entries).toEqual([
+        { entryIndex: 3, restarted: true, durationMs: 42 },
+        { entryIndex: 4, restarted: false, reason: 'in_flight' },
+      ]);
+    });
+
+    it('forwards wildcard entryIndex unchanged', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          entries: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.restartMcpServer('docs', { entryIndex: '*' });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/mcp/docs/restart?entryIndex=*',
+      );
+    });
+
     it('throws on 404 when the daemon reports an unknown server', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(404, { error: 'no such server' }),
@@ -1445,6 +2186,137 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(client.restartMcpServer('ghost')).rejects.toMatchObject({
         status: 404,
+      });
+    });
+
+    it('survives a slow daemon response longer than the client default timeout (#4282 fold-in 5 P2-3)', async () => {
+      // The daemon-side restart waits up to 300s for stdio MCP
+      // discovery. The client-wide `fetchTimeoutMs` defaults to 30s,
+      // so without the per-call override, a valid 60s+ restart would
+      // be aborted client-side while the daemon kept working.
+      // Simulate a 1.2s response with the default 1s `fetchTimeoutMs`
+      // — without the override the call would timeout; with it the
+      // call resolves successfully.
+      //
+      // #4297 fold-in 2 (copilot, wenshao C2): the stub must
+      // observe `init.signal` so a regression that removes the
+      // per-call override (and thus the 1s default fires) actually
+      // rejects the in-flight promise. The previous version resolved
+      // the response unconditionally and the test passed even when
+      // the abort signal had already fired — false-negative coverage.
+      let resolveResponse: ((v: Response) => void) | undefined;
+      let rejectResponse: ((reason: unknown) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            rejectResponse = reject;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1_000,
+      });
+      const inflight = client.restartMcpServer('docs');
+      // Resolve the promise after the client default would have timed
+      // out — proving the per-call override extends the budget. The
+      // abort listener above guarantees that if the override is ever
+      // removed, this resolve never fires (the abort rejects first).
+      void rejectResponse;
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, {
+            serverName: 'docs',
+            restarted: true,
+            durationMs: 1200,
+          }),
+        );
+      }, 1_200);
+      await expect(inflight).resolves.toMatchObject({
+        serverName: 'docs',
+        restarted: true,
+      });
+    });
+
+    it('honors a caller-provided `timeoutMs` override (#4282 fold-in 5 P2-3)', async () => {
+      // When the caller sets a tighter cap, the per-call override
+      // wins over the 5-minute default. Verify by passing a 50ms
+      // budget against a stub that rejects only when its
+      // `init.signal` aborts — proving the abort actually fired
+      // rather than relying on a sleep racing the timeout.
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+      });
+      await expect(
+        client.restartMcpServer('docs', { timeoutMs: 50 }),
+      ).rejects.toThrow();
+    });
+
+    it('honors `timeoutMs: 0` as "disable the timeout" (#4297 fold-in 2 C1)', async () => {
+      // The JSDoc on `restartMcpServer` documents `0` as "disable
+      // the timeout entirely". Use a 1ms client-wide default so a
+      // regression that ignores the 0 override would abort almost
+      // immediately. The slow stub resolves after 50ms — well past
+      // the 1ms default but only because 0 disables the timer.
+      //
+      // #4297 fold-in 4 (wenshao critical, addresses #3260810242):
+      // the stub must observe `init.signal` and reject on abort.
+      // Without the listener, a regression where the override is
+      // ignored fires the AbortController at 1ms but the stub never
+      // sees it — the promise stays pending until the 50ms
+      // `resolveResponse` wins, leaving the test green and the
+      // "0 disables timeout" contract unprotected. Mirrors the
+      // listener pattern in the two sibling tests above.
+      let resolveResponse: ((v: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+      const inflight = client.restartMcpServer('docs', { timeoutMs: 0 });
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, {
+            serverName: 'docs',
+            restarted: true,
+            durationMs: 50,
+          }),
+        );
+      }, 50);
+      await expect(inflight).resolves.toMatchObject({
+        serverName: 'docs',
+        restarted: true,
       });
     });
   });
@@ -1494,7 +2366,7 @@ describe('DaemonClient', () => {
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const iter = client.subscribeEvents('s-1');
-      await expect(iter.next()).rejects.toThrow(/SSE response has no body/);
+      await expect(iter.next()).rejects.toThrow(/No SSE body/);
     });
 
     it('throws DaemonHttpError when content-type is not text/event-stream', async () => {
@@ -1997,6 +2869,75 @@ describe('DaemonClient', () => {
           DaemonHttpError,
         );
       }
+    });
+  });
+
+  describe('addRuntimeMcpServer (T2.8 #4514)', () => {
+    it('POSTs /workspace/mcp/servers with JSON body and returns the typed result', async () => {
+      const result = {
+        name: 'my-server',
+        transport: 'stdio',
+        replaced: false,
+        shadowedSettings: false,
+        toolCount: 3,
+        originatorClientId: 'client-1',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.addRuntimeMcpServer({
+        name: 'my-server',
+        config: { command: 'node', args: ['server.js'] },
+      });
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/mcp/servers');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['content-type']).toBe('application/json');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        name: 'my-server',
+        config: { command: 'node', args: ['server.js'] },
+      });
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: 'invalid config' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.addRuntimeMcpServer({
+          name: 'bad',
+          config: { command: '' },
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+  });
+
+  describe('removeRuntimeMcpServer (T2.8 #4514)', () => {
+    it('DELETEs /workspace/mcp/servers/:name with URL-encoded name', async () => {
+      const result = {
+        name: 'my server',
+        removed: true,
+        wasShadowingSettings: false,
+        originatorClientId: 'client-1',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.removeRuntimeMcpServer('my server');
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/mcp/servers/my%20server',
+      );
+      expect(calls[0]?.method).toBe('DELETE');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'internal' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.removeRuntimeMcpServer('ghost'),
+      ).rejects.toMatchObject({ status: 500 });
     });
   });
 

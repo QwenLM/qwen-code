@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
@@ -18,6 +19,41 @@ import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 const MAX_RELEVANT_DOCS = 5;
 const MAX_DOC_BODY_CHARS = 1_200;
 const debugLogger = createDebugLogger('AUTO_MEMORY_RECALL');
+
+const ACTIVE_TOOL_USAGE_MEMORY_MARKERS = [
+  'api docs',
+  'api documentation',
+  'failed call',
+  'failed tool call',
+  'failed tool-call',
+  'field mapping',
+  'field mappings',
+  'guessed call',
+  'guessed tool',
+  'mcp tool',
+  'parameter schema',
+  'parameter schemas',
+  'tool schema',
+  'tool schemas',
+  'tool usage',
+  'usage reference',
+];
+
+const DURABLE_ACTIVE_TOOL_MEMORY_MARKERS = [
+  'credential',
+  'credentials',
+  'escalation',
+  'gotcha',
+  'gotchas',
+  'known issue',
+  'known issues',
+  'owner',
+  'ownership',
+  'warning',
+  'warnings',
+  'workaround',
+  'workarounds',
+];
 
 const TYPE_KEYWORDS: Record<string, string[]> = {
   user: ['user', 'preference', 'preferences', 'background', 'role', 'terse'],
@@ -44,6 +80,58 @@ function normalizeBody(body: string): string {
     return '';
   }
   return trimmed;
+}
+
+function toolAliases(toolName: string): string[] {
+  const normalized = toolName.trim().toLowerCase();
+  const aliases = [normalized];
+
+  if (normalized.includes('::')) {
+    aliases.push(normalized.split('::').at(-1) ?? '');
+  }
+
+  if (normalized.startsWith('mcp__')) {
+    const parts = normalized.split('__');
+    if (parts.length >= 3) {
+      aliases.push(parts.slice(2).join('__'));
+      aliases.push(parts.at(-1) ?? '');
+    }
+  }
+
+  return Array.from(
+    new Set(aliases.map((alias) => alias.trim()).filter(Boolean)),
+  );
+}
+
+function isActiveToolUsageMemory(
+  doc: ScannedAutoMemoryDocument,
+  recentTools: readonly string[],
+): boolean {
+  if (recentTools.length === 0) {
+    return false;
+  }
+
+  const haystack = [doc.title, doc.description, normalizeBody(doc.body)]
+    .join(' ')
+    .toLowerCase();
+  const namesActiveTool = recentTools.some((toolName) =>
+    toolAliases(toolName).some((alias) => haystack.includes(alias)),
+  );
+  if (!namesActiveTool) {
+    return false;
+  }
+
+  if (
+    DURABLE_ACTIVE_TOOL_MEMORY_MARKERS.some((marker) =>
+      haystack.includes(marker),
+    )
+  ) {
+    return false;
+  }
+
+  return ACTIVE_TOOL_USAGE_MEMORY_MARKERS.some((marker) =>
+    haystack.includes(marker),
+  );
 }
 
 function scoreDocument(
@@ -163,8 +251,26 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   options: ResolveRelevantAutoMemoryPromptOptions = {},
 ): Promise<RelevantAutoMemoryPromptResult> {
   const t0 = Date.now();
+  // User-level scan is best-effort: a read failure (EACCES, ELOOP) on
+  // `~/.qwen/memories/` must not cancel the project-level scan, otherwise
+  // recall returns nothing at all for the rest of the session. Project-
+  // level scan failures still bubble — they're the only mandatory side.
+  const [projectDocs, userDocs] = await Promise.all([
+    scanAutoMemoryTopicDocuments(projectRoot),
+    scanUserAutoMemoryTopicDocuments().catch((error: unknown) => {
+      debugLogger.warn(
+        `User-level auto-memory scan failed; project-level recall continues: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }),
+  ]);
+  // Project-level docs come first as a soft hint to the model-based
+  // selector and, in the heuristic fallback (`selectRelevantAutoMemoryDocuments`),
+  // as the stable-sort tie-breaker — matching the PR's "project shadows
+  // user" precedence. The model selector ranks by its own judgement so
+  // this ordering is advisory there, not enforced.
   const docs = filterExcludedAutoMemoryDocuments(
-    await scanAutoMemoryTopicDocuments(projectRoot),
+    [...projectDocs, ...userDocs],
     options.excludedFilePaths,
   );
   const limit = options.limit ?? MAX_RELEVANT_DOCS;
@@ -257,7 +363,14 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     };
   }
 
-  const selectedDocs = selectRelevantAutoMemoryDocuments(query, docs, limit);
+  const heuristicDocs = docs.filter(
+    (doc) => !isActiveToolUsageMemory(doc, options.recentTools ?? []),
+  );
+  const selectedDocs = selectRelevantAutoMemoryDocuments(
+    query,
+    heuristicDocs,
+    limit,
+  );
   const strategy: RelevantAutoMemoryPromptResult['strategy'] =
     selectedDocs.length > 0 ? 'heuristic' : 'none';
   if (options.config && !options.abortSignal?.aborted) {

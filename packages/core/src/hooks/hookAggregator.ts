@@ -10,6 +10,7 @@ import {
   PreToolUseHookOutput,
   PostToolUseHookOutput,
   PostToolUseFailureHookOutput,
+  UserPromptExpansionHookOutput,
   PostToolBatchHookOutput,
   StopHookOutput,
   PermissionRequestHookOutput,
@@ -108,6 +109,7 @@ export class HookAggregator {
       case HookEventName.PostToolBatch:
       case HookEventName.Stop:
       case HookEventName.UserPromptSubmit:
+      case HookEventName.UserPromptExpansion:
       case HookEventName.SubagentStop:
       case HookEventName.TodoCreated:
       case HookEventName.TodoCompleted:
@@ -184,6 +186,9 @@ export class HookAggregator {
         merged.systemMessage = output.systemMessage;
       }
     }
+
+    // Concatenate terminal sequences from all outputs
+    this.mergeTerminalSequences(outputs, merged);
 
     // Set merged decision
     if (hasBlock) {
@@ -326,6 +331,8 @@ export class HookAggregator {
       decision: mergedDecision,
     };
 
+    this.mergeTerminalSequences(outputs, merged);
+
     return merged;
   }
 
@@ -339,7 +346,10 @@ export class HookAggregator {
     for (const output of outputs) {
       // Collect additionalContext for concatenation
       this.extractAdditionalContext(output, additionalContexts);
-      merged = { ...merged, ...output };
+      // Exclude terminalSequence from spread — it is concatenated below
+      const { terminalSequence: _ts, ...rest } = output;
+      void _ts;
+      merged = { ...merged, ...rest };
     }
 
     // Merge additionalContext with concatenation
@@ -349,6 +359,9 @@ export class HookAggregator {
         additionalContext: additionalContexts.join('\n'),
       };
     }
+
+    // Concatenate all terminalSequence values
+    this.mergeTerminalSequences(outputs, merged);
 
     return merged;
   }
@@ -367,6 +380,8 @@ export class HookAggregator {
         return new PostToolUseHookOutput(output);
       case HookEventName.PostToolUseFailure:
         return new PostToolUseFailureHookOutput(output);
+      case HookEventName.UserPromptExpansion:
+        return new UserPromptExpansionHookOutput(output);
       case HookEventName.PostToolBatch:
         return new PostToolBatchHookOutput(output);
       case HookEventName.Stop:
@@ -376,6 +391,23 @@ export class HookAggregator {
         return new PermissionRequestHookOutput(output);
       default:
         return new DefaultHookOutput(output);
+    }
+  }
+
+  /**
+   * Concatenate terminalSequence values from all outputs into merged.
+   */
+  private mergeTerminalSequences(
+    outputs: HookOutput[],
+    merged: HookOutput,
+  ): void {
+    const sequences = outputs
+      .map((o) => o.terminalSequence)
+      .filter((s): s is string => typeof s === 'string' && s.length > 0);
+    if (sequences.length > 0) {
+      merged.terminalSequence = sequences.join('');
+    } else {
+      delete merged.terminalSequence;
     }
   }
 

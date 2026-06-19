@@ -1,0 +1,173 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 12px 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  max-width: min(920px, calc(100vw - 64px));
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.title {
+  font-weight: 700;
+}
+
+.secondary {
+  color: var(--text-secondary);
+}
+
+.hint {
+  color: var(--text-secondary);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(360px, calc(100vh - 260px));
+  overflow-y: auto;
+  padding-right: 14px;
+  scrollbar-gutter: stable;
+}
+
+.category {
+  color: var(--text-secondary);
+  font-weight: 700;
+  padding-left: calc(1ch + 6px);
+}
+
+.category:not(:first-child) {
+  margin-top: 6px;
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+}
+
+.item:hover {
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+}
+
+.row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-height: 18px;
+}
+
+.pointer {
+  display: inline-block;
+  width: 1ch;
+  flex-shrink: 0;
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+.label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected .label {
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+/* Stays secondary and unbolded even on the selected row, like the native
+   CLI's scope message. */
+.scopeHint {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.value {
+  flex-shrink: 0;
+  color: var(--accent-color);
+  opacity: 0.85;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.editWrap {
+  padding: 4px 8px 4px calc(1ch + 6px);
+}
+
+.editInput {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  outline: none;
+}
+
+/* Single line (like the native CLI's wrap="truncate-end") at a fixed height
+   so the panel does not grow/shrink as the cursor moves. Short descriptions
+   sit still with an ellipsis fallback; overflowing ones glide horizontally
+   (music-player marquee) so the full text stays readable on one line. */
+.detail {
+  border-top: 1px solid var(--border-color);
+  padding-top: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.detailEllipsis {
+  text-overflow: ellipsis;
+}
+
+.detailText {
+  display: inline-block;
+}
+
+.detailTextScrolling {
+  animation: settings-detail-marquee var(--marquee-duration, 6s) linear infinite
+    alternate;
+}
+
+@keyframes settings-detail-marquee {
+  0%,
+  15% {
+    transform: translateX(0);
+  }
+
+  85%,
+  100% {
+    transform: translateX(calc(-1 * var(--marquee-distance, 0px)));
+  }
+}
+
+.footer {
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-color);
+  padding-top: 8px;
+}
+
+.empty {
+  color: var(--text-secondary);
+}

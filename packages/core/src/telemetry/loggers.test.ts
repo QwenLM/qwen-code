@@ -58,10 +58,12 @@ import {
   logExtensionUninstall,
   logHookCall,
   logApiError,
+  logApiRetry,
 } from './loggers.js';
 import * as metrics from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import * as sdk from './sdk.js';
+import * as tokenUsageService from '../services/tokenUsageService.js';
 import { ToolCallDecision } from './tool-call-decision.js';
 import {
   ApiRequestEvent,
@@ -82,6 +84,7 @@ import {
   ExtensionUninstallEvent,
   HookCallEvent,
   ApiErrorEvent,
+  ApiRetryEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -109,6 +112,10 @@ describe('loggers', () => {
     );
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('logChatCompression', () => {
@@ -299,6 +306,10 @@ describe('loggers', () => {
       vi.spyOn(metrics, 'recordTokenUsageMetrics').mockImplementation(
         mockMetrics.recordTokenUsageMetrics,
       );
+      vi.spyOn(
+        tokenUsageService,
+        'recordTokenUsageFromApiResponseBestEffort',
+      ).mockImplementation(() => undefined);
     });
 
     it('should log an API response with all fields', () => {
@@ -354,16 +365,76 @@ describe('loggers', () => {
         { model: 'test-model', type: 'output' },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_API_RESPONSE,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      });
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_API_RESPONSE,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).toHaveBeenCalledWith(mockConfig, event);
+    });
+
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])('does not record token usage for internal prompt_id %s', (promptId) => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        promptId,
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+      );
+
+      logApiResponse(mockConfig, event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not record token usage when usage statistics are disabled', () => {
+      const configWithUsageStatsDisabled = {
+        ...mockConfig,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id-1',
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+      );
+
+      logApiResponse(configWithUsageStatsDisabled, event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).not.toHaveBeenCalled();
     });
   });
 
   describe('logApiResponse skips chatRecordingService for internal prompt IDs', () => {
-    it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])(
       'should not record to chatRecordingService when prompt_id is %s',
       (promptId) => {
         const mockRecordUiTelemetryEvent = vi.fn();
@@ -778,11 +849,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      });
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
     it('should log a tool call with a reject decision', () => {
       const call: ErroredToolCall = {
@@ -851,11 +925,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      });
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
 
     it('should log a tool call with a modify decision', () => {
@@ -927,11 +1004,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      });
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
 
     it('should log a tool call without a decision', () => {
@@ -1002,11 +1082,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      });
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
 
     it('should log a failed tool call with an error', () => {
@@ -1078,11 +1161,14 @@ describe('loggers', () => {
         },
       );
 
-      expect(mockUiEvent.addEvent).toHaveBeenCalledWith({
-        ...event,
-        'event.name': EVENT_TOOL_CALL,
-        'event.timestamp': '2025-01-01T00:00:00.000Z',
-      });
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        {
+          ...event,
+          'event.name': EVENT_TOOL_CALL,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+        },
+        'test-session-id',
+      );
     });
 
     it('should log a tool call with mcp_server_name for MCP tools', () => {
@@ -1692,6 +1778,88 @@ describe('loggers', () => {
       expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledTimes(1);
       const passedEvent = mockQwenLogger.logHookCallEvent.mock.calls[0][0];
       expect(passedEvent).toBe(event);
+    });
+  });
+
+  // Phase 4b — logApiRetry: HTTP-status retry telemetry from retryWithBackoff.
+  describe('logApiRetry (Phase 4b)', () => {
+    const mockQwenLogger = {
+      logApiRetryEvent: vi.fn(),
+    };
+
+    beforeEach(() => {
+      vi.spyOn(QwenLogger, 'getInstance').mockReturnValue(
+        mockQwenLogger as unknown as QwenLogger,
+      );
+      mockQwenLogger.logApiRetryEvent.mockClear();
+      vi.spyOn(metrics, 'recordApiRetry');
+    });
+
+    function buildEvent(
+      overrides: Partial<{
+        model: string;
+        promptId: string;
+        attemptNumber: number;
+        status: number;
+        delay: number;
+        errorMsg: string;
+        subagentName: string;
+      }> = {},
+    ): ApiRetryEvent {
+      const err = new Error(overrides.errorMsg ?? 'rate limited');
+      return new ApiRetryEvent({
+        model: overrides.model ?? 'qwen3',
+        promptId: overrides.promptId ?? 'p-1',
+        attemptNumber: overrides.attemptNumber ?? 2,
+        error: err,
+        statusCode: overrides.status ?? 429,
+        retryDelayMs: overrides.delay ?? 1500,
+        subagentName: overrides.subagentName,
+      });
+    }
+
+    it('fans out to all 3 sinks: QwenLogger, OTel log, and metric counter', () => {
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = buildEvent();
+      logApiRetry(mockConfig, event);
+
+      // 1. QwenLogger RUM
+      expect(mockQwenLogger.logApiRetryEvent).toHaveBeenCalledWith(event);
+      // 2. OTel log signal — picked up by LogToSpanProcessor to bridge as span
+      expect(mockLogger.emit).toHaveBeenCalledTimes(1);
+      const logRecord = mockLogger.emit.mock.calls[0][0];
+      expect(logRecord.body).toContain('API retry attempt 2');
+      expect(logRecord.body).toContain('qwen3');
+      expect(logRecord.body).toContain('status 429');
+      expect(logRecord.attributes['event.name']).toBe('qwen-code.api_retry');
+      expect(logRecord.attributes['attempt_number']).toBe(2);
+      expect(logRecord.attributes['retry_delay_ms']).toBe(1500);
+      expect(logRecord.attributes['status_code']).toBe(429);
+      expect(logRecord.attributes['model']).toBe('qwen3');
+      // 3. Metric counter — tagged with {model}
+      expect(metrics.recordApiRetry).toHaveBeenCalledWith(mockConfig, {
+        model: 'qwen3',
+      });
+    });
+
+    it('propagates subagent_name when present', () => {
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = buildEvent({ subagentName: 'explore-agent' });
+      logApiRetry(mockConfig, event);
+
+      const logRecord = mockLogger.emit.mock.calls[0][0];
+      expect(logRecord.attributes['subagent_name']).toBe('explore-agent');
+    });
+
+    it('skips logger.emit and metric counter when SDK is not initialized (QwenLogger still called)', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = buildEvent();
+      logApiRetry(mockConfig, event);
+
+      expect(mockQwenLogger.logApiRetryEvent).toHaveBeenCalledWith(event);
+      expect(mockLogger.emit).not.toHaveBeenCalled();
+      expect(metrics.recordApiRetry).not.toHaveBeenCalled();
     });
   });
 });

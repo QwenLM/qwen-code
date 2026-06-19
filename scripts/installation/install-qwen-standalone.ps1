@@ -279,37 +279,24 @@ function Update-CurrentShell {
     }
 
     if ($env:QWEN_NO_MODIFY_PATH -eq '1') {
-        Write-Output "Run: ${qwenCommandPath}"
-        Write-Output "INFO: QWEN_NO_MODIFY_PATH=1; skipping current-session PATH refresh."
         return
     }
 
     $inheritedPath = $env:Path
     Update-CurrentSessionPath -BinDir $qwenInstallBinDir
 
-    Write-Output "Run: qwen"
     $parentProcessName = Get-ParentProcessName
     if ($parentProcessName -ieq 'cmd.exe') {
         if (Test-PathContainsDirectory -PathValue $inheritedPath -Directory $qwenInstallBinDir) {
-            Write-Output "qwen is ready to use after this installer command returns."
             return
         }
 
         $shimPath = Install-CurrentCmdPathShim -QwenCommand $qwenCommandPath -PathValue $inheritedPath
         if (-not [string]::IsNullOrEmpty($shimPath)) {
-            Write-Output "INFO: Added qwen.cmd to a directory already on this cmd.exe PATH:"
-            Write-Output "INFO:   ${shimPath}"
-            Write-Output "qwen is ready to use after this installer command returns."
             return
         }
-
-        Write-Output "WARNING: Windows does not allow this PowerShell child process to update the parent cmd.exe PATH directly."
-        Write-Output "Or, for this cmd.exe window, run:"
-        Write-Output "  set `"PATH=${qwenInstallBinDir};%PATH%`""
         return
     }
-
-    Write-Output "qwen is ready to use in this PowerShell session."
 }
 
 $qwenDefaultInstallerUrl = 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.bat'

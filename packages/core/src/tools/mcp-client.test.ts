@@ -10,7 +10,11 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AuthProviderType, type Config } from '../config/config.js';
+import {
+  AuthProviderType,
+  MCPServerConfig,
+  type Config,
+} from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
@@ -19,10 +23,12 @@ import {
   addMCPStatusChangeListener,
   createStreamableHttpCompatibilityFetch,
   createTransport,
+  discoverPrompts,
   getAllMCPServerStatuses,
   getMCPServerStatus,
   hasNetworkTransport,
   isEnabled,
+  listMcpPrompts,
   MCPServerStatus,
   McpClient,
   populateMcpServerCommand,
@@ -72,6 +78,7 @@ describe('mcp-client', () => {
         getStatus: vi.fn(),
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -106,6 +113,38 @@ describe('mcp-client', () => {
       expect(mockedMcpToTool).toHaveBeenCalledOnce();
     });
 
+    it('stores server instructions returned during initialization', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn().mockReturnValue('Use concise replies.'),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'test-server',
+        {
+          command: 'test-command',
+        },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+
+      expect(client.getInstructions()).toBe('Use concise replies.');
+    });
+
     it('should not skip tools even if a parameter is missing a type', async () => {
       const mockedClient = {
         connect: vi.fn(),
@@ -115,6 +154,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         tool: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -175,6 +215,7 @@ describe('mcp-client', () => {
         setRequestHandler: vi.fn(),
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
         request: vi.fn().mockRejectedValue(new Error('Test error')),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -220,6 +261,7 @@ describe('mcp-client', () => {
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
         request: vi.fn().mockRejectedValue(new Error('tools/list crashed')),
         close: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -251,7 +293,387 @@ describe('mcp-client', () => {
       expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
     });
+
+    it('discoverAndReturn returns tools and prompts WITHOUT registering them', async () => {
+      // F2 (#4175) pool path: a single shared McpClient produces this
+      // snapshot once; per-session SessionMcpView instances each register
+      // a filtered copy. The bare method must therefore NOT touch any
+      // registry — otherwise sharing a snapshot across sessions would
+      // double-register or cross-contaminate.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'pure-prompt', description: 'p' }],
+        }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'pure-tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const promptRegistry = {
+        registerPrompt: vi.fn(),
+      } as unknown as PromptRegistry;
+      const client = new McpClient(
+        'pure-server',
+        { command: 'test-command' },
+        toolRegistry,
+        promptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const snapshot = await client.discoverAndReturn({} as Config);
+
+      expect(snapshot.tools).toHaveLength(1);
+      expect(snapshot.tools[0].serverToolName).toBe('pure-tool');
+      expect(snapshot.prompts).toHaveLength(1);
+      expect(snapshot.prompts[0].name).toBe('pure-prompt');
+      expect(snapshot.prompts[0].serverName).toBe('pure-server');
+      expect(typeof snapshot.prompts[0].invoke).toBe('function');
+      // The critical assertion: registries untouched.
+      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
+    });
+
+    it('discoverAndReturn with { applyConfigFilters: false } ignores config filters and trust for shared pool snapshots', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [
+              { name: 'allowed' },
+              { name: 'filtered_out' },
+            ],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const client = new McpClient(
+        'pure-filter-server',
+        new MCPServerConfig(
+          'test-command',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          ['allowed'],
+          ['filtered_out'],
+        ),
+        toolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      // R23 T1: pool callers explicitly opt out of filters via the
+      // `applyConfigFilters: false` opts argument. Default
+      // `discoverAndReturn(cliConfig)` (no opts) applies filters,
+      // matching the legacy `discover()` semantics expected by
+      // non-pool consumers.
+      const snapshot = await client.discoverAndReturn({} as Config, {
+        applyConfigFilters: false,
+      });
+
+      expect(snapshot.tools.map((tool) => tool.serverToolName)).toEqual([
+        'allowed',
+        'filtered_out',
+      ]);
+      expect(snapshot.tools.every((tool) => tool.trust === undefined)).toBe(
+        true,
+      );
+      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
+    });
+
+    it('discoverAndReturn (default) applies config filters and trust — legacy non-pool callers (R23 T1)', async () => {
+      // R23 T1 regression: pre-fix `discoverAndReturn` hardcoded
+      // `{ applyConfigFilters: false }`, so legacy `discover()`
+      // (which delegates here) silently lost filtering and trust.
+      // Operators with `trust: true` saw unexpected permission
+      // prompts, and `excludeTools` was ignored.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [
+              { name: 'allowed' },
+              { name: 'filtered_out' },
+            ],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const client = new McpClient(
+        'legacy-filter-server',
+        new MCPServerConfig(
+          'test-command',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          ['allowed'],
+          ['filtered_out'],
+        ),
+        toolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      // No opts → default applyConfigFilters=true → filters applied.
+      const snapshot = await client.discoverAndReturn({} as Config);
+
+      // `excludeTools: ['filtered_out']` excludes the second tool;
+      // `includeTools: ['allowed']` keeps the first.
+      expect(snapshot.tools.map((tool) => tool.serverToolName)).toEqual([
+        'allowed',
+      ]);
+      // `trust: true` config → tools carry trust=true (pre-fix this
+      // was always undefined because discoverAndReturn forced
+      // applyConfigFilters=false).
+      expect(snapshot.tools[0].trust).toBe(true);
+    });
+
+    it('discoverAndReturn throws "No prompts or tools found" when both empty', async () => {
+      // Preserves the discover() pre-F2 invariant — the wrapping
+      // McpClientManager / pool entry uses this signal to mark the
+      // entry as failed (vs "server up, just empty").
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({ prompts: [] }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      // Forward defense (per code-reviewer P2.4): also assert registries
+      // were NOT touched even on the throw path. Catches a future
+      // refactor in commits 2-6 that accidentally registers a partial
+      // batch before the "no prompts or tools" guard fires.
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const promptRegistry = {
+        registerPrompt: vi.fn(),
+      } as unknown as PromptRegistry;
+      const client = new McpClient(
+        'empty-server',
+        { command: 'test-command' },
+        toolRegistry,
+        promptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await expect(client.discoverAndReturn({} as Config)).rejects.toThrow(
+        'No prompts or tools found on the server.',
+      );
+      // Status flipped to DISCONNECTED (same as discover() path).
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      // Registries strictly untouched even on throw — pure method invariant.
+      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
+    });
+
+    it('discoverAndReturn throws when called before connect()', async () => {
+      const client = new McpClient(
+        'unconnected-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      // Status starts DISCONNECTED; discoverAndReturn must reject without
+      // hitting the network.
+      await expect(client.discoverAndReturn({} as Config)).rejects.toThrow(
+        'Client is not connected.',
+      );
+    });
+
+    it('discover() delegates to discoverAndReturn and registers both tools and prompts', async () => {
+      // Backward-compat sanity: the historical discover() entry point
+      // still produces side effects in BOTH registries. Previously
+      // prompt registration was a side effect inside discoverPrompts;
+      // post-F2-1 it is an explicit step in discover() after
+      // discoverAndReturn returns.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'p1' }, { name: 'p2' }],
+        }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 't1' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const promptRegistry = {
+        registerPrompt: vi.fn(),
+      } as unknown as PromptRegistry;
+      const client = new McpClient(
+        'compat-server',
+        { command: 'test-command' },
+        toolRegistry,
+        promptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await client.discover({} as Config);
+      expect(toolRegistry.registerTool).toHaveBeenCalledTimes(1);
+      expect(promptRegistry.registerPrompt).toHaveBeenCalledTimes(2);
+    });
   });
+
+  describe('listMcpPrompts (F2 pure helper)', () => {
+    it('returns enriched DiscoveredMCPPrompt[] with serverName + bound invoke', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({
+          prompts: [
+            { name: 'greet', description: 'Greet a user' },
+            { name: 'farewell' },
+          ],
+        }),
+      } as unknown as ClientLib.Client;
+
+      const result = await listMcpPrompts('my-server', mockClient);
+      expect(result).toHaveLength(2);
+      expect(result[0].serverName).toBe('my-server');
+      expect(result[0].name).toBe('greet');
+      expect(typeof result[0].invoke).toBe('function');
+      expect(result[1].name).toBe('farewell');
+    });
+
+    it('returns [] when server has no prompts capability', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        request: vi.fn(),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('no-prompts', mockClient);
+      expect(result).toEqual([]);
+      expect(vi.mocked(mockClient.request)).not.toHaveBeenCalled();
+    });
+
+    it('returns [] on protocol error (server up but list call rejects)', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockRejectedValue(new Error('boom')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('flaky', mockClient);
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('discoverPrompts wrapper (backward compat after F2-1 split)', () => {
+    it('still registers prompts into the supplied PromptRegistry', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'register-me' }],
+        }),
+      } as unknown as ClientLib.Client;
+      const promptRegistry = {
+        registerPrompt: vi.fn(),
+      } as unknown as PromptRegistry;
+      const out = await discoverPrompts(
+        'wrapper-server',
+        mockClient,
+        promptRegistry,
+      );
+      expect(promptRegistry.registerPrompt).toHaveBeenCalledTimes(1);
+      expect(out).toHaveLength(1);
+      expect(out[0].name).toBe('register-me');
+      // Historical contract: return type strips serverName/invoke.
+      expect((out[0] as Record<string, unknown>)['serverName']).toBeUndefined();
+      expect((out[0] as Record<string, unknown>)['invoke']).toBeUndefined();
+    });
+  });
+
   describe('appendMcpServerCommand', () => {
     it('should do nothing if no MCP servers or command are configured', () => {
       const out = populateMcpServerCommand({}, undefined);
@@ -866,6 +1288,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         close: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -912,6 +1335,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         close: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,

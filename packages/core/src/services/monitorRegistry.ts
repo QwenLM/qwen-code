@@ -18,6 +18,7 @@
 import * as path from 'node:path';
 import { sanitizeFilenameComponent } from '../agents/agent-transcript.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 
@@ -27,28 +28,6 @@ const EVENT_LINE_TRUNCATE = 2000;
 const MAX_DESCRIPTION_LENGTH = 80;
 export const MAX_CONCURRENT_MONITORS = 16;
 export const MAX_RETAINED_TERMINAL_MONITORS = 128;
-
-/**
- * Strip C0 control characters (except tab) and C1 control characters from a
- * string destined for terminal/UI display. The Monitor tool pre-sanitizes
- * stdout lines before calling `emitEvent`, but we apply the same strip here
- * as defense-in-depth so that any direct caller of the registry cannot leak
- * terminal escape sequences or NUL bytes into the `displayText` surface.
- */
-function stripDisplayControlChars(text: string): string {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code === 0x09) {
-      out += text[i];
-      continue;
-    }
-    if (code < 0x20) continue; // C0 (NUL, BEL, ESC, \n, \r, ...)
-    if (code >= 0x80 && code <= 0x9f) continue; // C1
-    out += text[i];
-  }
-  return out;
-}
 
 export type MonitorStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -320,6 +299,7 @@ export class MonitorRegistry {
 
     if (options.notify === false) {
       this.settle(entry, 'cancelled');
+      entry.notified = true;
       debugLogger.info(`Monitor cancelled: ${monitorId}`);
       entry.abortController.abort();
       this.dispatchOwnerLifecycleWake(entry);
@@ -551,6 +531,9 @@ export class MonitorRegistry {
 
   /** Emit a terminal notification (completed/failed/cancelled). */
   private emitTerminalNotification(entry: MonitorTask, detail?: string): void {
+    if (entry.notified) return;
+    entry.notified = true;
+
     const statusText =
       entry.status === 'completed'
         ? 'completed'

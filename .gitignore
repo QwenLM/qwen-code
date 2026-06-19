@@ -25,7 +25,6 @@ package-lock.json
 .cursor
 .qoder
 .claude
-CLAUDE.md
 .codex
 
 # Qwen Code Configs
@@ -34,6 +33,13 @@ CLAUDE.md
 !.qwen/commands/**
 !.qwen/skills/
 !.qwen/skills/**
+# Re-ignore auto-generated skills (created by the managed-skill-extractor
+# agent with the mandatory `auto-skill-` directory prefix). Git's last-rule-
+# wins semantics keep hand-authored project skills tracked while excluding
+# these transient, session-specific directories. The `auto-skill-` prefix is
+# reserved for auto-generated skills — do not hand-author a project skill with
+# this prefix, or its directory will be ignored here.
+.qwen/skills/auto-skill-*/
 !.qwen/agents/
 !.qwen/agents/**
 
@@ -86,6 +92,9 @@ integration-tests/concurrent-runner/output/
 integration-tests/concurrent-runner/task-*
 
 integration-tests/terminal-capture/scenarios/screenshots/
+
+# Test-built worker artifact (fzfWorkerHandle.test.ts builds this on-the-fly)
+packages/core/src/utils/filesearch/fzfWorker.js
 
 # storybook
 *storybook.log

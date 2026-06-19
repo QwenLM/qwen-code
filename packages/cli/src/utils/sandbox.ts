@@ -23,6 +23,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
+import { parseSandboxImageName } from './sandboxImageName.js';
 
 const execAsync = promisify(exec);
 
@@ -100,14 +101,6 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
   }
 
   return false;
-}
-
-// docker does not allow container names to contain ':' or '/', so we
-// parse those out to shorten the name
-function parseImageName(image: string): string {
-  const [fullName, tag] = image.split(':');
-  const name = fullName.split('/').at(-1) ?? 'unknown-image';
-  return tag ? `${name}-${tag}` : name;
 }
 
 function ports(): string[] {
@@ -325,10 +318,7 @@ export async function start_sandbox(
       process.on('SIGINT', stopProxy);
       process.on('SIGTERM', stopProxy);
 
-      // commented out as it disrupts ink rendering
-      // proxyProcess.stdout?.on('data', (data) => {
-      //   console.info(data.toString());
-      // });
+      // Proxy stdout is intentionally not piped — it disrupts ink rendering.
       proxyProcess.stderr?.on('data', (data) => {
         writeStderrLine(data.toString());
       });
@@ -606,7 +596,7 @@ export async function start_sandbox(
   }
 
   // name container after image, plus random suffix to avoid conflicts
-  const imageName = parseImageName(image);
+  const imageName = parseSandboxImageName(image);
   const isIntegrationTest =
     process.env['QWEN_CODE_INTEGRATION_TEST'] === 'true';
   let containerName;
@@ -635,6 +625,22 @@ export async function start_sandbox(
     args.push(
       '--env',
       `QWEN_CODE_TEST_VAR=${process.env['QWEN_CODE_TEST_VAR']}`,
+    );
+  }
+  for (const envVar of [
+    'QWEN_DEBUG_LOG_FILE',
+    'QWEN_CODE_LEGACY_MCP_BLOCKING',
+  ] as const) {
+    if (process.env[envVar]) {
+      args.push('--env', `${envVar}=${process.env[envVar]}`);
+    }
+  }
+  if (process.env['QWEN_CODE_MCP_APPROVALS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_MCP_APPROVALS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_MCP_APPROVALS_PATH'],
+      )}`,
     );
   }
 
@@ -863,10 +869,7 @@ export async function start_sandbox(
     process.on('SIGINT', stopProxy);
     process.on('SIGTERM', stopProxy);
 
-    // commented out as it disrupts ink rendering
-    // proxyProcess.stdout?.on('data', (data) => {
-    //   console.info(data.toString());
-    // });
+    // Proxy stdout is intentionally not piped — it disrupts ink rendering.
     proxyProcess.stderr?.on('data', (data) => {
       writeStderrLine(data.toString().trim());
     });
@@ -933,12 +936,9 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
       resolve(false);
     });
 
-    checkProcess.on('close', (code) => {
-      // Non-zero code might indicate docker daemon not running, etc.
+    checkProcess.on('close', () => {
+      // Non-zero exit code may indicate docker daemon not running, etc.
       // The primary success indicator is non-empty stdoutData.
-      if (code !== 0) {
-        // console.warn(`'${sandbox} images -q ${image}' exited with code ${code}.`);
-      }
       resolve(stdoutData.trim() !== '');
     });
   });

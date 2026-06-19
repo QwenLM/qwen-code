@@ -111,8 +111,7 @@ export async function cloneFromGit(
 
     await git.fetch(remotes[0].name, refToFetch);
 
-    // After fetching, checkout FETCH_HEAD to get the content of the fetched ref.
-    // This results in a detached HEAD state, which is fine for this purpose.
+    // Detached HEAD is expected here — we only need the fetched content.
     await git.checkout('FETCH_HEAD');
   } catch (error) {
     const redactedErrorMessage = redactUrlCredentials(getErrorMessage(error));
@@ -216,7 +215,6 @@ export async function checkForExtensionUpdate(
         return ExtensionUpdateState.ERROR;
       }
 
-      // Determine the ref to check on the remote.
       const refToCheck = installMetadata.ref || 'HEAD';
 
       const lsRemoteOutput = await git.listRemote([remoteUrl, refToCheck]);

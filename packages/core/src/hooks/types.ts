@@ -32,6 +32,8 @@ export enum HookEventName {
   Notification = 'Notification',
   // UserPromptSubmit - When the user submits a prompt
   UserPromptSubmit = 'UserPromptSubmit',
+  // UserPromptExpansion - When a slash command expands into a prompt
+  UserPromptExpansion = 'UserPromptExpansion',
   // SessionStart - When a new session is started
   SessionStart = 'SessionStart',
   // Stop - Right before Claude concludes its response
@@ -56,6 +58,8 @@ export enum HookEventName {
   TodoCreated = 'TodoCreated',
   // TodoCompleted - When a todo item's status changes to 'completed' (Qwen Code specific)
   TodoCompleted = 'TodoCompleted',
+  // InstructionsLoaded - When an instruction or context file is loaded
+  InstructionsLoaded = 'InstructionsLoaded',
 }
 
 /**
@@ -255,6 +259,21 @@ export interface HookInput {
   timestamp: string;
 }
 
+export type InstructionMemoryType = 'user' | 'project' | 'local' | 'extension';
+
+export type InstructionLoadReason = 'session_start' | 'include' | 'refresh';
+
+/**
+ * Input for InstructionsLoaded hook events
+ */
+export interface InstructionsLoadedInput extends HookInput {
+  file_path: string;
+  memory_type: InstructionMemoryType;
+  load_reason: InstructionLoadReason;
+  trigger_file_path?: string;
+  parent_file_path?: string;
+}
+
 /**
  * Base hook output - common fields for all events
  */
@@ -263,9 +282,23 @@ export interface HookOutput {
   stopReason?: string;
   suppressOutput?: boolean;
   systemMessage?: string;
+  terminalSequence?: string;
   decision?: HookDecision;
   reason?: string;
   hookSpecificOutput?: Record<string, unknown>;
+}
+
+export const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;
+
+export function sanitizeUserPromptExpansionAdditionalContext(
+  raw: string,
+): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)
+    .replace(/&(?:a(?:mp?)?|lt?|gt?)?$/, '');
 }
 
 /**
@@ -283,6 +316,8 @@ export function createHookOutput(
       return new PostToolUseHookOutput(data);
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
+    case HookEventName.UserPromptExpansion:
+      return new UserPromptExpansionHookOutput(data);
     case HookEventName.PostToolBatch:
       return new PostToolBatchHookOutput(data);
     case HookEventName.Stop:
@@ -303,6 +338,7 @@ export class DefaultHookOutput implements HookOutput {
   stopReason?: string;
   suppressOutput?: boolean;
   systemMessage?: string;
+  terminalSequence?: string;
   decision?: HookDecision;
   reason?: string;
   hookSpecificOutput?: Record<string, unknown>;
@@ -312,6 +348,7 @@ export class DefaultHookOutput implements HookOutput {
     this.stopReason = data.stopReason;
     this.suppressOutput = data.suppressOutput;
     this.systemMessage = data.systemMessage;
+    this.terminalSequence = data.terminalSequence;
     this.decision = data.decision;
     this.reason = data.reason;
     this.hookSpecificOutput = data.hookSpecificOutput;
@@ -338,19 +375,23 @@ export class DefaultHookOutput implements HookOutput {
     return this.stopReason || this.reason || 'No reason provided';
   }
 
-  /**
-   * Get sanitized additional context for adding to responses.
-   */
-  getAdditionalContext(): string | undefined {
+  protected getRawAdditionalContext(): string | undefined {
     if (
       this.hookSpecificOutput &&
       'additionalContext' in this.hookSpecificOutput
     ) {
       const context = this.hookSpecificOutput['additionalContext'];
-      if (typeof context !== 'string') {
-        return undefined;
-      }
+      return typeof context === 'string' ? context : undefined;
+    }
+    return undefined;
+  }
 
+  /**
+   * Get sanitized additional context for adding to responses.
+   */
+  getAdditionalContext(): string | undefined {
+    const context = this.getRawAdditionalContext();
+    if (context !== undefined) {
       // Sanitize by escaping < and > to prevent tag injection
       return context.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
@@ -490,6 +531,19 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
 }
 
 /**
+ * Specific hook output class for UserPromptExpansion events.
+ */
+export class UserPromptExpansionHookOutput extends DefaultHookOutput {
+  override getAdditionalContext(): string | undefined {
+    const raw = this.getRawAdditionalContext();
+    if (raw === undefined) {
+      return undefined;
+    }
+    return sanitizeUserPromptExpansionAdditionalContext(raw);
+  }
+}
+
+/**
  * Specific hook output class for PostToolBatch events.
  */
 export class PostToolBatchHookOutput extends DefaultHookOutput {
@@ -554,6 +608,7 @@ export interface PermissionDeniedInput extends HookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_use_id: string;
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
   reason: PermissionDeniedReason;
 }
 
@@ -637,7 +692,8 @@ export interface PreToolUseInput extends HookInput {
   permission_mode: PermissionMode;
   tool_name: string;
   tool_input: Record<string, unknown>;
-  tool_use_id: string; // Unique identifier for this tool use instance
+  tool_use_id: string; // Unique identifier for this tool use instance (internal format, e.g., toolu_xxx)
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
 }
 
 /**
@@ -659,7 +715,8 @@ export interface PostToolUseInput extends HookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_response: Record<string, unknown>;
-  tool_use_id: string; // Unique identifier for this tool use instance
+  tool_use_id: string; // Unique identifier for this tool use instance (internal format, e.g., toolu_xxx)
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
 }
 
 /**
@@ -681,7 +738,8 @@ export interface PostToolUseOutput extends HookOutput {
  */
 export interface PostToolUseFailureInput extends HookInput {
   permission_mode: PermissionMode;
-  tool_use_id: string; // Unique identifier for the tool use
+  tool_use_id: string; // Unique identifier for the tool use (internal format, e.g., toolu_xxx)
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
   tool_name: string;
   tool_input: Record<string, unknown>;
   error: string; // Error message describing the failure
@@ -706,6 +764,7 @@ export interface PostToolBatchToolCall {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_use_id: string;
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
   status: 'success' | 'error' | 'cancelled';
   /**
    * Serialized ToolCallResponseInfo fields for the resolved call:
@@ -746,6 +805,28 @@ export interface UserPromptSubmitInput extends HookInput {
 export interface UserPromptSubmitOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'UserPromptSubmit';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * UserPromptExpansion hook input
+ *
+ * Field names intentionally follow the JSON hook payload convention rather
+ * than TypeScript camelCase, matching UserPromptSubmit and other hook inputs.
+ */
+export interface UserPromptExpansionInput extends HookInput {
+  command_name: string;
+  command_args: string;
+  prompt: string;
+}
+
+/**
+ * UserPromptExpansion hook output
+ */
+export interface UserPromptExpansionOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'UserPromptExpansion';
     additionalContext?: string;
   };
 }

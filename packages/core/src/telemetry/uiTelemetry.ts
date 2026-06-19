@@ -143,24 +143,22 @@ const createInitialMetrics = (): SessionMetrics => ({
 });
 
 export class UiTelemetryService extends EventEmitter {
+  static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
+  #sessionMetrics: Map<string, SessionMetrics> = new Map();
+  #closedSessions: Set<string> = new Set();
   #lastPromptTokenCount = 0;
   #lastCachedContentTokenCount = 0;
+  #sessionStartTime: Date = new Date();
 
-  addEvent(event: UiEvent) {
-    switch (event['event.name']) {
-      case EVENT_API_RESPONSE:
-        this.processApiResponse(event);
-        break;
-      case EVENT_API_ERROR:
-        this.processApiError(event);
-        break;
-      case EVENT_TOOL_CALL:
-        this.processToolCall(event);
-        break;
-      default:
-        // We should not emit update for any other event metric.
-        return;
+  addEvent(event: UiEvent, sessionId?: string) {
+    if (!this.#accumulateEvent(this.#metrics, event)) return;
+
+    if (sessionId && !this.#closedSessions.has(sessionId)) {
+      if (!this.#sessionMetrics.has(sessionId)) {
+        this.#sessionMetrics.set(sessionId, createInitialMetrics());
+      }
+      this.#accumulateEvent(this.#sessionMetrics.get(sessionId)!, event);
     }
 
     this.emit('update', {
@@ -173,6 +171,10 @@ export class UiTelemetryService extends EventEmitter {
     return this.#metrics;
   }
 
+  getMetricsForSession(sessionId: string): SessionMetrics {
+    return this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
+  }
+
   getLastPromptTokenCount(): number {
     return this.#lastPromptTokenCount;
   }
@@ -183,6 +185,10 @@ export class UiTelemetryService extends EventEmitter {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
     });
+  }
+
+  getSessionStartTime(): Date {
+    return this.#sessionStartTime;
   }
 
   getLastCachedContentTokenCount(): number {
@@ -198,34 +204,53 @@ export class UiTelemetryService extends EventEmitter {
    */
   reset(): void {
     this.#metrics = createInitialMetrics();
+    this.#sessionMetrics.clear();
+    this.#closedSessions.clear();
     this.#lastPromptTokenCount = 0;
     this.#lastCachedContentTokenCount = 0;
+    this.#sessionStartTime = new Date();
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
     });
   }
 
-  private getOrCreateModelMetrics(modelName: string): ModelMetrics {
-    if (!this.#metrics.models[modelName]) {
-      this.#metrics.models[modelName] = createInitialModelMetrics();
-    }
-    return this.#metrics.models[modelName];
+  resetSession(sessionId: string): void {
+    this.#sessionMetrics.set(sessionId, createInitialMetrics());
+    this.#closedSessions.delete(sessionId);
   }
 
-  private getOrCreateSourceMetrics(
-    modelMetrics: ModelMetrics,
-    source: string,
-  ): ModelMetricsCore {
-    if (!modelMetrics.bySource[source]) {
-      modelMetrics.bySource[source] = createInitialModelMetricsCore();
+  removeSession(sessionId: string): void {
+    this.#sessionMetrics.delete(sessionId);
+    this.#closedSessions.add(sessionId);
+    if (this.#closedSessions.size > UiTelemetryService.#MAX_CLOSED_SESSIONS) {
+      const oldest = this.#closedSessions.values().next().value;
+      if (oldest) this.#closedSessions.delete(oldest);
     }
-    return modelMetrics.bySource[source];
   }
 
-  private processApiResponse(event: ApiResponseEvent) {
-    const modelMetrics = this.getOrCreateModelMetrics(event.model);
-    const sourceMetrics = this.getOrCreateSourceMetrics(
+  #accumulateEvent(metrics: SessionMetrics, event: UiEvent): boolean {
+    switch (event['event.name']) {
+      case EVENT_API_RESPONSE:
+        this.#accumulateApiResponse(metrics, event);
+        return true;
+      case EVENT_API_ERROR:
+        this.#accumulateApiError(metrics, event);
+        return true;
+      case EVENT_TOOL_CALL:
+        this.#accumulateToolCall(metrics, event);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  #accumulateApiResponse(
+    metrics: SessionMetrics,
+    event: ApiResponseEvent,
+  ): void {
+    const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
+    const sourceMetrics = this.#getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
     );
@@ -242,9 +267,9 @@ export class UiTelemetryService extends EventEmitter {
     }
   }
 
-  private processApiError(event: ApiErrorEvent) {
-    const modelMetrics = this.getOrCreateModelMetrics(event.model);
-    const sourceMetrics = this.getOrCreateSourceMetrics(
+  #accumulateApiError(metrics: SessionMetrics, event: ApiErrorEvent): void {
+    const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
+    const sourceMetrics = this.#getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
     );
@@ -256,8 +281,8 @@ export class UiTelemetryService extends EventEmitter {
     }
   }
 
-  private processToolCall(event: ToolCallEvent) {
-    const { tools, files } = this.#metrics;
+  #accumulateToolCall(metrics: SessionMetrics, event: ToolCallEvent): void {
+    const { tools, files } = metrics;
     tools.totalCalls++;
     tools.totalDurationMs += event.duration_ms;
 
@@ -296,7 +321,6 @@ export class UiTelemetryService extends EventEmitter {
       toolStats.decisions[event.decision]++;
     }
 
-    // Aggregate line count data from metadata
     if (event.metadata) {
       if (event.metadata['model_added_lines'] !== undefined) {
         files.totalLinesAdded += event.metadata['model_added_lines'];
@@ -305,6 +329,26 @@ export class UiTelemetryService extends EventEmitter {
         files.totalLinesRemoved += event.metadata['model_removed_lines'];
       }
     }
+  }
+
+  #getOrCreateModelMetrics(
+    metrics: SessionMetrics,
+    modelName: string,
+  ): ModelMetrics {
+    if (!metrics.models[modelName]) {
+      metrics.models[modelName] = createInitialModelMetrics();
+    }
+    return metrics.models[modelName];
+  }
+
+  #getOrCreateSourceMetrics(
+    modelMetrics: ModelMetrics,
+    source: string,
+  ): ModelMetricsCore {
+    if (!modelMetrics.bySource[source]) {
+      modelMetrics.bySource[source] = createInitialModelMetricsCore();
+    }
+    return modelMetrics.bySource[source];
   }
 }
 

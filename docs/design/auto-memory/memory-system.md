@@ -215,27 +215,28 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[runAutoMemoryExtract] --> B[ensureAutoMemoryScaffold\n初始化目录和文件]
-    B --> C[buildTranscriptMessages\n将 Content[] 转换为带 offset 的消息列表]
-    C --> D[readExtractCursor\n读取上次处理到的位置]
-    D --> E[loadUnprocessedTranscriptSlice\n截取未处理的消息段]
-    E --> F{slice 为空?}
-    F -- 是 --> G[返回无 patches 结果]
-    F -- 否 --> H[runAutoMemoryExtractionByAgent\n调用 forked agent 提取 patches]
-    H --> I[dedupeExtractPatches\n去重+规范化]
-    I --> J{有 touched topics?}
-    J -- 是 --> K[bumpMetadata\n更新 meta.json]
-    K --> L[rebuildManagedAutoMemoryIndex\n重建 MEMORY.md]
-    L --> M[writeExtractCursor\n记录最新 offset]
-    J -- 否 --> M
-    M --> N[返回 AutoMemoryExtractResult]
+    B --> C[readExtractCursor\n读取上次处理到的位置]
+    C --> D[history.slice startOffset\n只取未处理的消息切片]
+    D --> E{slice 有新的 user 消息?}
+    E -- 否 --> F[更新 cursor\n返回无 patches 结果]
+    E -- 是 --> G[runAutoMemoryExtractionByAgent\n调用 forked agent 提取]
+    G --> H{有 touched topics?}
+    H -- 是 --> I[bumpMetadata\n更新 meta.json]
+    I --> J[rebuildManagedAutoMemoryIndex\n重建 MEMORY.md]
+    J --> K[writeExtractCursor\n记录最新 offset = history.length]
+    H -- 否 --> K
+    K --> L[返回 AutoMemoryExtractResult]
 ```
+
+> **注意：** `isUnderMemoryPressure` 门控位于 `MemoryManager.runExtract()` 中，不在本流程内。当 monitor 报告 hard/critical 压力时，`MemoryManager` 会跳过 extract 调用，不推进 cursor。
 
 **提取游标（Cursor）**：
 
 - 字段：`{ sessionId, processedOffset, updatedAt }`
-- 每次提取后更新 `processedOffset` 为当前历史长度
-- 下次提取时，只处理 `offset >= processedOffset` 的消息
+- 提取前先通过 `readExtractCursor` 读取当前进度，再用 `history.slice(processedOffset)` 仅处理未读部分
+- 每次提取后更新 `processedOffset` 为当前历史长度（`params.history.length`）
 - 跨会话时（`sessionId` 变化）从偏移量 0 重新开始
+- 注意：不再通过 `buildTranscriptMessages` / `loadUnprocessedTranscriptSlice` 构建转录文本——`hasNewUserMessages` 通过 `history.slice(startOffset).some(m => m.role === 'user' && partToString(m.parts).trim().length > 0)` 判断，仅在未读切片上做轻量字符串化，全量历史不再处理
 
 **Patch 过滤规则**：
 

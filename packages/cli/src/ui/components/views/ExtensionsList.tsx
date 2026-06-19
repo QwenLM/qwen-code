@@ -7,7 +7,11 @@
 import { Box, Text } from 'ink';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { ExtensionUpdateState } from '../../state/extensions.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  getExtensionDisplayName,
+} from '@qwen-code/qwen-code-core';
+import { getCurrentLanguage } from '../../../i18n/index.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS_LIST');
 
@@ -57,7 +61,7 @@ export const ExtensionsList = () => {
           return (
             <Box key={ext.name} flexDirection="column" marginBottom={1}>
               <Text>
-                <Text color="cyan">{`${ext.name} (v${ext.version})`}</Text>
+                <Text color="cyan">{`${getExtensionDisplayName(ext, getCurrentLanguage())} (v${ext.version})`}</Text>
                 <Text color={activeColor}>{` - ${activeString}`}</Text>
                 {<Text color={stateColor}>{` (${stateText})`}</Text>}
               </Text>

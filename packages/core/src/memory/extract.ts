@@ -14,9 +14,15 @@ import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryMetadataPath,
 } from './paths.js';
-import { ensureAutoMemoryScaffold } from './store.js';
+import {
+  ensureAutoMemoryScaffold,
+  ensureUserAutoMemoryScaffold,
+} from './store.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
-import { rebuildManagedAutoMemoryIndex } from './indexer.js';
+import {
+  rebuildManagedAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
+} from './indexer.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
@@ -25,48 +31,15 @@ import {
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACT');
 
-export interface AutoMemoryTranscriptMessage {
-  offset: number;
-  role: 'user' | 'model';
-  text: string;
-}
-
 export interface AutoMemoryExtractResult {
   touchedTopics: AutoMemoryType[];
-  skippedReason?: 'already_running' | 'queued' | 'memory_tool';
+  skippedReason?:
+    | 'already_running'
+    | 'queued'
+    | 'memory_tool'
+    | 'memory_pressure';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
-}
-
-export function buildTranscriptMessages(
-  history: Content[],
-): AutoMemoryTranscriptMessage[] {
-  return history
-    .map((message, index) => ({
-      offset: index,
-      role: message.role,
-      text: partToString(message.parts ?? [])
-        .replace(/\s+/g, ' ')
-        .trim(),
-    }))
-    .filter(
-      (message): message is AutoMemoryTranscriptMessage =>
-        (message.role === 'user' || message.role === 'model') &&
-        message.text.length > 0,
-    );
-}
-
-export function loadUnprocessedTranscriptSlice(
-  sessionId: string,
-  messages: AutoMemoryTranscriptMessage[],
-  cursor: AutoMemoryExtractCursor,
-): { messages: AutoMemoryTranscriptMessage[]; nextProcessedOffset: number } {
-  const startOffset =
-    cursor.sessionId === sessionId ? (cursor.processedOffset ?? 0) : 0;
-  return {
-    messages: messages.filter((message) => message.offset >= startOffset),
-    nextProcessedOffset: messages.length,
-  };
 }
 
 async function readExtractCursor(
@@ -134,15 +107,18 @@ export async function runAutoMemoryExtract(params: {
   config?: Config;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
+  // Per-project scaffold is required (extraction cursor + metadata live
+  // there). User-level scaffold is optional — a brand-new user without
+  // write access to `~/.qwen/memories/` should still be able to use
+  // project-level memory, so swallow the failure and continue.
   await ensureAutoMemoryScaffold(params.projectRoot, now);
-
-  const transcript = buildTranscriptMessages(params.history);
-  const currentCursor = await readExtractCursor(params.projectRoot);
-  const slice = loadUnprocessedTranscriptSlice(
-    params.sessionId,
-    transcript,
-    currentCursor,
-  );
+  try {
+    await ensureUserAutoMemoryScaffold();
+  } catch (error) {
+    debugLogger.warn(
+      `User-level auto-memory scaffold failed (non-critical, will skip user-level writes this run): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   if (!params.config) {
     throw new Error(
@@ -150,12 +126,31 @@ export async function runAutoMemoryExtract(params: {
     );
   }
 
-  // Skip if no new user messages in the unprocessed slice.
-  const hasNewUserMessages = slice.messages.some((m) => m.role === 'user');
+  // Read the cursor first, then scan only the unprocessed slice. The old
+  // code ran partToString().replace() over EVERY message but the resulting
+  // text was never read — fork agent context comes from getCacheSafeParams().
+  const currentCursor = await readExtractCursor(params.projectRoot);
+  const rawOffset =
+    currentCursor.sessionId === params.sessionId
+      ? (currentCursor.processedOffset ?? 0)
+      : 0;
+  // History may shrink between extract calls (compression). Clamp to length
+  // so new messages after compression are not permanently skipped.
+  const startOffset = rawOffset > params.history.length ? 0 : rawOffset;
+
+  // Skip if there are no new, non-empty user messages in the unprocessed
+  // slice. partToString runs only on this small slice and without the
+  // global whitespace regex — the .trim().length check preserves the old
+  // behaviour of ignoring empty-text user turns.
+  const hasNewUserMessages = params.history
+    .slice(startOffset)
+    .some(
+      (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+    );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
-      processedOffset: slice.nextProcessedOffset,
+      processedOffset: params.history.length,
       updatedAt: now.toISOString(),
     };
     await writeExtractCursor(params.projectRoot, cursor);
@@ -174,12 +169,37 @@ export async function runAutoMemoryExtract(params: {
       params.sessionId,
       agentResult.touchedTopics,
     );
-    await rebuildManagedAutoMemoryIndex(params.projectRoot);
+    // Asymmetric failure isolation:
+    //   * project-level rebuild MUST bubble its error up. The cursor advances
+    //     only after rebuilds complete; a project rebuild failure that gets
+    //     silently swallowed would leave the memory file written, the index
+    //     stale, AND the cursor advanced — the memory becomes un-recallable
+    //     until some later session happens to trigger another rebuild. The
+    //     pre-existing `Promise.all` contract (throw → cursor stays → retry
+    //     on next session) is the durability guarantee we must preserve.
+    //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
+    //     (EACCES) must not poison the project-level rebuild or block the
+    //     cursor. Catch + warn, same shape as the user-level scaffold above.
+    const projectRebuild =
+      agentResult.touchedProjectScope || !agentResult.touchedUserScope
+        ? // Either explicitly touched, or the defensive fallback when both
+          // scope flags were unset (e.g. older planner) — both paths must
+          // surface project-level rebuild failures.
+          rebuildManagedAutoMemoryIndex(params.projectRoot)
+        : Promise.resolve();
+    const userRebuild = agentResult.touchedUserScope
+      ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
+          debugLogger.warn(
+            `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        })
+      : Promise.resolve();
+    await Promise.all([projectRebuild, userRebuild]);
   }
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    processedOffset: slice.nextProcessedOffset,
+    processedOffset: params.history.length,
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);
