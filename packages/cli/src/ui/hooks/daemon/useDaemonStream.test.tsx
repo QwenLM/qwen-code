@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import { StreamingState, type HistoryItemWithoutId } from '../../types.js';
 import {
   useDaemonStream,
@@ -361,6 +362,71 @@ describe('useDaemonStream', () => {
     expect(driver.stats().permissions[1]).toEqual({
       requestId: 'req_1',
       response: { outcome: { outcome: 'cancelled' } },
+    });
+  });
+
+  it('attaches an answerable confirmation to the gated tool (outcome → optionId)', async () => {
+    // An edit gate arrives as a permission_request with no prior tool_call; the
+    // reducer seeds the tool and the hook attaches a confirmation whose
+    // onConfirm maps the chosen outcome to the daemon optionId by `kind`.
+    const driver = makeFakeDriver({ clientId: 'me' });
+    const { result } = renderHook(() => useDaemonStream(driver, vi.fn()));
+
+    act(() => {
+      driver.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'req_1',
+          toolCall: {
+            toolCallId: 'call_1',
+            title: 'Writing to /tmp/x.txt',
+            status: 'pending',
+          },
+          options: [
+            { kind: 'allow_always', optionId: 'proceed_always' },
+            { kind: 'allow_once', optionId: 'proceed_once' },
+            { kind: 'reject_once', optionId: 'cancel' },
+          ],
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect(result.current.streamingState).toBe(
+        StreamingState.WaitingForConfirmation,
+      ),
+    );
+
+    const group = result.current.pendingHistoryItems.find(
+      (i) => i.type === 'tool_group',
+    );
+    if (!group || group.type !== 'tool_group') {
+      throw new Error('expected a tool_group in pendingHistoryItems');
+    }
+    const tool = group.tools.find((t) => t.callId === 'call_1');
+    const details = tool?.confirmationDetails;
+    expect(details?.type).toBe('info');
+
+    // "Allow always" → the daemon's allow_always optionId.
+    await act(async () => {
+      await details!.onConfirm(ToolConfirmationOutcome.ProceedAlways);
+    });
+    expect(driver.stats().permissions).toEqual([
+      {
+        requestId: 'req_1',
+        response: {
+          outcome: { outcome: 'selected', optionId: 'proceed_always' },
+        },
+      },
+    ]);
+
+    // Esc/No → the reject_once optionId.
+    await act(async () => {
+      await details!.onConfirm(ToolConfirmationOutcome.Cancel);
+    });
+    expect(driver.stats().permissions[1]).toEqual({
+      requestId: 'req_1',
+      response: { outcome: { outcome: 'selected', optionId: 'cancel' } },
     });
   });
 

@@ -91,7 +91,14 @@ export interface DaemonTurnUsage {
 export interface PendingPermission {
   requestId: string;
   toolCallId?: string;
-  options: Array<{ optionId: string; [key: string]: unknown }>;
+  /** Human-readable tool title (e.g. "Writing to /tmp/x"); shown in the prompt. */
+  title?: string;
+  /**
+   * Daemon-defined options. Each carries an ACP `kind`
+   * (`allow_once`/`allow_always`/`reject_once`/`reject_always`) the hook maps a
+   * `ToolConfirmationOutcome` onto — the opaque `optionId` is never hardcoded.
+   */
+  options: Array<{ optionId: string; kind?: string; [key: string]: unknown }>;
 }
 
 export interface DaemonProjectionState {
@@ -345,20 +352,34 @@ export function projectDaemonEvent(
       // synthetic frames; the shape is the SDK's DaemonPermissionRequestData.)
       const requestId = String(data['requestId'] ?? '');
       if (!requestId) return { state, committed: [] };
+      const toolCall = asRecord(data['toolCall']);
       const toolCallId = toolCallIdOf(data['toolCall']);
+      const title =
+        typeof toolCall['title'] === 'string'
+          ? (toolCall['title'] as string)
+          : undefined;
       const options = Array.isArray(data['options'])
         ? (data['options'] as PendingPermission['options'])
         : [];
+      // Seed the tool display from the request's OWN toolCall, then mark it
+      // Confirming. Edits arrive ONLY as a permission_request — no preceding
+      // `tool_call` frame (verified against a live daemon) — so without this the
+      // gated tool would never render. A run_shell_command DOES send a prior
+      // `tool_call`; there `upsertTool` just refreshes the existing entry.
+      let tools = state.tools;
+      if (toolCallId) {
+        tools = setToolStatus(
+          upsertTool(tools, toolCall),
+          toolCallId,
+          ToolCallStatus.Confirming,
+        );
+      }
       return {
         state: {
           ...state,
           streamingState: StreamingState.WaitingForConfirmation,
-          tools: setToolStatus(
-            state.tools,
-            toolCallId,
-            ToolCallStatus.Confirming,
-          ),
-          pendingPermission: { requestId, toolCallId, options },
+          tools,
+          pendingPermission: { requestId, toolCallId, title, options },
         },
         committed: [],
       };

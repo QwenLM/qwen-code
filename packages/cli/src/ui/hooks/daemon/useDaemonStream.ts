@@ -18,13 +18,16 @@
  * (an attached `DaemonSessionClient` satisfies it) so this package gains no
  * `@qwen-code/sdk` dependency and the hook is unit-testable with a fake driver.
  *
- * Known gaps for the interactive wiring pass (NOT done here):
- * - **Permission UI is non-functional until bound.** The reducer marks a gated
- *   tool `Confirming` but leaves `confirmationDetails` undefined; `ToolGroupMessage`
- *   renders the prompt off `confirmationDetails`, so until the wiring builds an
- *   `onConfirm` that calls {@link UseDaemonStreamResult.respondToPermission}, the
- *   approval prompt shows with no way to answer. The hook exposes `activePermission`
- *   + `respondToPermission` so the wiring can drive it.
+ * Approval wiring (DONE): the reducer marks a gated tool `Confirming`; this hook
+ * attaches a `confirmationDetails` (built by {@link buildDaemonConfirmation}) to
+ * that tool in `pendingHistoryItems`, so `ToolGroupMessage`/`ToolConfirmationMessage`
+ * render an answerable prompt whose `onConfirm` maps the chosen
+ * `ToolConfirmationOutcome` to the daemon `optionId` and posts the vote. Esc also
+ * works: that component's keypress handler only mounts once `confirmationDetails`
+ * is present, and a decline emits `permission_resolved` which the reducer folds
+ * back to `Responding`.
+ *
+ * Known gaps for a later pass (NOT done here):
  * - **Errored/canceled turns** (`stream_error`/`session_died`) don't reset
  *   streaming state yet (reducer slice-1 gap) — a stuck spinner.
  * - Several contract fields are documented stubs (see the return).
@@ -62,6 +65,7 @@ import {
   type DaemonFrame,
   type PendingPermission,
 } from './projectDaemonEvent.js';
+import { buildDaemonConfirmation } from './daemonConfirmation.js';
 
 /**
  * A vote on a daemon permission request. The `outcome` is itself an object
@@ -248,10 +252,28 @@ export function useDaemonStream(
     [driver],
   );
 
-  const pendingHistoryItems = useMemo(
-    () => pendingHistoryItemsOf(snapshot),
-    [snapshot],
-  );
+  const pendingHistoryItems = useMemo(() => {
+    const items = pendingHistoryItemsOf(snapshot);
+    // Bind the approval prompt: attach a `confirmationDetails` (with an
+    // outcome→optionId-mapping `onConfirm`) to the gated tool so
+    // `ToolConfirmationMessage` renders an answerable Yes/Always/No. The reducer
+    // can't build this — `onConfirm` closes over the impure `respondToPermission`.
+    const gate = activePermissionOf(snapshot);
+    if (!gate?.toolCallId) return items;
+    const details = buildDaemonConfirmation(gate, respondToPermission);
+    return items.map((item) =>
+      item.type === 'tool_group'
+        ? {
+            ...item,
+            tools: item.tools.map((tool) =>
+              tool.callId === gate.toolCallId
+                ? { ...tool, confirmationDetails: details }
+                : tool,
+            ),
+          }
+        : item,
+    );
+  }, [snapshot, respondToPermission]);
   const thought = useMemo(() => thoughtOf(snapshot), [snapshot]);
   const pendingToolCalls = useMemo(
     () => pendingToolCallsOf(snapshot),

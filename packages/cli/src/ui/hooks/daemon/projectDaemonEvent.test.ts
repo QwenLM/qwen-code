@@ -425,6 +425,82 @@ describe('projectDaemonEvent', () => {
     });
   });
 
+  it('seeds the gated tool from the request when no tool_call preceded it (edit)', () => {
+    // Real captured shape: a write_file/edit gate arrives ONLY as a
+    // permission_request — there is NO prior `tool_call` frame — so the reducer
+    // must materialize the tool from the request's own `toolCall`.
+    let s = initialDaemonProjectionState(SELF);
+    expect(pendingToolCallsOf(s)).toEqual([]); // nothing yet
+    s = projectDaemonEvent(s, {
+      type: 'permission_request',
+      data: {
+        requestId: 'b95e50a2',
+        sessionId: 's1',
+        toolCall: {
+          content: [
+            {
+              newText: 'hi',
+              oldText: '',
+              path: '/tmp/capture_probe.txt',
+              type: 'diff',
+            },
+          ],
+          kind: 'edit',
+          locations: [{ path: '/tmp/capture_probe.txt' }],
+          rawInput: { file_path: '/tmp/capture_probe.txt', content: 'hi' },
+          status: 'pending',
+          title: 'Writing to /tmp/capture_probe.txt',
+          toolCallId: 'eZfspYl89m4FgWl2OUmlx4KXUHRJNZk0',
+        },
+        options: [
+          {
+            kind: 'allow_always',
+            name: 'Allow All Edits',
+            optionId: 'proceed_always',
+          },
+          { kind: 'allow_once', name: 'Allow', optionId: 'proceed_once' },
+          { kind: 'reject_once', name: 'Reject', optionId: 'cancel' },
+        ],
+      },
+    }).state;
+
+    // The tool now exists and is Confirming, with its title as the label.
+    expect(pendingToolCallsOf(s)).toEqual([
+      expect.objectContaining({
+        callId: 'eZfspYl89m4FgWl2OUmlx4KXUHRJNZk0',
+        description: 'Writing to /tmp/capture_probe.txt',
+        status: ToolCallStatus.Confirming,
+      }),
+    ]);
+    // And it renders live (so the user sees what they're approving).
+    expect(pendingHistoryItemsOf(s)).toEqual([
+      {
+        type: 'tool_group',
+        tools: [
+          expect.objectContaining({
+            callId: 'eZfspYl89m4FgWl2OUmlx4KXUHRJNZk0',
+            status: ToolCallStatus.Confirming,
+          }),
+        ],
+      },
+    ]);
+    // The gate carries the title + kind-tagged options for the hook to map.
+    expect(activePermissionOf(s)).toEqual({
+      requestId: 'b95e50a2',
+      toolCallId: 'eZfspYl89m4FgWl2OUmlx4KXUHRJNZk0',
+      title: 'Writing to /tmp/capture_probe.txt',
+      options: [
+        {
+          kind: 'allow_always',
+          name: 'Allow All Edits',
+          optionId: 'proceed_always',
+        },
+        { kind: 'allow_once', name: 'Allow', optionId: 'proceed_once' },
+        { kind: 'reject_once', name: 'Reject', optionId: 'cancel' },
+      ],
+    });
+  });
+
   it('clears the gate on permission_resolved — approved → Executing', () => {
     let s = initialDaemonProjectionState(SELF);
     s = projectDaemonEvent(s, TOOL_CALL).state;
