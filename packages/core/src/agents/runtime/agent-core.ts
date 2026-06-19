@@ -1858,5 +1858,21 @@ Important Rules:
       durationMs: Date.now() - roundStreamStart,
       timestamp: Date.now(),
     } as AgentUsageEvent);
+
+    // #5180: Sub-agent token budget warning — alert when approaching limits.
+    const cumulativeTokens = this.executionStats.totalTokens || 0;
+    if (cumulativeTokens > 300000) {
+      this.runtimeContext
+        .getDebugLogger()
+        .warn(
+          `[AGENT-BUDGET] subagent=${this.subagentId} totalTokens=${cumulativeTokens} — consider /compress or breaking into smaller tasks`,
+        );
+    } else if (cumulativeTokens > 200000) {
+      this.runtimeContext
+        .getDebugLogger()
+        .warn(
+          `[AGENT-BUDGET] subagent=${this.subagentId} totalTokens=${cumulativeTokens} — approaching limits`,
+        );
+    }
   }
 }
