@@ -242,6 +242,27 @@ complete) confirmed on a real 0.17.x daemon.
   `write_file`; the capture harness forces the mode (`CAPTURE_APPROVAL_MODE`) and can
   attach to a running daemon (`CAPTURE_ATTACH_URL`) to record real gates.
 
+### Handoff finding — the 0.17.x daemon does NOT broadcast remote prompts
+
+Verified live (terminal TUI + browser `/ui` on ONE shared daemon session): both
+directions DRIVE the session — a prompt from either client runs the turn and the
+**agent's reply streams to both clients**. But a watching client never sees the
+_other_ client's PROMPT TEXT: across a real cross-client turn the TUI logged
+`agent_message_chunk=95, user_message_chunk=0`. The 0.17.x daemon emits no
+`user_message_chunk` for any client (each echoes its OWN input locally; 0.18.x adds
+the broadcast — same version gap as `turn_complete`). Two distinct needs fall out:
+
+- **Live co-watching** (both screens, each sees the other's prompts as typed) →
+  needs the daemon to broadcast `user_message_chunk`. Our reducer ALREADY renders a
+  non-self `user_message_chunk`, so the fix is daemon-side: patch the fork's
+  `qwen serve` to emit one on prompt accept (we own it), or bump the bundled daemon
+  to 0.18.x (bigger drift). Lesser priority.
+- **Pick-up handoff** (step away → drive from phone → return to terminal and catch
+  up on the whole conversation) → needs **replay-on-attach (Slice 3)**. The session
+  TRANSCRIPT already contains every prompt (incl. the phone's), so replay surfaces
+  them with no daemon change. **This is the user's actual goal**, so Slice 3 is the
+  high-value next step — not the live-echo patch.
+
 ## Phasing inside Phase 2 ("grows")
 
 Built + unit-tested here (now 37 daemon tests):
