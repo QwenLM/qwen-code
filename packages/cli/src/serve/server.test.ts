@@ -1766,6 +1766,24 @@ describe('createServeApp', () => {
         expect(existsSync(path.join(dir, 'assets'))).toBe(true);
       }
     });
+
+    it('serves the shell pre-auth while the API stays token-gated', async () => {
+      // Pins the central contract: the shell is registered BEFORE bearerAuth,
+      // so a browser navigation with no Authorization still loads it, while
+      // API routes remain gated. If registerWebShell ever moves below
+      // bearerAuth, the first assertion breaks.
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const shell = await request(app)
+        .get('/')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(shell.status).toBe(200);
+      expect(shell.text).toContain('<div id="root">');
+      const api = await request(app).get('/capabilities').set('Host', host);
+      expect(api.status).toBe(401);
+    });
   });
 
   describe('GET /health', () => {

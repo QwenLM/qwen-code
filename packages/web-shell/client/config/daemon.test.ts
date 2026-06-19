@@ -94,3 +94,41 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
     expect(mod.getDaemonBaseUrl()).toBe('');
   });
 });
+
+describe('getDaemonToken', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  function setupToken(search: string, hash: string) {
+    Object.defineProperty(window, 'location', {
+      value: { search, hash, href: `http://localhost:4170/${search}${hash}` },
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  it('reads the token from the URL fragment', async () => {
+    setupToken('', '#token=frag-secret');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBe('frag-secret');
+  });
+
+  it('falls back to the query parameter', async () => {
+    setupToken('?token=query-secret', '');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBe('query-secret');
+  });
+
+  it('prefers the fragment over the query parameter', async () => {
+    setupToken('?token=query-secret', '#token=frag-secret');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBe('frag-secret');
+  });
+
+  it('returns undefined when neither is present', async () => {
+    setupToken('', '');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBeUndefined();
+  });
+});

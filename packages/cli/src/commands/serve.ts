@@ -504,7 +504,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
               ? rawBrowserToken.trim()
               : undefined;
           if (browserToken) {
-            target.searchParams.set('token', browserToken);
+            // Use the URL fragment (#token=), not a query param: the fragment
+            // is never sent to the server (kept out of access logs / Referer)
+            // and the Web Shell reads it client-side. It is still visible in
+            // the browser-launcher's argv (ps / /proc), so a one-time-code
+            // exchange remains the real fix for multi-user hosts.
+            target.hash = `token=${encodeURIComponent(browserToken)}`;
             writeStderrLine(
               'qwen serve: --open passes the token in the browser launch command ' +
                 '(visible via `ps` / /proc); on a multi-user host open the URL manually instead.',
