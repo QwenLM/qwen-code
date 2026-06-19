@@ -24,7 +24,7 @@ export default {
   'toolDisplayName.Glob': 'Glob',
   'toolDisplayName.Shell': '運行命令',
   'toolDisplayName.Shell Command': 'Shell 命令',
-  'toolDisplayName.TodoWrite': '任務清單',
+  'toolDisplayName.TodoList': '任務清單',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Skill': '技能',

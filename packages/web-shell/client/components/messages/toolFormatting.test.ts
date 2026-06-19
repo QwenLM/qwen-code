@@ -306,7 +306,7 @@ describe('toolFormatting', () => {
 
     it('falls back to the English display name when the locale has no entry', () => {
       const t = getTranslator('en');
-      expect(localizeToolDisplayName('todo_write', t)).toBe('TodoWrite');
+      expect(localizeToolDisplayName('todo_write', t)).toBe('TodoList');
       expect(localizeToolDisplayName('grep_search', t)).toBe('Grep');
     });
 

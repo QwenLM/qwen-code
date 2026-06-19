@@ -24,7 +24,7 @@ export default {
   'toolDisplayName.Glob': 'toolDisplayName.Glob',
   'toolDisplayName.Shell': 'toolDisplayName.Shell',
   'toolDisplayName.Shell Command': 'toolDisplayName.Shell Command',
-  'toolDisplayName.TodoWrite': 'toolDisplayName.TodoWrite',
+  'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',

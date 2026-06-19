@@ -7,7 +7,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   save_memory: 'SaveMemory',
   agent: 'Agent',
   skill: 'Skill',

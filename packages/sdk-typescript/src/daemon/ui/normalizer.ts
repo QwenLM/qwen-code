@@ -704,7 +704,7 @@ function normalizePlanUpdate(
     toolCallId: planCallId,
     title: 'Updated Plan',
     status: 'completed',
-    toolName: 'TodoWrite',
+    toolName: 'todo_write',
     toolKind: 'updated_plan',
     content: [
       {
