@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useFiles } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonDirectoryEntry,
@@ -10,7 +10,9 @@ const PREVIEW_MAX_BYTES = 256 * 1024;
 const GLOB_MAX_RESULTS = 100;
 
 interface FilesPanelProps {
+  initialPath?: string;
   onAddToChat?: (path: string) => void;
+  onPathChange?: (path: string) => void;
 }
 
 type PreviewState =
@@ -31,9 +33,14 @@ interface BreadcrumbItem {
   path: string;
 }
 
-export function FilesPanel({ onAddToChat }: FilesPanelProps) {
+export function FilesPanel({
+  initialPath,
+  onAddToChat,
+  onPathChange,
+}: FilesPanelProps) {
   const files = useFiles();
-  const [currentPath, setCurrentPath] = useState(() => getInitialFilesPath());
+  const syncedPathRef = useRef<string | undefined>(undefined);
+  const [currentPath, setCurrentPath] = useState('.');
   const [entries, setEntries] = useState<DaemonDirectoryEntry[]>([]);
   const [listingTruncated, setListingTruncated] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string>();
@@ -48,7 +55,10 @@ export function FilesPanel({ onAddToChat }: FilesPanelProps) {
   const [globError, setGlobError] = useState<string>();
   const [copiedPath, setCopiedPath] = useState<string>();
 
-  async function loadDirectory(path: string) {
+  async function loadDirectory(
+    path: string,
+    options: { syncPath?: boolean } = {},
+  ) {
     setLoading(true);
     setPanelError(undefined);
     try {
@@ -56,7 +66,10 @@ export function FilesPanel({ onAddToChat }: FilesPanelProps) {
       setCurrentPath(listing.path);
       setEntries(listing.entries);
       setListingTruncated(listing.truncated);
-      updateFilesUrl(listing.path);
+      if (options.syncPath !== false) {
+        syncedPathRef.current = listing.path;
+        onPathChange?.(listing.path);
+      }
     } catch (error) {
       setPanelError(errorMessage(error));
     } finally {
@@ -64,11 +77,31 @@ export function FilesPanel({ onAddToChat }: FilesPanelProps) {
     }
   }
 
+  async function openInitialPath(path: string) {
+    setPanelError(undefined);
+    try {
+      const stat = await files.stat(path);
+      if (stat.type === 'directory') {
+        await loadDirectory(path, { syncPath: false });
+        return;
+      }
+      const parentPath = getParentPath(path) ?? '.';
+      await loadDirectory(parentPath, { syncPath: false });
+      await previewFile(path, { syncPath: false });
+    } catch (error) {
+      setPanelError(errorMessage(error));
+      await loadDirectory('.', { syncPath: false });
+    }
+  }
+
   useEffect(() => {
-    void loadDirectory(currentPath);
-    // Run once when the daemon file actions become available.
+    const path = initialPath || '.';
+    if (syncedPathRef.current === path) return;
+    syncedPathRef.current = path;
+    void openInitialPath(path);
+    // Sync when the URL path changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialPath]);
 
   const parentPath = useMemo(() => getParentPath(currentPath), [currentPath]);
   const breadcrumbs = useMemo(() => getBreadcrumbs(currentPath), [currentPath]);
@@ -83,11 +116,18 @@ export function FilesPanel({ onAddToChat }: FilesPanelProps) {
     await previewFile(entryPath);
   }
 
-  async function previewFile(path: string) {
+  async function previewFile(
+    path: string,
+    options: { syncPath?: boolean } = {},
+  ) {
     setSelectedPath(path);
     setSelectedStat(undefined);
     setStatError(undefined);
     setPreview({ kind: 'loading', path });
+    if (options.syncPath !== false) {
+      syncedPathRef.current = path;
+      onPathChange?.(path);
+    }
     void loadFileStat(path);
     try {
       const bytes = await files.readFileBytes(path, {
@@ -448,26 +488,6 @@ function FileMetadata({
       ) : null}
     </dl>
   );
-}
-
-function getInitialFilesPath(): string {
-  if (typeof window === 'undefined') return '.';
-  const params = new URLSearchParams(window.location.search);
-  return params.get('path') || '.';
-}
-
-function updateFilesUrl(path: string) {
-  if (typeof window === 'undefined' || window.location.pathname !== '/files') {
-    return;
-  }
-  const url = new URL(window.location.href);
-  url.pathname = '/files';
-  if (path && path !== '.') {
-    url.search = `?path=${encodeURIComponent(path)}`;
-  } else {
-    url.search = '';
-  }
-  window.history.replaceState(null, '', url);
 }
 
 function joinPath(parent: string, name: string): string {
