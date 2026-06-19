@@ -6528,7 +6528,8 @@ class QwenAgent implements Agent {
         const settings = loadSettings(cwd);
         const extensionManager = new ExtensionManager({
           workspaceDir: cwd,
-          isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+          isWorkspaceTrusted:
+            isWorkspaceTrusted(settings.merged).isTrusted ?? true,
           locale: getCurrentLanguage(),
         });
         await extensionManager.refreshCache();

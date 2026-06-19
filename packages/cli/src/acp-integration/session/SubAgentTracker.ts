@@ -18,7 +18,6 @@ import type {
 import {
   AgentEventType,
   ToolConfirmationOutcome,
-  ToolNames,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
@@ -64,7 +63,7 @@ export class SubAgentTracker {
     private readonly client: AgentSideConnection,
     parentToolCallId: string,
     subagentType: string,
-    private readonly onAskUserQuestionCancel?: () => void,
+    private readonly onPermissionCancel?: () => void,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
@@ -232,11 +231,8 @@ export class SubAgentTracker {
         await event.respond(outcome, {
           answers: 'answers' in output ? output.answers : undefined,
         });
-        if (
-          outcome === ToolConfirmationOutcome.Cancel &&
-          event.name === ToolNames.ASK_USER_QUESTION
-        ) {
-          this.onAskUserQuestionCancel?.();
+        if (outcome === ToolConfirmationOutcome.Cancel) {
+          this.onPermissionCancel?.();
         }
       } catch (error) {
         // If permission request fails, cancel the tool call
@@ -244,12 +240,10 @@ export class SubAgentTracker {
           `Permission request failed for subagent tool ${event.name}:`,
           error,
         );
-        if (event.name === ToolNames.ASK_USER_QUESTION) {
-          // Fail closed: if the client cannot answer a nested user question,
-          // stop the parent turn instead of letting later tools run without the
-          // required user input.
-          this.onAskUserQuestionCancel?.();
-        }
+        // Fail closed: if the client cannot answer a nested permission
+        // request, stop the parent turn instead of letting later tools run
+        // without the required user input.
+        this.onPermissionCancel?.();
         try {
           await event.respond(ToolConfirmationOutcome.Cancel);
         } catch (respondError) {
