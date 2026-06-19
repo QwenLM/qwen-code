@@ -396,7 +396,7 @@ const QWEN_PROCESS_PATTERN =
   /(^|[^a-z0-9_-])qwen(?:-code)?(?:\.exe)?(?=$|[^a-z0-9_-])/i;
 const TASKKILL_IMAGE_FILTER_PATTERN = /\bimagename\s+eq\s+(.+)$/i;
 
-const EXEC_PREFIX_OPTIONS_WITH_VALUES = new Set([
+const SUDO_OPTIONS_WITH_VALUES = new Set([
   '-u',
   '--user',
   '-g',
@@ -409,6 +409,17 @@ const EXEC_PREFIX_OPTIONS_WITH_VALUES = new Set([
   '--close-from',
   '-T',
   '--command-timeout',
+]);
+
+const COMMAND_OPTIONS_WITH_VALUES = new Set<string>();
+
+const ENV_OPTIONS_WITH_VALUES = new Set([
+  '-u',
+  '--unset',
+  '-S',
+  '--split-string',
+  '-C',
+  '--chdir',
 ]);
 
 const KILLALL_OPTIONS_WITH_VALUES = new Set([
@@ -454,9 +465,22 @@ export const SHELL_SELF_KILL_REJECTION =
 
 function parseShellSegment(segment: string): string[] | null {
   try {
-    return parse(segment, (key) => '$' + key).filter(
-      (token): token is string => typeof token === 'string',
-    );
+    return parse(segment, (key) => '$' + key)
+      .map((token) => {
+        if (typeof token === 'string') {
+          return token;
+        }
+        if (
+          typeof token === 'object' &&
+          token !== null &&
+          'pattern' in token &&
+          typeof token.pattern === 'string'
+        ) {
+          return token.pattern;
+        }
+        return null;
+      })
+      .filter((token): token is string => token !== null);
   } catch {
     return null;
   }
@@ -479,6 +503,15 @@ function optionHasInlineValue(token: string): boolean {
   return token.includes('=') || token.includes(':');
 }
 
+function shortOptionBundleHasFlag(token: string, flag: string): boolean {
+  return (
+    token.startsWith('-') &&
+    !token.startsWith('--') &&
+    token.length > 2 &&
+    token.slice(1).toLowerCase().includes(flag.toLowerCase().slice(1))
+  );
+}
+
 function matchesSelfProcessPattern(value: string): boolean {
   return SELF_KILL_PROCESS_PATTERN.test(value);
 }
@@ -493,12 +526,17 @@ function isBroadNodeFullPattern(value: string): boolean {
     .replace(/^(\^|\\b|\.\*)+/, '')
     .replace(/(\$|\\b|\.\*)+$/, '');
   const base = normalized.split(/[\\/]/).pop()?.toLowerCase();
-  return base === 'node' || base === 'node.exe';
+  return (
+    base === 'node' ||
+    base === 'node.exe' ||
+    /^node(?:\.exe)?[*?]+$/.test(base ?? '')
+  );
 }
 
 function consumeOptionsWithValues(
   tokens: string[],
   startIndex: number,
+  optionsWithValues: Set<string>,
 ): number {
   let index = startIndex;
   while (index < tokens.length) {
@@ -510,7 +548,10 @@ function consumeOptionsWithValues(
 
     index++;
     if (
-      EXEC_PREFIX_OPTIONS_WITH_VALUES.has(normalized) &&
+      (optionsWithValues.has(normalized) ||
+        [...optionsWithValues].some((option) =>
+          shortOptionBundleHasFlag(token, option),
+        )) &&
       !optionHasInlineValue(token)
     ) {
       index++;
@@ -528,17 +569,29 @@ function unwrapExecutionPrefixes(tokens: string[]): string[] {
   while (index < tokens.length) {
     const root = normalizeExecutableName(tokens[index]!);
     if (root === 'sudo') {
-      index = consumeOptionsWithValues(tokens, index + 1);
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        SUDO_OPTIONS_WITH_VALUES,
+      );
       continue;
     }
 
     if (root === 'command') {
-      index = consumeOptionsWithValues(tokens, index + 1);
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        COMMAND_OPTIONS_WITH_VALUES,
+      );
       continue;
     }
 
     if (root === 'env') {
-      index = consumeOptionsWithValues(tokens, index + 1);
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        ENV_OPTIONS_WITH_VALUES,
+      );
       while (
         index < tokens.length &&
         ENV_ASSIGNMENT_REGEX.test(tokens[index]!)
@@ -560,6 +613,8 @@ function getCommandSegments(command: string, depth = 0): string[] {
     const stripped = stripShellWrapper(segment);
     if (stripped !== segment && depth < 3) {
       segments.push(...getCommandSegments(stripped, depth + 1));
+    } else if (stripped !== segment) {
+      segments.push(stripped);
     } else {
       segments.push(segment);
     }
@@ -650,7 +705,11 @@ function pkillTargetsSelf(tokens: string[]): boolean {
     }
 
     const normalized = optionKey(token);
-    if (normalized === '-f' || normalized === '--full') {
+    if (
+      normalized === '-f' ||
+      normalized === '--full' ||
+      shortOptionBundleHasFlag(token, '-f')
+    ) {
       usesFullCommandLine = true;
       continue;
     }
@@ -678,6 +737,10 @@ function pkillTargetsSelf(tokens: string[]): boolean {
 }
 
 export function detectSelfKillCommand(command: string): boolean {
+  if (!/kill/i.test(command)) {
+    return false;
+  }
+
   const segments = getCommandSegments(command);
   for (const segment of segments) {
     const parsed = parseShellSegment(segment);
@@ -1008,11 +1071,23 @@ function isShellWrapperFlagToken(normalizedToken: string): boolean {
 
 function shellWrapperFlagConsumesOperand(token: string): boolean {
   const normalized = getNormalizedShellToken(token);
-  return normalized === '-o' || normalized === '+o';
+  if (optionHasInlineValue(token)) {
+    return false;
+  }
+  return (
+    normalized === '-o' ||
+    normalized === '+o' ||
+    normalized === '-executionpolicy' ||
+    normalized === '-file' ||
+    normalized === '-encodedcommand'
+  );
 }
 
 function shellWrapperCommandConsumesRest(wrapperToken: string): boolean {
   const base = getShellWrapperBase(wrapperToken);
+  // POSIX shells pass exactly one argument after -c as the command string.
+  // cmd.exe and PowerShell treat the remaining tokens after /c or -Command as
+  // the command, so unquoted inner commands need the full rest of the line.
   return (
     base === 'cmd' ||
     base === 'cmd.exe' ||

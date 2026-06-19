@@ -589,9 +589,35 @@ describe('detectSelfKillCommand', () => {
 
   it('detects broad Unix killall and pkill patterns', () => {
     expect(detectSelfKillCommand('killall -9 node')).toBe(true);
+    expect(detectSelfKillCommand('pkill node')).toBe(true);
     expect(detectSelfKillCommand('pkill -f qwen-code')).toBe(true);
     expect(detectSelfKillCommand('pkill -f /usr/bin/node')).toBe(true);
+    expect(detectSelfKillCommand('pkill -9f node')).toBe(true);
     expect(detectSelfKillCommand("bash -lc 'pkill -f qwen'")).toBe(true);
+  });
+
+  it('detects self-kill commands in chains and execution prefixes', () => {
+    expect(detectSelfKillCommand('echo setup && killall node')).toBe(true);
+    expect(detectSelfKillCommand('false || taskkill /F /IM node.exe')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('sudo killall node')).toBe(true);
+    expect(detectSelfKillCommand('env FOO=bar pkill -f qwen-code')).toBe(true);
+    expect(detectSelfKillCommand('command -p killall node')).toBe(true);
+  });
+
+  it('detects taskkill inline and dash-prefixed image options', () => {
+    expect(detectSelfKillCommand('taskkill /IM:node.exe /F')).toBe(true);
+    expect(
+      detectSelfKillCommand('taskkill /FI:"IMAGENAME eq qwen-code.exe" /F'),
+    ).toBe(true);
+    expect(detectSelfKillCommand('taskkill -IM node.exe -F')).toBe(true);
+  });
+
+  it('detects glob patterns emitted by shell parsing', () => {
+    expect(detectSelfKillCommand('killall node*')).toBe(true);
+    expect(detectSelfKillCommand('pkill -f node*')).toBe(true);
+    expect(detectSelfKillCommand('taskkill /IM node*')).toBe(true);
   });
 
   it('detects taskkill through Windows shell wrappers', () => {
@@ -606,6 +632,11 @@ describe('detectSelfKillCommand', () => {
     expect(
       detectSelfKillCommand('powershell -Command taskkill /F /IM node.exe'),
     ).toBe(true);
+    expect(
+      detectSelfKillCommand(
+        'powershell -ExecutionPolicy Bypass -Command "taskkill /F /IM node.exe"',
+      ),
+    ).toBe(true);
     expect(detectSelfKillCommand('cmd.exe /c taskkill /F /IM node.exe')).toBe(
       true,
     );
@@ -616,6 +647,7 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('kill 1234')).toBe(false);
     expect(detectSelfKillCommand('pkill -f vite')).toBe(false);
     expect(detectSelfKillCommand('pkill -f "node server.js"')).toBe(false);
+    expect(detectSelfKillCommand('pkill -9f "node server.js"')).toBe(false);
     expect(detectSelfKillCommand('pkill -F qwen-code.pid vite')).toBe(false);
     expect(detectSelfKillCommand('taskkill /IM notepad.exe')).toBe(false);
   });
