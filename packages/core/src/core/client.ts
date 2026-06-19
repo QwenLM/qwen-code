@@ -2632,6 +2632,14 @@ export class GeminiClient {
       if (abortSignal.aborted) {
         throw error;
       }
+      // #5019: Auto-recovery for API-level repetitive tool call detection.
+      const errMsg = getErrorMessage(error);
+      if (errMsg.includes('Repetitive tool calls')) {
+        this.loopDetector.disableForSession();
+        debugLogger.warn(
+          '[qwen-code] API rejected: repetitive tool calls. Use /compress for long conversations.',
+        );
+      }
       await reportError(
         error,
         `Error generating content via API with model ${currentAttemptModel}.`,

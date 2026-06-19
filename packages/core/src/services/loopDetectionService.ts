@@ -47,7 +47,7 @@ const STAGNATION_THRESHOLD = 8;
 // Global tool call duplicate tracking: how many times the same (tool, args)
 // pair must appear across the entire turn (not necessarily consecutively)
 // before it is treated as a loop.
-const GLOBAL_DUPLICATE_THRESHOLD = 6;
+const GLOBAL_DUPLICATE_THRESHOLD = 4;
 
 // Alternating pattern detection: number of complete AB cycles needed to
 // trip the detector (3 cycles = 6 calls: A B A B A B).
