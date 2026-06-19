@@ -72,6 +72,7 @@ export function extractDaemonTodosFromToolBlock(
   const toolKind = (block.toolKind ?? '').toLowerCase();
   if (
     toolName !== 'todowrite' &&
+    toolName !== 'todo_write' &&
     toolKind !== 'updated_plan' &&
     toolKind !== 'todo' &&
     toolKind !== 'other'

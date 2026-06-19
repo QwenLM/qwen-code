@@ -72,7 +72,7 @@ export const ToolDisplayNames = {
   GREP: 'Grep',
   GLOB: 'Glob',
   SHELL: 'Shell',
-  TODO_WRITE: 'TodoWrite',
+  TODO_WRITE: 'TodoList',
   MEMORY: 'SaveMemory',
   AGENT: 'Agent',
   SKILL: 'Skill',
@@ -119,4 +119,5 @@ export const ToolDisplayNamesMigration = {
   FindFiles: ToolDisplayNames.GLOB, // Old display name for Glob
   ReadFolder: ToolDisplayNames.LS, // Old display name for ListFiles
   Task: ToolDisplayNames.AGENT, // Old display name for Agent (renamed from Task)
+  TodoWrite: ToolDisplayNames.TODO_WRITE, // Old display name for TodoList (renamed from TodoWrite)
 } as const;

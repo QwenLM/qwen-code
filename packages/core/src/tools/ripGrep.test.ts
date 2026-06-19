@@ -118,6 +118,20 @@ describe('RipGrepTool', () => {
       expect(grepTool.validateToolParams(params)).toBeNull();
     });
 
+    it('should return null for a positive integer limit', () => {
+      const params: RipGrepToolParams = { pattern: 'hello', limit: 2 };
+      expect(grepTool.validateToolParams(params)).toBeNull();
+    });
+
+    it.each([
+      [0, 'params/limit must be >= 1'],
+      [-1, 'params/limit must be >= 1'],
+      [1.5, 'params/limit must be integer'],
+    ])('should return error for invalid limit %s', (limit, expectedError) => {
+      const params: RipGrepToolParams = { pattern: 'hello', limit };
+      expect(grepTool.validateToolParams(params)).toBe(expectedError);
+    });
+
     it('should return error if pattern is missing', () => {
       const params = { path: '.' } as unknown as RipGrepToolParams;
       expect(grepTool.validateToolParams(params)).toBe(
@@ -638,6 +652,30 @@ describe('RipGrepTool', () => {
         returnDisplay: 'Error: ripgrep binary not found.',
       });
     });
+
+    it('should pass useBuiltinRipgrep setting to ripgrep execution', async () => {
+      const systemOnlyConfig = {
+        ...mockConfig,
+        getUseBuiltinRipgrep: () => false,
+      } as unknown as Config;
+      const systemOnlyGrepTool = new RipGrepTool(systemOnlyConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'hello' };
+      const invocation = systemOnlyGrepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      expect(runRipgrep).toHaveBeenCalledWith(
+        expect.any(Array),
+        abortSignal,
+        false,
+      );
+    });
   });
 
   describe('multi-directory workspace', () => {
@@ -684,6 +722,7 @@ describe('RipGrepTool', () => {
           secondDir,
         ]),
         expect.anything(),
+        true,
       );
 
       await fs.rm(secondDir, { recursive: true, force: true });
@@ -1103,6 +1142,16 @@ describe('RipGrepTool', () => {
 
     it('should return ask for paths outside workspace', async () => {
       const params: RipGrepToolParams = { pattern: 'hello', path: '/tmp' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
+    it('should return ask for tilde paths outside workspace', async () => {
+      const params: RipGrepToolParams = {
+        pattern: 'hello',
+        path: '~/outside-workspace',
+      };
       const invocation = grepTool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('ask');

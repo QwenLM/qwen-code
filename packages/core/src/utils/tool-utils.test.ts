@@ -129,6 +129,18 @@ describe('isToolEnabled', () => {
     expect(isToolEnabled(ToolNames.GLOB, ['FindFiles'], undefined)).toBe(true);
   });
 
+  it('keeps the pre-rename TodoWrite display name working as a legacy alias', () => {
+    // The display name was renamed from 'TodoWrite' to 'TodoList'; existing
+    // coreTools/excludeTools configs that reference the old name must still
+    // resolve via ToolDisplayNamesMigration.
+    expect(isToolEnabled(ToolNames.TODO_WRITE, ['TodoWrite'], undefined)).toBe(
+      true,
+    );
+    expect(isToolEnabled(ToolNames.TODO_WRITE, undefined, ['TodoWrite'])).toBe(
+      false,
+    );
+  });
+
   it('enables tool when coreTools contains an argument-specific pattern', () => {
     expect(
       isToolEnabled(ToolNames.SHELL, ['Shell(git status)'], undefined),

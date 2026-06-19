@@ -90,7 +90,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       type: 'tool.update',
-      toolName: 'TodoWrite',
+      toolName: 'todo_write',
       rawOutput: {
         entries: [{ content: 'Task', status: 'completed', priority: 'medium' }],
         stats: {

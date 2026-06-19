@@ -155,6 +155,16 @@ describe('formatters', () => {
       expect(formatDuration(-100)).toBe('0s');
     });
 
+    it('should roll a sub-minute value up to "1m" when it rounds to 60s', () => {
+      // 59.95s and up round to "60.0" at one decimal, which is not a valid
+      // sub-minute reading; it should render as the minute it rounds to,
+      // matching formatDuration(60000) === '1m'.
+      expect(formatDuration(59949)).toBe('59.9s');
+      expect(formatDuration(59950)).toBe('1m');
+      expect(formatDuration(59999)).toBe('1m');
+      expect(formatDuration(59950, { hideTrailingZeros: true })).toBe('1m');
+    });
+
     describe('with hideTrailingZeros', () => {
       it('drops .0 suffix for whole seconds under a minute', () => {
         expect(formatDuration(5000, { hideTrailingZeros: true })).toBe('5s');

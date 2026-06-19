@@ -86,6 +86,15 @@ async function restoreAction(
       };
     }
 
+    const toolCall = toolCallData.toolCall;
+    if (
+      !toolCall ||
+      typeof toolCall !== 'object' ||
+      typeof toolCall.name !== 'string'
+    ) {
+      throw new Error('Checkpoint is missing a valid toolCall.');
+    }
+
     if (toolCallData.promptId) {
       if (!config) {
         return {
@@ -144,8 +153,8 @@ async function restoreAction(
 
     return {
       type: 'tool',
-      toolName: toolCallData.toolCall.name,
-      toolArgs: toolCallData.toolCall.args,
+      toolName: toolCall.name,
+      toolArgs: toolCall.args,
     };
   } catch (error) {
     return {
