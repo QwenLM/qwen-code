@@ -74,6 +74,7 @@ import {
 } from '../voice/voiceTranscriber.js';
 import { openQwenAsrRealtimeStream } from '../voice/qwenAsrRealtimeSession.js';
 import { openVoiceStream } from '../voice/voiceStreamSession.js';
+import { openVoiceStreamWithRetry } from '../voice/voiceStreamRetry.js';
 import { VoiceIndicator } from './VoiceIndicator.js';
 
 /**
@@ -352,9 +353,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         settings,
         voiceModel,
       });
-      return streamConfig.transport === 'qwen-asr-realtime'
-        ? openQwenAsrRealtimeStream(streamConfig, callbacks)
-        : openVoiceStream(streamConfig, callbacks);
+      return openVoiceStreamWithRetry(() =>
+        streamConfig.transport === 'qwen-asr-realtime'
+          ? openQwenAsrRealtimeStream(streamConfig, callbacks)
+          : openVoiceStream(streamConfig, callbacks),
+      );
     },
     [config, settings, voiceModel],
   );

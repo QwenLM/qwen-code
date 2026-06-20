@@ -173,12 +173,15 @@ export function resolveVoiceStreamConfig(
     );
   }
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
+  const keytermsContext =
+    transport === 'qwen-asr-realtime' ? buildKeytermsContext(args) : undefined;
   return {
     transport,
     baseUrl: base.baseUrl,
     model: base.model,
     ...(base.apiKey ? { apiKey: base.apiKey } : {}),
     ...(language ? { language } : {}),
+    ...(keytermsContext ? { keytermsContext } : {}),
   };
 }
 
@@ -212,7 +215,7 @@ function resolveLanguageCode(language: string | undefined): string | undefined {
 }
 
 function buildKeytermsContext(
-  args: TranscribeVoiceAudioArgs,
+  args: ResolveVoiceTranscriptionConfigArgs,
 ): string | undefined {
   try {
     const projectRoot =

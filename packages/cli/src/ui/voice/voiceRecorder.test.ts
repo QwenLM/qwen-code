@@ -60,4 +60,35 @@ describe('createVoiceRecorder', () => {
     expect(soxRecorder.start).toHaveBeenCalledTimes(1);
     expect(soxRecorder.stop).toHaveBeenCalledTimes(1);
   });
+
+  it('reports streaming support from the active native recorder', async () => {
+    const nativeRecorder = recorder({
+      supportsStreaming: vi.fn(() => true),
+    });
+
+    const voiceRecorder = createVoiceRecorder({
+      createNativeRecorder: vi.fn(() => nativeRecorder),
+      createSoxRecorder: vi.fn(() => recorder()),
+    });
+
+    await voiceRecorder.start();
+
+    expect(voiceRecorder.supportsStreaming?.()).toBe(true);
+  });
+
+  it('reports no streaming support after falling back to shell recording', async () => {
+    const nativeRecorder = recorder({
+      start: vi.fn().mockRejectedValue(new Error('native unavailable')),
+    });
+    const soxRecorder = recorder();
+
+    const voiceRecorder = createVoiceRecorder({
+      createNativeRecorder: vi.fn(() => nativeRecorder),
+      createSoxRecorder: vi.fn(() => soxRecorder),
+    });
+
+    await voiceRecorder.start();
+
+    expect(voiceRecorder.supportsStreaming?.()).toBe(false);
+  });
 });

@@ -200,7 +200,7 @@ export function useVoiceInput({
         }
         if (recorder.supportsStreaming?.() === false) {
           throw new Error(
-            'Streaming voice transcription requires native audio capture.',
+            'Streaming voice transcription requires native audio capture. Install/rebuild @qwen-code/audio-capture or switch voiceModel to qwen3-asr-flash for batch transcription.',
           );
         }
         const streamPromise = openStream!({

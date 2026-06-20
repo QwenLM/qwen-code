@@ -90,6 +90,19 @@ export const voiceCommand: SlashCommand = {
       };
     }
 
+    if (command === '' && isVoiceEnabled(settings)) {
+      settings.setValue(
+        getVoiceScope(settings),
+        'general.voice.enabled',
+        false,
+      );
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: 'Voice dictation disabled.',
+      };
+    }
+
     const voiceModel = getVoiceModel(settings);
     if (!voiceModel) {
       return {

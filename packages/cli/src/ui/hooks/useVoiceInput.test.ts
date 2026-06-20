@@ -404,7 +404,7 @@ describe('useVoiceInput', () => {
       expect(addItem).toHaveBeenCalledWith(
         {
           type: 'error',
-          text: 'Voice transcription failed: Streaming voice transcription requires native audio capture.',
+          text: 'Voice transcription failed: Streaming voice transcription requires native audio capture. Install/rebuild @qwen-code/audio-capture or switch voiceModel to qwen3-asr-flash for batch transcription.',
         },
         expect.any(Number),
       );

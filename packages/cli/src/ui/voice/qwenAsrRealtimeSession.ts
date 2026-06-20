@@ -109,6 +109,9 @@ export function openQwenAsrRealtimeStream(
           sample_rate: 16000,
           input_audio_transcription: {
             ...(config.language ? { language: config.language } : {}),
+            ...(config.keytermsContext
+              ? { corpus_text: config.keytermsContext }
+              : {}),
           },
           turn_detection: null,
         },

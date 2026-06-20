@@ -20,6 +20,8 @@ export interface VoiceStreamConfig {
   model: string;
   /** Optional BCP-47-ish language code (paraformer language_hints). */
   language?: string;
+  /** Optional contextual bias text for providers that support corpus prompts. */
+  keytermsContext?: string;
 }
 
 export interface VoiceStreamCallbacks {

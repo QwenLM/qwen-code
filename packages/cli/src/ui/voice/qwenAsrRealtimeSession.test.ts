@@ -66,6 +66,7 @@ describe('qwenAsrRealtimeSession', () => {
         apiKey: 'sk-test',
         model: 'qwen3-asr-flash-realtime',
         language: 'zh',
+        keytermsContext: 'grep regex OAuth',
       },
       { onInterim: interim },
       { createWebSocket },
@@ -86,7 +87,10 @@ describe('qwenAsrRealtimeSession', () => {
       session: {
         input_audio_format: 'pcm',
         sample_rate: 16000,
-        input_audio_transcription: { language: 'zh' },
+        input_audio_transcription: {
+          language: 'zh',
+          corpus_text: 'grep regex OAuth',
+        },
         turn_detection: null,
       },
     });

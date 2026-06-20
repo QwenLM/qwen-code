@@ -77,6 +77,32 @@ describe('voiceCommand', () => {
     });
   });
 
+  it('toggles voice dictation off when bare /voice is used while enabled', async () => {
+    const setValue = vi.fn();
+    const context = createMockCommandContext({
+      services: {
+        settings: createSettings(
+          { general: { voice: { enabled: true, mode: 'tap' } } },
+          setValue,
+        ),
+      },
+    });
+
+    const result = await voiceCommand.action!(context, '');
+
+    expect(setValue).toHaveBeenCalledTimes(1);
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'general.voice.enabled',
+      false,
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Voice dictation disabled.',
+    });
+  });
+
   it('enables tap mode when /voice tap is used', async () => {
     const setValue = vi.fn();
     const context = createMockCommandContext({

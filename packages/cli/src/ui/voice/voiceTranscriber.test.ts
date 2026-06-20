@@ -100,42 +100,44 @@ describe('voiceTranscriber', () => {
   });
 
   it('keeps realtime model ids on their matching streaming transport', () => {
-    expect(
-      resolveVoiceStreamConfig({
-        config: createConfig([
-          {
-            id: 'qwen3-asr-flash-realtime',
-            label: 'Qwen ASR Realtime',
-            authType: AuthType.USE_OPENAI,
-            baseUrl: 'https://dashscope.example/v1',
-            envKey: 'DASHSCOPE_API_KEY',
-          },
-        ]),
-        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
-        voiceModel: 'qwen3-asr-flash-realtime',
-      }),
-    ).toEqual({
+    const qwenStreamConfig = resolveVoiceStreamConfig({
+      config: createConfig([
+        {
+          id: 'qwen3-asr-flash-realtime',
+          label: 'Qwen ASR Realtime',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.example/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ]),
+      settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+      voiceModel: 'qwen3-asr-flash-realtime',
+    });
+
+    expect(qwenStreamConfig).toEqual({
       transport: 'qwen-asr-realtime',
       model: 'qwen3-asr-flash-realtime',
       baseUrl: 'https://dashscope.example/v1',
       apiKey: 'sk-test',
+      keytermsContext: expect.stringContaining('Qwen'),
     });
 
-    expect(
-      resolveVoiceStreamConfig({
-        config: createConfig([
-          {
-            id: 'fun-asr-realtime',
-            label: 'Fun ASR Realtime',
-            authType: AuthType.USE_OPENAI,
-            baseUrl: 'https://dashscope.example/v1',
-            envKey: 'DASHSCOPE_API_KEY',
-          },
-        ]),
-        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
-        voiceModel: 'fun-asr-realtime',
-      }).transport,
-    ).toBe('dashscope-task-realtime');
+    const funStreamConfig = resolveVoiceStreamConfig({
+      config: createConfig([
+        {
+          id: 'fun-asr-realtime',
+          label: 'Fun ASR Realtime',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.example/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ]),
+      settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+      voiceModel: 'fun-asr-realtime',
+    });
+
+    expect(funStreamConfig.transport).toBe('dashscope-task-realtime');
+    expect(funStreamConfig.keytermsContext).toBeUndefined();
   });
 
   it('treats colon-containing voice model values as literal model ids', () => {
