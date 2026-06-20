@@ -85,10 +85,13 @@ prod and load `https://<domain>/ui/` from the phone.
 
 ## Slices
 
-1. `renewalSchedule` (pure) + `certStore` (fs) + `DnsProvider` interface — all
-   provider-agnostic, fully TDD. ← start here.
-2. `dnsProviders/route53.ts` (operator's own host), then `cloudflare.ts` — TDD with
-   a fake transport.
-3. `acmeClient` + `acmeManager` — TDD with mocks; add the `acme-client` dep.
-4. cli flags + `bindSecurity` `mode:'acme'` + SNICallback live reload.
-5. On-box: LE-staging issuance → prod → phone over HTTPS.
+1. ✅ `renewalSchedule` (pure) + `certStore` (fs) + `DnsProvider` interface.
+2. ✅ `dnsProviders/route53.ts` + `cloudflare.ts` — TDD with fake transports.
+3. ✅ `acmeManager` (acquire/renew loop, timer-cap) + `acmeClient` (acme-client v5
+   wrapper) + assembly (`buildAcmeStack`, `accountKeyStore`) +
+   `scripts/acme-staging-test.mts`.
+4. ✅ cli `--acme-*` flags + `bindSecurity` `mode:'acme'` + `acmeHttps`
+   SNICallback live reload. (~120 unit tests across slices 1–4.)
+5. ⏳ **On-box (needs a real domain):** LE-**staging** issuance via the harness →
+   `--acme-staging` end-to-end → production → phone over HTTPS. Also: declare
+   `acme-client` + `@aws-sdk/client-route-53` as `optionalDependencies`.
