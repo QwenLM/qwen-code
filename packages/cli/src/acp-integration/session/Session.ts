@@ -531,8 +531,14 @@ export interface AvailableCommandsSnapshot {
 export async function buildAvailableCommandsSnapshot(
   config: Config,
   abortSignal: AbortSignal = AbortSignal.timeout(10_000),
+  settings?: LoadedSettings,
 ): Promise<AvailableCommandsSnapshot> {
-  const slashCommands = await getAvailableCommands(config, abortSignal, 'acp');
+  const slashCommands = await getAvailableCommands(
+    config,
+    abortSignal,
+    'acp',
+    settings,
+  );
 
   const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
     const acceptsInput =
@@ -2960,7 +2966,11 @@ export class Session implements SessionContext {
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
       const { availableCommands, availableSkills, availableSkillDetails } =
-        await buildAvailableCommandsSnapshot(this.config);
+        await buildAvailableCommandsSnapshot(
+          this.config,
+          undefined,
+          this.settings,
+        );
 
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
