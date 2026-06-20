@@ -1002,8 +1002,12 @@ async function resolvePluginSource(
 
   // Handle string source (relative path or URL)
   if (typeof source === 'string') {
-    // Check if it's a URL
-    if (source.startsWith('http://') || source.startsWith('https://')) {
+    // Check if it's a URL (scheme is case-insensitive, e.g. HTTPS://)
+    const lowerSource = source.toLowerCase();
+    if (
+      lowerSource.startsWith('http://') ||
+      lowerSource.startsWith('https://')
+    ) {
       // Download from URL
       const installMetadata: ExtensionInstallMetadata = {
         source,
