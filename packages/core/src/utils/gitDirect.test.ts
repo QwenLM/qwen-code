@@ -93,6 +93,8 @@ describe('isValidRefName', () => {
     'a\x9bb', // C1 control (CSI) — terminal escape injection
     'a\u2028b', // Unicode line separator — status-line layout desync
     'a'.repeat(256), // exceeds the length cap
+    'feature/.hidden', // a component starts with a dot
+    'test.lock/branch', // a component ends with .lock
   ])('rejects %j', (name) => {
     expect(isValidRefName(name)).toBe(false);
   });

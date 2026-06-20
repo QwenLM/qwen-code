@@ -11,10 +11,10 @@ import { resolveGitDir } from './gitDiff.js';
 
 /**
  * Direct-read git helpers: resolve the current branch / HEAD by reading the
- * `.git` metadata files instead of spawning `git`. This mirrors the approach
- * Claude Code takes for hot-path reads (branch in the status line) — a plain
- * file read is microseconds versus milliseconds for a `git` subprocess, and it
- * cannot hang on a large repository.
+ * `.git` metadata files instead of spawning `git`. A plain file read is
+ * microseconds versus milliseconds for a `git` subprocess on a hot path (the
+ * status line re-reads the branch on render), and it cannot hang on a large
+ * repository.
  *
  * Scope: this only covers reading the current branch / HEAD. Heavier git
  * operations (diff, log, merge-base, remotes) still belong on the `git` binary.
@@ -50,6 +50,9 @@ export function isValidRefName(name: string): boolean {
   if (name.startsWith('.') || name.endsWith('.')) return false;
   if (name.endsWith('.lock')) return false;
   if (name.includes('..') || name.includes('//')) return false;
+  // git applies the dot/.lock rules per slash-separated component, not just to
+  // the whole name: no component may start with a dot or end with `.lock`.
+  if (name.includes('/.') || name.includes('.lock/')) return false;
   if (name.includes('@{')) return false;
   if (INVALID_REF_CHARS.test(name)) return false;
   return true;
@@ -83,10 +86,11 @@ async function isDir(p: string): Promise<boolean> {
 
 /** A git object store: `objects/` + `refs/` (standalone repo, or a worktree's common dir). */
 async function hasGitStore(dir: string): Promise<boolean> {
-  return (
-    (await isDir(path.join(dir, 'objects'))) &&
-    (await isDir(path.join(dir, 'refs')))
-  );
+  const [objects, refs] = await Promise.all([
+    isDir(path.join(dir, 'objects')),
+    isDir(path.join(dir, 'refs')),
+  ]);
+  return objects && refs;
 }
 
 /**
@@ -154,10 +158,19 @@ export async function readGitHead(gitDir: string): Promise<GitHead | null> {
   const headPath = path.join(gitDir, 'HEAD');
   let content: string;
   try {
-    // Refuse a symlinked HEAD: readFile would otherwise follow it out of the
-    // repo and surface the target file's first line.
-    if ((await fsPromises.lstat(headPath)).isSymbolicLink()) return null;
-    content = (await fsPromises.readFile(headPath, 'utf-8')).trim();
+    // Open with O_NOFOLLOW so a symlinked HEAD is refused atomically at the
+    // kernel level (ELOOP) — closing the lstat→readFile TOCTOU window where
+    // HEAD could be swapped for a symlink pointing out of the repo. Falls back
+    // to plain O_RDONLY where the flag is absent (Windows omits O_NOFOLLOW).
+    const fh = await fsPromises.open(
+      headPath,
+      (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
+    );
+    try {
+      content = (await fh.readFile('utf-8')).trim();
+    } finally {
+      await fh.close();
+    }
   } catch {
     return null;
   }
@@ -224,7 +237,9 @@ export async function watchRepoBranch(
     try {
       await fsPromises.access(logsHeadPath, fs.constants.F_OK);
       // Refuse a symlinked reflog: we'd otherwise place a persistent watch on a
-      // file outside the repo.
+      // file outside the repo. A residual lstat→watch TOCTOU remains (fs.watch
+      // has no O_NOFOLLOW form), but the watch only ever fires readGitHead —
+      // which opens HEAD with O_NOFOLLOW — and never reads logs/HEAD's content.
       if ((await fsPromises.lstat(logsHeadPath)).isSymbolicLink()) {
         return () => {};
       }
