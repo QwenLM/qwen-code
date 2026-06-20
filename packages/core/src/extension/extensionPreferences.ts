@@ -119,6 +119,16 @@ export class ExtensionPreferencesStore {
       // A transient read error (permission/too-many-files/…) — the file may be
       // perfectly valid, so do NOT quarantine it here; only parse failures
       // above do that. Return the default for this read.
+      //
+      // `debugLogger.error` is gated behind QWEN_DEBUG_LOG_FILE (unset for
+      // almost all users), so without an stderr line the user's
+      // favorites/scopes would appear to vanish with no trail. Mirror the
+      // `quarantineCorruptFile` pattern and surface it on stderr too.
+      process.stderr.write(
+        `[warn] Could not read extension preferences at ${this.filePath}: ${
+          error instanceof Error ? error.message : String(error)
+        }. Using defaults for this session.\n`,
+      );
       debugLogger.error('Error reading extension preferences:', error);
       return emptyPreferences();
     }

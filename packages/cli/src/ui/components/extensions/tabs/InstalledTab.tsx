@@ -11,6 +11,7 @@ import { useKeypress } from '../../../hooks/useKeypress.js';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { t } from '../../../../i18n/index.js';
+import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
 import {
   type Config,
   type Extension,
@@ -746,7 +747,11 @@ export const InstalledTab = ({
           item.kind === 'mcp'
             ? t('MCP')
             : t('Extension v{{version}}', {
-                version: item.extension.version,
+                // Persisted marketplace metadata: `version` is stored verbatim
+                // by the converter and only `name` is validated on load, so
+                // scrub it here (the Discover-side sanitization doesn't cover
+                // this persisted/Installed render path).
+                version: stripUnsafeCharacters(item.extension.version ?? ''),
               });
         // MCP rows surface the live connection state — "enabled" alone would
         // read as usable even when the server failed to connect or still

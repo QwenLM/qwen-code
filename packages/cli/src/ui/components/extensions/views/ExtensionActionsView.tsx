@@ -220,14 +220,29 @@ export const ExtensionActionsView = ({
       const name = extension.name;
       setScopeBusy(true);
       try {
-        manager.setExtensionScope(name, newScope);
-        // Apply enablement: Global -> User; Project/Local -> workspace only.
+        // Apply enablement first: Global -> User; Project/Local -> workspace
+        // only. Record the scope preference only once enablement succeeds so a
+        // failed enable can't leave the prefs pointing at a scope the extension
+        // isn't actually enabled at.
         if (newScope === 'user') {
           await manager.enableExtension(name, SettingScope.User);
         } else {
           await manager.disableExtension(name, SettingScope.User);
-          await manager.enableExtension(name, SettingScope.Workspace);
+          try {
+            await manager.enableExtension(name, SettingScope.Workspace);
+          } catch (enableError) {
+            // The User-scope disable already landed; if the Workspace enable
+            // fails the extension would be disabled everywhere. Roll the User
+            // enable back so it isn't silently dead, then surface the error.
+            try {
+              await manager.enableExtension(name, SettingScope.User);
+            } catch {
+              // Best-effort rollback.
+            }
+            throw enableError;
+          }
         }
+        manager.setExtensionScope(name, newScope);
         setScope(newScope);
         setEnabled(true);
         onStatus({

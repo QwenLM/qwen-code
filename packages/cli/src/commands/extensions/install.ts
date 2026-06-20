@@ -96,9 +96,10 @@ export async function handleInstall(args: InstallArgs) {
     );
     const scope = normalizeScope(args.scope);
     if (args.scope) {
-      extensionManager.setExtensionScope(extension.name, scope);
       // installExtension auto-enables at the user (global) scope. For a
-      // project-scoped install, re-scope enablement to this workspace only.
+      // project-scoped install, re-scope enablement to this workspace only —
+      // BEFORE recording the scope preference, so a failed Workspace enable
+      // (which rolls back to User) can't leave the prefs claiming "project".
       if (scope === 'project') {
         await extensionManager.disableExtension(
           extension.name,
@@ -129,6 +130,9 @@ export async function handleInstall(args: InstallArgs) {
           throw enableError;
         }
       }
+      // Enablement succeeded (or scope is user/local with no enablement change):
+      // now it's safe to persist the scope preference.
+      extensionManager.setExtensionScope(extension.name, scope);
     }
     writeStdoutLine(
       scope === 'project'

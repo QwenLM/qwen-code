@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -136,5 +136,42 @@ describe('ExtensionPreferencesStore', () => {
     // And can still write afterwards.
     expect(store.toggleFavorite('alpha')).toBe(true);
     expect(store.isFavorite('alpha')).toBe(true);
+  });
+
+  it('quarantines a corrupt file (parse error) to a .corrupted sibling', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, '{ not valid json');
+
+    expect(store.getFavorites()).toEqual([]);
+
+    // The unparseable file is moved aside so the next write can't clobber it.
+    expect(fs.existsSync(`${filePath}.corrupted`)).toBe(true);
+    expect(fs.readFileSync(`${filePath}.corrupted`, 'utf-8')).toBe(
+      '{ not valid json',
+    );
+    expect(stderr).toHaveBeenCalled();
+    stderr.mockRestore();
+  });
+
+  it('does NOT quarantine on a transient read error, but warns on stderr', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // A path that exists but momentarily can't be read as a file (here a
+    // directory → EISDIR; same class as EACCES/EMFILE) must NOT be moved aside:
+    // only a genuine JSON parse failure quarantines. statSync succeeds, then
+    // readFileSync throws the transient error → outer catch returns defaults.
+    fs.mkdirSync(filePath, { recursive: true });
+
+    expect(store.getFavorites()).toEqual([]);
+
+    // Not quarantined, and the path is left untouched for the next read.
+    expect(fs.existsSync(`${filePath}.corrupted`)).toBe(false);
+    expect(fs.existsSync(filePath)).toBe(true);
+    expect(stderr).toHaveBeenCalled();
+    stderr.mockRestore();
   });
 });

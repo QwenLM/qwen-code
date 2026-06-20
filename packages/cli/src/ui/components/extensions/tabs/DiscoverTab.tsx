@@ -231,7 +231,6 @@ export const DiscoverTab = ({
         // successful install to "failed" (which would prompt a confusing retry).
         installed++;
         try {
-          extensionManager.setExtensionScope(ext.name, scope);
           // installExtension auto-enables at User (global) scope. For a
           // workspace-scoped choice, re-scope enablement to this workspace
           // only: disable the global enable and enable for the workspace path.
@@ -240,11 +239,31 @@ export const DiscoverTab = ({
               ext.name,
               SettingScope.User,
             );
-            await extensionManager.enableExtension(
-              ext.name,
-              SettingScope.Workspace,
-            );
+            try {
+              await extensionManager.enableExtension(
+                ext.name,
+                SettingScope.Workspace,
+              );
+            } catch (enableError) {
+              // The User-scope disable already landed; roll it back so a failed
+              // Workspace enable doesn't leave the extension disabled at every
+              // scope (the outer catch only logs, so the install still reports
+              // success — without this the extension would be silently dead).
+              try {
+                await extensionManager.enableExtension(
+                  ext.name,
+                  SettingScope.User,
+                );
+              } catch {
+                // Best-effort rollback.
+              }
+              throw enableError;
+            }
           }
+          // Record the scope preference only after enablement succeeds, so the
+          // Installed tab can't show a "Project level" extension that is
+          // actually enabled at User scope after a rollback.
+          extensionManager.setExtensionScope(ext.name, scope);
         } catch (scopeError) {
           debugLogger.error(
             'Installed extension but failed to apply scope preference:',

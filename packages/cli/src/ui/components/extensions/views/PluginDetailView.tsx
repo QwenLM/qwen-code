@@ -13,6 +13,7 @@ import {
   type Extension,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../../../i18n/index.js';
+import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
 
 export type PluginDetailAction =
   | 'toggle'
@@ -125,7 +126,9 @@ export const PluginDetailView = ({
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="column">
         <InfoRow label={t('Name:')}>{ext.name}</InfoRow>
-        <InfoRow label={t('Version:')}>{ext.version}</InfoRow>
+        <InfoRow label={t('Version:')}>
+          {stripUnsafeCharacters(ext.version ?? '')}
+        </InfoRow>
         <InfoRow label={t('Scope:')}>{scope}</InfoRow>
         <InfoRow label={t('Status:')}>
           <Text color={isActive ? theme.status.success : theme.text.secondary}>

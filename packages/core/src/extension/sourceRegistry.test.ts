@@ -89,6 +89,42 @@ describe('SourceRegistryStore', () => {
     expect(store.read().map((s) => s.name)).toEqual(['B']);
     expect(store.remove('missing')).toBe(false);
   });
+
+  it('quarantines a corrupt registry (parse error) to a .corrupted sibling', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, '[ not valid json');
+
+    expect(store.read()).toEqual([]);
+
+    // The unparseable file is moved aside so the next add/remove can't clobber
+    // a recoverable (e.g. truncated) source list with the empty default.
+    expect(fs.existsSync(`${filePath}.corrupted`)).toBe(true);
+    expect(fs.readFileSync(`${filePath}.corrupted`, 'utf-8')).toBe(
+      '[ not valid json',
+    );
+    expect(stderr).toHaveBeenCalled();
+    stderr.mockRestore();
+  });
+
+  it('does NOT quarantine on a transient read error, but warns on stderr', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // A path that exists but momentarily can't be read as a file (here a
+    // directory → EISDIR; same class as EACCES/EMFILE) must NOT be moved aside:
+    // only a genuine JSON parse failure quarantines.
+    fs.mkdirSync(filePath, { recursive: true });
+
+    expect(store.read()).toEqual([]);
+
+    expect(fs.existsSync(`${filePath}.corrupted`)).toBe(false);
+    expect(fs.existsSync(filePath)).toBe(true);
+    expect(stderr).toHaveBeenCalled();
+    stderr.mockRestore();
+  });
 });
 
 describe('discoverPlugins', () => {
