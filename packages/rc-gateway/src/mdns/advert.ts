@@ -93,7 +93,7 @@ export function deriveInstanceName(
   return `${host}-${workspace}`.slice(0, 63);
 }
 
-export type BindModeLike = 'loopback-http' | 'tls' | 'insecure-proxy';
+export type BindModeLike = 'loopback-http' | 'tls' | 'acme' | 'insecure-proxy';
 
 export type MdnsSuppressReason =
   | 'flag'

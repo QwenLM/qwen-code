@@ -34,6 +34,8 @@ export type BindMode =
   | 'loopback-http'
   /** Native TLS termination in the gateway (cert+key supplied). */
   | 'tls'
+  /** Native TLS with an auto-obtained Let's Encrypt cert (ACME DNS-01). */
+  | 'acme'
   /** Plain HTTP on a non-loopback bind, operator asserts an upstream TLS terminator. */
   | 'insecure-proxy';
 
@@ -62,6 +64,8 @@ export interface BindSecurityInput {
   tlsCert?: string;
   tlsKey?: string;
   insecureBehindProxy?: boolean;
+  /** `--acme-domain` values: native TLS with an auto-obtained Let's Encrypt cert. */
+  acmeDomains?: string[];
 }
 
 /**
@@ -96,6 +100,24 @@ export function resolveBindSecurity(input: BindSecurityInput): BindSecurity {
     throw new BindSecurityError(
       'pass either --tls (native termination) or --insecure-behind-proxy, not both',
     );
+  }
+
+  // ACME (auto Let's Encrypt) is its own native-TLS story — it obtains the cert
+  // rather than reading files — so it satisfies a non-loopback bind. It's mutually
+  // exclusive with file-supplied TLS and with the insecure-proxy assertion.
+  const hasAcme = (input.acmeDomains?.length ?? 0) > 0;
+  if (hasAcme && hasTls) {
+    throw new BindSecurityError(
+      'pass either --acme-domain (auto TLS) or --tls (file cert), not both',
+    );
+  }
+  if (hasAcme && input.insecureBehindProxy) {
+    throw new BindSecurityError(
+      'pass either --acme-domain (auto TLS) or --insecure-behind-proxy, not both',
+    );
+  }
+  if (hasAcme) {
+    return { host, mode: 'acme', tlsRequired: true };
   }
 
   if (isLoopbackHost(host)) {

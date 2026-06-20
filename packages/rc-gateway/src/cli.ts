@@ -27,6 +27,9 @@ import {
 import { MdnsAdvertiser, type BonjourFactory } from './mdns/advertiser.js';
 import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
 import { startDaemon } from './daemonSupervisor.js';
+import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
+import type { AcmeManager } from './tls/acme/acmeManager.js';
+import { createLiveTlsContext, type LiveTlsContext } from './tls/acmeHttps.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
@@ -151,6 +154,20 @@ export interface ServeOptions {
   attachDaemonUrl?: string;
   /** Token (`QWEN_SERVER_TOKEN`) of the daemon to attach to. */
   attachDaemonToken?: string;
+  /**
+   * `--acme-domain` values: bind with native TLS using an auto-obtained (and
+   * auto-renewed) Let's Encrypt cert via DNS-01. Requires {@link acmeEmail} and
+   * {@link acmeDnsProvider}; DNS-provider creds come from env. See
+   * `docs/acme-dns01-design.md`.
+   */
+  acmeDomains?: string[];
+  acmeEmail?: string;
+  /** `route53` | `cloudflare`. */
+  acmeDnsProvider?: string;
+  /** Use LE staging (untrusted certs, loose limits) for testing. */
+  acmeStaging?: boolean;
+  /** Override the ACME directory URL (private CA / Pebble). */
+  acmeDirectoryUrl?: string;
 }
 
 /** Boot the daemon + gateway and print the owner pairing code. */
@@ -163,6 +180,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     tlsCert: opts.tlsCert,
     tlsKey: opts.tlsKey,
     insecureBehindProxy: opts.insecureBehindProxy,
+    acmeDomains: opts.acmeDomains,
   });
   // Read AND validate the cert/key NOW (before spawning the daemon) so a bad
   // path OR malformed PEM fails fast with a clean BindSecurityError and never
@@ -191,6 +209,48 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       );
     }
     tlsMaterial = { cert, key };
+  }
+  // ACME (auto Let's Encrypt): obtain the cert BEFORE spawning the daemon so an
+  // issuance failure fails fast without orphaning a daemon (same contract as the
+  // file-cert path above). `start()` loads a cached cert (fast) or obtains one via
+  // DNS-01 (slow first boot); it then keeps an auto-renewal loop running. The
+  // `liveTls` SNICallback serves the current cert and swaps on renewal (onChange).
+  let acmeManager: AcmeManager | undefined;
+  let acmeTls: LiveTlsContext | undefined;
+  if (bind.mode === 'acme') {
+    if (!opts.acmeEmail) {
+      throw new BindSecurityError(
+        '--acme-domain requires --acme-email <email>',
+      );
+    }
+    if (!opts.acmeDnsProvider) {
+      throw new BindSecurityError(
+        '--acme-domain requires --acme-dns-provider <route53|cloudflare>',
+      );
+    }
+    acmeManager = await buildAcmeManager(
+      {
+        domains: opts.acmeDomains!,
+        email: opts.acmeEmail,
+        dnsProvider: opts.acmeDnsProvider,
+        staging: opts.acmeStaging,
+        directoryUrl: opts.acmeDirectoryUrl,
+      },
+      {
+        baseDir: join(homedir(), '.qwen', 'rc', 'acme'),
+        // eslint-disable-next-line no-console
+        log: (m) => console.log(`acme: ${m}`),
+        onChange: (b) => acmeTls?.update(b),
+      },
+    );
+    const initial = await acmeManager.start();
+    acmeTls = createLiveTlsContext(initial);
+    // eslint-disable-next-line no-console
+    console.log(
+      `acme: certificate ready for ${opts.acmeDomains!.join(', ')} ` +
+        `(${opts.acmeStaging ? 'LE staging' : 'LE production'}, ` +
+        `notAfter=${initial.meta.notAfter})`,
+    );
   }
   // Validate any mDNS name overrides NOW (before side effects) so a path-traversal
   // value refuses to start cleanly (add-mdns-discovery: "rejected at startup").
@@ -641,8 +701,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // http vs native-TLS https per the bind decision. The cert/key were already
   // read+validated above (before startDaemon) so a bad path fails fast without
   // orphaning the daemon; here we just hand the buffers to the https server.
-  const listener = tlsMaterial ? createHttpsServer(tlsMaterial, app) : app;
-  const scheme = bind.mode === 'tls' ? 'https' : 'http';
+  const listener = acmeTls
+    ? createHttpsServer({ SNICallback: acmeTls.sniCallback }, app)
+    : tlsMaterial
+      ? createHttpsServer(tlsMaterial, app)
+      : app;
+  const scheme = bind.mode === 'tls' || bind.mode === 'acme' ? 'https' : 'http';
   // mDNS advertise/suppress decision (add-mdns-discovery). Only a native-TLS
   // bind advertises; loopback and insecure-proxy are suppressed (the latter
   // because the upstream proxy, not this cleartext bind, is the right mDNS
@@ -672,6 +736,10 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       );
     } else if (bind.mode === 'tls') {
       banner.push('TLS: native termination enabled');
+    } else if (bind.mode === 'acme') {
+      banner.push(
+        `TLS: auto Let's Encrypt (${opts.acmeStaging ? 'staging' : 'production'}), auto-renewing`,
+      );
     }
     banner.push(
       `webpush: enabled (key ${vapid.getApplicationServerKey().slice(0, 8)}…)`,
@@ -941,6 +1009,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // not haunt the LAN for the 75-min TTL; bounded to 500 ms.
     if (mdnsAdvertiser) await mdnsAdvertiser.stop(500);
     if (pump) await pump.stop();
+    acmeManager?.stop();
     await handle.stop();
     process.exit(0);
   };
@@ -1078,6 +1147,8 @@ if (process.argv[2] === 'serve') {
   // Flags: --host <h> --tls <cert> --tls-key <key> --insecure-behind-proxy
   //        --port <n> --daemon-port <n> --no-mdns --mdns-workspace-name <s>
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
+  //        --acme-domain <d[,d]> --acme-email <e> --acme-dns-provider <route53|cloudflare>
+  //        --acme-staging --acme-directory <url>
   const argv = process.argv.slice(3);
   const flag = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
@@ -1087,6 +1158,7 @@ if (process.argv[2] === 'serve') {
   };
   const port = flag('port');
   const daemonPort = flag('daemon-port');
+  const acmeDomain = flag('acme-domain');
   const serveOpts: ServeOptions = {
     host: flag('host'),
     tlsCert: flag('tls'),
@@ -1100,6 +1172,17 @@ if (process.argv[2] === 'serve') {
     // Handoff Phase 1: attach to an existing daemon instead of spawning.
     attachDaemonUrl: flag('attach-daemon') ?? process.env.QWEN_RC_DAEMON_URL,
     attachDaemonToken: flag('daemon-token') ?? process.env.QWEN_RC_DAEMON_TOKEN,
+    // Auto TLS (Let's Encrypt, DNS-01). Provider creds come from env.
+    acmeDomains: acmeDomain
+      ? acmeDomain
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined,
+    acmeEmail: flag('acme-email'),
+    acmeDnsProvider: flag('acme-dns-provider'),
+    acmeStaging: argv.includes('--acme-staging'),
+    acmeDirectoryUrl: flag('acme-directory'),
   };
   runServe(serveOpts).catch((err) => {
     // eslint-disable-next-line no-console

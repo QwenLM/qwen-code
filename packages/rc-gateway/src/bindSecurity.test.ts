@@ -107,4 +107,34 @@ describe('resolveBindSecurity', () => {
     expect(r.mode).toBe('tls');
     expect(r.tlsRequired).toBe(true);
   });
+
+  it("accepts a non-loopback bind in acme mode (auto Let's Encrypt)", () => {
+    const r = resolveBindSecurity({
+      host: '0.0.0.0',
+      acmeDomains: ['qwen.example.com'],
+    });
+    expect(r.mode).toBe('acme');
+    expect(r.tlsRequired).toBe(true);
+  });
+
+  it('rejects --acme-domain combined with --tls', () => {
+    expect(() =>
+      resolveBindSecurity({
+        host: '0.0.0.0',
+        acmeDomains: ['qwen.example.com'],
+        tlsCert: '/c.pem',
+        tlsKey: '/k.pem',
+      }),
+    ).toThrow(/not both/);
+  });
+
+  it('rejects --acme-domain combined with --insecure-behind-proxy', () => {
+    expect(() =>
+      resolveBindSecurity({
+        host: '0.0.0.0',
+        acmeDomains: ['qwen.example.com'],
+        insecureBehindProxy: true,
+      }),
+    ).toThrow(/not both/);
+  });
 });
