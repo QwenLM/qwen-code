@@ -90,6 +90,9 @@ describe('isValidRefName', () => {
     'a[b',
     'a\\b',
     '../../evil',
+    'a\x9bb', // C1 control (CSI) — terminal escape injection
+    'a\u2028b', // Unicode line separator — status-line layout desync
+    'a'.repeat(256), // exceeds the length cap
   ])('rejects %j', (name) => {
     expect(isValidRefName(name)).toBe(false);
   });
@@ -209,22 +212,36 @@ describe('resolveBranchName', () => {
     expect(await resolveBranchName(dir)).toBeUndefined();
   });
 
-  it('caches gitDir resolution, and clearGitDirCache re-resolves', async () => {
+  it('does not cache a non-repo miss (detects git init mid-session)', async () => {
     const dir = await makeBareDir();
     expect(await resolveBranchName(dir)).toBeUndefined();
 
-    // Turn it into a real repo; the cached miss should still be returned...
+    // The directory becomes a real repo mid-session. The earlier miss must not
+    // have been cached, so the branch resolves without clearing anything.
     await fsp.mkdir(path.join(dir, '.git', 'objects'), { recursive: true });
     await fsp.mkdir(path.join(dir, '.git', 'refs'), { recursive: true });
     await fsp.writeFile(
       path.join(dir, '.git', 'HEAD'),
       'ref: refs/heads/main\n',
     );
-    expect(await resolveBranchName(dir)).toBeUndefined();
-
-    // ...until the cache is cleared.
-    clearGitDirCache();
     expect(await resolveBranchName(dir)).toBe('main');
+  });
+
+  it('caches a successful resolution; clearGitDirCache forces re-resolution', async () => {
+    const repo = await makeRepo('ref: refs/heads/main\n');
+    expect(await resolveBranchName(repo)).toBe('main');
+
+    // Remove the object store. The cached gitDir is still used (only HEAD is
+    // re-read), so the branch still resolves...
+    await fsp.rm(path.join(repo, '.git', 'objects'), {
+      recursive: true,
+      force: true,
+    });
+    expect(await resolveBranchName(repo)).toBe('main');
+
+    // ...until the cache is cleared and re-resolution rejects the storeless dir.
+    clearGitDirCache();
+    expect(await resolveBranchName(repo)).toBeUndefined();
   });
 
   it('rejects a .git gitdir pointer to a non-repo path', async () => {

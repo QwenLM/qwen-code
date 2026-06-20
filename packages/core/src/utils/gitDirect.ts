@@ -26,10 +26,15 @@ import { resolveGitDir } from './gitDiff.js';
 
 const SHORT_SHA_LENGTH = 7;
 
-// Control chars (0x00-0x1f), space (0x20), DEL (0x7f), and the characters git
-// disallows in a ref name: ~ ^ : ? * [ and backslash.
+const MAX_REF_NAME_LENGTH = 255;
+
+// Control chars (C0 0x00-0x1f, space 0x20, DEL 0x7f, C1 0x80-0x9f), the Unicode
+// line separators, and the characters git disallows in a ref name: ~ ^ : ? * [
+// and backslash. Blocking C1 and U+2028/U+2029 hardens the display path: with
+// `git` no longer vetting the value, a hand-written HEAD could otherwise carry
+// terminal escape bytes (CSI/OSC) or line separators into the status line.
 // eslint-disable-next-line no-control-regex
-const INVALID_REF_CHARS = /[\x00-\x20\x7f~^:?*[\\]/;
+const INVALID_REF_CHARS = /[\x00-\x20\x7f-\x9f\u2028\u2029~^:?*[\\]/;
 
 /**
  * Validate a branch/ref name well enough to trust it as a display value — and,
@@ -40,7 +45,7 @@ const INVALID_REF_CHARS = /[\x00-\x20\x7f~^:?*[\\]/;
  * git itself forbids.
  */
 export function isValidRefName(name: string): boolean {
-  if (!name) return false;
+  if (!name || name.length > MAX_REF_NAME_LENGTH) return false;
   if (name.startsWith('/') || name.endsWith('/')) return false;
   if (name.startsWith('.') || name.endsWith('.')) return false;
   if (name.endsWith('.lock')) return false;
@@ -56,10 +61,11 @@ export function isValidGitSha(value: string): boolean {
 }
 
 // resolveGitDir walks ancestors and parses the worktree gitdir pointer on every
-// call; its result is stable for a given cwd within a session, so cache it
-// (misses included). HEAD itself is never cached — it is re-read on every call
-// so a branch switch is reflected immediately.
-const gitDirCache = new Map<string, string | null>();
+// call; a successful result is stable for a given cwd within a session, so it
+// is cached. A miss (non-repo) is NOT cached — the directory may become a repo
+// mid-session (git init / clone), so it is always re-checked. HEAD is never
+// cached either: it is re-read every call so a branch switch shows at once.
+const gitDirCache = new Map<string, string>();
 
 /** Clear the cached gitDir results (e.g. after a repo is created/removed). */
 export function clearGitDirCache(): void {
@@ -123,7 +129,9 @@ async function getCachedGitDir(cwd: string): Promise<string | null> {
   const cached = gitDirCache.get(key);
   if (cached !== undefined) return cached;
   const gitDir = await resolveTrustedGitDir(key);
-  gitDirCache.set(key, gitDir);
+  // Only cache a successful resolution. A null (non-repo) result may become
+  // valid later (git init / clone mid-session), so always re-check.
+  if (gitDir !== null) gitDirCache.set(key, gitDir);
   return gitDir;
 }
 
