@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { join, sep } from 'path'
 import { tmpdir } from 'os'
 import {
   collectDirectoryFiles,
@@ -222,6 +222,21 @@ describe('bundle-files', () => {
       const target = join(tmpDir, 'target')
       mkdirSync(target)
       restoreFiles(target, files)
+
+      expect(readFileSync(join(target, 'test.txt'), 'utf-8')).toBe('restored content')
+    })
+
+    it('restores files when target directory has a trailing separator', () => {
+      const content = Buffer.from('restored content')
+      const files: BundleFile[] = [{
+        relativePath: 'test.txt',
+        contentBase64: content.toString('base64'),
+        size: content.length,
+      }]
+
+      const target = join(tmpDir, 'target')
+      mkdirSync(target)
+      restoreFiles(`${target}${sep}`, files)
 
       expect(readFileSync(join(target, 'test.txt'), 'utf-8')).toBe('restored content')
     })
