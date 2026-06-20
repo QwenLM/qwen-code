@@ -62,6 +62,9 @@ class NativeAudioRecorder implements VoiceRecorder {
   }
 
   async start(options: VoiceRecorderStartOptions = {}): Promise<void> {
+    if (this.backend) {
+      throw new Error('Native voice recorder is already recording.');
+    }
     const backend = await this.loadBackend();
     const silenceDetection = options.silenceDetection === true;
     backend.startRecording({

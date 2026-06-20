@@ -209,7 +209,7 @@ describe('voiceTranscriber', () => {
         id: 'qwen3-asr-flash',
         label: 'Qwen ASR',
         authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://dashscope.example/v1',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       },
     ]);
 
@@ -221,9 +221,69 @@ describe('voiceTranscriber', () => {
       }),
     ).toEqual({
       model: 'qwen3-asr-flash',
-      baseUrl: 'https://dashscope.example/v1',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       apiKey: 'sk-from-settings',
     });
+  });
+
+  it('does not forward the primary auth apiKey to third-party voice hosts', () => {
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Custom ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://asr.example/v1',
+      },
+    ]);
+
+    expect(
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings({}, 'sk-primary'),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://asr.example/v1',
+    });
+  });
+
+  it('rejects invalid voice base URLs', () => {
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Qwen ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'dashscope.example/v1',
+      },
+    ]);
+
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toThrow("Voice model 'qwen3-asr-flash' has an invalid baseUrl.");
+  });
+
+  it('rejects non-https voice URLs when an API key would be sent', () => {
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Qwen ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+    ]);
+
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings({}, 'sk-primary'),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toThrow(/must use an https baseUrl/);
   });
 
   it('posts audio to chat/completions as input_audio content', async () => {

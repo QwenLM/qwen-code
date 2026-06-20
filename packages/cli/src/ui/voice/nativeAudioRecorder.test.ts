@@ -68,4 +68,21 @@ describe('createNativeAudioRecorder', () => {
       vi.useRealTimers();
     }
   });
+
+  it('rejects a second start while already recording', async () => {
+    const backend = {
+      startRecording: vi.fn(),
+      stopRecording: vi.fn(() => new Uint8Array([1])),
+      isRecording: vi.fn(() => true),
+      microphoneAuthorizationStatus: vi.fn(() => 'unknown' as const),
+    };
+    const recorder = createNativeAudioRecorder({
+      loadBackend: () => backend,
+    });
+
+    await recorder.start();
+    await expect(recorder.start()).rejects.toThrow(/already recording/);
+
+    expect(backend.startRecording).toHaveBeenCalledTimes(1);
+  });
 });

@@ -23,14 +23,24 @@ interface VoiceRecorderOptions {
 
 class FallbackVoiceRecorder implements VoiceRecorder {
   private activeRecorder: VoiceRecorder | null = null;
+  private readonly recorders = new Map<() => VoiceRecorder, VoiceRecorder>();
 
   constructor(private readonly factories: Array<() => VoiceRecorder>) {}
+
+  private recorderFor(factory: () => VoiceRecorder): VoiceRecorder {
+    let recorder = this.recorders.get(factory);
+    if (!recorder) {
+      recorder = factory();
+      this.recorders.set(factory, recorder);
+    }
+    return recorder;
+  }
 
   async start(options?: VoiceRecorderStartOptions): Promise<void> {
     const errors: string[] = [];
 
     for (const factory of this.factories) {
-      const recorder = factory();
+      const recorder = this.recorderFor(factory);
       try {
         await recorder.start(options);
         this.activeRecorder = recorder;
@@ -58,7 +68,7 @@ class FallbackVoiceRecorder implements VoiceRecorder {
   async warmup(): Promise<void> {
     for (const factory of this.factories) {
       try {
-        await factory().warmup?.();
+        await this.recorderFor(factory).warmup?.();
       } catch {
         // Ignore — start() will still try/fall back at record time.
       }
@@ -85,7 +95,7 @@ class FallbackVoiceRecorder implements VoiceRecorder {
     'granted' | 'denied' | 'prompt' | 'unknown'
   > {
     for (const factory of this.factories) {
-      const recorder = factory();
+      const recorder = this.recorderFor(factory);
       if (recorder.microphoneStatus) {
         try {
           return await recorder.microphoneStatus();

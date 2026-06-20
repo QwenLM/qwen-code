@@ -27,6 +27,7 @@ describe('createVoiceRecorder', () => {
     const voiceRecorder = createVoiceRecorder({
       createNativeRecorder: vi.fn(() => nativeRecorder),
       createSoxRecorder: vi.fn(() => soxRecorder),
+      platform: 'darwin',
     });
 
     await voiceRecorder.start();
@@ -50,6 +51,7 @@ describe('createVoiceRecorder', () => {
     const voiceRecorder = createVoiceRecorder({
       createNativeRecorder: vi.fn(() => nativeRecorder),
       createSoxRecorder: vi.fn(() => soxRecorder),
+      platform: 'darwin',
     });
 
     await voiceRecorder.start();
@@ -69,6 +71,7 @@ describe('createVoiceRecorder', () => {
     const voiceRecorder = createVoiceRecorder({
       createNativeRecorder: vi.fn(() => nativeRecorder),
       createSoxRecorder: vi.fn(() => recorder()),
+      platform: 'darwin',
     });
 
     await voiceRecorder.start();
@@ -85,10 +88,34 @@ describe('createVoiceRecorder', () => {
     const voiceRecorder = createVoiceRecorder({
       createNativeRecorder: vi.fn(() => nativeRecorder),
       createSoxRecorder: vi.fn(() => soxRecorder),
+      platform: 'darwin',
     });
 
     await voiceRecorder.start();
 
     expect(voiceRecorder.supportsStreaming?.()).toBe(false);
+  });
+
+  it('reuses backend instances across warmup, status, and start', async () => {
+    const nativeRecorder = recorder({
+      warmup: vi.fn().mockResolvedValue(undefined),
+      microphoneStatus: vi.fn().mockResolvedValue('granted'),
+    });
+    const createNativeRecorder = vi.fn(() => nativeRecorder);
+
+    const voiceRecorder = createVoiceRecorder({
+      createNativeRecorder,
+      createSoxRecorder: vi.fn(() => recorder()),
+      platform: 'darwin',
+    });
+
+    await voiceRecorder.warmup?.();
+    await expect(voiceRecorder.microphoneStatus?.()).resolves.toBe('granted');
+    await voiceRecorder.start();
+
+    expect(createNativeRecorder).toHaveBeenCalledTimes(1);
+    expect(nativeRecorder.warmup).toHaveBeenCalledTimes(1);
+    expect(nativeRecorder.microphoneStatus).toHaveBeenCalledTimes(1);
+    expect(nativeRecorder.start).toHaveBeenCalledTimes(1);
   });
 });

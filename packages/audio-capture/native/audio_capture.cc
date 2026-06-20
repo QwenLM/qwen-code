@@ -6,6 +6,7 @@
 
 #include <node_api.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -32,6 +33,8 @@ namespace {
 // before the user speaks does not trigger a stop.
 constexpr double kSilenceThreshold = 0.03 * 32768.0;
 constexpr double kSilenceDurationSecs = 2.0;
+constexpr size_t kMaxPcmBytes = 10 * 1024 * 1024;
+constexpr size_t kMaxPcmSamples = kMaxPcmBytes / sizeof(int16_t);
 
 struct RecorderState {
   ma_device device;
@@ -177,7 +180,16 @@ void DataCallback(
 
   std::lock_guard<std::mutex> lock(state->mutex);
   state->level = meanAbs / 32768.0;
-  state->pcm.insert(state->pcm.end(), samples, samples + sampleCount);
+  const size_t remaining = state->pcm.size() < kMaxPcmSamples
+                               ? kMaxPcmSamples - state->pcm.size()
+                               : 0;
+  const size_t toCopy = std::min(sampleCount, remaining);
+  if (toCopy > 0) {
+    state->pcm.insert(state->pcm.end(), samples, samples + toCopy);
+  }
+  if (toCopy < sampleCount) {
+    state->silenceDetected.store(true);
+  }
 }
 
 napi_value StartRecording(napi_env env, napi_callback_info info) {

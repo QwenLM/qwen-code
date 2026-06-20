@@ -73,10 +73,11 @@ const buildOrder = [
 ];
 
 for (const workspace of buildOrder) {
-  execSync(`npm run build --workspace=${workspace}`, {
-    stdio: 'inherit',
-    cwd: root,
-  });
+  const command =
+    workspace === 'packages/audio-capture'
+      ? `npm run build:ts --workspace=${workspace}`
+      : `npm run build --workspace=${workspace}`;
+  execSync(command, { stdio: 'inherit', cwd: root });
 
   // After cli is built, generate the JSON Schema for settings
   // so the vscode-ide-companion extension can provide IntelliSense

@@ -6,12 +6,34 @@
 
 import type { VoiceStreamSession } from './voiceStreamSession.js';
 
+const RETRY_DELAY_MS = 200;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /\b(400|401|403)\b|unauthori[sz]ed|forbidden|model_not_supported/i.test(
+      message,
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export async function openVoiceStreamWithRetry(
   open: () => Promise<VoiceStreamSession>,
 ): Promise<VoiceStreamSession> {
   try {
     return await open();
-  } catch {
+  } catch (error) {
+    if (!isRetryable(error)) {
+      throw error;
+    }
+    await delay(RETRY_DELAY_MS);
     return open();
   }
 }

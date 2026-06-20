@@ -75,9 +75,32 @@ function readSettingsEnv(
     : undefined;
 }
 
+function isQwenBaseUrl(baseUrl: string): boolean {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return (
+      hostname === 'dashscope.aliyuncs.com' ||
+      hostname.endsWith('.dashscope.aliyuncs.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeBaseUrl(baseUrl: string, modelName: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(`Voice model '${modelName}' has an invalid baseUrl.`);
+  }
+  return trimTrailingSlashes(url.toString());
+}
+
 function readApiKey(
   settings: LoadedSettings,
   model: AvailableModel,
+  baseUrl: string,
 ): string | undefined {
   const envKey = model.envKey ?? DEFAULT_OPENAI_API_KEY;
   const envValue = process.env[envKey];
@@ -88,7 +111,7 @@ function readApiKey(
   if (settingsEnvValue) {
     return settingsEnvValue;
   }
-  if (!model.envKey) {
+  if (!model.envKey && isQwenBaseUrl(baseUrl)) {
     const authApiKey = settings.merged.security?.auth?.apiKey;
     return typeof authApiKey === 'string' && authApiKey.trim().length > 0
       ? authApiKey.trim()
@@ -125,15 +148,21 @@ export function resolveVoiceTranscriptionConfig({
   if (!baseUrl) {
     throw new Error(`Voice model '${voiceModel}' does not define a baseUrl.`);
   }
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl, voiceModel);
 
-  const apiKey = readApiKey(settings, model);
+  const apiKey = readApiKey(settings, model, normalizedBaseUrl);
   if (model.envKey && !apiKey) {
     throw new Error(`Voice model '${voiceModel}' requires ${model.envKey}.`);
+  }
+  if (apiKey && new URL(normalizedBaseUrl).protocol !== 'https:') {
+    throw new Error(
+      `Voice model '${voiceModel}' must use an https baseUrl when sending an API key.`,
+    );
   }
 
   return {
     model: voiceModel,
-    baseUrl,
+    baseUrl: normalizedBaseUrl,
     ...(apiKey ? { apiKey } : {}),
   };
 }
