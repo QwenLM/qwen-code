@@ -1149,7 +1149,7 @@ const SETTINGS_SCHEMA = {
         }
       | undefined,
     description:
-      'Opt-in compatibility layer for text-only primary models. When you send an image to a text-only model, a configured vision model transcribes/describes it to text that is then sent to the primary model. Disabled by default; the image and your prompt are sent to the configured vision model.',
+      'Opt-in compatibility layer for text-only primary models. When you send an image to a text-only model, a configured or auto-selected vision model transcribes/describes it to text that is then sent to the primary model. Disabled by default; the image and your prompt are sent to that vision model.',
     showInDialog: false,
     properties: {
       enabled: {

@@ -378,6 +378,7 @@ describe('runVisionBridge', () => {
     expect(textOf(result.parts)).toContain('Explain the screenshot please');
     expect(textOf(result.parts)).toMatch(/could not interpret/i);
     expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
+    expect(result.egressOccurred).toBe(true);
     expect(result.error).toContain('boom');
   });
 
@@ -420,6 +421,7 @@ describe('runVisionBridge', () => {
     expect(result.status).toBe('failed');
     expect(result.error).toMatch(/no usable image/);
     expect(result.omittedInvalidCount).toBe(1);
+    expect(result.egressOccurred).toBeUndefined();
     expect(mockSideQuery).not.toHaveBeenCalled();
     expect(textOf(result.parts)).toContain('describe this');
   });

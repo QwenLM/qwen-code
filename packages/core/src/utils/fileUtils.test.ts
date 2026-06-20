@@ -1114,27 +1114,23 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Skipped image file');
     });
 
-    it('keeps image inline on the @-path (preserveUnsupportedImage) when the vision bridge is enabled', async () => {
+    it('keeps image inline when preserveUnsupportedImage is true', async () => {
       const fakePngData = Buffer.from('fake png data');
       actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
       mockMimeGetType.mockReturnValue('image/png');
 
-      // Text-only model, bridge enabled with a resolvable model, AND the
-      // interactive @-path flag set: the image must survive so the bridge can
-      // transcribe it downstream.
-      const mockConfigBridge = {
+      const mockConfigNoImage = {
         ...mockConfig,
         getContentGeneratorConfig: () => ({ modalities: {} }),
-        getVisionBridgeConfig: () => ({ enabled: true, model: 'vision-model' }),
       } as unknown as Config;
 
       const result = await processSingleFileContent(
         testImageFilePath,
-        mockConfigBridge,
+        mockConfigNoImage,
         undefined,
         undefined,
         undefined,
-        true, // preserveUnsupportedImage (interactive @-path)
+        true,
       );
       expect(typeof result.llmContent).toBe('object');
       expect(
@@ -1142,88 +1138,6 @@ describe('fileUtils', () => {
           .mimeType,
       ).toBe('image/png');
       expect(result.returnDisplay).toContain('Read image file');
-    });
-
-    it('strips image when preserveUnsupportedImage is true but the vision bridge is disabled', async () => {
-      const fakePngData = Buffer.from('fake png data');
-      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const mockConfigBridgeDisabled = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-        getVisionBridgeConfig: () => ({ enabled: false }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testImageFilePath,
-        mockConfigBridgeDisabled,
-        undefined,
-        undefined,
-        undefined,
-        true,
-      );
-
-      expect(typeof result.llmContent).toBe('string');
-      expect(result.llmContent).toContain('Unsupported image file');
-      expect(result.llmContent).toContain('does not support image input');
-      expect(result.returnDisplay).toContain('Skipped image file');
-    });
-
-    it('strips image when the bridge is enabled but no bridge model is resolvable', async () => {
-      const fakePngData = Buffer.from('fake png data');
-      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const mockConfigBridgeWithoutModel = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-        getVisionBridgeConfig: () => ({ enabled: true }),
-        getDefaultVisionBridgeModel: () => undefined,
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testImageFilePath,
-        mockConfigBridgeWithoutModel,
-        undefined,
-        undefined,
-        undefined,
-        true,
-      );
-
-      expect(typeof result.llmContent).toBe('string');
-      expect(result.llmContent).toContain('Unsupported image file');
-      expect(result.llmContent).toContain('does not support image input');
-      expect(result.returnDisplay).toContain('Skipped image file');
-    });
-
-    it('strips image when the bridge is enabled but maxImages is 0', async () => {
-      const fakePngData = Buffer.from('fake png data');
-      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const mockConfigBridgeDisabledByLimit = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-        getVisionBridgeConfig: () => ({
-          enabled: true,
-          model: 'vision-model',
-          maxImages: 0,
-        }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testImageFilePath,
-        mockConfigBridgeDisabledByLimit,
-        undefined,
-        undefined,
-        undefined,
-        true,
-      );
-
-      expect(typeof result.llmContent).toBe('string');
-      expect(result.llmContent).toContain('Unsupported image file');
-      expect(result.returnDisplay).toContain('Skipped image file');
     });
 
     it('still strips image for agent reads (no preserve flag) even when the bridge is enabled', async () => {

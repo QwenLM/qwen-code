@@ -125,10 +125,17 @@ function formatVisionBridgeNotice(
   result: VisionBridgeResult,
   showTranscript: boolean,
 ): string {
+  const modelName = result.modelId ?? 'vision model';
+  const target = result.modelEndpoint
+    ? `${modelName} (${result.modelEndpoint})`
+    : modelName;
   if (result.status === 'failed') {
-    return `⚠ Vision bridge (${result.modelId ?? 'vision model'}) failed: ${
+    const egress = result.egressOccurred
+      ? ` Your image and prompt were sent to ${target}.`
+      : '';
+    return `⚠ Vision bridge (${modelName}) failed: ${
       result.error ?? 'unknown error'
-    }. The image was not interpreted.`;
+    }.${egress} The image was not interpreted.`;
   }
   if (result.status === 'skipped') {
     return '🔎 Vision bridge skipped (no images to convert).';
@@ -142,9 +149,6 @@ function formatVisionBridgeNotice(
   // that hiding the transcript never silently hides that data left the machine.
   // Name the endpoint too — cross-provider auto-select can route to a different
   // host than the primary model.
-  const target = result.modelEndpoint
-    ? `${result.modelId} (${result.modelEndpoint})`
-    : `${result.modelId}`;
   const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt were sent to that model.`;
   return showTranscript && result.transcript
     ? `${header}\n${result.transcript}`

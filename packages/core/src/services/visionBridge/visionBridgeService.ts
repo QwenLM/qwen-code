@@ -363,6 +363,8 @@ export interface VisionBridgeResult {
   modelId?: string;
   /** Host of the bridge model's endpoint, for cross-provider egress clarity. */
   modelEndpoint?: string;
+  /** True when image data was actually sent to the bridge model. */
+  egressOccurred?: boolean;
   /** Failure reason, when `status === 'failed'`. */
   error?: string;
 }
@@ -579,6 +581,7 @@ export async function runVisionBridge(params: {
   const requestContents: Content[] = [
     { role: 'user', parts: [...toConvert, { text: buildIntentPart(intent) }] },
   ];
+  const modelEndpoint = resolveEndpointHost(config, modelSelection);
 
   try {
     debugLogger.debug(`calling ${model} (timeout ${settings.timeoutMs}ms)`);
@@ -604,6 +607,7 @@ export async function runVisionBridge(params: {
         imageParts.length,
         omitted,
         model,
+        { egressOccurred: true, modelEndpoint },
       );
     }
     debugLogger.debug(`ok: ${description.length} chars from ${model}`);
@@ -625,7 +629,8 @@ export async function runVisionBridge(params: {
       omittedInvalidCount: omitted.invalid,
       omittedCappedCount: omitted.capped,
       modelId: model,
-      modelEndpoint: resolveEndpointHost(config, modelSelection),
+      modelEndpoint,
+      egressOccurred: true,
     };
   } catch (error) {
     if (signal.aborted && !timeoutSignal.aborted) {
@@ -647,7 +652,10 @@ export async function runVisionBridge(params: {
           ? error.message
           : String(error);
     debugLogger.warn(`conversion failed via ${model}: ${reason}`);
-    return failure(reason, nonImageParts, imageParts.length, omitted, model);
+    return failure(reason, nonImageParts, imageParts.length, omitted, model, {
+      egressOccurred: true,
+      modelEndpoint,
+    });
   }
 }
 
@@ -692,6 +700,7 @@ function failure(
   imageCount: number,
   omitted: OmittedBreakdown,
   modelId?: string,
+  options: { egressOccurred?: boolean; modelEndpoint?: string } = {},
 ): VisionBridgeResult {
   const note =
     `[Vision bridge could not interpret the attached image(s): ${reason}. ` +
@@ -706,6 +715,8 @@ function failure(
     omittedInvalidCount: omitted.invalid,
     omittedCappedCount: omitted.capped,
     modelId,
+    ...(options.modelEndpoint && { modelEndpoint: options.modelEndpoint }),
+    ...(options.egressOccurred && { egressOccurred: true }),
     error: reason,
   };
 }

@@ -348,12 +348,14 @@ export async function resolveAtCommandQuery({
   }
 
   try {
+    const preserveUnsupportedImageForBridge =
+      config.getVisionBridgeConfig?.().enabled === true;
     const result = await readManyFiles(config, {
       paths: pathSpecsToRead,
       signal,
       // Interactive @-resolution: keep images inline for a text-only model so
-      // the vision bridge can transcribe them (no-op unless the bridge is on).
-      preserveUnsupportedImageForBridge: true,
+      // the vision bridge can transcribe them when the bridge is enabled.
+      preserveUnsupportedImageForBridge,
     });
 
     const parts = Array.isArray(result.contentParts)

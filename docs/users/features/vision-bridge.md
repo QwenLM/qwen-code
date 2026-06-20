@@ -73,12 +73,12 @@ The notice always discloses that your image and prompt were sent to the vision m
 
 ## Privacy and safety
 
-- **Data egress**: your image(s) and prompt are sent to the configured vision model, which may be a different provider/endpoint than your primary model. The bridge runs only when you enable it, and the runtime notice tells you each time it happens.
+- **Data egress**: your image(s) and prompt are sent to the configured or auto-selected vision model, which may be a different provider/endpoint than your primary model. The bridge runs only when you enable it, and the runtime notice tells you each time it happens.
 - **Untrusted by design**: the transcription is fenced as untrusted machine-generated text. Text inside an image (e.g. instructions embedded in a screenshot) is treated as data, not commands — it is not executed or obeyed.
 
 ## Failure behavior
 
-If the conversion fails — the vision model times out, returns nothing, or no image-capable model is available — Qwen Code shows the failure reason and **stops the turn**. The primary model is not asked to respond, so it never answers as if it had seen the image. Resolve the cause (a reachable vision model, a higher `timeoutMs`) or describe the image in text yourself, then retry.
+If the conversion fails — the vision model times out, returns nothing, or no image-capable model is available — Qwen Code shows the failure reason, removes the image data, and sends the primary model a clear note that the image content is unavailable. The primary model can still answer any surrounding text, but it is told not to assume or invent what the image shows.
 
 ## Limitations
 

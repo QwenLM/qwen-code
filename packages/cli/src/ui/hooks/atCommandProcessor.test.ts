@@ -152,6 +152,60 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
   });
 
+  it('does not preserve unsupported images when the vision bridge is disabled', async () => {
+    const imagePath = path.join(testRootDir, 'image.png');
+    await fsPromises.writeFile(imagePath, Buffer.from('fake png data'));
+    const textOnlyConfig = {
+      ...mockConfig,
+      getModel: () => 'text-only-model',
+      getContentGeneratorConfig: () => ({ modalities: {} }),
+      getVisionBridgeConfig: () => ({ enabled: false }),
+    } as unknown as Config;
+
+    const result = await handleAtCommand({
+      query: `@${imagePath}`,
+      config: textOnlyConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 126,
+      signal: abortController.signal,
+    });
+
+    const parts = result.processedQuery as Array<{
+      text?: string;
+      inlineData?: unknown;
+    }>;
+    expect(parts.some((part) => part.inlineData)).toBe(false);
+    expect(parts.map((part) => part.text ?? '').join('')).toContain(
+      'Unsupported image file',
+    );
+  });
+
+  it('preserves unsupported images for the vision bridge when it is enabled', async () => {
+    const imagePath = path.join(testRootDir, 'image.png');
+    await fsPromises.writeFile(imagePath, Buffer.from('fake png data'));
+    const textOnlyConfig = {
+      ...mockConfig,
+      getModel: () => 'text-only-model',
+      getContentGeneratorConfig: () => ({ modalities: {} }),
+      getVisionBridgeConfig: () => ({ enabled: true }),
+    } as unknown as Config;
+
+    const result = await handleAtCommand({
+      query: `@${imagePath}`,
+      config: textOnlyConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 127,
+      signal: abortController.signal,
+    });
+
+    const parts = result.processedQuery as Array<{
+      inlineData?: { mimeType?: string };
+    }>;
+    expect(
+      parts.some((part) => part.inlineData?.mimeType === 'image/png'),
+    ).toBe(true);
+  });
+
   it('should process a valid directory path', async () => {
     const filePath = await createTestFile(
       path.join(testRootDir, 'path', 'to', 'file.txt'),

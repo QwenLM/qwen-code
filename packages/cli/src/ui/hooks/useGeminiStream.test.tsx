@@ -485,6 +485,8 @@ describe('useGeminiStream', () => {
         omittedInvalidCount: 0,
         omittedCappedCount: 0,
         modelId: 'vm',
+        modelEndpoint: 'vision.example.com',
+        egressOccurred: true,
         error: 'timed out',
       });
       const { result, mockSendMessageStream } = renderTestHook();
@@ -499,7 +501,9 @@ describe('useGeminiStream', () => {
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: MessageType.ERROR,
-          text: expect.stringContaining('failed: timed out'),
+          text: expect.stringContaining(
+            'Your image and prompt were sent to vm (vision.example.com).',
+          ),
         }),
         expect.any(Number),
       );

@@ -136,46 +136,6 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 
 Vision Bridge is available as an opt-in compatibility layer for text-only models that need to work with images. See [Vision Bridge](https://qwenlm.github.io/qwen-code-docs/en/users/features/vision-bridge/) and the [settings reference](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/) for configuration details.
 
-### Keyboard Shortcuts
-
-- `Ctrl+C` - Cancel current operation
-- `Ctrl+D` - Exit (on empty line)
-- `Up/Down` - Navigate command history
-
-> Learn more about [Commands](https://qwenlm.github.io/qwen-code-docs/en/users/features/commands/)
->
-> **Tip**: In YOLO mode (`--yolo`), vision switching happens automatically without prompts when images are detected. Learn more about [Approval Mode](https://qwenlm.github.io/qwen-code-docs/en/users/features/approval-mode/)
-
-## Configuration
-
-Qwen Code can be configured via `settings.json`, environment variables, and CLI flags.
-
-| File                    | Scope         | Description                                                                             |
-| ----------------------- | ------------- | --------------------------------------------------------------------------------------- |
-| `~/.qwen/settings.json` | User (global) | Applies to all your Qwen Code sessions. **Recommended for `modelProviders` and `env`.** |
-| `.qwen/settings.json`   | Project       | Applies only when running Qwen Code in this project. Overrides user settings.           |
-
-The most commonly used top-level fields in `settings.json`:
-
-| Field                        | Description                                                                                                                                                                      |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `modelProviders`             | Define available models per protocol (`openai`, `anthropic`, `gemini`, `vertex-ai`).                                                                                             |
-| `env`                        | Fallback environment variables (e.g. API keys). Lower priority than shell `export` and `.env` files.                                                                             |
-| `security.auth.selectedType` | The protocol to use on startup (e.g. `openai`).                                                                                                                                  |
-| `model.name`                 | The default model to use when Qwen Code starts.                                                                                                                                  |
-| `visionBridge`               | Opt-in: let a text-only model use images by transcribing them via a vision model. See [Vision Bridge](https://qwenlm.github.io/qwen-code-docs/en/users/features/vision-bridge/). |
-
-> See the [Authentication](#api-key-flexible) section above for complete `settings.json` examples, and the [settings reference](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/) for all available options.
-
-## Benchmark Results
-
-### Terminal-Bench Performance
-
-| Agent     | Model              | Accuracy |
-| --------- | ------------------ | -------- |
-| Qwen Code | Qwen3-Coder-480A35 | 37.5%    |
-| Qwen Code | Qwen3-Coder-30BA3B | 31.3%    |
-
 ## Ecosystem
 
 - [**Qwen Code Desktop**](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) — Official desktop app for macOS, Windows, and Linux
