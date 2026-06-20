@@ -9,6 +9,7 @@ import type { ExtensionInstallMetadata } from '../config/config.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as http from 'node:http';
 import * as https from 'node:https';
 import { stat } from 'node:fs/promises';
 import { parseGitHubRepoForReleases } from './github.js';
@@ -140,6 +141,9 @@ function fetchUrl(
   url: string,
   headers: Record<string, string>,
 ): Promise<string | null> {
+  const protocol = new URL(url).protocol;
+  const client = protocol === 'http:' ? http : https;
+
   return new Promise((resolve) => {
     let settled = false;
     const done = (value: string | null) => {
@@ -155,7 +159,7 @@ function fetchUrl(
       req.destroy();
       done(null);
     }, MARKETPLACE_FETCH_TIMEOUT_MS);
-    const req = https.get(url, { headers }, (res) => {
+    const req = client.get(url, { headers }, (res) => {
       if (res.statusCode !== 200) {
         res.resume(); // drain so the socket can be freed
         done(null);
@@ -254,7 +258,7 @@ async function readLocalMarketplaceConfig(
  * - Local directory containing `.claude-plugin/marketplace.json`
  * - Local path directly to a `marketplace.json` file
  * - `owner/repo`, `https://github.com/owner/repo`, `git@github.com:owner/repo.git`
- * - Arbitrary `https://host/.../marketplace.json` returning the JSON document
+ * - Arbitrary `http(s)://host/.../marketplace.json` returning the JSON document
  *
  * Returns `null` when no marketplace config can be resolved.
  */

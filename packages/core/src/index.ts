@@ -357,6 +357,7 @@ export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';
 export * from './utils/environmentContext.js';
+export * from './utils/env.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
 export * from './utils/fileUtils.js';
