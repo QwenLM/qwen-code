@@ -7,6 +7,7 @@ export type WebRoute =
 const VIEW_PATHS: Record<Exclude<WebViewId, 'chat'>, string> = {
   sessions: '/sessions',
   files: '/files',
+  artifacts: '/artifacts',
   mcp: '/mcp',
   tools: '/tools',
   skills: '/skills',
@@ -30,7 +31,7 @@ export function parseWebRoute(url: URL): WebRoute {
   }
   const view = PATH_VIEWS.get(pathname);
   if (!view || view === 'chat') return { view: 'chat' };
-  if (view === 'files') {
+  if (view === 'files' || view === 'artifacts') {
     return { view, path: url.searchParams.get('path') ?? undefined };
   }
   return { view };
@@ -43,7 +44,11 @@ export function buildWebRouteUrl(route: WebRoute): string {
       : '/';
   }
   const pathname = VIEW_PATHS[route.view];
-  if (route.view !== 'files' || !route.path || route.path === '.') {
+  if (
+    (route.view !== 'files' && route.view !== 'artifacts') ||
+    !route.path ||
+    route.path === '.'
+  ) {
     return pathname;
   }
   return `${pathname}?path=${encodeURIComponent(route.path)}`;

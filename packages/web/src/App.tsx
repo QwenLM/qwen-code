@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { WebShellComposerApi } from '@qwen-code/web-shell';
 import type { WebDaemonConfig } from './config/daemon';
+import { ArtifactsPanel } from './features/artifacts/ArtifactsPanel';
 import { ChatPane } from './features/chat/ChatPane';
 import { FilesPanel } from './features/files/FilesPanel';
 import { McpPanel } from './features/mcp/McpPanel';
@@ -133,6 +134,16 @@ export function App({ config }: AppProps) {
           onAddToChat={(path) => addTextToChat(`@${path} `)}
           onPathChange={(path) =>
             navigate({ view: 'files', path }, { replace: true })
+          }
+        />
+      ) : null}
+      {activeView === 'artifacts' ? (
+        <ArtifactsPanel
+          initialPath={route.view === 'artifacts' ? route.path : undefined}
+          onAddToChat={addTextToChat}
+          onOpenFile={openFile}
+          onPathChange={(path) =>
+            navigate({ view: 'artifacts', path }, { replace: true })
           }
         />
       ) : null}

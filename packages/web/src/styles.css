@@ -731,6 +731,10 @@ pre {
   white-space: normal;
 }
 
+.web-task-artifact-meta {
+  text-transform: capitalize;
+}
+
 .web-task-actions {
   display: flex;
   gap: 5px;
@@ -1025,6 +1029,96 @@ pre {
 .web-action-result a {
   color: #225f43;
   font-weight: 650;
+}
+
+.artifacts-layout {
+  align-items: start;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+}
+
+.artifacts-list {
+  min-width: 0;
+}
+
+.artifact-card {
+  align-items: stretch;
+}
+
+.artifact-title-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.artifact-title-row h3 {
+  min-width: 0;
+}
+
+.artifact-op {
+  border: 1px solid var(--web-border);
+  border-radius: 999px;
+  color: var(--web-muted);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 650;
+  padding: 3px 7px;
+}
+
+.artifact-op-produced,
+.artifact-op-modified {
+  background: rgba(78, 141, 108, 0.12);
+  border-color: rgba(78, 141, 108, 0.24);
+  color: #2f684d;
+}
+
+.artifact-op-read {
+  background: rgba(69, 113, 181, 0.1);
+  border-color: rgba(69, 113, 181, 0.2);
+  color: #355f9b;
+}
+
+.artifact-detail {
+  position: sticky;
+  top: 0;
+}
+
+.artifact-detail .web-card-main h3,
+.artifact-detail .web-card-main p {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.artifact-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.artifact-diff-placeholder {
+  background: var(--web-surface-soft);
+  border: 1px dashed var(--web-border-strong);
+  border-radius: 14px;
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+}
+
+.artifact-diff-placeholder strong {
+  color: var(--web-text);
+  font-size: 12px;
+}
+
+@media (max-width: 1180px) {
+  .artifacts-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .artifact-detail {
+    position: static;
+  }
 }
 
 .memory-append-box {

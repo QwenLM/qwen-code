@@ -15,6 +15,7 @@ import type {
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
 } from '@qwen-code/webui/daemon-react-sdk';
+import { useWebArtifacts } from '../artifacts/useWebArtifacts';
 
 const MAX_RECENT_ITEMS = 5;
 const MAX_NOTICE_ITEMS = 2;
@@ -34,10 +35,11 @@ export function TaskRail({ onAddToChat, onOpenFile }: TaskRailProps) {
   const pendingPermissions = usePendingPermissions();
   const activeTodoList = useActiveTodoList();
   const { notices } = useSessionNotices();
+  const { artifacts } = useWebArtifacts();
 
   const currentTool = getCurrentTool(transcriptState, blocks);
   const recentTools = getRecentToolBlocks(blocks);
-  const recentPaths = getRecentPaths(recentTools);
+  const recentArtifacts = artifacts.slice(0, MAX_RECENT_ITEMS);
   const importantNotices = notices
     .filter(
       (notice) => notice.severity === 'warning' || notice.severity === 'error',
@@ -164,24 +166,30 @@ export function TaskRail({ onAddToChat, onOpenFile }: TaskRailProps) {
         <p className="web-task-muted">
           从最近工具输出中推断，不代表完整 artifact 索引。
         </p>
-        {recentPaths.length > 0 ? (
+        {recentArtifacts.length > 0 ? (
           <ul className="web-task-list">
-            {recentPaths.map((path) => (
+            {recentArtifacts.map((artifact) => (
               <li
-                key={path}
+                key={artifact.id}
                 className="web-task-row web-task-mono web-task-artifact-row"
               >
-                <strong>{path}</strong>
+                <span className="web-task-artifact-meta">
+                  {artifact.operation}
+                </span>
+                <strong>{artifact.path}</strong>
                 <span className="web-task-actions">
                   {onOpenFile ? (
-                    <button type="button" onClick={() => onOpenFile(path)}>
+                    <button
+                      type="button"
+                      onClick={() => onOpenFile(artifact.path)}
+                    >
                       Open
                     </button>
                   ) : null}
                   {onAddToChat ? (
                     <button
                       type="button"
-                      onClick={() => onAddToChat(`@${path} `)}
+                      onClick={() => onAddToChat(`@${artifact.path} `)}
                     >
                       Add
                     </button>
@@ -253,49 +261,6 @@ function getCurrentTool(
 
 function getRecentToolBlocks(blocks: readonly DaemonTranscriptBlock[]) {
   return blocks.filter(isToolBlock).slice(-MAX_RECENT_ITEMS).reverse();
-}
-
-function getRecentPaths(blocks: readonly DaemonToolTranscriptBlock[]) {
-  const paths = new Set<string>();
-  for (const block of blocks) {
-    collectPaths(block.locations, paths, 0, true);
-    collectPaths(block.preview, paths, 0, true);
-    collectPaths(block.rawInput, paths, 0, false);
-  }
-  return Array.from(paths).slice(0, MAX_RECENT_ITEMS);
-}
-
-function collectPaths(
-  value: unknown,
-  paths: Set<string>,
-  depth: number,
-  acceptString: boolean,
-) {
-  if (paths.size >= MAX_RECENT_ITEMS || depth > 3 || value == null) return;
-  if (typeof value === 'string') {
-    if (acceptString && isLikelyPath(value)) paths.add(value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value)
-      collectPaths(item, paths, depth + 1, acceptString);
-    return;
-  }
-  if (typeof value !== 'object') return;
-  for (const [key, entry] of Object.entries(value)) {
-    const pathKey = /path|file|files|filename|location|output/i.test(key);
-    if (typeof entry === 'string' && pathKey && isLikelyPath(entry)) {
-      paths.add(entry);
-      continue;
-    }
-    collectPaths(entry, paths, depth + 1, pathKey || acceptString);
-  }
-}
-
-function isLikelyPath(value: string) {
-  if (!value || value.length > 180) return false;
-  if (/^https?:\/\//.test(value)) return false;
-  return value.includes('/') || /\.[a-z0-9]{1,8}$/i.test(value);
 }
 
 function isToolBlock(

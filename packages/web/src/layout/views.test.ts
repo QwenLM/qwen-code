@@ -7,6 +7,7 @@ describe('WEB_VIEWS', () => {
       'chat',
       'sessions',
       'files',
+      'artifacts',
       'mcp',
       'tools',
       'skills',

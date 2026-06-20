@@ -26,6 +26,7 @@ describe('web routes', () => {
   it('parses primary workspace views', () => {
     expect(route('/sessions')).toEqual({ view: 'sessions' });
     expect(route('/files')).toEqual({ view: 'files', path: undefined });
+    expect(route('/artifacts')).toEqual({ view: 'artifacts', path: undefined });
     expect(route('/mcp')).toEqual({ view: 'mcp' });
     expect(route('/tools')).toEqual({ view: 'tools' });
     expect(route('/skills')).toEqual({ view: 'skills' });
@@ -33,13 +34,17 @@ describe('web routes', () => {
     expect(route('/settings')).toEqual({ view: 'settings' });
   });
 
-  it('parses files paths', () => {
+  it('parses file-backed paths', () => {
     expect(route('/files?path=package.json')).toEqual({
       view: 'files',
       path: 'package.json',
     });
     expect(route('/files?path=packages%2Fweb%2Fsrc%2FApp.tsx')).toEqual({
       view: 'files',
+      path: 'packages/web/src/App.tsx',
+    });
+    expect(route('/artifacts?path=packages%2Fweb%2Fsrc%2FApp.tsx')).toEqual({
+      view: 'artifacts',
       path: 'packages/web/src/App.tsx',
     });
   });
@@ -55,6 +60,13 @@ describe('web routes', () => {
     expect(
       buildWebRouteUrl({ view: 'files', path: 'packages/web/src/App.tsx' }),
     ).toBe('/files?path=packages%2Fweb%2Fsrc%2FApp.tsx');
+    expect(buildWebRouteUrl({ view: 'artifacts' })).toBe('/artifacts');
+    expect(
+      buildWebRouteUrl({
+        view: 'artifacts',
+        path: 'packages/web/src/App.tsx',
+      }),
+    ).toBe('/artifacts?path=packages%2Fweb%2Fsrc%2FApp.tsx');
   });
 
   it('builds route for sidebar views', () => {
