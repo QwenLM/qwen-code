@@ -42,13 +42,16 @@ function parseSourceAndPluginName(source: string): {
   // Check if source contains a colon that could be a pluginName separator
   // We need to handle URL schemes that contain colons
   const urlSchemes = ['http://', 'https://', 'git@', 'sso://'];
+  // URL schemes are case-insensitive, so match against a lowercased copy while
+  // slicing from the original. Offsets stay valid because casing never changes length.
+  const lowerSource = source.toLowerCase();
 
   let repoEndIndex = source.length;
   let hasPluginName = false;
 
   // For URLs, find the last colon after the scheme
   for (const scheme of urlSchemes) {
-    if (source.startsWith(scheme)) {
+    if (lowerSource.startsWith(scheme)) {
       const afterScheme = source.substring(scheme.length);
       const lastColonIndex = afterScheme.lastIndexOf(':');
       if (lastColonIndex !== -1) {
@@ -71,7 +74,7 @@ function parseSourceAndPluginName(source: string): {
   // For non-URL sources (local paths or owner/repo format)
   if (
     repoEndIndex === source.length &&
-    !urlSchemes.some((s) => source.startsWith(s))
+    !urlSchemes.some((s) => lowerSource.startsWith(s))
   ) {
     const lastColonIndex = source.lastIndexOf(':');
     // On Windows, avoid treating drive letter as pluginName separator (e.g., C:\path)
@@ -111,11 +114,13 @@ function convertOwnerRepoToGitHubUrl(ownerRepo: string): string {
  * Check if source is a git URL
  */
 function isGitUrl(source: string): boolean {
+  // URL schemes are case-insensitive (e.g. HTTPS://...), so compare lowercased.
+  const lower = source.toLowerCase();
   return (
-    source.startsWith('http://') ||
-    source.startsWith('https://') ||
-    source.startsWith('git@') ||
-    source.startsWith('sso://')
+    lower.startsWith('http://') ||
+    lower.startsWith('https://') ||
+    lower.startsWith('git@') ||
+    lower.startsWith('sso://')
   );
 }
 
