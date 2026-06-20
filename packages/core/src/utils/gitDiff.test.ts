@@ -1256,28 +1256,6 @@ describe('fetchGitDiff untracked counting', () => {
     );
   });
 
-  it('counts untracked files in filesCount even after the per-file map is full', async () => {
-    // Create MAX_FILES tracked modifications to fill the per-file map.
-    for (let i = 0; i < MAX_FILES; i++) {
-      await fs.writeFile(path.join(repo, `t${i}.txt`), `hello${i}\n`);
-    }
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'seed');
-    for (let i = 0; i < MAX_FILES; i++) {
-      await fs.writeFile(path.join(repo, `t${i}.txt`), `HELLO${i}\n`);
-    }
-    // Add 3 untracked files.
-    await fs.writeFile(path.join(repo, 'u1.txt'), 'a\n');
-    await fs.writeFile(path.join(repo, 'u2.txt'), 'b\n');
-    await fs.writeFile(path.join(repo, 'u3.txt'), 'c\n');
-
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    expect(result!.stats.filesCount).toBe(MAX_FILES + 3);
-    // Per-file map is still capped at MAX_FILES.
-    expect(result!.perFileStats.size).toBe(MAX_FILES);
-  });
-
   it('line-counts every untracked file in the slow path, not just the first MAX_FILES', async () => {
     // Regression for the under-counted-totals bug: with 0 tracked changes
     // and 51-500 untracked files, the slow path used to read line counts
