@@ -16,15 +16,20 @@ import {
 // Mock fs module
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  // Imported inside the (hoisted) factory — the top-level `path` import isn't
+  // initialized yet when this runs.
+  const nodePath = await import('node:path');
   return {
     ...actual,
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
     // The symlink-confinement guard (realPathWithin) resolves both the config
     // path and its dir via realpathSync. These unit tests use in-memory mock
-    // dirs that don't exist on disk, so resolve paths to themselves — keeping
-    // the config inside its (mock) extension dir so the guard passes.
-    realpathSync: vi.fn((p: string) => p),
+    // dirs that don't exist on disk; normalize via path.resolve (as the real
+    // realpathSync would) so the config path and its dir share separators —
+    // otherwise on Windows path.join() backslashes vs. the raw forward-slash
+    // mock dir make the containment startsWith() spuriously fail.
+    realpathSync: vi.fn((p: string) => nodePath.resolve(p)),
   };
 });
 
