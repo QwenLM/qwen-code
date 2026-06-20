@@ -23,6 +23,16 @@ const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
 
+function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
+  const relativePath = path.relative(parentPath, childPath);
+  return (
+    relativePath === '' ||
+    (!relativePath.startsWith(`..${path.sep}`) &&
+      relativePath !== '..' &&
+      !path.isAbsolute(relativePath))
+  );
+}
+
 export class Storage {
   private readonly targetDir: string;
 
@@ -233,11 +243,7 @@ export class Storage {
     const realParent = Storage.resolvePathThroughExistingAncestor(parentPath);
     const realChild = Storage.resolvePathThroughExistingAncestor(childPath);
 
-    const relativePath = path.relative(realParent, realChild);
-    return (
-      relativePath === '' ||
-      (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
-    );
+    return isResolvedPathWithinDirectory(realChild, realParent);
   }
 
   static assertPathWithinDirectory(
