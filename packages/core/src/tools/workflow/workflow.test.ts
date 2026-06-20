@@ -580,7 +580,9 @@ describe('WorkflowTool', () => {
     expect(first.returnDisplay as string).toMatch(
       /Workflows have no per-run token cap|Workflow token cap is/,
     );
-    expect(first.returnDisplay as string).toMatch(/skipWorkflowUsageWarning/);
+    expect(first.returnDisplay as string).toMatch(
+      /skipWorkflowUsageWarning/,
+    );
     // Second invocation: latch already flipped on the registry.
     const second = await tool
       .build({ script: 'return 2' })
@@ -647,7 +649,9 @@ describe('WorkflowTool', () => {
     const success = await tool
       .build({ script: 'return 1' })
       .execute(new AbortController().signal);
-    expect(success.returnDisplay as string).toMatch(/skipWorkflowUsageWarning/);
+    expect(success.returnDisplay as string).toMatch(
+      /skipWorkflowUsageWarning/,
+    );
     expect(registry.list()).toHaveLength(2);
     expect(registry.list()[0]!.status).toBe('failed');
     expect(registry.list()[1]!.status).toBe('completed');
