@@ -223,13 +223,36 @@ export function useVoiceInput({
           return;
         }
         pumpTimerRef.current = setInterval(() => {
-          const active = recorderRef.current;
-          if (!active) return;
-          const pcm = active.drain?.();
-          if (pcm && pcm.length > 0) session.pushAudio(pcm);
-          const level = active.audioLevel?.();
-          if (typeof level === 'number' && mountedRef.current) {
-            setAudioLevelState(level);
+          try {
+            const active = recorderRef.current;
+            if (!active) return;
+            const pcm = active.drain?.();
+            if (pcm && pcm.length > 0) session.pushAudio(pcm);
+            const level = active.audioLevel?.();
+            if (typeof level === 'number' && mountedRef.current) {
+              setAudioLevelState(level);
+            }
+          } catch (error) {
+            clearPump();
+            clearReleaseTimer();
+            const pendingStreamPromise = streamSessionRef.current
+              ? null
+              : streamSessionPromiseRef.current;
+            streamSessionRef.current?.abort();
+            streamSessionRef.current = null;
+            streamSessionPromiseRef.current = null;
+            void pendingStreamPromise
+              ?.then((pendingSession) => pendingSession.abort())
+              .catch(() => {});
+            const active = recorderRef.current;
+            recorderRef.current = null;
+            startPromiseRef.current = null;
+            void Promise.resolve()
+              .then(() => active?.stop())
+              .catch(() => undefined);
+            setVoiceStatus('idle');
+            resetStreamUi();
+            reportError(error);
           }
         }, 100);
       });

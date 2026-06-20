@@ -419,7 +419,7 @@ describe('InputPrompt', () => {
     unmount();
   });
 
-  it('swallows non-voice keys while voice recording is active', async () => {
+  it('lets non-voice keys fall through while voice recording is active', async () => {
     const handleVoiceKeypress = vi.fn(() => false);
     mockedUseVoiceInput.mockReturnValue({
       status: 'recording',
@@ -434,7 +434,7 @@ describe('InputPrompt', () => {
     await waitFor(() => {
       expect(handleVoiceKeypress).toHaveBeenCalled();
     });
-    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    expect(props.buffer.handleInput).toHaveBeenCalled();
     unmount();
   });
 

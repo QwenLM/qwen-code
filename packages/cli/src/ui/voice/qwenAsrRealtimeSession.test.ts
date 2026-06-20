@@ -58,6 +58,14 @@ describe('qwenAsrRealtimeSession', () => {
     ).toBe(
       'wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-asr-flash-realtime',
     );
+    expect(
+      deriveQwenRealtimeUrl(
+        'http://localhost:8080/dashscope/v1',
+        'qwen3-asr-flash-realtime',
+      ),
+    ).toBe(
+      'ws://localhost:8080/dashscope/api-ws/v1/realtime?model=qwen3-asr-flash-realtime',
+    );
   });
 
   it('streams PCM chunks as base64 events and resolves the completed transcript', async () => {

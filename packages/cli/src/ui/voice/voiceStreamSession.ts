@@ -54,9 +54,20 @@ export interface VoiceStreamDeps {
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 
+function deriveWebSocketBase(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  const wsScheme = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  let prefix = url.pathname.replace(/\/+$/, '');
+  if (prefix.endsWith('/compatible-mode/v1')) {
+    prefix = prefix.slice(0, -'/compatible-mode/v1'.length);
+  } else if (prefix.endsWith('/v1')) {
+    prefix = prefix.slice(0, -'/v1'.length);
+  }
+  return `${wsScheme}//${url.host}${prefix}`;
+}
+
 export function deriveStreamUrl(baseUrl: string): string {
-  const host = new URL(baseUrl).host;
-  return `wss://${host}/api-ws/v1/inference`;
+  return `${deriveWebSocketBase(baseUrl)}/api-ws/v1/inference`;
 }
 
 export function openVoiceStream(

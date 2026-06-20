@@ -651,8 +651,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const handleInput = useCallback(
     (key: Key): boolean => {
       if (voiceInput.status !== 'idle') {
-        voiceInput.handleKeypress(key);
-        return true;
+        return voiceInput.handleKeypress(key);
       }
 
       // When the Arena tab bar or background pill has focus, block

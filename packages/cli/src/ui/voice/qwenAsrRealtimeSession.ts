@@ -11,6 +11,7 @@ import type {
   VoiceStreamConfig,
   VoiceStreamSession,
 } from './voiceStreamSession.js';
+import { deriveStreamUrl } from './voiceStreamSession.js';
 
 interface SocketLike {
   readyState: number;
@@ -31,8 +32,8 @@ const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 
 export function deriveQwenRealtimeUrl(baseUrl: string, model: string): string {
-  const host = new URL(baseUrl).host;
-  return `wss://${host}/api-ws/v1/realtime?model=${encodeURIComponent(model)}`;
+  const inferenceUrl = deriveStreamUrl(baseUrl);
+  return `${inferenceUrl.replace(/\/inference$/, '/realtime')}?model=${encodeURIComponent(model)}`;
 }
 
 function appendTranscript(existing: string, next: string): string {
@@ -75,6 +76,7 @@ export function openQwenAsrRealtimeStream(
     let finishTimer: ReturnType<typeof setTimeout> | null = null;
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
     let terminalError: Error | null = null;
+    let failed = false;
 
     const sendJson = (body: Record<string, unknown>) => {
       ws.send(JSON.stringify({ event_id: randomUUID(), ...body }));
@@ -103,6 +105,8 @@ export function openQwenAsrRealtimeStream(
     };
 
     const fail = (error: unknown) => {
+      if (failed) return;
+      failed = true;
       const normalized = toError(error);
       clearConnectTimer();
       clearFinishTimer();

@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { openVoiceStream } from './voiceStreamSession.js';
+import { deriveStreamUrl, openVoiceStream } from './voiceStreamSession.js';
 
 class FakeSocket {
   readonly OPEN = 1;
@@ -58,6 +58,15 @@ function startSession(socket: FakeSocket) {
 describe('voiceStreamSession', () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('derives websocket URLs from https/http base URLs with path prefixes', () => {
+    expect(
+      deriveStreamUrl('https://dashscope.aliyuncs.com/compatible-mode/v1'),
+    ).toBe('wss://dashscope.aliyuncs.com/api-ws/v1/inference');
+    expect(deriveStreamUrl('http://localhost:8080/dashscope/v1')).toBe(
+      'ws://localhost:8080/dashscope/api-ws/v1/inference',
+    );
   });
 
   it('rejects finish when the task stream closes unexpectedly', async () => {

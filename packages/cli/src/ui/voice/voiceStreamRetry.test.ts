@@ -27,7 +27,9 @@ describe('openVoiceStreamWithRetry', () => {
         .mockResolvedValueOnce(opened);
 
       const result = openVoiceStreamWithRetry(open);
-      const assertion = await expect(result).resolves.toBe(opened);
+      const assertion = result.then((value) => {
+        expect(value).toBe(opened);
+      });
       await vi.advanceTimersByTimeAsync(200);
 
       await assertion;
@@ -47,7 +49,14 @@ describe('openVoiceStreamWithRetry', () => {
         .mockRejectedValueOnce(second);
 
       const result = openVoiceStreamWithRetry(open);
-      const assertion = await expect(result).rejects.toBe(second);
+      const assertion = result.then(
+        () => {
+          throw new Error('Expected retry to reject.');
+        },
+        (error) => {
+          expect(error).toBe(second);
+        },
+      );
       await vi.advanceTimersByTimeAsync(200);
 
       await assertion;

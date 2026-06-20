@@ -5,8 +5,10 @@
  */
 
 import type { VoiceStreamSession } from './voiceStreamSession.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const RETRY_DELAY_MS = 200;
+const debugLogger = createDebugLogger('VOICE_STREAM');
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -33,6 +35,7 @@ export async function openVoiceStreamWithRetry(
     if (!isRetryable(error)) {
       throw error;
     }
+    debugLogger.debug('[voice] stream open failed, retrying:', error);
     await delay(RETRY_DELAY_MS);
     return open();
   }

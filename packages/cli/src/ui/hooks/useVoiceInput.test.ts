@@ -421,6 +421,66 @@ describe('useVoiceInput', () => {
     });
   });
 
+  it('reports streaming pump errors without throwing from the timer', async () => {
+    vi.useFakeTimers();
+    try {
+      buffer = createBuffer();
+      const addItem = vi.fn();
+      const stop = vi.fn().mockResolvedValue({
+        data: new Uint8Array([1]),
+        mimeType: 'audio/wav',
+      });
+      const recorder = {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop,
+        supportsStreaming: vi.fn(() => true),
+        drain: vi.fn(() => {
+          throw new Error('native drain failed');
+        }),
+      };
+      const streamSession = {
+        pushAudio: vi.fn(),
+        finish: vi.fn().mockResolvedValue('streamed text'),
+        abort: vi.fn(),
+      };
+
+      const { result } = renderHook(() =>
+        useVoiceInput({
+          enabled: true,
+          mode: 'tap',
+          voiceModel: 'qwen3-asr-flash-realtime',
+          buffer,
+          addItem,
+          createRecorder: () => recorder,
+          transcribe: vi.fn(),
+          streaming: true,
+          openStream: vi.fn().mockResolvedValue(streamSession),
+        }),
+      );
+
+      await act(async () => {
+        result.current.handleKeypress(voiceKey);
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      expect(streamSession.abort).toHaveBeenCalledTimes(1);
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: 'error',
+          text: 'Voice transcription failed: native drain failed',
+        },
+        expect.any(Number),
+      );
+      expect(result.current.status).toBe('idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stops an active recorder when unmounted without transcribing', async () => {
     buffer = createBuffer();
     const stop = vi.fn().mockResolvedValue({
