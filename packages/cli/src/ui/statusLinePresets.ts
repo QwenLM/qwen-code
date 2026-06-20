@@ -406,10 +406,10 @@ export function buildStatusLinePresetParts(
         }
         break;
       case 'total-input-tokens':
-        parts.push(`${formatTokenCount(data.totalInputTokens)} in`);
+        parts.push(`${formatTokenCount(data.totalInputTokens)} total in`);
         break;
       case 'total-output-tokens':
-        parts.push(`${formatTokenCount(data.totalOutputTokens)} out`);
+        parts.push(`${formatTokenCount(data.totalOutputTokens)} total out`);
         break;
       case 'session-id':
         if (data.sessionId) {

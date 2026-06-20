@@ -1543,6 +1543,21 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).not.toContain('\x00');
   });
 
+  it('renders extension failures without assuming install failed', () => {
+    const output = daemonUiEventToTerminalText({
+      type: 'workspace.extensions.changed',
+      refreshed: 0,
+      failed: 0,
+      status: 'failed',
+      name: 'test-extension',
+      error: 'Extension mutation failed',
+    });
+
+    expect(output).toContain('extension action failed test-extension');
+    expect(output).toContain('Extension mutation failed');
+    expect(output).not.toContain('install failed');
+  });
+
   it('strips terminal control and bidi spoofing sequences', () => {
     const output = sanitizeTerminalText(
       '\u202etxt.exe\u001b[31mred\roverwrite\u001bPhidden\u001b\\ok',
@@ -2055,6 +2070,60 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     expect(refused[0]).toMatchObject({
       type: 'workspace.mcp.server_restart_refused',
       reason: 'in_flight',
+    });
+  });
+
+  it('normalizes extension install lifecycle details', () => {
+    const installed = normalizeDaemonEvent(
+      envelopeOf('extensions_changed', {
+        refreshed: 1,
+        failed: 0,
+        status: 'installed',
+        source: 'owner/repo',
+        name: 'test-extension',
+        version: '1.2.3',
+      }),
+    );
+    expect(installed[0]).toMatchObject({
+      type: 'workspace.extensions.changed',
+      refreshed: 1,
+      failed: 0,
+      status: 'installed',
+      source: 'owner/repo',
+      name: 'test-extension',
+      version: '1.2.3',
+    });
+
+    const updated = normalizeDaemonEvent(
+      envelopeOf('extensions_changed', {
+        refreshed: 1,
+        failed: 0,
+        status: 'updated',
+        name: 'test-extension',
+        version: '1.2.4',
+      }),
+    );
+    expect(updated[0]).toMatchObject({
+      type: 'workspace.extensions.changed',
+      status: 'updated',
+      name: 'test-extension',
+      version: '1.2.4',
+    });
+
+    const failed = normalizeDaemonEvent(
+      envelopeOf('extensions_changed', {
+        refreshed: 0,
+        failed: 0,
+        status: 'failed',
+        source: 'owner/repo',
+        error: 'install failed',
+      }),
+    );
+    expect(failed[0]).toMatchObject({
+      type: 'workspace.extensions.changed',
+      status: 'failed',
+      source: 'owner/repo',
+      error: 'install failed',
     });
   });
 

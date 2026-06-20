@@ -29,6 +29,7 @@ import type {
 } from './agent-events.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { createConcurrencyLimiter } from '../../utils/concurrencyLimiter.js';
+import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import {
   GitWorktreeService,
@@ -274,8 +275,11 @@ function generateRunId(): string {
  * `runOverridePath` for `opts.agentType`.
  */
 function sanitizeForErrorMessage(value: string): string {
-  // eslint-disable-next-line no-control-regex
-  return value.replace(/[\u0000-\u001f\u007f]+/g, ' ');
+  // Shared with the extension converters via stripAnsiAndControl: strips ANSI/VT
+  // escape sequences and removes C0/C1 control chars (incl. the C1 range the old
+  // local regex missed). Removing rather than spacing still keeps the error
+  // single-line, which is the original intent here.
+  return stripAnsiAndControl(value);
 }
 
 /**

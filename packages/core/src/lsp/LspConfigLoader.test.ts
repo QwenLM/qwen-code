@@ -12,6 +12,10 @@ import type { Extension } from '../extension/extensionManager.js';
 describe('LspConfigLoader config-driven behavior', () => {
   const workspaceRoot = '/workspace';
 
+  afterEach(() => {
+    mock.restore();
+  });
+
   it('does not generate any presets when no user or extension config provided', () => {
     const loader = new LspConfigLoader(workspaceRoot);
     // Even if languages are detected, no built-in presets should be generated
@@ -104,6 +108,51 @@ describe('LspConfigLoader config-driven behavior', () => {
     expect(configs).toHaveLength(1);
     expect(configs[0]?.command).toBe('/custom/path/jdtls');
     expect(configs[0]?.args).toEqual(['--custom-flag']);
+  });
+
+  it('accepts valid string socket ports from .lsp.json', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            transport: 'tcp',
+            host: '127.0.0.1',
+            port: '1234',
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const configs = await loader.loadUserConfigs();
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.socket).toEqual({
+      host: '127.0.0.1',
+      port: 1234,
+    });
+  });
+
+  it('rejects malformed socket ports from .lsp.json', async () => {
+    for (const port of ['1.5', '0x10', 1.5, 0, 65_536]) {
+      mock({
+        [workspaceRoot]: {
+          '.lsp.json': JSON.stringify({
+            typescript: {
+              transport: 'tcp',
+              host: '127.0.0.1',
+              port,
+            },
+          }),
+        },
+      });
+
+      const loader = new LspConfigLoader(workspaceRoot);
+      const configs = await loader.loadUserConfigs();
+
+      expect(configs, `port ${JSON.stringify(port)}`).toHaveLength(0);
+      mock.restore();
+    }
   });
 });
 

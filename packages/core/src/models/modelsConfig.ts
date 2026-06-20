@@ -955,7 +955,11 @@ export class ModelsConfig {
    * 4. If no default is available, leave the generationConfig incomplete and let
    *    resolveContentGeneratorConfigWithSources throw exceptions as expected.
    */
-  syncAfterAuthRefresh(authType: AuthType, modelId?: string): void {
+  syncAfterAuthRefresh(
+    authType: AuthType,
+    modelId?: string,
+    providerBaseUrlOverride?: string,
+  ): void {
     this.strictModelProviderSelection = false;
     const previousAuthType = this.currentAuthType;
     this.currentAuthType = authType;
@@ -967,9 +971,10 @@ export class ModelsConfig {
     // Prefer exact match (id+baseUrl) when the current baseUrl was set by a
     // model provider switch; fall back to any model with the same id.
     const providerBaseUrl =
-      this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
+      providerBaseUrlOverride ??
+      (this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
         ? this._generationConfig.baseUrl
-        : undefined;
+        : undefined);
     const resolved = modelId
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))

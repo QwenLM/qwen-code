@@ -219,6 +219,17 @@
           "type": "boolean",
           "default": false
         },
+        "history": {
+          "description": "History display settings.",
+          "type": "object",
+          "properties": {
+            "collapseOnResume": {
+              "description": "Whether to collapse history by default when resuming a session.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
         "showLineNumbers": {
           "description": "Show line numbers in the code output.",
           "type": "boolean",
@@ -243,6 +254,11 @@
           "items": {
             "type": "string"
           }
+        },
+        "showResponseTokensPerSecond": {
+          "description": "Show a live tokens/sec estimate next to the response token counter while the model is streaming. Takes effect in the next session.",
+          "type": "boolean",
+          "default": false
         },
         "enableWelcomeBack": {
           "description": "Show welcome back dialog when returning to a project with conversation history. Choosing \"Start new chat session\" suppresses the dialog for that project until the project summary changes.",
@@ -553,6 +569,14 @@
               "type": "boolean",
               "default": true
             },
+            "toolResultContentFormat": {
+              "description": "Controls how text-only tool results are serialized in OpenAI-compatible requests. Use \"parts\" for the default content-part array shape. Use \"string\" only for legacy OpenAI-compatible runtimes whose tool templates ignore text content parts (for example older GLM-5.1 vLLM/SGLang templates; QwenLM/qwen-code#3361). Tool-returned media is still handled by splitToolMedia. Options: parts, string",
+              "enum": [
+                "parts",
+                "string"
+              ],
+              "default": "parts"
+            },
             "schemaCompliance": {
               "description": "The compliance mode for tool schemas sent to the model. Use \"openapi_30\" for strict OpenAPI 3.0 compatibility (e.g., for Gemini). Options: auto, openapi_30",
               "enum": [
@@ -593,8 +617,11 @@
           "description": "The name of the context file or files."
         },
         "importFormat": {
-          "description": "The format to use when importing memory.",
-          "type": "string"
+          "description": "The format to use when importing memory. Options: tree, flat",
+          "enum": [
+            "tree",
+            "flat"
+          ]
         },
         "includeDirectories": {
           "description": "Additional directories to include in the workspace context. Missing directories will be skipped with a warning.",
@@ -1061,8 +1088,11 @@
           "default": false
         },
         "dnsResolutionOrder": {
-          "description": "The DNS resolution order.",
-          "type": "string"
+          "description": "The DNS resolution order. Options: ipv4first, verbatim",
+          "enum": [
+            "ipv4first",
+            "verbatim"
+          ]
         },
         "excludedEnvVars": {
           "description": "Environment variables to exclude from project context.",

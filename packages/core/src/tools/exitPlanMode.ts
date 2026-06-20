@@ -22,7 +22,6 @@ import {
   formatBlockedResponse,
   formatNeedsUserResponse,
   formatCapEscalationResponse,
-  formatUnavailableResponse,
   formatApprovedNotes,
 } from '../plan-gate/planApprovalGate.js';
 import type { EvidenceBundle } from '../plan-gate/types.js';
@@ -295,16 +294,13 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
             };
           }
           case 'unavailable': {
-            const llmContent = formatUnavailableResponse(decision);
-            const message = `Plan gate: unavailable - ${decision.reason}`;
-            return {
-              llmContent,
-              returnDisplay: this.buildRejectedGateDisplay(
-                message,
-                plan,
-                llmContent,
-              ),
-            };
+            // Gate is broken — fall back to DEFAULT mode so the user
+            // gets a real confirmation dialog on the next action,
+            // instead of trapping in plan mode with no escape hatch.
+            debugLogger.warn(
+              `Gate unavailable, falling back to DEFAULT mode: ${decision.reason}`,
+            );
+            return this.fallbackToUserDecision(plan);
           }
           default: {
             const _exhaustive: never = decision;
@@ -401,6 +397,36 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       returnDisplay: {
         type: 'plan_summary',
         message: displayMessage,
+        plan,
+      },
+    };
+  }
+
+  /**
+   * Gate unavailable fallback — switch to DEFAULT mode so the next
+   * action triggers a real user confirmation dialog. This breaks the
+   * gate trap while forcing the model to present the plan for approval
+   * rather than auto-executing in AUTO/YOLO.
+   */
+  private fallbackToUserDecision(plan: string): ToolResult {
+    this.setApprovalModeSafely(ApprovalMode.DEFAULT);
+
+    // Save plan so it's on disk even if the model proceeds.
+    try {
+      this.config.savePlan(plan);
+    } catch (error) {
+      debugLogger.warn(
+        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    return {
+      llmContent:
+        'Gate is unavailable and cannot review the plan. Ask the user whether to execute this plan or stay in plan mode to revise it.',
+      returnDisplay: {
+        type: 'plan_summary',
+        message:
+          'Plan gate is unavailable. The plan has been saved — please confirm whether to execute it.',
         plan,
       },
     };

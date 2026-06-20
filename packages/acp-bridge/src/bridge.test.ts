@@ -384,6 +384,118 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('refreshes extensions across live sessions and broadcasts merged results', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (
+              method === 'qwen/control/workspace/extensions/refresh' &&
+              String(params['sessionId']).endsWith('#2')
+            ) {
+              throw new Error('refresh failed');
+            }
+            return {};
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+    const first = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    const second = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(first.sessionId, {
+      signal: abort.signal,
+    });
+    const nextEvent = iter[Symbol.asyncIterator]().next();
+
+    const result = await bridge.refreshExtensionsForAllSessions({
+      status: 'updated',
+      name: 'test-ext',
+    });
+
+    expect(result).toEqual({ refreshed: 1, failed: 1 });
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: 'qwen/control/workspace/extensions/refresh',
+        params: { sessionId: first.sessionId },
+      },
+      {
+        method: 'qwen/control/workspace/extensions/refresh',
+        params: { sessionId: second.sessionId },
+      },
+    ]);
+    const event = await nextEvent;
+    expect(event.value).toMatchObject({
+      type: 'extensions_changed',
+      data: {
+        status: 'updated',
+        name: 'test-ext',
+        refreshed: 1,
+        failed: 1,
+      },
+    });
+    abort.abort();
+    await bridge.shutdown();
+  });
+
+  it('does not refresh or broadcast extensions when no sessions are live', async () => {
+    const bridge = makeBridge();
+
+    await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
+      refreshed: 0,
+      failed: 0,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('skips dying sessions when refreshing extensions', async () => {
+    let releaseKill: (() => void) | undefined;
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel();
+        const originalKill = h.channel.kill;
+        h.channel.kill = async () => {
+          await new Promise<void>((resolve) => {
+            releaseKill = resolve;
+          });
+          await originalKill();
+        };
+        handles.push(h);
+        return h.channel;
+      },
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const killPromise = bridge.killSession(session.sessionId);
+    await vi.waitFor(() => {
+      expect(releaseKill).toBeDefined();
+    });
+
+    await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
+      refreshed: 0,
+      failed: 0,
+    });
+    expect(
+      handles[0]?.agent.extMethodCalls.filter(
+        (call) => call.method === 'qwen/control/workspace/extensions/refresh',
+      ),
+    ).toEqual([]);
+
+    releaseKill?.();
+    await killPromise;
+    await bridge.shutdown();
+  });
+
   it('rejects session status requests for unknown sessions', async () => {
     const bridge = makeBridge({
       channelFactory: async () => makeChannel().channel,
@@ -2828,7 +2940,7 @@ describe('createAcpSessionBridge', () => {
       releaseBranch!();
       await expect(branch).resolves.toMatchObject({
         sessionId: 'branch-1',
-        title: 'Branch 1',
+        displayName: 'Branch 1',
       });
       await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
       await bridge.shutdown();

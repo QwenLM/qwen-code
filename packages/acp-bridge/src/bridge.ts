@@ -3379,17 +3379,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }),
           initTimeoutMs,
           'branchSession',
-        )) as { newSessionId: string; title: string };
+        )) as { newSessionId: string; title?: string; displayName?: string };
 
-        if (
-          !result ||
-          typeof result.newSessionId !== 'string' ||
-          typeof result.title !== 'string'
-        ) {
+        if (!result || typeof result.newSessionId !== 'string') {
           throw new Error(
             `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
           );
         }
+        const rawBranchName = result.displayName ?? result.title;
+        const branchDisplayName =
+          typeof rawBranchName === 'string'
+            ? rawBranchName
+            : result.newSessionId.slice(0, 8);
 
         let restored;
         try {
@@ -3416,12 +3417,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
 
         const newEntry = byId.get(result.newSessionId);
-        if (newEntry) newEntry.displayName = result.title;
+        if (newEntry) newEntry.displayName = branchDisplayName;
 
         const eventData = {
           sourceSessionId: sessionId,
           newSessionId: result.newSessionId,
-          displayName: result.title,
+          displayName: branchDisplayName,
         };
         const branchEnvelope = {
           type: 'session_branched' as const,
@@ -3433,10 +3434,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
         return {
           ...restored,
-          title: result.title,
+          displayName: branchDisplayName,
           forkedFrom: {
             sessionId,
-            title: entry.displayName ?? sessionId.slice(0, 8),
+            displayName: entry.displayName ?? sessionId.slice(0, 8),
           },
         };
       });
@@ -3490,6 +3491,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 ? ` by client ${JSON.stringify(context.clientId)}`
                 : ''),
           );
+          if (nextDisplayName) {
+            entry.connection
+              .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+                sessionId,
+                displayName: nextDisplayName,
+                titleSource: 'manual',
+              })
+              .then((res: unknown) => {
+                const r = res as { persisted?: boolean } | undefined;
+                if (r && r.persisted === false) {
+                  writeStderrLine(
+                    `qwen serve: displayName for ${sessionId} was not persisted (recording service unavailable)`,
+                  );
+                }
+              })
+              .catch((err: unknown) => {
+                writeStderrLine(
+                  `qwen serve: failed to persist displayName for ${sessionId}: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              });
+          }
           try {
             entry.events.publish({
               type: 'session_metadata_updated',
@@ -3786,6 +3810,61 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_STATUS_EXT_METHODS.workspaceExtensions,
         () => createIdleWorkspaceExtensionsStatus(boundWorkspace),
       );
+    },
+
+    async refreshExtensionsForAllSessions(data) {
+      const sessions = Array.from(byId.values());
+
+      const results = await Promise.all(
+        sessions.map(async (entry) => {
+          const info = channelInfoForEntry(entry);
+          if (!info || info.isDying) {
+            return { refreshed: 0, failed: 0 };
+          }
+          try {
+            await Promise.race([
+              withTimeout(
+                entry.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+                  { sessionId: entry.sessionId },
+                ),
+                30_000,
+                SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+              ),
+              getTransportClosedReject(entry),
+            ]);
+            return { refreshed: 1, failed: 0 };
+          } catch (err) {
+            writeServeDebugLine(
+              `refreshExtensions: session ${entry.sessionId} failed: ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+            return { refreshed: 0, failed: 1 };
+          }
+        }),
+      );
+
+      const refreshed = results.reduce(
+        (sum, result) => sum + result.refreshed,
+        0,
+      );
+      const failed = results.reduce((sum, result) => sum + result.failed, 0);
+
+      if (refreshed > 0 || failed > 0 || data?.status !== undefined) {
+        broadcastWorkspaceEvent({
+          type: 'extensions_changed',
+          data: { ...data, refreshed, failed },
+        });
+      }
+
+      return { refreshed, failed };
+    },
+
+    broadcastExtensionsChanged(data) {
+      broadcastWorkspaceEvent({
+        type: 'extensions_changed',
+        data,
+      });
     },
 
     async setSessionModel(sessionId, req, context) {

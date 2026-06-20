@@ -50,6 +50,8 @@ export interface MCPServerDisplayInfo {
   isDisabled: boolean;
   /** 是否存储有 OAuth 认证信息 */
   hasOAuthTokens?: boolean;
+  /** 未连接且需要（重新）认证：连接时收到 401，或声明了 OAuth 但无已存 token */
+  requiresAuth?: boolean;
 }
 
 /**
@@ -138,6 +140,8 @@ export interface ServerDetailStepProps {
   onClearAuth?: () => void;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**
@@ -164,6 +168,8 @@ export interface ToolListStepProps {
   onSelect: (tool: MCPToolDisplayInfo) => void;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**
@@ -174,6 +180,8 @@ export interface ToolDetailStepProps {
   tool: MCPToolDisplayInfo | null;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**
@@ -184,6 +192,8 @@ export interface AuthenticateStepProps {
   server: MCPServerDisplayInfo | null;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**

@@ -2715,8 +2715,9 @@ export class GeminiClient {
 
   /**
    * Surgically disarm FileReadCache entries for files evicted by
-   * microcompaction. Falls back to a blanket clear() when any evicted
-   * path can't be resolved.
+   * microcompaction. Falls back to a blanket clear() only when a blanked read
+   * cannot be linked to any path; path-level resolution failures are targeted
+   * to that path so one ghost file does not wipe unrelated cache entries.
    *
    * Shared by pre-send microcompaction and /compress-fast.
    */
@@ -2741,23 +2742,28 @@ export class GeminiClient {
         fsPromises.stat(p).catch(() => undefined),
       ),
     );
-    let fullyDisarmed = true;
-    for (const stats of statResults) {
-      if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
-        fullyDisarmed = false;
+    let usedPathFallback = false;
+    for (let i = 0; i < meta.evictedReadPaths.length; i++) {
+      const stats = statResults[i];
+      if (stats && fileReadCache.markReadEvictedFromHistory(stats)) {
+        continue;
+      }
+      const evictedPath = meta.evictedReadPaths[i];
+      if (evictedPath) {
+        fileReadCache.invalidateByPath(evictedPath);
+        usedPathFallback = true;
       }
     }
-    if (fullyDisarmed) {
+    if (usedPathFallback) {
       debugLogger.debug(
-        `[FILE_READ_CACHE] disarmed fast-path for ` +
+        `[FILE_READ_CACHE] disarmed fast-path by path for ` +
           `${meta.evictedReadPaths.length} file(s) after ${logTag}`,
       );
     } else {
       debugLogger.debug(
-        `[FILE_READ_CACHE] clear after ${logTag} ` +
-          '(an evicted path was unresolvable)',
+        `[FILE_READ_CACHE] disarmed fast-path for ` +
+          `${meta.evictedReadPaths.length} file(s) after ${logTag}`,
       );
-      fileReadCache.clear();
     }
   }
 

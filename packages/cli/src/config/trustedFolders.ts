@@ -15,7 +15,9 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
+import { parse, stringify } from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
+import { applyUpdates } from '../utils/commentJson.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
@@ -180,9 +182,51 @@ export function saveTrustedFolders(
       fs.mkdirSync(dirPath, { recursive: true });
     }
 
+    let content = stringify(trustedFoldersFile.config, null, 2);
+    if (fs.existsSync(trustedFoldersFile.path)) {
+      try {
+        // Intentionally keep the comment-preserving round-trip local here
+        // instead of reusing updateSettingsFilePreservingFormat(), because
+        // trustedFolders.json must continue to use atomicWriteFileSync with
+        // noFollow:true when it is finally written to disk.
+        const originalContent = fs.readFileSync(
+          trustedFoldersFile.path,
+          'utf-8',
+        );
+        const parsed = parse(originalContent);
+        if (
+          typeof parsed !== 'object' ||
+          parsed === null ||
+          Array.isArray(parsed) ||
+          parsed instanceof String ||
+          parsed instanceof Number ||
+          parsed instanceof Boolean
+        ) {
+          throw new Error('trusted folders file is not a JSON object');
+        }
+        const updated = applyUpdates(
+          parsed as Record<string, unknown>,
+          trustedFoldersFile.config as Record<string, unknown>,
+          true,
+        );
+        const preservedContent = stringify(updated, null, 2);
+
+        // Validate the serialized output before writing. If the round-trip
+        // fails at any point, fall back to writing a clean normalized file so
+        // a corrupted trustedFolders.json can still self-heal on save.
+        parse(preservedContent);
+        content = preservedContent;
+      } catch (error) {
+        // Fall back to a clean rewrite when comment-preserving round-trip fails.
+        writeStderrLine(
+          `Falling back to clean rewrite for trusted folders: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     atomicWriteFileSync(
       trustedFoldersFile.path,
-      JSON.stringify(trustedFoldersFile.config, null, 2),
+      content,
       // noFollow: refuse to follow any pre-placed symlink at the
       // config path — a redirected write could either leak the
       // trusted-folder list to an attacker target or leave the user's
