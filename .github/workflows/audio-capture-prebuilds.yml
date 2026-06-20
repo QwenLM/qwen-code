@@ -1,4 +1,4 @@
-name: Audio Capture Prebuilds
+name: 'Audio Capture Prebuilds'
 
 # Cross-compiles the @qwen-code/audio-capture native addon (miniaudio + N-API)
 # into prebuilds/<platform>-<arch>/*.node for every supported target, then
@@ -8,7 +8,9 @@ name: Audio Capture Prebuilds
 # packages/audio-capture/prebuilds/ before `npm publish`, e.g.:
 #
 #   - uses: actions/download-artifact@v4
-#     with: { name: audio-capture-prebuilds, path: packages/audio-capture/prebuilds }
+#     with:
+#       name: audio-capture-prebuilds
+#       path: packages/audio-capture/prebuilds
 #
 # N-API is ABI-stable, so one prebuild per platform/arch works across Node
 # versions and `node-gyp-build` selects the right one at require time.
@@ -18,59 +20,69 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: 'read'
 
 defaults:
   run:
-    working-directory: packages/audio-capture
+    working-directory: 'packages/audio-capture'
 
 jobs:
   build:
-    name: prebuild ${{ matrix.os }} (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
+    name: 'prebuild ${{ matrix.os }} (${{ matrix.arch }})'
+    runs-on: '${{ matrix.runner }}'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, arch: arm64 }
-          - { os: macos-13, arch: x64 }
-          - { os: ubuntu-latest, arch: x64 }
-          - { os: ubuntu-24.04-arm, arch: arm64 }
-          - { os: windows-latest, arch: x64 }
+          - os: 'macos-14'
+            runner: 'macos-14'
+            arch: 'arm64'
+          - os: 'macos-13'
+            runner: 'macos-13'
+            arch: 'x64'
+          - os: 'ubuntu-latest'
+            runner: 'ubuntu-latest'
+            arch: 'x64'
+          - os: 'ubuntu-24.04-arm'
+            runner: 'ubuntu-24.04-arm'
+            arch: 'arm64'
+          - os: 'windows-latest'
+            runner: 'windows-2022'
+            arch: 'x64'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@v4'
         with:
-          node-version: 22
+          node-version: '22'
       # Install only this package's deps (skip the node-gyp-build install hook;
       # prebuildify does its own compile below).
-      - name: Install build deps
-        run: npm install --no-workspaces --ignore-scripts --no-audit --no-fund
-      - name: Build prebuild
-        run: npm run prebuildify
-      - name: Upload prebuild
-        uses: actions/upload-artifact@v4
+      - name: 'Install build deps'
+        run: 'npm install --no-workspaces --ignore-scripts --no-audit --no-fund'
+      - name: 'Build prebuild'
+        run: 'npm run prebuildify'
+      - name: 'Upload prebuild'
+        uses: 'actions/upload-artifact@v4'
         with:
-          name: prebuilds-${{ matrix.os }}-${{ matrix.arch }}
-          path: packages/audio-capture/prebuilds/
-          if-no-files-found: error
+          name: 'prebuilds-${{ matrix.os }}-${{ matrix.arch }}'
+          path: 'packages/audio-capture/prebuilds/'
+          if-no-files-found: 'error'
 
   collect:
-    name: collect prebuilds
-    needs: build
-    runs-on: ubuntu-latest
+    name: 'collect prebuilds'
+    needs: 'build'
+    runs-on: 'ubuntu-latest'
     steps:
-      - name: Merge per-platform prebuilds
-        uses: actions/download-artifact@v4
+      - name: 'Merge per-platform prebuilds'
+        uses: 'actions/download-artifact@v4'
         with:
-          pattern: prebuilds-*
+          pattern: 'prebuilds-*'
           merge-multiple: true
-          path: packages/audio-capture/prebuilds
-      - name: List collected prebuilds
-        run: find prebuilds -type f
-      - name: Upload combined prebuilds
-        uses: actions/upload-artifact@v4
+          path: 'packages/audio-capture/prebuilds'
+      - name: 'List collected prebuilds'
+        run: 'find prebuilds -type f'
+      - name: 'Upload combined prebuilds'
+        uses: 'actions/upload-artifact@v4'
         with:
-          name: audio-capture-prebuilds
-          path: packages/audio-capture/prebuilds/
-          if-no-files-found: error
+          name: 'audio-capture-prebuilds'
+          path: 'packages/audio-capture/prebuilds/'
+          if-no-files-found: 'error'
