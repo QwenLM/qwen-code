@@ -8,7 +8,6 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { resolveGitDir } from './gitDiff.js';
-import { findGitRoot } from './gitUtils.js';
 
 /**
  * Direct-read git helpers: resolve the current branch / HEAD by reading the
@@ -67,39 +66,56 @@ export function clearGitDirCache(): void {
   gitDirCache.clear();
 }
 
+/** True if `p` exists and is a directory. */
+async function isDir(p: string): Promise<boolean> {
+  try {
+    return (await fsPromises.stat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** A git object store: `objects/` + `refs/` (standalone repo, or a worktree's common dir). */
+async function hasGitStore(dir: string): Promise<boolean> {
+  return (
+    (await isDir(path.join(dir, 'objects'))) &&
+    (await isDir(path.join(dir, 'refs')))
+  );
+}
+
 /**
- * Resolve the gitDir for `cwd` and verify it is trustworthy for an automatic,
- * zero-click display read.
+ * Verify `gitDir` is a real git directory, the way git itself decides — so the
+ * automatic, zero-click display read can't be tricked where `git rev-parse`
+ * couldn't.
  *
  * Security: `resolveGitDir` follows a `.git`-FILE `gitdir:` pointer verbatim, so
- * a crafted project could point it at an arbitrary out-of-repo path and make us
- * read/watch a file outside the repo (the old `git rev-parse` path refused this
- * with exit 128). We require containment: after resolving symlinks, the gitDir
- * must be the repo's own `<root>/.git`, or a linked worktree / submodule gitdir
- * under some `.git/worktrees/` or `.git/modules/`. Anything else is rejected.
+ * a crafted project could aim it at an arbitrary path or stand up a fake `.git`
+ * with just a HEAD; the old `git rev-parse` path refused both with "not a git
+ * repository" (exit 128). git treats a directory as a gitdir only if the object
+ * store is present: a standalone repo has `objects/` + `refs/` directly; a
+ * linked worktree / submodule gitdir instead carries a `commondir` file
+ * pointing at the main gitdir that does. Incomplete forgeries (a lone HEAD, or a
+ * path-shaped `.git/worktrees/x` containing only a HEAD) have neither and are
+ * rejected. This matches git's own validity check rather than a path shape,
+ * which a `gitdir:` pointer can fake.
  */
+async function isRealGitDir(gitDir: string): Promise<boolean> {
+  if (await hasGitStore(gitDir)) return true;
+  try {
+    const rel = (
+      await fsPromises.readFile(path.join(gitDir, 'commondir'), 'utf-8')
+    ).trim();
+    if (!rel) return false;
+    return await hasGitStore(path.resolve(gitDir, rel));
+  } catch {
+    return false;
+  }
+}
+
 async function resolveTrustedGitDir(cwd: string): Promise<string | null> {
   const gitDir = await resolveGitDir(cwd);
   if (!gitDir) return null;
-  const root = findGitRoot(cwd);
-  if (!root) return null;
-  try {
-    const realRoot = await fsPromises.realpath(root);
-    const realGitDir = await fsPromises.realpath(gitDir);
-    if (realGitDir === path.join(realRoot, '.git')) return gitDir;
-    const segs = realGitDir.split(path.sep);
-    for (let i = 0; i + 1 < segs.length; i++) {
-      if (
-        segs[i] === '.git' &&
-        (segs[i + 1] === 'worktrees' || segs[i + 1] === 'modules')
-      ) {
-        return gitDir;
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
+  return (await isRealGitDir(gitDir)) ? gitDir : null;
 }
 
 async function getCachedGitDir(cwd: string): Promise<string | null> {

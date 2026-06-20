@@ -37,7 +37,9 @@ async function makeRepo(
   const { withReflog = true } = opts;
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdirect-'));
   tmpRoots.push(dir);
-  await fsp.mkdir(path.join(dir, '.git'), { recursive: true });
+  // A real git dir carries an object store; isRealGitDir requires objects/ + refs/.
+  await fsp.mkdir(path.join(dir, '.git', 'objects'), { recursive: true });
+  await fsp.mkdir(path.join(dir, '.git', 'refs'), { recursive: true });
   await fsp.writeFile(path.join(dir, '.git', 'HEAD'), headContent);
   if (withReflog) {
     await fsp.mkdir(path.join(dir, '.git', 'logs'), { recursive: true });
@@ -188,6 +190,9 @@ describe('resolveBranchName', () => {
       path.join(realGitDir, 'HEAD'),
       'ref: refs/heads/feature\n',
     );
+    // A real worktree gitdir has no objects/ of its own; commondir points at
+    // the main gitdir (which has objects/ + refs/).
+    await fsp.writeFile(path.join(realGitDir, 'commondir'), '../..\n');
     const worktree = await makeBareDir();
     await fsp.writeFile(path.join(worktree, '.git'), `gitdir: ${realGitDir}\n`);
     expect(await resolveBranchName(worktree)).toBe('feature');
@@ -208,8 +213,9 @@ describe('resolveBranchName', () => {
     const dir = await makeBareDir();
     expect(await resolveBranchName(dir)).toBeUndefined();
 
-    // Turn it into a repo; the cached miss should still be returned...
-    await fsp.mkdir(path.join(dir, '.git'), { recursive: true });
+    // Turn it into a real repo; the cached miss should still be returned...
+    await fsp.mkdir(path.join(dir, '.git', 'objects'), { recursive: true });
+    await fsp.mkdir(path.join(dir, '.git', 'refs'), { recursive: true });
     await fsp.writeFile(
       path.join(dir, '.git', 'HEAD'),
       'ref: refs/heads/main\n',
@@ -221,24 +227,49 @@ describe('resolveBranchName', () => {
     expect(await resolveBranchName(dir)).toBe('main');
   });
 
-  it('rejects a .git gitdir pointer that escapes the repo (containment)', async () => {
-    // A crafted `.git` FILE pointing at an out-of-repo dir with a fake HEAD.
+  it('rejects a .git gitdir pointer to a non-repo path', async () => {
+    // A crafted `.git` FILE pointing at an out-of-repo dir with a fake HEAD but
+    // no object store.
     const decoy = await makeBareDir();
     await fsp.writeFile(path.join(decoy, 'HEAD'), 'ref: refs/heads/pwned\n');
     const project = await makeBareDir();
     await fsp.writeFile(path.join(project, '.git'), `gitdir: ${decoy}\n`);
-    // Without containment this would surface 'pwned' from another location.
+    // Without the object-store check this would surface 'pwned'.
     expect(await resolveBranchName(project)).toBeUndefined();
   });
 
-  it('accepts a submodule gitdir under .git/modules/', async () => {
+  it('accepts a submodule gitdir with its own object store', async () => {
     const main = await makeRepo('ref: refs/heads/main\n');
     const modDir = path.join(main, '.git', 'modules', 'sub');
-    await fsp.mkdir(modDir, { recursive: true });
+    await fsp.mkdir(path.join(modDir, 'objects'), { recursive: true });
+    await fsp.mkdir(path.join(modDir, 'refs'), { recursive: true });
     await fsp.writeFile(path.join(modDir, 'HEAD'), 'ref: refs/heads/submod\n');
     const sub = await makeBareDir();
     await fsp.writeFile(path.join(sub, '.git'), `gitdir: ${modDir}\n`);
     expect(await resolveBranchName(sub)).toBe('submod');
+  });
+
+  it('rejects a .git/worktrees/* gitdir with no object store', async () => {
+    // Path shape alone must not be trusted: a crafted `.git/worktrees/fake`
+    // with only a HEAD (no objects/, no commondir) is rejected, like git.
+    const other = await makeBareDir();
+    const fake = path.join(other, '.git', 'worktrees', 'fake');
+    await fsp.mkdir(fake, { recursive: true });
+    await fsp.writeFile(path.join(fake, 'HEAD'), 'ref: refs/heads/pwned\n');
+    const project = await makeBareDir();
+    await fsp.writeFile(path.join(project, '.git'), `gitdir: ${fake}\n`);
+    expect(await resolveBranchName(project)).toBeUndefined();
+  });
+
+  it('rejects a fake .git directory with only a HEAD (no object store)', async () => {
+    const dir = await makeBareDir();
+    await fsp.mkdir(path.join(dir, '.git', 'logs'), { recursive: true });
+    await fsp.writeFile(
+      path.join(dir, '.git', 'HEAD'),
+      'ref: refs/heads/FAKE-DOTGIT\n',
+    );
+    await fsp.writeFile(path.join(dir, '.git', 'logs', 'HEAD'), 'x\n');
+    expect(await resolveBranchName(dir)).toBeUndefined();
   });
 });
 
