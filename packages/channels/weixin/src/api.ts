@@ -343,13 +343,14 @@ export async function uploadToCdn(
   const CDN_HOST = 'novac2c.cdn.weixin.qq.com';
 
   let url: string;
-  if (urlOrParam.startsWith('https://')) {
+  const lowerUrlOrParam = urlOrParam.toLowerCase();
+  if (lowerUrlOrParam.startsWith('https://')) {
     const parsed = new URL(urlOrParam);
     if (parsed.hostname !== CDN_HOST) {
       throw new Error(`CDN upload URL has unexpected host: ${parsed.hostname}`);
     }
     url = urlOrParam;
-  } else if (urlOrParam.startsWith('http://')) {
+  } else if (lowerUrlOrParam.startsWith('http://')) {
     throw new Error('CDN upload URL must use HTTPS');
   } else {
     url = `https://${CDN_HOST}/c2c/upload?encrypted_query_param=${encodeURIComponent(urlOrParam)}&filekey=${encodeURIComponent(filekey)}`;
