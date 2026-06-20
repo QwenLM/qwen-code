@@ -39,13 +39,16 @@ const MAX_HEAD_BYTES = 4096;
 // than one component's limit.
 const MAX_REF_COMPONENT_LENGTH = 255;
 
-// Control chars (C0 0x00-0x1f, space 0x20, DEL 0x7f, C1 0x80-0x9f), the Unicode
-// line separators, and the characters git disallows in a ref name: ~ ^ : ? * [
-// and backslash. Blocking C1 and U+2028/U+2029 hardens the display path: with
-// `git` no longer vetting the value, a hand-written HEAD could otherwise carry
-// terminal escape bytes (CSI/OSC) or line separators into the status line.
+// Control chars (C0 0x00-0x1f, space 0x20, DEL 0x7f, C1 0x80-0x9f), zero-width
+// (U+200B-U+200D, U+FEFF) and bidi-override (U+202A-U+202E, U+2066-U+2069)
+// characters, the Unicode line separators, and the characters git disallows in a
+// ref name: ~ ^ : ? * [ and backslash. With `git` no longer vetting the value, a
+// hand-written HEAD could otherwise smuggle terminal escapes (CSI/OSC), bidi or
+// zero-width spoofing, or line separators into the status-line branch name.
+// The class is long but must stay on one line so the eslint-disable applies.
+// prettier-ignore
 // eslint-disable-next-line no-control-regex
-const INVALID_REF_CHARS = /[\x00-\x20\x7f-\x9f\u2028\u2029~^:?*[\\]/;
+const INVALID_REF_CHARS = /[\x00-\x20\x7f-\x9f\u200b-\u200d\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff~^:?*[\\]/;
 
 /**
  * Validate a branch/ref name well enough to trust it as a display value — and,
@@ -56,14 +59,17 @@ const INVALID_REF_CHARS = /[\x00-\x20\x7f-\x9f\u2028\u2029~^:?*[\\]/;
  * git itself forbids.
  */
 export function isValidRefName(name: string): boolean {
-  if (!name) return false;
+  // 'HEAD' is ambiguous with a detached HEAD and git rejects it as a branch name.
+  if (!name || name === 'HEAD') return false;
   if (name.startsWith('/') || name.endsWith('/')) return false;
   if (name.startsWith('.') || name.endsWith('.')) return false;
   if (name.endsWith('.lock')) return false;
   if (name.includes('..') || name.includes('//')) return false;
   // git applies the dot/.lock rules per slash-separated component, not just to
-  // the whole name: no component may start with a dot or end with `.lock`.
-  if (name.includes('/.') || name.includes('.lock/')) return false;
+  // the whole name: no component may start or end with a dot, or end with `.lock`.
+  if (name.includes('/.') || name.includes('./') || name.includes('.lock/')) {
+    return false;
+  }
   if (name.includes('@{')) return false;
   if (INVALID_REF_CHARS.test(name)) return false;
   // Length limit is per slash-separated component (a filesystem cap), not the
@@ -115,6 +121,32 @@ async function hasGitStore(dir: string): Promise<boolean> {
 }
 
 /**
+ * Read the first line of a file with O_NOFOLLOW (refuse symlinks atomically) and
+ * a bounded prefix (never load a pathologically large file). Returns null on any
+ * failure. Shared by the HEAD and commondir reads.
+ */
+async function readFirstLineNoFollow(filePath: string): Promise<string | null> {
+  let fh: fsPromises.FileHandle;
+  try {
+    fh = await fsPromises.open(
+      filePath,
+      (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NOFOLLOW ?? 0),
+    );
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.allocUnsafe(MAX_HEAD_BYTES);
+    const { bytesRead } = await fh.read(buf, 0, MAX_HEAD_BYTES, 0);
+    return buf.toString('utf-8', 0, bytesRead).split('\n', 1)[0] ?? '';
+  } catch {
+    return null;
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
  * Verify `gitDir` is a real git directory, the way git itself decides — so the
  * automatic, zero-click display read can't be tricked where `git rev-parse`
  * couldn't.
@@ -132,15 +164,12 @@ async function hasGitStore(dir: string): Promise<boolean> {
  */
 async function isRealGitDir(gitDir: string): Promise<boolean> {
   if (await hasGitStore(gitDir)) return true;
-  try {
-    const rel = (
-      await fsPromises.readFile(path.join(gitDir, 'commondir'), 'utf-8')
-    ).trim();
-    if (!rel) return false;
-    return await hasGitStore(path.resolve(gitDir, rel));
-  } catch {
-    return false;
-  }
+  // A worktree/submodule gitdir has no object store of its own; commondir points
+  // at the main gitdir that does. Read it bounded + O_NOFOLLOW, like HEAD, so a
+  // crafted oversized or symlinked commondir can't OOM or redirect us.
+  const rel = await readFirstLineNoFollow(path.join(gitDir, 'commondir'));
+  if (!rel) return false;
+  return hasGitStore(path.resolve(gitDir, rel.trim()));
 }
 
 async function resolveTrustedGitDir(cwd: string): Promise<string | null> {
@@ -176,30 +205,11 @@ export interface GitHead {
  * object id, which is returned as-is (callers shorten it for display).
  */
 export async function readGitHead(gitDir: string): Promise<GitHead | null> {
-  const headPath = path.join(gitDir, 'HEAD');
-  let content: string;
-  try {
-    // Open with O_NOFOLLOW so a symlinked HEAD is refused atomically at the
-    // kernel level (ELOOP) — closing the lstat→readFile TOCTOU window where
-    // HEAD could be swapped for a symlink pointing out of the repo. Falls back
-    // to plain O_RDONLY where the flag is absent (Windows omits O_NOFOLLOW).
-    const fh = await fsPromises.open(
-      headPath,
-      (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NOFOLLOW ?? 0),
-    );
-    try {
-      // HEAD is a single short line; read a bounded prefix and parse only the
-      // first line, so a pathologically large file isn't loaded into memory.
-      const buf = Buffer.allocUnsafe(MAX_HEAD_BYTES);
-      const { bytesRead } = await fh.read(buf, 0, MAX_HEAD_BYTES, 0);
-      const firstLine = buf.toString('utf-8', 0, bytesRead).split('\n', 1)[0];
-      content = (firstLine ?? '').trim();
-    } finally {
-      await fh.close();
-    }
-  } catch {
-    return null;
-  }
+  // O_NOFOLLOW refuses a symlinked HEAD atomically (no lstat→read TOCTOU); the
+  // bounded read parses only the first line so a huge file isn't loaded.
+  const firstLine = await readFirstLineNoFollow(path.join(gitDir, 'HEAD'));
+  if (firstLine === null) return null;
+  const content = firstLine.trim();
 
   if (content.startsWith('ref:')) {
     const ref = content.slice(4).trim();

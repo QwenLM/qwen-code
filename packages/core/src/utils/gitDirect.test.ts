@@ -100,6 +100,10 @@ describe('isValidRefName', () => {
     'a'.repeat(256), // exceeds the length cap
     'feature/.hidden', // a component starts with a dot
     'test.lock/branch', // a component ends with .lock
+    'feature/bar./baz', // a component ends with a dot
+    'HEAD', // ambiguous with detached HEAD; git rejects it as a branch
+    'a\u202eb', // bidi override (RLO) — visual spoofing
+    'a\u200bb', // zero-width space — invisible spoofing
   ])('rejects %j', (name) => {
     expect(isValidRefName(name)).toBe(false);
   });
