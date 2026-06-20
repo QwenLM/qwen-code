@@ -15,6 +15,7 @@ import { trace, type Span } from '@opentelemetry/api';
 import {
   createServeApp,
   detectFromLoopback,
+  listWorkspaceSessionsForResponse,
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
@@ -1726,9 +1727,13 @@ describe('createServeApp', () => {
     });
 
     it('does not mount the UI when serveWebShell is false', async () => {
-      const app = createServeApp({ ...baseOpts, serveWebShell: false }, undefined, {
-        webShellDir,
-      });
+      const app = createServeApp(
+        { ...baseOpts, serveWebShell: false },
+        undefined,
+        {
+          webShellDir,
+        },
+      );
       const res = await request(app)
         .get('/')
         .set('Host', host)
@@ -1771,7 +1776,12 @@ describe('createServeApp', () => {
       // bearerAuth (401), not receive the shell. Without the /health guard the
       // pre-auth fallback would return index.html instead.
       const app = createServeApp(
-        { ...baseOpts, hostname: '0.0.0.0', token: 'secret', requireAuth: true },
+        {
+          ...baseOpts,
+          hostname: '0.0.0.0',
+          token: 'secret',
+          requireAuth: true,
+        },
         undefined,
         { webShellDir },
       );
@@ -5070,6 +5080,21 @@ describe('createServeApp', () => {
       await fsp.utimes(filePath, input.mtime, input.mtime);
     }
 
+    async function writeStoredSessions(count: number): Promise<void> {
+      for (let i = 0; i < count; i++) {
+        const timestamp = new Date(
+          Date.UTC(2026, 4, 17, 12, i, 0),
+        ).toISOString();
+        await writeStoredSession({
+          sessionId: `550e8400-e29b-41d4-a716-44665544${String(i).padStart(4, '0')}`,
+          cwd: WS_BOUND,
+          timestamp,
+          prompt: `prompt ${i}`,
+          mtime: new Date(timestamp),
+        });
+      }
+    }
+
     it('returns the list returned by the bridge', async () => {
       // #3803 §02 (commit 0c6e963cd): the route now rejects
       // cross-workspace queries with 400 workspace_mismatch (so
@@ -5457,6 +5482,65 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(1);
+    });
+
+    it('ignores malformed size query values', async () => {
+      await writeStoredSessions(3);
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      for (const malformedSize of ['1abc', '1.5', '1e2', '0x10']) {
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=${malformedSize}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.sessions).toHaveLength(3);
+        expect(res.body.nextCursor).toBeUndefined();
+      }
+    });
+
+    it('clamps unsafe finite HTTP size values to the max page size', async () => {
+      await writeStoredSessions(21);
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const res = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=9007199254740992`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(21);
+      expect(res.body.nextCursor).toBeUndefined();
+    });
+
+    it('uses the default page size for invalid non-HTTP size values', async () => {
+      for (const invalidSize of [
+        1.5,
+        Number.MAX_SAFE_INTEGER + 1,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+        await fsp.mkdir(runtimeDir, { recursive: true });
+        await writeStoredSessions(21);
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { size: invalidSize },
+        );
+
+        expect(result.sessions).toHaveLength(20);
+        expect(result.nextCursor).toBeDefined();
+      }
     });
 
     it('clamps size=200 to max page size', async () => {
