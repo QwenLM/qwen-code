@@ -122,6 +122,21 @@ describe('parseInstallSource', () => {
       expect(result.source).toBe('https://example.com:8080/repo');
       expect(result.pluginName).toBeUndefined();
     });
+
+    it('should parse an uppercase HTTPS URL scheme as a git source', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        'HTTPS://github.com/owner/repo:my-plugin',
+      );
+
+      // The uppercase scheme must be recognized as a URL, so the colon in the
+      // scheme is not mistaken for a pluginName separator.
+      expect(result.source).toBe('HTTPS://github.com/owner/repo');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBe('my-plugin');
+    });
   });
 
   describe('git@ URL parsing', () => {
