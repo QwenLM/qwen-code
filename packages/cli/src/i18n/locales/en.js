@@ -89,6 +89,10 @@ export default {
   'Installed extension "{{name}}".': 'Installed extension "{{name}}".',
   'Installed extensions ({{count}}):': 'Installed extensions ({{count}}):',
   'Installed {{count}} extension(s).': 'Installed {{count}} extension(s).',
+  '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.':
+    '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.',
+  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})':
+    'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})',
   'Installed {{ok}}, failed {{fail}}: {{detail}}':
     'Installed {{ok}}, failed {{fail}}: {{detail}}',
   'Installing...': 'Installing...',

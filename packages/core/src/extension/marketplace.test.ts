@@ -359,5 +359,62 @@ describe('parseInstallSource', () => {
       );
       expect(result).toEqual(cfg);
     });
+
+    // A non-GitHub https URL reaches fetchUrl via a single direct-JSON fetch,
+    // so these exercise the fetchUrl security guards in isolation.
+    it('aborts and returns null when the response body exceeds the size cap', async () => {
+      vi.mocked(fs.stat).mockRejectedValue(new Error('ENOENT'));
+      const destroy = vi.fn();
+      vi.mocked(https.get).mockImplementation((_url, _options, callback) => {
+        const handlers: Record<string, (chunk?: Buffer) => void> = {};
+        const res = {
+          statusCode: 200,
+          resume: vi.fn(),
+          on: vi.fn((event: string, handler: (chunk?: Buffer) => void) => {
+            handlers[event] = handler;
+          }),
+        };
+        if (typeof callback === 'function') callback(res as never);
+        // Emit one chunk past the 10 MB cap AFTER `req` is assigned in fetchUrl
+        // (the real `https.get` invokes the response callback asynchronously);
+        // 'end' never fires, so the guard must abort mid-stream.
+        process.nextTick(() =>
+          handlers['data']?.(Buffer.alloc(11 * 1024 * 1024)),
+        );
+        return { on: vi.fn(), setTimeout: vi.fn(), destroy } as never;
+      });
+
+      const result = await loadMarketplaceConfigFromSource(
+        'https://example.com/marketplace.json',
+      );
+      expect(result).toBeNull();
+      expect(destroy).toHaveBeenCalled();
+    });
+
+    it('aborts and returns null when the wall-clock deadline elapses', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(fs.stat).mockRejectedValue(new Error('ENOENT'));
+        const destroy = vi.fn();
+        vi.mocked(https.get).mockImplementation((_url, _options, callback) => {
+          // A stalled/trickling server: connects with 200 but never emits
+          // 'data' or 'end'. The socket-idle req.setTimeout (mocked no-op) would
+          // never fire, so only the absolute wall-clock deadline can resolve it.
+          const res = { statusCode: 200, resume: vi.fn(), on: vi.fn() };
+          if (typeof callback === 'function') callback(res as never);
+          return { on: vi.fn(), setTimeout: vi.fn(), destroy } as never;
+        });
+
+        const promise = loadMarketplaceConfigFromSource(
+          'https://example.com/marketplace.json',
+        );
+        // MARKETPLACE_FETCH_TIMEOUT_MS is 10s; advance just past it.
+        await vi.advanceTimersByTimeAsync(10_000 + 50);
+        await expect(promise).resolves.toBeNull();
+        expect(destroy).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

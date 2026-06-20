@@ -84,6 +84,10 @@ export default {
   'Installed extension "{{name}}".': '已安装扩展 "{{name}}"。',
   'Installed extensions ({{count}}):': '已安装的扩展（{{count}}）：',
   'Installed {{count}} extension(s).': '已安装 {{count}} 个扩展。',
+  '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.':
+    '{{name}}：已安装,但作用域回滚失败 —— 该扩展可能在所有作用域均被禁用;请在“已安装”页重新启用。',
+  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})':
+    '无法更改作用域,且回滚也失败 ——“{{name}}”可能在所有作用域均被禁用。请在“已安装”页重新启用。({{error}})',
   'Installed {{ok}}, failed {{fail}}: {{detail}}':
     '成功 {{ok}} 个，失败 {{fail}} 个：{{detail}}',
   'Installing...': '安装中...',

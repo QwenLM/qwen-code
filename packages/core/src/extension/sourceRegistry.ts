@@ -179,6 +179,20 @@ function resolveInstallSource(
     return `${src.repo}:${plugin.name}`;
   }
   if (src && src.source === 'url') {
+    // Same local-path guard as the string-source branch above: a remote
+    // marketplace must not be able to redirect the installer at a local
+    // filesystem path via the structured `{ source: 'url' }` form either.
+    if (
+      typeof src.url === 'string' &&
+      (path.isAbsolute(src.url) ||
+        src.url.startsWith('.') ||
+        src.url.startsWith('~'))
+    ) {
+      debugLogger.warn(
+        `Ignoring local path source "${src.url}" from remote marketplace "${marketplace.source}".`,
+      );
+      return plugin.name;
+    }
     return src.url;
   }
   return plugin.name;

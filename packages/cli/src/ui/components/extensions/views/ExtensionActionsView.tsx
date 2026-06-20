@@ -233,11 +233,19 @@ export const ExtensionActionsView = ({
           } catch (enableError) {
             // The User-scope disable already landed; if the Workspace enable
             // fails the extension would be disabled everywhere. Roll the User
-            // enable back so it isn't silently dead, then surface the error.
+            // enable back so it isn't silently dead.
             try {
               await manager.enableExtension(name, SettingScope.User);
-            } catch {
-              // Best-effort rollback.
+            } catch (rollbackError) {
+              // Rollback also failed: the extension is now disabled at every
+              // scope. Surface that explicitly — the bare enable error wouldn't
+              // tell the user the extension is dead and needs manual recovery.
+              throw new Error(
+                t(
+                  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})',
+                  { name, error: getErrorMessage(rollbackError) },
+                ),
+              );
             }
             throw enableError;
           }

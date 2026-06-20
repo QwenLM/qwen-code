@@ -11,6 +11,7 @@ import { useKeypress } from '../../hooks/useKeypress.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { t } from '../../../i18n/index.js';
+import { stripUnsafeCharacters } from '../../utils/textUtils.js';
 import {
   EXTENSIONS_TABS,
   type ExtensionsTab,
@@ -110,7 +111,12 @@ export function ExtensionsManagerDialog({
   const handleBrowseSource = useCallback((marketplaceName: string) => {
     setStatus(null);
     setTabLocked(false);
-    setDiscoverFilter(marketplaceName);
+    // The marketplace name is untrusted (it originates from a remote
+    // marketplace.json). Scrub terminal escapes before it becomes the Discover
+    // filter: it is rendered as a hint AND compared against the
+    // already-sanitized DiscoveredPlugin.marketplaceName, so sanitizing here
+    // both blocks ANSI injection and keeps the filter comparison matching.
+    setDiscoverFilter(stripUnsafeCharacters(marketplaceName));
     setActiveTab(EXTENSIONS_TABS.DISCOVER);
   }, []);
 
@@ -126,7 +132,15 @@ export function ExtensionsManagerDialog({
   useKeypress(
     (key) => {
       if (key.name === 'tab') {
-        cycleTab(key.shift ? -1 : 1);
+        // On Discover with an active marketplace filter, Tab clears the filter
+        // in place (revealing all extensions) instead of leaving the tab — this
+        // is what the "(Tab to clear)" hint promises. Otherwise it cycles tabs.
+        if (activeTab === EXTENSIONS_TABS.DISCOVER && discoverFilter) {
+          setStatus(null);
+          setDiscoverFilter(null);
+        } else {
+          cycleTab(key.shift ? -1 : 1);
+        }
       } else if (key.name === 'right') {
         cycleTab(1);
       } else if (key.name === 'left') {

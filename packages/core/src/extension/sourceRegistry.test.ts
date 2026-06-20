@@ -290,6 +290,51 @@ describe('discoverPlugins', () => {
     );
   });
 
+  it('rejects local-path sources from a remote (http) marketplace', async () => {
+    // A hostile remote marketplace must not be able to point the installer at a
+    // local filesystem path — via either the bare-string source or the
+    // structured { source: 'url' } form. Both fall back to the plugin name.
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Remote', [
+        { name: 'abs', version: '1.0.0', source: '/etc/passwd' },
+        { name: 'rel', version: '1.0.0', source: '../../secret' },
+        { name: 'home', version: '1.0.0', source: '~/.ssh/id_rsa' },
+        {
+          name: 'urlabs',
+          version: '1.0.0',
+          source: { source: 'url', url: '/etc/shadow' },
+        },
+        {
+          name: 'urlrel',
+          version: '1.0.0',
+          source: { source: 'url', url: '../escape' },
+        },
+        {
+          name: 'urlok',
+          version: '1.0.0',
+          source: { source: 'url', url: 'https://example.com/p.tgz' },
+        },
+      ] as never),
+    );
+
+    const discovered = await discoverPlugins(
+      [{ name: 'Remote', source: 'https://x/m.json', type: 'http' }],
+      new Set(),
+    );
+
+    const src = (name: string) =>
+      discovered.find((p) => p.name === name)!.installSource;
+    // String local paths fall back to the bare plugin name (no redirect).
+    expect(src('abs')).toBe('abs');
+    expect(src('rel')).toBe('rel');
+    expect(src('home')).toBe('home');
+    // { source: 'url' } local paths are rejected too (previously bypassed).
+    expect(src('urlabs')).toBe('urlabs');
+    expect(src('urlrel')).toBe('urlrel');
+    // A genuine remote URL is preserved.
+    expect(src('urlok')).toBe('https://example.com/p.tgz');
+  });
+
   it('skips sources that fail to load without throwing', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockImplementation(
       async (source: string) => {

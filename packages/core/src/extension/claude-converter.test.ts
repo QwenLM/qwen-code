@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -19,8 +19,21 @@ import {
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
 } from './claude-converter.js';
+import { cloneFromGit } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+
+// The git-subdir source clones a repo; stub the network clone so the security
+// guards around the cloned subdirectory can be exercised against a real fs.
+// Other tests use local sources and never call these, so the stubs are inert.
+vi.mock('./github.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./github.js')>();
+  return {
+    ...actual,
+    cloneFromGit: vi.fn(),
+    downloadFromGitHubRelease: vi.fn(),
+  };
+});
 
 describe('convertClaudeToQwenConfig', () => {
   it('should convert basic Claude config', () => {
@@ -1223,5 +1236,123 @@ describe('performVariableReplacement for Claude extensions', () => {
     const result = fs.readFileSync(path.join(extDir, 'parse.sh'), 'utf-8');
     expect(result).toContain('.message.parts | map(select(has("text")))');
     expect(result).not.toContain('.message.content');
+  });
+});
+
+describe('convertClaudePluginPackage — git-subdir source', () => {
+  let extDir: string;
+
+  beforeEach(() => {
+    extDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-gitsub-'));
+    vi.mocked(cloneFromGit).mockReset();
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(extDir)) {
+      fs.rmSync(extDir, { recursive: true, force: true });
+    }
+  });
+
+  // Writes a marketplace.json declaring a single git-subdir plugin.
+  const writeMarketplace = (source: unknown) => {
+    const mp = path.join(extDir, '.claude-plugin');
+    fs.mkdirSync(mp, { recursive: true });
+    fs.writeFileSync(
+      path.join(mp, 'marketplace.json'),
+      JSON.stringify({
+        name: 'm',
+        owner: { name: 'o', email: 'e' },
+        plugins: [{ name: 'p', version: '1.0.0', source }],
+      }),
+      'utf-8',
+    );
+  };
+
+  it('clones, pins to the sha over the ref, and returns the subdirectory', async () => {
+    vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
+      const sub = path.join(dir as string, 'packages', 'plugin');
+      fs.mkdirSync(path.join(sub, '.claude-plugin'), { recursive: true });
+      fs.writeFileSync(
+        path.join(sub, '.claude-plugin', 'plugin.json'),
+        JSON.stringify({ name: 'p', version: '1.0.0' }),
+        'utf-8',
+      );
+    });
+
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: 'packages/plugin',
+      ref: 'main',
+      sha: 'abc123',
+    });
+
+    const result = await convertClaudePluginPackage(extDir, 'p');
+    expect(result.config.name).toBe('p');
+    // The immutable sha is preferred over the named ref when both are present.
+    const meta = vi.mocked(cloneFromGit).mock.calls[0][0] as { ref?: string };
+    expect(meta.ref).toBe('abc123');
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('rejects a subdirectory that escapes the repository root', async () => {
+    vi.mocked(cloneFromGit).mockResolvedValue(undefined as never);
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: '../../etc',
+    });
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /escapes the repository root/,
+    );
+  });
+
+  it('rejects an absolute subdirectory path', async () => {
+    vi.mocked(cloneFromGit).mockResolvedValue(undefined as never);
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: path.resolve(path.sep, 'etc'),
+    });
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /Invalid plugin subdirectory/,
+    );
+  });
+
+  it('rejects a missing subdirectory', async () => {
+    vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
+      // The clone succeeded but does not contain the requested subdir.
+      fs.mkdirSync(path.join(dir as string, 'other'), { recursive: true });
+    });
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: 'packages/missing',
+    });
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /not found/,
+    );
+  });
+
+  it('rejects a subdirectory that is a symlink escaping the clone', async () => {
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    fs.writeFileSync(path.join(secretDir, 'SKILL.md'), 'secret', 'utf-8');
+    vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
+      // A hostile repo commits the subdir as a symlink whose name stays inside
+      // the clone but whose target escapes it.
+      fs.symlinkSync(secretDir, path.join(dir as string, 'sub'));
+    });
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: 'sub',
+    });
+
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /resolves through a symlink/,
+    );
+
+    fs.rmSync(secretDir, { recursive: true, force: true });
   });
 });

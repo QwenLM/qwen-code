@@ -254,8 +254,21 @@ export const DiscoverTab = ({
                   ext.name,
                   SettingScope.User,
                 );
-              } catch {
-                // Best-effort rollback.
+              } catch (rollbackError) {
+                // Rollback failed: the extension is now disabled at every scope.
+                // The outer catch only debug-logs, so surface it through the
+                // batch error list — otherwise the user is told the install
+                // succeeded with no hint the extension is silently dead.
+                debugLogger.error(
+                  'Scope rollback failed after install:',
+                  rollbackError,
+                );
+                errors.push(
+                  t(
+                    '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.',
+                    { name: plugin.name },
+                  ),
+                );
               }
               throw enableError;
             }
