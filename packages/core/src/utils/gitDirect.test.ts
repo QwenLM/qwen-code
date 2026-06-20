@@ -221,6 +221,28 @@ describe('resolveBranchName', () => {
     expect(await resolveBranchName(worktree)).toBe('feature');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked commondir',
+    async () => {
+      const main = await makeRepo('ref: refs/heads/main\n');
+      const realGitDir = path.join(main, '.git', 'worktrees', 'wt1');
+      await fsp.mkdir(realGitDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(realGitDir, 'HEAD'),
+        'ref: refs/heads/feature\n',
+      );
+      // commondir is a symlink, not a regular file → O_NOFOLLOW refuses it, so
+      // the gitdir can't be validated and no branch is surfaced.
+      await fsp.symlink('../..', path.join(realGitDir, 'commondir'));
+      const worktree = await makeBareDir();
+      await fsp.writeFile(
+        path.join(worktree, '.git'),
+        `gitdir: ${realGitDir}\n`,
+      );
+      expect(await resolveBranchName(worktree)).toBeUndefined();
+    },
+  );
+
   it('returns a 7-char short hash when detached', async () => {
     const sha = 'abcdef1234567890abcdef1234567890abcdef12';
     const repo = await makeRepo(`${sha}\n`);

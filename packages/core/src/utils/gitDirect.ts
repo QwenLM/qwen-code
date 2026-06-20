@@ -128,9 +128,14 @@ async function hasGitStore(dir: string): Promise<boolean> {
 async function readFirstLineNoFollow(filePath: string): Promise<string | null> {
   let fh: fsPromises.FileHandle;
   try {
+    // O_NOFOLLOW refuses a symlink (ELOOP). O_NONBLOCK never blocks on a FIFO —
+    // a crafted `.git/HEAD` or commondir named pipe would otherwise hang here
+    // and pin a libuv thread-pool slot. Both are no-ops on a regular file.
     fh = await fsPromises.open(
       filePath,
-      (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NOFOLLOW ?? 0),
+      (fs.constants?.O_RDONLY ?? 0) |
+        (fs.constants?.O_NOFOLLOW ?? 0) |
+        (fs.constants?.O_NONBLOCK ?? 0),
     );
   } catch {
     return null;
@@ -142,7 +147,9 @@ async function readFirstLineNoFollow(filePath: string): Promise<string | null> {
   } catch {
     return null;
   } finally {
-    await fh.close();
+    // Per the codebase convention a close error must not escape — the docstring
+    // promises null on any failure.
+    await fh.close().catch(() => {});
   }
 }
 
