@@ -152,6 +152,19 @@ describe('readGitHead', () => {
     await fsp.mkdir(path.join(dir, '.git'), { recursive: true });
     expect(await readGitHead(path.join(dir, '.git'))).toBeNull();
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked HEAD (would follow out of the repo)',
+    async () => {
+      const repo = await makeRepo('ref: refs/heads/main\n');
+      const secret = path.join(await makeBareDir(), 'secret');
+      await fsp.writeFile(secret, 'ref: refs/heads/leaked\n');
+      const headPath = path.join(repo, '.git', 'HEAD');
+      await fsp.rm(headPath);
+      await fsp.symlink(secret, headPath);
+      expect(await readGitHead(path.join(repo, '.git'))).toBeNull();
+    },
+  );
 });
 
 describe('resolveBranchName', () => {
@@ -206,6 +219,26 @@ describe('resolveBranchName', () => {
     // ...until the cache is cleared.
     clearGitDirCache();
     expect(await resolveBranchName(dir)).toBe('main');
+  });
+
+  it('rejects a .git gitdir pointer that escapes the repo (containment)', async () => {
+    // A crafted `.git` FILE pointing at an out-of-repo dir with a fake HEAD.
+    const decoy = await makeBareDir();
+    await fsp.writeFile(path.join(decoy, 'HEAD'), 'ref: refs/heads/pwned\n');
+    const project = await makeBareDir();
+    await fsp.writeFile(path.join(project, '.git'), `gitdir: ${decoy}\n`);
+    // Without containment this would surface 'pwned' from another location.
+    expect(await resolveBranchName(project)).toBeUndefined();
+  });
+
+  it('accepts a submodule gitdir under .git/modules/', async () => {
+    const main = await makeRepo('ref: refs/heads/main\n');
+    const modDir = path.join(main, '.git', 'modules', 'sub');
+    await fsp.mkdir(modDir, { recursive: true });
+    await fsp.writeFile(path.join(modDir, 'HEAD'), 'ref: refs/heads/submod\n');
+    const sub = await makeBareDir();
+    await fsp.writeFile(path.join(sub, '.git'), `gitdir: ${modDir}\n`);
+    expect(await resolveBranchName(sub)).toBe('submod');
   });
 });
 
@@ -331,4 +364,32 @@ describe('watchRepoBranch', () => {
     expect(watchMock).not.toHaveBeenCalled();
     expect(() => dispose()).not.toThrow();
   });
+
+  it('returns a no-op (never rejects) when fs.watch throws synchronously', async () => {
+    watchMock.mockImplementation(() => {
+      // TOCTOU: logs/HEAD vanished after access(), or a platform watch limit.
+      throw new Error('ENOENT');
+    });
+    const repo = await makeRepo('ref: refs/heads/main\n');
+    // Must resolve to a disposer, not reject (which would surface as unhandled).
+    const dispose = await watchRepoBranch(repo, vi.fn());
+    expect(() => dispose()).not.toThrow();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked reflog (no out-of-repo watch)',
+    async () => {
+      installWatchMock();
+      const repo = await makeRepo('ref: refs/heads/main\n', {
+        withReflog: false,
+      });
+      const target = path.join(await makeBareDir(), 'evil-log');
+      await fsp.writeFile(target, 'x\n');
+      await fsp.mkdir(path.join(repo, '.git', 'logs'), { recursive: true });
+      await fsp.symlink(target, path.join(repo, '.git', 'logs', 'HEAD'));
+      const dispose = await watchRepoBranch(repo, vi.fn());
+      expect(watchMock).not.toHaveBeenCalled();
+      expect(() => dispose()).not.toThrow();
+    },
+  );
 });

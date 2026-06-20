@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { resolveGitDir } from './gitDiff.js';
+import { findGitRoot } from './gitUtils.js';
 
 /**
  * Direct-read git helpers: resolve the current branch / HEAD by reading the
@@ -61,16 +62,51 @@ export function isValidGitSha(value: string): boolean {
 // so a branch switch is reflected immediately.
 const gitDirCache = new Map<string, string | null>();
 
-/** Clear the cached {@link resolveGitDir} results (e.g. after a repo is created/removed). */
+/** Clear the cached gitDir results (e.g. after a repo is created/removed). */
 export function clearGitDirCache(): void {
   gitDirCache.clear();
+}
+
+/**
+ * Resolve the gitDir for `cwd` and verify it is trustworthy for an automatic,
+ * zero-click display read.
+ *
+ * Security: `resolveGitDir` follows a `.git`-FILE `gitdir:` pointer verbatim, so
+ * a crafted project could point it at an arbitrary out-of-repo path and make us
+ * read/watch a file outside the repo (the old `git rev-parse` path refused this
+ * with exit 128). We require containment: after resolving symlinks, the gitDir
+ * must be the repo's own `<root>/.git`, or a linked worktree / submodule gitdir
+ * under some `.git/worktrees/` or `.git/modules/`. Anything else is rejected.
+ */
+async function resolveTrustedGitDir(cwd: string): Promise<string | null> {
+  const gitDir = await resolveGitDir(cwd);
+  if (!gitDir) return null;
+  const root = findGitRoot(cwd);
+  if (!root) return null;
+  try {
+    const realRoot = await fsPromises.realpath(root);
+    const realGitDir = await fsPromises.realpath(gitDir);
+    if (realGitDir === path.join(realRoot, '.git')) return gitDir;
+    const segs = realGitDir.split(path.sep);
+    for (let i = 0; i + 1 < segs.length; i++) {
+      if (
+        segs[i] === '.git' &&
+        (segs[i + 1] === 'worktrees' || segs[i + 1] === 'modules')
+      ) {
+        return gitDir;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 async function getCachedGitDir(cwd: string): Promise<string | null> {
   const key = path.resolve(cwd);
   const cached = gitDirCache.get(key);
   if (cached !== undefined) return cached;
-  const gitDir = await resolveGitDir(key);
+  const gitDir = await resolveTrustedGitDir(key);
   gitDirCache.set(key, gitDir);
   return gitDir;
 }
@@ -91,11 +127,13 @@ export interface GitHead {
  * object id, which is returned as-is (callers shorten it for display).
  */
 export async function readGitHead(gitDir: string): Promise<GitHead | null> {
+  const headPath = path.join(gitDir, 'HEAD');
   let content: string;
   try {
-    content = (
-      await fsPromises.readFile(path.join(gitDir, 'HEAD'), 'utf-8')
-    ).trim();
+    // Refuse a symlinked HEAD: readFile would otherwise follow it out of the
+    // repo and surface the target file's first line.
+    if ((await fsPromises.lstat(headPath)).isSymbolicLink()) return null;
+    content = (await fsPromises.readFile(headPath, 'utf-8')).trim();
   } catch {
     return null;
   }
@@ -161,6 +199,11 @@ export async function watchRepoBranch(
     const logsHeadPath = path.join(gitDir, 'logs', 'HEAD');
     try {
       await fsPromises.access(logsHeadPath, fs.constants.F_OK);
+      // Refuse a symlinked reflog: we'd otherwise place a persistent watch on a
+      // file outside the repo.
+      if ((await fsPromises.lstat(logsHeadPath)).isSymbolicLink()) {
+        return () => {};
+      }
     } catch {
       // No reflog yet (unborn repo) or unreadable. Return a no-op without
       // caching a watcher-less entry, so a later caller can establish the
@@ -174,11 +217,21 @@ export async function watchRepoBranch(
     if (existing) {
       entry = existing;
     } else {
-      const watcher = fs.watch(logsHeadPath, (eventType: string) => {
-        if (eventType === 'change' || eventType === 'rename') {
-          repoBranchWatches.get(gitDir)?.subscribers.forEach((cb) => cb());
-        }
-      });
+      let watcher: fs.FSWatcher;
+      try {
+        watcher = fs.watch(logsHeadPath, (eventType: string) => {
+          if (eventType === 'change' || eventType === 'rename') {
+            repoBranchWatches.get(gitDir)?.subscribers.forEach((cb) => cb());
+          }
+        });
+      } catch {
+        // fs.watch throws synchronously if logs/HEAD vanished after access()
+        // (TOCTOU: git gc / reflog expire / worktree removal) or a platform
+        // watch limit (ENOSPC) is hit. Fall back to a no-op rather than
+        // rejecting (which the hook's bare `void init()` would surface as an
+        // unhandled rejection).
+        return () => {};
+      }
       // fs.FSWatcher is an EventEmitter: an unhandled 'error' (reflog removed
       // by `git gc` / `reflog expire`, worktree removal, inode change, or a
       // platform watch limit) would crash the process. Tear the watch down

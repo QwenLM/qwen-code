@@ -40,7 +40,10 @@ export function useGitBranchName(cwd: string): string | undefined {
       }
     };
 
-    void init();
+    // Defensive: init() shouldn't reject (resolveBranchName / watchRepoBranch
+    // swallow their own errors), but guard so a future change can't surface an
+    // unhandled rejection on the render path.
+    void init().catch(() => {});
 
     return () => {
       cancelled = true;

@@ -167,4 +167,18 @@ describe('useGitBranchName', () => {
     expect(mockResolve).toHaveBeenCalledWith('/repo-b');
     expect(mockWatch).toHaveBeenCalledWith('/repo-b', expect.any(Function));
   });
+
+  it('still renders the branch if watcher setup rejects', async () => {
+    mockResolve.mockResolvedValue('main');
+    mockWatch.mockRejectedValue(new Error('watch boom'));
+
+    const { result } = renderHook(() => useGitBranchName(CWD));
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+
+    // The initial read still rendered; the rejected setup is swallowed by the
+    // hook's .catch() (no unhandled rejection).
+    expect(result.current).toBe('main');
+  });
 });
