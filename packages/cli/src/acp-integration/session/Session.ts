@@ -99,6 +99,7 @@ import {
   sessionIdContext,
   dedupeToolCallsById,
   getProviderToolCallId,
+  parsePositiveIntegerEnv,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -3344,12 +3345,10 @@ export class Session implements SessionContext {
       onStopAfterPermissionCancel?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
-      const parsed = parseInt(
-        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+      const maxConcurrency = parsePositiveIntegerEnv(
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
         10,
       );
-      const maxConcurrency =
-        Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
       const results: RunToolResult[] = new Array(calls.length);
       const executing = new Set<Promise<void>>();
       for (let i = 0; i < calls.length; i++) {
