@@ -94,6 +94,10 @@ function isNonNegativeIntegerOrInfinity(value: number): boolean {
   );
 }
 
+function isNonNegativeIntegerMs(value: number): boolean {
+  return Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+}
+
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 function assertTimerDelayInRange(name: string, value: number): void {
@@ -696,6 +700,20 @@ export async function runQwenServe(
     ) {
       throw new TypeError(
         `Invalid channelIdleTimeoutMs: ${opts.channelIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = immediate kill).`,
+      );
+    }
+  }
+  if (opts.sessionReapIntervalMs !== undefined) {
+    if (!isNonNegativeIntegerMs(opts.sessionReapIntervalMs)) {
+      throw new TypeError(
+        `Invalid sessionReapIntervalMs: ${opts.sessionReapIntervalMs}. Must be a non-negative integer (milliseconds, 0 = disabled).`,
+      );
+    }
+  }
+  if (opts.sessionIdleTimeoutMs !== undefined) {
+    if (!isNonNegativeIntegerMs(opts.sessionIdleTimeoutMs)) {
+      throw new TypeError(
+        `Invalid sessionIdleTimeoutMs: ${opts.sessionIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = disabled).`,
       );
     }
   }

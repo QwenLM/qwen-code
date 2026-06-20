@@ -316,6 +316,83 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
   });
 });
 
+describe('runQwenServe session reaper timeout validation', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  function makeFakeBridge(): HttpAcpBridge {
+    return {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HttpAcpBridge;
+  }
+
+  async function runWithReaperOption(
+    optionName: 'sessionReapIntervalMs' | 'sessionIdleTimeoutMs',
+    value: number,
+  ) {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-rt-')));
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      return await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          [optionName]: value,
+        },
+        { bridge: makeFakeBridge() },
+      );
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  }
+
+  it.each([
+    ['sessionReapIntervalMs', -1],
+    ['sessionReapIntervalMs', 1.5],
+    ['sessionReapIntervalMs', Number.NaN],
+    ['sessionReapIntervalMs', Number.POSITIVE_INFINITY],
+    ['sessionIdleTimeoutMs', -1],
+    ['sessionIdleTimeoutMs', 1.5],
+    ['sessionIdleTimeoutMs', Number.NaN],
+    ['sessionIdleTimeoutMs', Number.POSITIVE_INFINITY],
+  ] as const)('rejects invalid %s=%s', async (optionName, value) => {
+    await expect(runWithReaperOption(optionName, value)).rejects.toThrow(
+      optionName,
+    );
+  });
+
+  it.each([
+    ['sessionReapIntervalMs', 0],
+    ['sessionIdleTimeoutMs', 0],
+  ] as const)(
+    'keeps %s=0 as the disabled sentinel',
+    async (optionName, value) => {
+      const handle = await runWithReaperOption(optionName, value);
+      await handle.close();
+    },
+  );
+});
+
 describe('runQwenServe Web Shell signals on RunHandle', () => {
   let tmpDir: string;
 
