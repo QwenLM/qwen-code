@@ -614,14 +614,21 @@ export const InstalledTab = ({
   const toggleFavorite = useCallback(
     async (item: InstalledItem) => {
       if (!extensionManager) return;
-      const nowFavorite = extensionManager.toggleFavorite(item.name);
-      onStatus({
-        type: 'info',
-        text: nowFavorite
-          ? t('Added "{{name}}" to favorites.', { name: item.name })
-          : t('Removed "{{name}}" from favorites.', { name: item.name }),
-      });
-      await load();
+      // toggleFavorite() -> atomicWriteFileSync can throw; this runs in a
+      // void-invoked handler, so an unguarded throw surfaces as the alarming
+      // "Unhandled Promise Rejection" banner. Route it to an error toast.
+      try {
+        const nowFavorite = extensionManager.toggleFavorite(item.name);
+        onStatus({
+          type: 'info',
+          text: nowFavorite
+            ? t('Added "{{name}}" to favorites.', { name: item.name })
+            : t('Removed "{{name}}" from favorites.', { name: item.name }),
+        });
+        await load();
+      } catch (error) {
+        onStatus({ type: 'error', text: getErrorMessage(error) });
+      }
     },
     [extensionManager, load, onStatus],
   );
