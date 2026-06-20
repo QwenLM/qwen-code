@@ -65,14 +65,6 @@
               "description": "Preferred spoken language for voice transcription (e.g. \"english\", \"chinese\"). Leave empty to auto-detect.",
               "type": "string",
               "default": ""
-            },
-            "protocol": {
-              "description": "Transcription transport: \"qwen-asr-chat\" (batch, default) or \"dashscope-realtime\" (live streaming over WebSocket; needs a *-realtime model). Options: qwen-asr-chat, dashscope-realtime",
-              "enum": [
-                "qwen-asr-chat",
-                "dashscope-realtime"
-              ],
-              "default": "qwen-asr-chat"
             }
           }
         },

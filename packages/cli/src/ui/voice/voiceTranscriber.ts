@@ -16,50 +16,17 @@ import {
   isTranscribableVoiceModel,
 } from './voiceModel.js';
 
-// Streaming needs a *-realtime model; the configured (batch) model only
-// provides the provider baseUrl + key.
-const DEFAULT_REALTIME_MODEL = 'fun-asr-realtime';
-
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
 
-/**
- * Voice transcription transport protocols. The axis is API *shape*, not vendor:
- * DashScope alone spans three (see voiceTranscriber notes). Only 'qwen-asr-chat'
- * is implemented today; the rest are reserved extension points.
- */
-export type VoiceProtocol =
-  // DashScope OpenAI-compatible: POST chat/completions + input_audio, sync. (impl)
+export type VoiceTransport =
   | 'qwen-asr-chat'
-  // OpenAI/Whisper: POST /audio/transcriptions multipart, sync.
-  | 'openai-whisper'
-  // DashScope native async file transcription: submit task + poll. (Fun-ASR/Paraformer)
-  | 'dashscope-filetrans'
-  // DashScope WebSocket streaming ASR (paraformer-realtime / fun-asr-realtime / qwen-realtime).
-  | 'dashscope-realtime';
+  | 'qwen-asr-realtime'
+  | 'dashscope-task-realtime'
+  | 'unsupported';
 
-const VOICE_PROTOCOLS: readonly VoiceProtocol[] = [
-  'qwen-asr-chat',
-  'openai-whisper',
-  'dashscope-filetrans',
-  'dashscope-realtime',
-];
-
-const DEFAULT_VOICE_PROTOCOL: VoiceProtocol = 'qwen-asr-chat';
-
-/**
- * Resolve which transport to use. Default is the DashScope Qwen3-ASR-Flash sync
- * chat protocol. An explicit `general.voice.protocol` override is honored when
- * present (the future home for per-provider selection); unknown values fall back
- * to the default. Behavior is unchanged until other protocols are implemented.
- */
-function resolveVoiceProtocol(settings: LoadedSettings): VoiceProtocol {
-  const explicit = (
-    settings.merged.general as { voice?: { protocol?: unknown } } | undefined
-  )?.voice?.protocol;
-  return VOICE_PROTOCOLS.includes(explicit as VoiceProtocol)
-    ? (explicit as VoiceProtocol)
-    : DEFAULT_VOICE_PROTOCOL;
-}
+export type VoiceStreamingTransport =
+  | 'qwen-asr-realtime'
+  | 'dashscope-task-realtime';
 
 function readVoiceLanguage(settings: LoadedSettings): string | undefined {
   const language = (
@@ -76,6 +43,10 @@ export interface VoiceTranscriptionConfig {
   model: string;
   baseUrl: string;
   apiKey?: string;
+}
+
+export interface ResolvedVoiceStreamConfig extends VoiceStreamConfig {
+  transport: VoiceStreamingTransport;
 }
 
 interface ResolveVoiceTranscriptionConfigArgs {
@@ -166,27 +137,46 @@ export function resolveVoiceTranscriptionConfig({
   };
 }
 
-// Map a configured (possibly batch/file) model id to a Protocol-A realtime
-// model. qwen3-asr-flash has no Protocol-A realtime variant, so it falls back
-// to the fun-asr-realtime default.
-function toRealtimeModel(model: string): string {
+export function resolveVoiceTransport(model: string): VoiceTransport {
   const id = model.toLowerCase();
-  if (id.includes('realtime')) return model;
-  if (id.startsWith('paraformer')) return 'paraformer-realtime-v2';
-  if (id.startsWith('fun-asr')) return 'fun-asr-realtime';
-  return DEFAULT_REALTIME_MODEL;
+  if (/^qwen3-asr-flash-realtime(?:-|$)/.test(id)) {
+    return 'qwen-asr-realtime';
+  }
+  if (/^qwen3-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(id)) {
+    return 'qwen-asr-chat';
+  }
+  if (/^(fun-asr|paraformer).*realtime(?:-|$)/.test(id)) {
+    return 'dashscope-task-realtime';
+  }
+  return 'unsupported';
+}
+
+export function isStreamingVoiceModel(model: string): boolean {
+  const transport = resolveVoiceTransport(model);
+  return (
+    transport === 'qwen-asr-realtime' || transport === 'dashscope-task-realtime'
+  );
 }
 
 /** Build a streaming (WebSocket) config from the configured voice provider. */
 export function resolveVoiceStreamConfig(
   args: ResolveVoiceTranscriptionConfigArgs,
-): VoiceStreamConfig {
+): ResolvedVoiceStreamConfig {
   const base = resolveVoiceTranscriptionConfig(args);
-  const model = toRealtimeModel(base.model);
+  const transport = resolveVoiceTransport(base.model);
+  if (
+    transport !== 'qwen-asr-realtime' &&
+    transport !== 'dashscope-task-realtime'
+  ) {
+    throw new Error(
+      `Voice model '${base.model}' does not support streaming transcription.`,
+    );
+  }
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
   return {
+    transport,
     baseUrl: base.baseUrl,
-    model,
+    model: base.model,
     ...(base.apiKey ? { apiKey: base.apiKey } : {}),
     ...(language ? { language } : {}),
   };
@@ -342,7 +332,7 @@ async function transcribeViaQwenAsr(
     }
     if (/model_not_supported|unsupported model/i.test(details)) {
       throw new Error(
-        'This voice model cannot be used for batch transcription. Use qwen3-asr-flash for batch, or enable streaming (set general.voice.protocol to "dashscope-realtime") for realtime models like fun-asr-realtime / paraformer-realtime-v2.',
+        'This voice model cannot be used for batch transcription. Use qwen3-asr-flash for batch or choose a realtime voice model such as qwen3-asr-flash-realtime / fun-asr-realtime / paraformer-realtime-v2.',
       );
     }
     const suffix = details ? `: ${details}` : '';
@@ -374,8 +364,8 @@ export async function transcribeVoiceAudio(
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
   const keytermsContext = buildKeytermsContext(args);
 
-  const protocol = resolveVoiceProtocol(args.settings);
-  switch (protocol) {
+  const transport = resolveVoiceTransport(voiceConfig.model);
+  switch (transport) {
     case 'qwen-asr-chat':
       return transcribeViaQwenAsr(
         audio,
@@ -383,16 +373,15 @@ export async function transcribeVoiceAudio(
         { language, keytermsContext },
         fetchFn,
       );
-    // Extension points — add a transcribeVia* handler and wire it here:
-    //   'openai-whisper'      → multipart POST /audio/transcriptions
-    //   'dashscope-filetrans' → native async submit + poll
-    //   'dashscope-realtime'  → WebSocket streaming
-    case 'openai-whisper':
-    case 'dashscope-filetrans':
-    case 'dashscope-realtime':
+    case 'qwen-asr-realtime':
+    case 'dashscope-task-realtime':
+      throw new Error(
+        `Voice model '${voiceConfig.model}' requires streaming transcription.`,
+      );
+    case 'unsupported':
     default:
       throw new Error(
-        `Voice protocol '${protocol}' is not implemented yet; only 'qwen-asr-chat' is supported.`,
+        `Voice model '${voiceConfig.model}' is not a supported transcription model.`,
       );
   }
 }

@@ -68,9 +68,11 @@ import {
 } from '../hooks/useVoiceInput.js';
 import { createVoiceRecorder } from '../voice/voiceRecorder.js';
 import {
+  isStreamingVoiceModel,
   resolveVoiceStreamConfig,
   transcribeVoiceAudio,
 } from '../voice/voiceTranscriber.js';
+import { openQwenAsrRealtimeStream } from '../voice/qwenAsrRealtimeSession.js';
 import { openVoiceStream } from '../voice/voiceStreamSession.js';
 import { VoiceIndicator } from './VoiceIndicator.js';
 
@@ -339,18 +341,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       })
       .catch(() => {});
   }, [uiState.historyManager]);
-  const voiceStreaming =
-    (settings.merged.general as { voice?: { protocol?: unknown } } | undefined)
-      ?.voice?.protocol === 'dashscope-realtime';
+  const voiceStreaming = voiceModel ? isStreamingVoiceModel(voiceModel) : false;
   const openVoiceStreamSession = useCallback(
     (callbacks: { onInterim: (text: string) => void }) => {
       if (!voiceModel) {
         return Promise.reject(new Error('No voice model selected.'));
       }
-      return openVoiceStream(
-        resolveVoiceStreamConfig({ config, settings, voiceModel }),
-        callbacks,
-      );
+      const streamConfig = resolveVoiceStreamConfig({
+        config,
+        settings,
+        voiceModel,
+      });
+      return streamConfig.transport === 'qwen-asr-realtime'
+        ? openQwenAsrRealtimeStream(streamConfig, callbacks)
+        : openVoiceStream(streamConfig, callbacks);
     },
     [config, settings, voiceModel],
   );

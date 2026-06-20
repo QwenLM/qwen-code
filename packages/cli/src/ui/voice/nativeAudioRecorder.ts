@@ -53,6 +53,10 @@ class NativeAudioRecorder implements VoiceRecorder {
     return this.backend?.drainAudio?.() ?? new Uint8Array(0);
   }
 
+  supportsStreaming(): boolean {
+    return typeof this.backend?.drainAudio === 'function';
+  }
+
   audioLevel(): number {
     return this.backend?.audioLevel?.() ?? 0;
   }

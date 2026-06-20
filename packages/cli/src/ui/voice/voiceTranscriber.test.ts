@@ -8,7 +8,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
+  isStreamingVoiceModel,
+  resolveVoiceStreamConfig,
   resolveVoiceTranscriptionConfig,
+  resolveVoiceTransport,
   transcribeVoiceAudio,
 } from './voiceTranscriber.js';
 
@@ -50,6 +53,89 @@ describe('voiceTranscriber', () => {
       baseUrl: 'https://dashscope.example/v1',
       apiKey: 'sk-test',
     });
+  });
+
+  it('routes known voice models by model id instead of user protocol', () => {
+    expect(resolveVoiceTransport('qwen3-asr-flash')).toBe('qwen-asr-chat');
+    expect(resolveVoiceTransport('qwen3-asr-flash-2026-02-10')).toBe(
+      'qwen-asr-chat',
+    );
+    expect(resolveVoiceTransport('qwen3-asr-flash-realtime')).toBe(
+      'qwen-asr-realtime',
+    );
+    expect(resolveVoiceTransport('qwen3-asr-flash-realtime-2026-02-10')).toBe(
+      'qwen-asr-realtime',
+    );
+    expect(resolveVoiceTransport('fun-asr-realtime')).toBe(
+      'dashscope-task-realtime',
+    );
+    expect(resolveVoiceTransport('fun-asr-flash-8k-realtime')).toBe(
+      'dashscope-task-realtime',
+    );
+    expect(resolveVoiceTransport('paraformer-realtime-v2')).toBe(
+      'dashscope-task-realtime',
+    );
+    expect(resolveVoiceTransport('qwen3-asr-flash-filetrans')).toBe(
+      'unsupported',
+    );
+  });
+
+  it('does not rewrite qwen3-asr-flash to a realtime model', () => {
+    expect(isStreamingVoiceModel('qwen3-asr-flash')).toBe(false);
+    expect(() =>
+      resolveVoiceStreamConfig({
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Qwen ASR',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1',
+            envKey: 'DASHSCOPE_API_KEY',
+          },
+        ]),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toThrow(/does not support streaming/);
+  });
+
+  it('keeps realtime model ids on their matching streaming transport', () => {
+    expect(
+      resolveVoiceStreamConfig({
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash-realtime',
+            label: 'Qwen ASR Realtime',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1',
+            envKey: 'DASHSCOPE_API_KEY',
+          },
+        ]),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'qwen3-asr-flash-realtime',
+      }),
+    ).toEqual({
+      transport: 'qwen-asr-realtime',
+      model: 'qwen3-asr-flash-realtime',
+      baseUrl: 'https://dashscope.example/v1',
+      apiKey: 'sk-test',
+    });
+
+    expect(
+      resolveVoiceStreamConfig({
+        config: createConfig([
+          {
+            id: 'fun-asr-realtime',
+            label: 'Fun ASR Realtime',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1',
+            envKey: 'DASHSCOPE_API_KEY',
+          },
+        ]),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'fun-asr-realtime',
+      }).transport,
+    ).toBe('dashscope-task-realtime');
   });
 
   it('treats colon-containing voice model values as literal model ids', () => {
@@ -141,11 +227,9 @@ describe('voiceTranscriber', () => {
   it('posts audio to chat/completions as input_audio content', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
-      json: vi
-        .fn()
-        .mockResolvedValue({
-          choices: [{ message: { content: 'hello world' } }],
-        }),
+      json: vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'hello world' } }],
+      }),
     });
 
     const text = await transcribeVoiceAudio(
@@ -254,15 +338,21 @@ describe('voiceTranscriber', () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
-  it('throws for a configured-but-unimplemented voice protocol', async () => {
+  it('ignores legacy protocol settings and routes batch models by model id', async () => {
     const fetchFn = vi.fn();
     const settings = {
       merged: {
         env: { DASHSCOPE_API_KEY: 'sk-test' },
         security: { auth: {} },
-        general: { voice: { protocol: 'openai-whisper' } },
+        general: { voice: { protocol: 'dashscope-realtime' } },
       },
     } as unknown as LoadedSettings;
+    fetchFn.mockResolvedValue({
+      ok: true,
+      json: vi
+        .fn()
+        .mockResolvedValue({ choices: [{ message: { content: 'hi' } }] }),
+    });
 
     await expect(
       transcribeVoiceAudio(
@@ -282,8 +372,8 @@ describe('voiceTranscriber', () => {
           fetchFn,
         },
       ),
-    ).rejects.toThrow(/not implemented yet/);
-    expect(fetchFn).not.toHaveBeenCalled();
+    ).resolves.toBe('hi');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
   it('drops an echoed keyterm list instead of inserting it', async () => {

@@ -71,7 +71,7 @@ export function openVoiceStream(
   return new Promise<VoiceStreamSession>((resolve, reject) => {
     const ws = createWebSocket(deriveStreamUrl(config.baseUrl), {
       headers: config.apiKey
-        ? { Authorization: `bearer ${config.apiKey}` }
+        ? { Authorization: `Bearer ${config.apiKey}` }
         : {},
     });
     const taskId = randomUUID();

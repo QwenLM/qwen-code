@@ -34,6 +34,8 @@ export interface VoiceRecorder {
   microphoneStatus?: () => Promise<MicrophonePermission>;
   /** Optional (streaming): return & clear PCM captured since the last call. */
   drain?: () => Uint8Array;
+  /** Optional: whether this recorder can provide streaming PCM chunks. */
+  supportsStreaming?: () => boolean;
   /** Optional: recent input level 0..1 for the waveform. */
   audioLevel?: () => number;
 }
@@ -127,6 +129,9 @@ export function useVoiceInput({
   const releaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const finalizeRef = useRef<(submit: boolean) => void>(() => {});
   const streamSessionRef = useRef<VoiceStreamSession | null>(null);
+  const streamSessionPromiseRef = useRef<Promise<VoiceStreamSession> | null>(
+    null,
+  );
   const pumpTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isStreaming = streaming === true && typeof openStream === 'function';
@@ -193,16 +198,26 @@ export function useVoiceInput({
         if (!isStreaming || recorderRef.current !== recorder) {
           return;
         }
-        const session = await openStream!({
+        if (recorder.supportsStreaming?.() === false) {
+          throw new Error(
+            'Streaming voice transcription requires native audio capture.',
+          );
+        }
+        const streamPromise = openStream!({
           onInterim: (text) => {
             if (mountedRef.current) setInterimText(text);
           },
         });
+        streamSessionPromiseRef.current = streamPromise;
+        const session = await streamPromise;
         if (recorderRef.current !== recorder) {
           session.abort();
           return;
         }
         streamSessionRef.current = session;
+        if (statusRef.current !== 'recording') {
+          return;
+        }
         pumpTimerRef.current = setInterval(() => {
           const active = recorderRef.current;
           if (!active) return;
@@ -216,13 +231,23 @@ export function useVoiceInput({
       });
       startPromiseRef.current = startPromise;
       void startPromise.catch((error: unknown) => {
-        if (recorderRef.current === recorder) {
+        if (
+          recorderRef.current === recorder &&
+          statusRef.current === 'recording'
+        ) {
           recorderRef.current = null;
           startPromiseRef.current = null;
           clearReleaseTimer();
           clearPump();
+          void Promise.resolve()
+            .then(() => recorder.stop())
+            .catch(() => undefined);
           streamSessionRef.current?.abort();
           streamSessionRef.current = null;
+          void streamSessionPromiseRef.current
+            ?.then((session) => session.abort())
+            .catch(() => {});
+          streamSessionPromiseRef.current = null;
           setVoiceStatus('idle');
           resetStreamUi();
           if (!(error instanceof Error && /empty audio/i.test(error.message))) {
@@ -254,13 +279,13 @@ export function useVoiceInput({
       clearReleaseTimer();
       clearPump();
       const startPromise = startPromiseRef.current ?? Promise.resolve();
-      const session = streamSessionRef.current;
-      streamSessionRef.current = null;
-      recorderRef.current = null;
-      startPromiseRef.current = null;
+      const wasStreaming = isStreaming;
       setVoiceStatus('transcribing');
       void startPromise
         .then(async () => {
+          const session =
+            streamSessionRef.current ??
+            (wasStreaming ? await streamSessionPromiseRef.current : null);
           if (session) {
             // Push any remaining audio, tear down the device, then flush the
             // stream and await the final transcript.
@@ -282,6 +307,11 @@ export function useVoiceInput({
           }
         })
         .catch((error: unknown) => {
+          if (wasStreaming) {
+            void Promise.resolve()
+              .then(() => recorder.stop())
+              .catch(() => undefined);
+          }
           // A too-short/empty capture (quick tap, or cold-start race) isn't a
           // real failure — silently return to idle instead of a scary error.
           if (error instanceof Error && /empty audio/i.test(error.message)) {
@@ -290,6 +320,12 @@ export function useVoiceInput({
           reportError(error);
         })
         .finally(() => {
+          if (recorderRef.current === recorder) {
+            recorderRef.current = null;
+          }
+          streamSessionRef.current = null;
+          streamSessionPromiseRef.current = null;
+          startPromiseRef.current = null;
           setVoiceStatus('idle');
           resetStreamUi();
         });
@@ -298,6 +334,7 @@ export function useVoiceInput({
       buffer,
       clearPump,
       clearReleaseTimer,
+      isStreaming,
       onSubmit,
       reportError,
       resetStreamUi,
@@ -314,6 +351,10 @@ export function useVoiceInput({
     const session = streamSessionRef.current;
     streamSessionRef.current = null;
     session?.abort();
+    void streamSessionPromiseRef.current
+      ?.then((pendingSession) => pendingSession.abort())
+      .catch(() => {});
+    streamSessionPromiseRef.current = null;
     resetStreamUi();
     const recorder = recorderRef.current;
     if (!recorder) {

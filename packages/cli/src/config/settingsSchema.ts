@@ -407,23 +407,6 @@ const SETTINGS_SCHEMA = {
               'Preferred spoken language for voice transcription (e.g. "english", "chinese"). Leave empty to auto-detect.',
             showInDialog: false,
           },
-          protocol: {
-            type: 'enum',
-            label: 'Voice Transcription Protocol',
-            category: 'General',
-            requiresRestart: false,
-            default: 'qwen-asr-chat',
-            description:
-              'Transcription transport: "qwen-asr-chat" (batch, default) or "dashscope-realtime" (live streaming over WebSocket; needs a *-realtime model).',
-            showInDialog: false,
-            options: [
-              { value: 'qwen-asr-chat', label: 'Batch (Qwen-ASR chat)' },
-              {
-                value: 'dashscope-realtime',
-                label: 'Streaming (DashScope realtime)',
-              },
-            ],
-          },
         },
       },
       enableAutoUpdate: {
