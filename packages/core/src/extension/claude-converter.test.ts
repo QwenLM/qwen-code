@@ -203,6 +203,8 @@ describe('convertClaudePluginPackage', () => {
   beforeEach(() => {
     // Create a temporary directory for test files
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-test-'));
+    vi.mocked(downloadFromGitHubRelease).mockReset();
+    vi.mocked(cloneFromGit).mockReset();
   });
 
   afterEach(() => {
@@ -376,6 +378,46 @@ describe('convertClaudePluginPackage', () => {
     ).rejects.toThrow(/resolves through a symlink outside the marketplace/);
 
     fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('treats uppercase HTTPS marketplace plugin sources as URLs', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-uppercase-url');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'remote',
+          version: '1.0.0',
+          source: 'HTTPS://github.com/owner/plugin',
+          strict: false,
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+    vi.mocked(downloadFromGitHubRelease).mockResolvedValue(undefined as never);
+
+    const result = await convertClaudePluginPackage(pluginSourceDir, 'remote');
+
+    expect(result.config.name).toBe('remote');
+    expect(downloadFromGitHubRelease).toHaveBeenCalledWith(
+      {
+        source: 'HTTPS://github.com/owner/plugin',
+        type: 'git',
+        originSource: 'Claude',
+      },
+      expect.any(String),
+    );
+    expect(cloneFromGit).not.toHaveBeenCalled();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
   it('should use all skills from folder when config does not specify skills', async () => {

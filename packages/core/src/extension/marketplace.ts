@@ -9,12 +9,12 @@ import type { ExtensionInstallMetadata } from '../config/config.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as http from 'node:http';
-import * as https from 'node:https';
+import type { ClientRequest, IncomingMessage } from 'node:http';
 import { stat } from 'node:fs/promises';
 import { parseGitHubRepoForReleases } from './github.js';
 import { isScopedNpmPackage } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
+import { clientForUrl } from './http-client.js';
 
 export interface MarketplaceInstallOptions {
   marketplaceUrl: string;
@@ -141,11 +141,17 @@ function fetchUrl(
   url: string,
   headers: Record<string, string>,
 ): Promise<string | null> {
-  const protocol = new URL(url).protocol;
-  const client = protocol === 'http:' ? http : https;
-
   return new Promise((resolve) => {
+    let client: ReturnType<typeof clientForUrl>;
+    try {
+      client = clientForUrl(url);
+    } catch {
+      resolve(null);
+      return;
+    }
+
     let settled = false;
+    let req: ClientRequest | undefined;
     const done = (value: string | null) => {
       if (settled) return;
       settled = true;
@@ -156,10 +162,11 @@ function fetchUrl(
     // chunk, so a server trickling bytes can keep the request alive forever.
     // Pair it with an absolute wall-clock deadline.
     const hardDeadline = setTimeout(() => {
-      req.destroy();
+      req?.destroy();
       done(null);
     }, MARKETPLACE_FETCH_TIMEOUT_MS);
-    const req = client.get(url, { headers }, (res) => {
+
+    const onResponse = (res: IncomingMessage) => {
       if (res.statusCode !== 200) {
         res.resume(); // drain so the socket can be freed
         done(null);
@@ -170,7 +177,7 @@ function fetchUrl(
       res.on('data', (chunk) => {
         total += chunk.length;
         if (total > MARKETPLACE_MAX_BODY_BYTES) {
-          req.destroy();
+          req?.destroy();
           done(null);
           return;
         }
@@ -178,10 +185,17 @@ function fetchUrl(
       });
       res.on('end', () => done(Buffer.concat(chunks).toString()));
       res.on('error', () => done(null));
-    });
+    };
+
+    try {
+      req = client.get(url, { headers }, onResponse);
+    } catch {
+      done(null);
+      return;
+    }
     req.on('error', () => done(null));
     req.setTimeout(MARKETPLACE_FETCH_TIMEOUT_MS, () => {
-      req.destroy();
+      req?.destroy();
       done(null);
     });
   });
@@ -266,6 +280,7 @@ export async function loadMarketplaceConfigFromSource(
   source: string,
 ): Promise<ClaudeMarketplaceConfig | null> {
   const trimmed = source.trim();
+  const lowerTrimmed = trimmed.toLowerCase();
 
   // Priority 1: local path (directory with .claude-plugin/marketplace.json,
   // or a direct marketplace.json file).
@@ -287,7 +302,10 @@ export async function loadMarketplaceConfigFromSource(
   }
 
   // Priority 2: http(s) URL — try GitHub repo first, then a direct JSON doc.
-  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+  if (
+    lowerTrimmed.startsWith('http://') ||
+    lowerTrimmed.startsWith('https://')
+  ) {
     try {
       const { owner, repo } = parseGitHubRepoForReleases(trimmed);
       const ghConfig = await fetchGitHubMarketplaceConfig(owner, repo);
@@ -309,11 +327,11 @@ export async function loadMarketplaceConfigFromSource(
   }
 
   // Priority 3: ssh/sso git URLs -> resolve owner/repo via github.
-  if (trimmed.startsWith('git@') || trimmed.startsWith('sso://')) {
+  if (lowerTrimmed.startsWith('git@') || lowerTrimmed.startsWith('sso://')) {
     // `git@github.com:owner/repo(.git)` isn't a parseable URL, so extract
     // owner/repo directly before falling back to the URL-based parser.
     const sshMatch = trimmed.match(
-      /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/,
+      /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i,
     );
     if (sshMatch) {
       return fetchGitHubMarketplaceConfig(sshMatch[1], sshMatch[2]);
