@@ -9,6 +9,7 @@ This folder contains the different provider implementations for the Qwen Code re
 - `default.ts` - Default provider for standard OpenAI-compatible APIs
 - `dashscope.ts` - DashScope (Qwen) specific provider implementation
 - `openrouter.ts` - OpenRouter specific provider implementation
+- `requesty.ts` - Requesty specific provider implementation
 - `index.ts` - Main export file for all providers
 
 ## Provider Types
@@ -24,6 +25,10 @@ The `DashScopeOpenAICompatibleProvider` handles DashScope (Qwen) specific featur
 ### OpenRouter Provider
 
 The `OpenRouterOpenAICompatibleProvider` handles OpenRouter specific headers and configurations.
+
+### Requesty Provider
+
+The `RequestyOpenAICompatibleProvider` handles Requesty specific attribution headers and configurations.
 
 ## Adding a New Provider
 
