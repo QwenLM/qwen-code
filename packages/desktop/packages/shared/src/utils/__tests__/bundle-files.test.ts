@@ -72,6 +72,25 @@ describe('bundle-files', () => {
       expect(validateBundleFile(file)).toContain('Path traversal')
     })
 
+    it('rejects parent traversal segments below the bundle root', () => {
+      const file: BundleFile = {
+        relativePath: 'docs/../escape.txt',
+        contentBase64: Buffer.from('x').toString('base64'),
+        size: 1,
+      }
+      expect(validateBundleFile(file)).toContain('Path traversal')
+    })
+
+    it('accepts double dots inside a path segment', () => {
+      const content = Buffer.from('hello')
+      const file: BundleFile = {
+        relativePath: 'docs/release..notes.md',
+        contentBase64: content.toString('base64'),
+        size: content.length,
+      }
+      expect(validateBundleFile(file)).toBeNull()
+    })
+
     it('rejects absolute paths', () => {
       const file: BundleFile = {
         relativePath: '/etc/passwd',

@@ -47,6 +47,10 @@ export function fromPortableRelPath(portablePath: string): string {
   return portablePath.split('/').join(sep)
 }
 
+function hasParentTraversalSegment(portablePath: string): boolean {
+  return portablePath.split('/').includes('..')
+}
+
 // ============================================================
 // Validation
 // ============================================================
@@ -61,7 +65,7 @@ export function validateBundleFile(file: BundleFile): string | null {
   }
 
   // Path traversal checks
-  if (file.relativePath.includes('..')) {
+  if (hasParentTraversalSegment(file.relativePath)) {
     return `Path traversal detected: ${file.relativePath}`
   }
   if (file.relativePath.startsWith('/') || file.relativePath.startsWith('\\')) {
