@@ -294,12 +294,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
             };
           }
           case 'unavailable': {
-            // Gate is broken — fall back to user confirmation instead of
-            // trapping in plan mode with no escape hatch.
+            // Gate is broken — fall back to pre-plan mode (auto-execute)
+            // instead of trapping in plan mode with no escape hatch.
             debugLogger.warn(
-              `Gate unavailable, falling back to user confirmation: ${decision.reason}`,
+              `Gate unavailable, falling back to pre-plan mode: ${decision.reason}`,
             );
-            return this.fallbackToUserConfirmation(plan, currentPrePlanMode);
+            return this.fallbackToAutoExecute(plan, currentPrePlanMode);
           }
           default: {
             const _exhaustive: never = decision;
@@ -402,16 +402,16 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Gate unavailable fallback — grant provisional approval so the user
-   * can decide instead of being trapped in plan mode with no escape.
+   * Gate unavailable fallback — restore the pre-plan mode so the model
+   * can auto-execute instead of being trapped in plan mode with no escape.
    */
-  private fallbackToUserConfirmation(
+  private fallbackToAutoExecute(
     plan: string,
     targetMode: ApprovalMode,
   ): ToolResult {
     this.setApprovalModeSafely(targetMode);
 
-    // Save plan so it's on disk even if user proceeds.
+    // Save plan so it's on disk even if the model proceeds.
     try {
       this.config.savePlan(plan);
     } catch (error) {
@@ -422,11 +422,11 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent:
-        'Gate unavailable. Falling back to user confirmation — you may proceed manually or cancel to stay in plan mode.',
+        'Gate unavailable. Falling back to pre-plan mode (auto-execute). You may proceed or cancel to stay in plan mode.',
       returnDisplay: {
         type: 'plan_summary',
         message:
-          'Plan gate is unavailable. Falling back to user confirmation — you may proceed manually or cancel to stay in plan mode.',
+          'Plan gate is unavailable. Falling back to pre-plan mode (auto-execute). You may proceed or cancel to stay in plan mode.',
         plan,
       },
     };
