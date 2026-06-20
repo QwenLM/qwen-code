@@ -14,7 +14,13 @@ export class RequestyOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
     const baseURL = contentGeneratorConfig.baseUrl || '';
-    return baseURL.includes('router.requesty.ai');
+    if (!baseURL) return false;
+    try {
+      const host = new URL(baseURL).hostname.toLowerCase();
+      return host === 'router.requesty.ai' || host.endsWith('.requesty.ai');
+    } catch {
+      return false;
+    }
   }
 
   override buildHeaders(): Record<string, string | undefined> {

@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type OpenAI from 'openai';
 import { RequestyOpenAICompatibleProvider } from './requesty.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+import { determineProvider } from '../index.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 
@@ -85,6 +86,48 @@ describe('RequestyOpenAICompatibleProvider', () => {
       const result =
         RequestyOpenAICompatibleProvider.isRequestyProvider(config);
       expect(result).toBe(false);
+    });
+
+    it('should reject hostile hostnames containing router.requesty.ai', () => {
+      const configs = [
+        { baseUrl: 'https://router.requesty.ai.evil.example/v1' },
+        { baseUrl: 'https://fake-router.requesty.ai.attacker.com/v1' },
+        { baseUrl: 'https://router.requesty.ai@evil.example/v1' },
+        { baseUrl: 'not-a-url' },
+      ];
+
+      configs.forEach((config) => {
+        const result = RequestyOpenAICompatibleProvider.isRequestyProvider(
+          config as ContentGeneratorConfig,
+        );
+        expect(result).toBe(false);
+      });
+    });
+  });
+
+  describe('determineProvider dispatch', () => {
+    it('routes router.requesty.ai configs to RequestyOpenAICompatibleProvider', () => {
+      const provider = determineProvider(
+        {
+          apiKey: 'key',
+          baseUrl: 'https://router.requesty.ai/v1',
+          model: 'openai/gpt-4o-mini',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      expect(provider).toBeInstanceOf(RequestyOpenAICompatibleProvider);
+    });
+
+    it('does not route hostile hostnames to RequestyOpenAICompatibleProvider', () => {
+      const provider = determineProvider(
+        {
+          apiKey: 'key',
+          baseUrl: 'https://router.requesty.ai.evil.example/v1',
+          model: 'openai/gpt-4o-mini',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      expect(provider).not.toBeInstanceOf(RequestyOpenAICompatibleProvider);
     });
   });
 
