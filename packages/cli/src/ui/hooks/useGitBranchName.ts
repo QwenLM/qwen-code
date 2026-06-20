@@ -29,7 +29,9 @@ export function useGitBranchName(cwd: string): string | undefined {
       await refresh();
       if (cancelled) return;
       const disposer = await watchRepoBranch(cwd, () => {
-        void refresh();
+        // Guard the watcher-triggered refresh too: the synchronous try/catch
+        // inside watchRepoBranch can't observe an async rejection.
+        void refresh().catch(() => {});
       });
       // The component may have unmounted while we were resolving the watcher;
       // if so, dispose immediately rather than leaking the subscription.

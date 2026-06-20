@@ -434,6 +434,22 @@ describe('watchRepoBranch', () => {
     expect(() => dispose()).not.toThrow();
   });
 
+  it('clearGitDirCache tears down active watchers (no fd leak)', async () => {
+    const w = installWatchMock();
+    const repo = await makeRepo('ref: refs/heads/main\n');
+    const dispose = await watchRepoBranch(repo, vi.fn());
+    expect(watchMock).toHaveBeenCalledTimes(1);
+
+    clearGitDirCache();
+    expect(w.close).toHaveBeenCalledTimes(1);
+
+    // The entry was dropped, so a later subscriber re-establishes the watch...
+    await watchRepoBranch(repo, vi.fn());
+    expect(watchMock).toHaveBeenCalledTimes(2);
+    // ...and the stale disposer is a safe no-op.
+    expect(() => dispose()).not.toThrow();
+  });
+
   it('returns a no-op (never rejects) when fs.watch throws synchronously', async () => {
     watchMock.mockImplementation(() => {
       // TOCTOU: logs/HEAD vanished after access(), or a platform watch limit.

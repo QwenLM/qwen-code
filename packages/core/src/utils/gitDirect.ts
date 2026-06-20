@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { resolveGitDir } from './gitDiff.js';
+import { createDebugLogger } from './debugLogger.js';
 
 /**
  * Direct-read git helpers: resolve the current branch / HEAD by reading the
@@ -25,6 +26,11 @@ import { resolveGitDir } from './gitDiff.js';
  */
 
 const SHORT_SHA_LENGTH = 7;
+
+// Failure returns are intentionally silent for the common cases (not a repo, no
+// HEAD): a status-line display must not log-spam. Only the unexpected paths
+// (watcher errors) emit a debug line, consistent with the other utils here.
+const debug = createDebugLogger('gitDirect');
 
 const MAX_REF_NAME_LENGTH = 255;
 
@@ -70,8 +76,13 @@ export function isValidGitSha(value: string): boolean {
 // cached either: it is re-read every call so a branch switch shows at once.
 const gitDirCache = new Map<string, string>();
 
-/** Clear the cached gitDir results (e.g. after a repo is created/removed). */
+/**
+ * Clear all cached gitDir state (e.g. after a repo is created/removed). Both
+ * the resolution cache and the shared reflog watchers are gitDir-keyed, so this
+ * also tears the watchers down — clearing only half would leak their fds.
+ */
 export function clearGitDirCache(): void {
+  closeAllRepoBranchWatches();
   gitDirCache.clear();
 }
 
@@ -215,6 +226,18 @@ interface RepoBranchWatch {
 // share a single fs.watch.
 const repoBranchWatches = new Map<string, RepoBranchWatch>();
 
+/** Close every shared reflog watcher and drop the entries. */
+function closeAllRepoBranchWatches(): void {
+  for (const entry of repoBranchWatches.values()) {
+    try {
+      entry.watcher.close();
+    } catch {
+      // already closed
+    }
+  }
+  repoBranchWatches.clear();
+}
+
 /**
  * Subscribe to branch changes for `cwd`'s repository.
  *
@@ -271,19 +294,23 @@ export async function watchRepoBranch(
             });
           }
         });
-      } catch {
+      } catch (err) {
         // fs.watch throws synchronously if logs/HEAD vanished after access()
         // (TOCTOU: git gc / reflog expire / worktree removal) or a platform
         // watch limit (ENOSPC) is hit. Fall back to a no-op rather than
         // rejecting (which the hook's bare `void init()` would surface as an
         // unhandled rejection).
+        debug.warn(`failed to watch reflog for ${gitDir}: ${err}`);
         return () => {};
       }
       // fs.FSWatcher is an EventEmitter: an unhandled 'error' (reflog removed
       // by `git gc` / `reflog expire`, worktree removal, inode change, or a
       // platform watch limit) would crash the process. Tear the watch down
       // instead — subscribers simply stop auto-refreshing.
-      watcher.on('error', () => {
+      watcher.on('error', (err: Error) => {
+        debug.warn(
+          `reflog watcher error for ${gitDir}; branch will no longer auto-update: ${err?.message}`,
+        );
         const current = repoBranchWatches.get(gitDir);
         if (current?.watcher === watcher) {
           try {
