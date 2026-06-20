@@ -1226,6 +1226,14 @@ describe('QwenContentGenerator', () => {
           expected: 'https://api.example.com:443/v1',
         },
         {
+          input: 'HTTPS://api.example.com',
+          expected: 'HTTPS://api.example.com/v1',
+        },
+        {
+          input: 'HtTp://localhost:8080',
+          expected: 'HtTp://localhost:8080/v1',
+        },
+        {
           input: 'api.example.com:9000/api',
           expected: 'https://api.example.com:9000/api/v1',
         },

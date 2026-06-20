@@ -303,7 +303,12 @@ export function resolveBaseUrl(
     return config.baseUrl;
   }
   if (Array.isArray(config.baseUrl)) {
-    const match = config.baseUrl.find((opt) => opt.url === selectedBaseUrl);
+    const normalizedSelectedBaseUrl =
+      normalizeBaseUrlForMatching(selectedBaseUrl);
+    const match = config.baseUrl.find(
+      (opt) =>
+        normalizeBaseUrlForMatching(opt.url) === normalizedSelectedBaseUrl,
+    );
     if (match) return match.url;
     // Defensive: an empty baseUrl array would crash `config.baseUrl[0].url`
     // and bring down the install flow. Fall back to the caller-supplied
@@ -311,6 +316,15 @@ export function resolveBaseUrl(
     return config.baseUrl[0]?.url ?? selectedBaseUrl ?? '';
   }
   return selectedBaseUrl ?? '';
+}
+
+function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
+  if (baseUrl === undefined) return '';
+  let end = baseUrl.length;
+  while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {
+    end--;
+  }
+  return end === baseUrl.length ? baseUrl : baseUrl.slice(0, end);
 }
 
 // ---------------------------------------------------------------------------
