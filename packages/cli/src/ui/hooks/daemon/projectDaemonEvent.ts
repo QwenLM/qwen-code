@@ -119,6 +119,13 @@ export interface DaemonProjectionState {
    * (the submitter already rendered its own input locally).
    */
   ownClientId?: string;
+  /**
+   * Highest daemon event `id` folded in so far (monotonic watermark). Frames with
+   * an `id` at or below this are skipped as duplicates — a defense against a
+   * double-subscribe / ring re-replay (e.g. React StrictMode remount) delivering
+   * already-seen frames. Locally-synthesized frames (no `id`) are never deduped.
+   */
+  lastEventId?: number;
 }
 
 export interface ProjectionResult {
@@ -260,6 +267,30 @@ function setToolStatus(
   return tools.map((t) => (t.callId === callId ? { ...t, status } : t));
 }
 
+/**
+ * Commit the in-flight turn (tool group, then assistant message) and clear the
+ * pending buffers. Shared by `turn_complete` and the replay turn-segmentation in
+ * `user_message_chunk` (history replay sends no `turn_complete` between turns, so
+ * a new user message marks the previous assistant turn done). Reasoning stays
+ * ephemeral.
+ */
+function flushPendingTurn(state: DaemonProjectionState): {
+  committed: HistoryItemWithoutId[];
+  state: DaemonProjectionState;
+} {
+  const committed: HistoryItemWithoutId[] = [];
+  if (state.tools.length > 0) {
+    committed.push({ type: 'tool_group', tools: state.tools });
+  }
+  if (state.pendingText.trim().length > 0) {
+    committed.push({ type: 'gemini', text: state.pendingText });
+  }
+  return {
+    committed,
+    state: { ...state, pendingText: '', pendingThought: '', tools: [] },
+  };
+}
+
 function projectSessionUpdate(
   state: DaemonProjectionState,
   data: Record<string, unknown>,
@@ -271,14 +302,21 @@ function projectSessionUpdate(
 
   switch (kind) {
     case 'user_message_chunk': {
-      // Drop our OWN echo (the submitter rendered it locally); render turns
-      // that originated on another client (the phone). Unknown origin → render.
+      // A new user message ends the previous assistant turn — flush it first
+      // (replay sends no `turn_complete` between turns). In the live path the
+      // previous turn already committed, so the flush is a no-op.
+      const flushed = flushPendingTurn(state);
+      // Drop our OWN echo (the submitter rendered it locally); render turns that
+      // originated on another client (the phone) or on replay (the original
+      // originator, not us). Unknown origin → render.
       const isSelfEcho =
         state.ownClientId !== undefined &&
         originatorClientId === state.ownClientId;
+      const committed = [...flushed.committed];
+      if (text && !isSelfEcho) committed.push({ type: 'user', text });
       return {
-        state: { ...state, streamingState: StreamingState.Responding },
-        committed: text && !isSelfEcho ? [{ type: 'user', text }] : [],
+        state: { ...flushed.state, streamingState: StreamingState.Responding },
+        committed,
       };
     }
 
@@ -335,8 +373,34 @@ function toolCallIdOf(toolCall: unknown): string | undefined {
 /**
  * Fold one daemon frame into the projection state, returning the next state and
  * any history items to commit. Pure: same input → same output, no side effects.
+ *
+ * Dedups by the monotonic event `id`: a frame at or below the watermark was
+ * already folded in (a double-subscribe / ring re-replay can re-deliver it), so it
+ * is skipped. Frames without an `id` (locally-synthesized `turn_complete`) always
+ * apply. On apply, the watermark advances to the frame's `id`.
  */
 export function projectDaemonEvent(
+  state: DaemonProjectionState,
+  frame: DaemonFrame,
+): ProjectionResult {
+  if (
+    typeof frame.id === 'number' &&
+    state.lastEventId !== undefined &&
+    frame.id <= state.lastEventId
+  ) {
+    return { state, committed: [] };
+  }
+  const result = projectFrame(state, frame);
+  if (typeof frame.id === 'number') {
+    result.state = {
+      ...result.state,
+      lastEventId: Math.max(state.lastEventId ?? 0, frame.id),
+    };
+  }
+  return result;
+}
+
+function projectFrame(
   state: DaemonProjectionState,
   frame: DaemonFrame,
 ): ProjectionResult {
@@ -415,26 +479,15 @@ export function projectDaemonEvent(
     }
 
     case 'turn_complete': {
-      // Commit this turn's tool group (if any), then the assembled assistant
-      // message. Reasoning stays ephemeral. (Precise text/tool interleaving is
-      // an integration concern — see the in-process grouping logic.)
-      const committed: HistoryItemWithoutId[] = [];
-      if (state.tools.length > 0) {
-        committed.push({ type: 'tool_group', tools: state.tools });
-      }
-      if (state.pendingText.trim().length > 0) {
-        committed.push({ type: 'gemini', text: state.pendingText });
-      }
+      // Commit this turn (tool group, then assistant message) and go Idle.
+      const flushed = flushPendingTurn(state);
       return {
         state: {
-          ...state,
+          ...flushed.state,
           streamingState: StreamingState.Idle,
-          pendingText: '',
-          pendingThought: '',
-          tools: [],
           pendingPermission: undefined,
         },
-        committed,
+        committed: flushed.committed,
       };
     }
 

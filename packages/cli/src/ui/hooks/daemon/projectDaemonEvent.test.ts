@@ -557,3 +557,117 @@ describe('projectDaemonEvent', () => {
     expect(s.streamingState).toBe(StreamingState.WaitingForConfirmation);
   });
 });
+
+// --- slice 3: replay (ring re-attach) — dedup + turn segmentation ---
+
+const withId = (frame: DaemonFrame, id: number): DaemonFrame => ({
+  ...frame,
+  id,
+});
+
+describe('projectDaemonEvent — replay', () => {
+  it('dedups frames at or below the event-id watermark (no double-render)', () => {
+    let s = initialDaemonProjectionState(SELF);
+    const a = withId(
+      sessionUpdate(
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'A' },
+        },
+        SELF,
+      ),
+      5,
+    );
+    s = projectDaemonEvent(s, a).state;
+    expect(s.lastEventId).toBe(5);
+
+    // A re-delivered frame (id ≤ watermark) is skipped — text is NOT doubled.
+    const dup = projectDaemonEvent(s, a);
+    expect(dup.committed).toEqual([]);
+    expect(pendingHistoryItemsOf(dup.state)).toEqual([
+      { type: 'gemini', text: 'A' },
+    ]);
+
+    // A newer id applies and advances the watermark.
+    const b = withId(
+      sessionUpdate(
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'B' },
+        },
+        SELF,
+      ),
+      6,
+    );
+    const r = projectDaemonEvent(dup.state, b);
+    expect(pendingHistoryItemsOf(r.state)).toEqual([
+      { type: 'gemini', text: 'AB' },
+    ]);
+    expect(r.state.lastEventId).toBe(6);
+  });
+
+  it('segments a replayed history stream into turns without turn_complete frames', () => {
+    // Ring replay (lastEventId:0 re-attach) sends a turn typed on the PHONE with
+    // no turn_complete between turns. A new user_message_chunk flushes the prior
+    // assistant turn so history renders as discrete turns.
+    const replay: DaemonFrame[] = [
+      withId(
+        sessionUpdate(
+          {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'hello' },
+          },
+          PHONE,
+        ),
+        1,
+      ),
+      withId(
+        sessionUpdate(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'hi there' },
+          },
+          PHONE,
+        ),
+        2,
+      ),
+      withId(
+        sessionUpdate(
+          {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'how are you' },
+          },
+          PHONE,
+        ),
+        3,
+      ),
+      withId(
+        sessionUpdate(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'great' },
+          },
+          PHONE,
+        ),
+        4,
+      ),
+    ];
+    const { committed, state } = runAll(replay, SELF);
+
+    // The first two turns committed; the last assistant turn stays pending until
+    // a boundary (a later user message or a turn_complete).
+    expect(committed).toEqual([
+      { type: 'user', text: 'hello' },
+      { type: 'gemini', text: 'hi there' },
+      { type: 'user', text: 'how are you' },
+    ]);
+    expect(pendingHistoryItemsOf(state)).toEqual([
+      { type: 'gemini', text: 'great' },
+    ]);
+
+    // A turn_complete (or the next live user turn) flushes the final turn.
+    const end = projectDaemonEvent(state, { type: 'turn_complete', data: {} });
+    expect(end.committed).toEqual([{ type: 'gemini', text: 'great' }]);
+    expect(end.state.streamingState).toBe(StreamingState.Idle);
+  });
+});
