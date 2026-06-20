@@ -5,6 +5,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -67,7 +68,7 @@ describe('createSoxRecorder', () => {
       '1',
       '-b',
       '16',
-      '/tmp/qwen-voice-abc/recording.wav',
+      path.join('/tmp/qwen-voice-abc', 'recording.wav'),
     ]);
     const stopPromise = recorder.stop();
     expect(child.kill).toHaveBeenCalledWith('SIGINT');

@@ -1324,8 +1324,11 @@ export default {
   // ============================================================================
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
+    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '设置用于输入建议和推测执行的轻量模型',
+  'Toggle voice dictation input': '切换语音听写输入',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
