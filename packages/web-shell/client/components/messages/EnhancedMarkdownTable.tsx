@@ -1,0 +1,1055 @@
+import {
+  Children,
+  isValidElement,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ClipboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
+import styles from './EnhancedMarkdownTable.module.css';
+
+type TableElement = ReactElement<{ children?: ReactNode }>;
+type TextFilterOperator =
+  | 'contains'
+  | 'equals'
+  | 'notEquals'
+  | 'startsWith'
+  | 'endsWith';
+type NumberFilterOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'between';
+
+interface CellData {
+  key: string;
+  content: ReactNode;
+  text: string;
+  isHeader: boolean;
+}
+
+interface RowData {
+  key: string;
+  cells: CellData[];
+}
+
+interface ParsedTable {
+  headers: CellData[];
+  rows: RowData[];
+  columnCount: number;
+}
+
+interface SortState {
+  columnIndex: number;
+  direction: 'asc' | 'desc';
+}
+
+interface SelectionRange {
+  anchorRow: number;
+  anchorCol: number;
+  focusRow: number;
+  focusCol: number;
+}
+
+interface ColumnFilter {
+  selectedValues?: string[];
+  textFilter?: {
+    operator: TextFilterOperator;
+    value: string;
+  };
+  numberFilter?: {
+    operator: NumberFilterOperator;
+    value: string;
+    valueTo?: string;
+  };
+}
+
+interface OpenFilterMenu {
+  columnIndex: number;
+  left: number;
+  top: number;
+}
+
+interface FilterOption {
+  value: string;
+  label: string;
+  count: number;
+}
+
+const TEXT_FILTER_LABELS: Record<TextFilterOperator, string> = {
+  contains: '包含',
+  equals: '等于',
+  notEquals: '不等于',
+  startsWith: '开头是',
+  endsWith: '结尾是',
+};
+
+const NUMBER_FILTER_LABELS: Record<NumberFilterOperator, string> = {
+  gt: '大于',
+  gte: '大于等于',
+  lt: '小于',
+  lte: '小于等于',
+  between: '区间',
+};
+
+function isTagElement(node: ReactNode, tag: string): node is TableElement {
+  return isValidElement<{ children?: ReactNode }>(node) && node.type === tag;
+}
+
+function normalizeText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function getTextContent(node: ReactNode): string {
+  if (node === null || node === undefined || typeof node === 'boolean') {
+    return '';
+  }
+  if (typeof node === 'string' || typeof node === 'number') {
+    return String(node);
+  }
+  if (Array.isArray(node)) {
+    return node.map(getTextContent).join('');
+  }
+  if (isValidElement<{ alt?: string; children?: ReactNode }>(node)) {
+    if (node.type === 'img') return node.props.alt ?? '';
+    return getTextContent(node.props.children);
+  }
+  return '';
+}
+
+function emptyCell(rowKey: string, columnIndex: number): CellData {
+  return {
+    key: `${rowKey}-empty-${columnIndex}`,
+    content: '',
+    text: '',
+    isHeader: false,
+  };
+}
+
+function parseRow(rowNode: TableElement, rowKey: string): RowData {
+  const cellNodes = Children.toArray(rowNode.props.children).filter(
+    (child) => isTagElement(child, 'td') || isTagElement(child, 'th'),
+  );
+  return {
+    key: rowKey,
+    cells: cellNodes.map((cellNode, cellIndex) => ({
+      key: `${rowKey}-${cellIndex}`,
+      content: cellNode.props.children,
+      text: normalizeText(getTextContent(cellNode.props.children)),
+      isHeader: cellNode.type === 'th',
+    })),
+  };
+}
+
+function parseRows(sectionNode: TableElement, prefix: string): RowData[] {
+  return Children.toArray(sectionNode.props.children)
+    .filter((child) => isTagElement(child, 'tr'))
+    .map((rowNode, rowIndex) => parseRow(rowNode, `${prefix}-${rowIndex}`));
+}
+
+function normalizeRow(row: RowData, columnCount: number): RowData {
+  return {
+    ...row,
+    cells: Array.from(
+      { length: columnCount },
+      (_, columnIndex) =>
+        row.cells[columnIndex] ?? emptyCell(row.key, columnIndex),
+    ),
+  };
+}
+
+function parseTable(children: ReactNode): ParsedTable {
+  const topLevel = Children.toArray(children);
+  const headerRows: RowData[] = [];
+  const bodyRows: RowData[] = [];
+  const directRows: RowData[] = [];
+
+  topLevel.forEach((child, index) => {
+    if (isTagElement(child, 'thead')) {
+      headerRows.push(...parseRows(child, `head-${index}`));
+    } else if (isTagElement(child, 'tbody') || isTagElement(child, 'tfoot')) {
+      bodyRows.push(...parseRows(child, `body-${index}`));
+    } else if (isTagElement(child, 'tr')) {
+      directRows.push(parseRow(child, `row-${index}`));
+    }
+  });
+
+  if (directRows.length > 0) {
+    const [firstRow, ...restRows] = directRows;
+    if (firstRow?.cells.some((cell) => cell.isHeader)) {
+      headerRows.push(firstRow);
+      bodyRows.push(...restRows);
+    } else {
+      bodyRows.push(...directRows);
+    }
+  }
+
+  const allRows = [...headerRows, ...bodyRows];
+  const columnCount = Math.max(0, ...allRows.map((row) => row.cells.length));
+  const firstHeaderRow = headerRows[0];
+  const headers = Array.from({ length: columnCount }, (_, columnIndex) => {
+    const cell = firstHeaderRow?.cells[columnIndex];
+    if (cell) return cell;
+    return {
+      key: `header-${columnIndex}`,
+      content: `Column ${columnIndex + 1}`,
+      text: `Column ${columnIndex + 1}`,
+      isHeader: true,
+    };
+  });
+
+  return {
+    headers,
+    rows: bodyRows.map((row) => normalizeRow(row, columnCount)),
+    columnCount,
+  };
+}
+
+function parseNumber(value: string): number | null {
+  const normalized = value.replace(/[,%\s]/g, '');
+  if (!/^-?\d+(\.\d+)?$/.test(normalized)) return null;
+  return Number(normalized);
+}
+
+function compareCellText(a: string, b: string): number {
+  const aNumber = parseNumber(a);
+  const bNumber = parseNumber(b);
+  if (aNumber !== null && bNumber !== null && aNumber !== bNumber) {
+    return aNumber - bNumber;
+  }
+  return a.localeCompare(b, undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  });
+}
+
+function getSelectionBounds(range: SelectionRange) {
+  return {
+    minRow: Math.min(range.anchorRow, range.focusRow),
+    maxRow: Math.max(range.anchorRow, range.focusRow),
+    minCol: Math.min(range.anchorCol, range.focusCol),
+    maxCol: Math.max(range.anchorCol, range.focusCol),
+  };
+}
+
+function getSelectionText(
+  range: SelectionRange | null,
+  rows: RowData[],
+): string {
+  if (!range) return '';
+  const { minRow, maxRow, minCol, maxCol } = getSelectionBounds(range);
+  const lines: string[] = [];
+  for (let rowIndex = minRow; rowIndex <= maxRow; rowIndex++) {
+    const row = rows[rowIndex];
+    if (!row) continue;
+    const values: string[] = [];
+    for (let columnIndex = minCol; columnIndex <= maxCol; columnIndex++) {
+      values.push(row.cells[columnIndex]?.text ?? '');
+    }
+    lines.push(values.join('\t'));
+  }
+  return lines.join('\n');
+}
+
+function selectionSize(range: SelectionRange | null): number {
+  if (!range) return 0;
+  const { minRow, maxRow, minCol, maxCol } = getSelectionBounds(range);
+  return (maxRow - minRow + 1) * (maxCol - minCol + 1);
+}
+
+function isFilterActive(filter: ColumnFilter | undefined): boolean {
+  if (!filter) return false;
+  if (filter.selectedValues !== undefined) return true;
+  if (filter.textFilter?.value.trim()) return true;
+  if (filter.numberFilter?.value.trim()) return true;
+  return false;
+}
+
+function matchesTextFilter(value: string, filter: ColumnFilter['textFilter']) {
+  if (!filter?.value.trim()) return true;
+  const cellText = value.toLowerCase();
+  const filterText = filter.value.trim().toLowerCase();
+  switch (filter.operator) {
+    case 'equals':
+      return cellText === filterText;
+    case 'notEquals':
+      return cellText !== filterText;
+    case 'startsWith':
+      return cellText.startsWith(filterText);
+    case 'endsWith':
+      return cellText.endsWith(filterText);
+    case 'contains':
+    default:
+      return cellText.includes(filterText);
+  }
+}
+
+function matchesNumberFilter(
+  value: string,
+  filter: ColumnFilter['numberFilter'],
+) {
+  if (!filter?.value.trim()) return true;
+  const cellNumber = parseNumber(value);
+  const filterNumber = parseNumber(filter.value);
+  if (cellNumber === null || filterNumber === null) return false;
+
+  switch (filter.operator) {
+    case 'gt':
+      return cellNumber > filterNumber;
+    case 'gte':
+      return cellNumber >= filterNumber;
+    case 'lt':
+      return cellNumber < filterNumber;
+    case 'lte':
+      return cellNumber <= filterNumber;
+    case 'between': {
+      const filterNumberTo = parseNumber(filter.valueTo ?? '');
+      if (filterNumberTo === null) return false;
+      const min = Math.min(filterNumber, filterNumberTo);
+      const max = Math.max(filterNumber, filterNumberTo);
+      return cellNumber >= min && cellNumber <= max;
+    }
+    default:
+      return true;
+  }
+}
+
+function matchesColumnFilter(value: string, filter: ColumnFilter): boolean {
+  if (
+    filter.selectedValues !== undefined &&
+    !filter.selectedValues.includes(value)
+  ) {
+    return false;
+  }
+  return (
+    matchesTextFilter(value, filter.textFilter) &&
+    matchesNumberFilter(value, filter.numberFilter)
+  );
+}
+
+function applyFilters(
+  rows: RowData[],
+  filters: Record<number, ColumnFilter>,
+  excludeColumnIndex?: number,
+): RowData[] {
+  const activeFilters = Object.entries(filters)
+    .map(([key, value]) => [Number(key), value] as const)
+    .filter(
+      ([columnIndex, value]) =>
+        columnIndex !== excludeColumnIndex && isFilterActive(value),
+    );
+
+  if (activeFilters.length === 0) return rows;
+  return rows.filter((row) =>
+    activeFilters.every(([columnIndex, filter]) =>
+      matchesColumnFilter(row.cells[columnIndex]?.text ?? '', filter),
+    ),
+  );
+}
+
+function sortRows(rows: RowData[], sort: SortState | null): RowData[] {
+  if (!sort) return rows;
+  return rows
+    .map((row, index) => ({ row, index }))
+    .sort((a, b) => {
+      const result = compareCellText(
+        a.row.cells[sort.columnIndex]?.text ?? '',
+        b.row.cells[sort.columnIndex]?.text ?? '',
+      );
+      const sorted = sort.direction === 'asc' ? result : -result;
+      return sorted === 0 ? a.index - b.index : sorted;
+    })
+    .map(({ row }) => row);
+}
+
+function getColumnOptions(
+  rows: RowData[],
+  columnIndex: number,
+): FilterOption[] {
+  const counts = new Map<string, number>();
+  rows.forEach((row) => {
+    const value = row.cells[columnIndex]?.text ?? '';
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  });
+
+  return Array.from(counts.entries())
+    .map(([value, count]) => ({
+      value,
+      label: value || '(空白)',
+      count,
+    }))
+    .sort((a, b) => compareCellText(a.value, b.value));
+}
+
+function isMostlyNumericColumn(rows: RowData[], columnIndex: number): boolean {
+  let filledCount = 0;
+  let numericCount = 0;
+  rows.forEach((row) => {
+    const value = row.cells[columnIndex]?.text ?? '';
+    if (!value) return;
+    filledCount += 1;
+    if (parseNumber(value) !== null) numericCount += 1;
+  });
+  return filledCount > 0 && numericCount / filledCount >= 0.7;
+}
+
+function hasSameValues(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const aSet = new Set(a);
+  return b.every((value) => aSet.has(value));
+}
+
+function normalizeFilter(
+  filter: ColumnFilter,
+  allOptionValues: string[],
+): ColumnFilter | undefined {
+  const next: ColumnFilter = {};
+  if (
+    filter.selectedValues !== undefined &&
+    !hasSameValues(filter.selectedValues, allOptionValues)
+  ) {
+    next.selectedValues = filter.selectedValues;
+  }
+
+  if (filter.textFilter?.value.trim()) {
+    next.textFilter = {
+      operator: filter.textFilter.operator,
+      value: filter.textFilter.value.trim(),
+    };
+  }
+
+  if (filter.numberFilter?.value.trim()) {
+    const value = filter.numberFilter.value.trim();
+    const valueTo = filter.numberFilter.valueTo?.trim();
+    if (
+      parseNumber(value) !== null &&
+      (filter.numberFilter.operator !== 'between' ||
+        parseNumber(valueTo ?? '') !== null)
+    ) {
+      next.numberFilter = {
+        operator: filter.numberFilter.operator,
+        value,
+        valueTo,
+      };
+    }
+  }
+
+  return isFilterActive(next) ? next : undefined;
+}
+
+function ColumnFilterMenu({
+  columnName,
+  columnIndex,
+  filter,
+  isNumeric,
+  options,
+  sort,
+  style,
+  onApply,
+  onClose,
+  onSort,
+}: {
+  columnName: string;
+  columnIndex: number;
+  filter?: ColumnFilter;
+  isNumeric: boolean;
+  options: FilterOption[];
+  sort: SortState | null;
+  style?: CSSProperties;
+  onApply: (columnIndex: number, filter: ColumnFilter | undefined) => void;
+  onClose: () => void;
+  onSort: (
+    columnIndex: number,
+    direction: SortState['direction'] | null,
+  ) => void;
+}) {
+  const allOptionValues = useMemo(
+    () => options.map((option) => option.value),
+    [options],
+  );
+  const [search, setSearch] = useState('');
+  const [selectedValues, setSelectedValues] = useState<Set<string>>(
+    () => new Set(filter?.selectedValues ?? allOptionValues),
+  );
+  const [textOperator, setTextOperator] = useState<TextFilterOperator>(
+    filter?.textFilter?.operator ?? 'contains',
+  );
+  const [textValue, setTextValue] = useState(filter?.textFilter?.value ?? '');
+  const [numberOperator, setNumberOperator] = useState<NumberFilterOperator>(
+    filter?.numberFilter?.operator ?? 'gt',
+  );
+  const [numberValue, setNumberValue] = useState(
+    filter?.numberFilter?.value ?? '',
+  );
+  const [numberValueTo, setNumberValueTo] = useState(
+    filter?.numberFilter?.valueTo ?? '',
+  );
+
+  const filteredOptions = useMemo(() => {
+    const keyword = search.trim().toLowerCase();
+    if (!keyword) return options;
+    return options.filter((option) =>
+      option.label.toLowerCase().includes(keyword),
+    );
+  }, [options, search]);
+  const visibleOptions = filteredOptions.slice(0, 500);
+  const allFilteredSelected =
+    filteredOptions.length > 0 &&
+    filteredOptions.every((option) => selectedValues.has(option.value));
+
+  const setFilteredSelection = (selected: boolean) => {
+    setSelectedValues((current) => {
+      const next = new Set(current);
+      filteredOptions.forEach((option) => {
+        if (selected) {
+          next.add(option.value);
+        } else {
+          next.delete(option.value);
+        }
+      });
+      return next;
+    });
+  };
+
+  const toggleValue = (value: string) => {
+    setSelectedValues((current) => {
+      const next = new Set(current);
+      if (next.has(value)) {
+        next.delete(value);
+      } else {
+        next.add(value);
+      }
+      return next;
+    });
+  };
+
+  const applyDraft = () => {
+    onApply(
+      columnIndex,
+      normalizeFilter(
+        {
+          selectedValues: Array.from(selectedValues),
+          textFilter: {
+            operator: textOperator,
+            value: textValue,
+          },
+          numberFilter: {
+            operator: numberOperator,
+            value: numberValue,
+            valueTo: numberValueTo,
+          },
+        },
+        allOptionValues,
+      ),
+    );
+  };
+
+  const clearFilter = () => {
+    onApply(columnIndex, undefined);
+  };
+
+  const sortedThisColumn = sort?.columnIndex === columnIndex ? sort : null;
+
+  return (
+    <div
+      className={styles.filterMenu}
+      style={style}
+      role="dialog"
+      aria-label={columnName}
+    >
+      <div className={styles.filterMenuTitle}>{columnName}</div>
+      <div className={styles.filterMenuSection}>
+        <button
+          className={`${styles.filterMenuAction} ${
+            sortedThisColumn?.direction === 'asc' ? styles.activeAction : ''
+          }`}
+          type="button"
+          onClick={() => onSort(columnIndex, 'asc')}
+        >
+          升序排序
+        </button>
+        <button
+          className={`${styles.filterMenuAction} ${
+            sortedThisColumn?.direction === 'desc' ? styles.activeAction : ''
+          }`}
+          type="button"
+          onClick={() => onSort(columnIndex, 'desc')}
+        >
+          降序排序
+        </button>
+        <button
+          className={styles.filterMenuAction}
+          type="button"
+          onClick={() => onSort(columnIndex, null)}
+        >
+          清除排序
+        </button>
+      </div>
+
+      <div className={styles.filterMenuSection}>
+        <input
+          className={styles.filterSearch}
+          value={search}
+          onChange={(event) => setSearch(event.currentTarget.value)}
+          placeholder="搜索筛选值"
+          name={`markdown-table-option-search-${columnIndex}`}
+          aria-label={`搜索 ${columnName}`}
+        />
+        <label className={styles.filterOption}>
+          <input
+            type="checkbox"
+            name={`markdown-table-filter-all-${columnIndex}`}
+            checked={allFilteredSelected}
+            onChange={(event) =>
+              setFilteredSelection(event.currentTarget.checked)
+            }
+          />
+          <span>全选当前结果</span>
+          <span className={styles.optionCount}>{filteredOptions.length}</span>
+        </label>
+        <div className={styles.filterOptionList}>
+          {visibleOptions.map((option, optionIndex) => (
+            <label key={option.value} className={styles.filterOption}>
+              <input
+                type="checkbox"
+                name={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
+                checked={selectedValues.has(option.value)}
+                onChange={() => toggleValue(option.value)}
+              />
+              <span className={styles.optionLabel}>{option.label}</span>
+              <span className={styles.optionCount}>{option.count}</span>
+            </label>
+          ))}
+          {filteredOptions.length > visibleOptions.length && (
+            <div className={styles.optionLimitHint}>
+              已显示前 {visibleOptions.length} 项，请搜索缩小范围
+            </div>
+          )}
+          {filteredOptions.length === 0 && (
+            <div className={styles.optionLimitHint}>没有匹配项</div>
+          )}
+        </div>
+      </div>
+
+      <div className={styles.filterMenuSection}>
+        <div className={styles.conditionTitle}>自定义筛选</div>
+        {isNumeric ? (
+          <>
+            <select
+              className={styles.conditionSelect}
+              value={numberOperator}
+              name={`markdown-table-number-operator-${columnIndex}`}
+              onChange={(event) =>
+                setNumberOperator(
+                  event.currentTarget.value as NumberFilterOperator,
+                )
+              }
+              aria-label={`数字筛选 ${columnName}`}
+            >
+              {Object.entries(NUMBER_FILTER_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <div className={styles.conditionInputs}>
+              <input
+                className={styles.conditionInput}
+                value={numberValue}
+                onChange={(event) => setNumberValue(event.currentTarget.value)}
+                placeholder="数值"
+                name={`markdown-table-number-filter-${columnIndex}`}
+              />
+              {numberOperator === 'between' && (
+                <input
+                  className={styles.conditionInput}
+                  value={numberValueTo}
+                  onChange={(event) =>
+                    setNumberValueTo(event.currentTarget.value)
+                  }
+                  placeholder="到"
+                  name={`markdown-table-number-filter-to-${columnIndex}`}
+                />
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <select
+              className={styles.conditionSelect}
+              value={textOperator}
+              name={`markdown-table-text-operator-${columnIndex}`}
+              onChange={(event) =>
+                setTextOperator(event.currentTarget.value as TextFilterOperator)
+              }
+              aria-label={`文本筛选 ${columnName}`}
+            >
+              {Object.entries(TEXT_FILTER_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <input
+              className={styles.conditionInput}
+              value={textValue}
+              onChange={(event) => setTextValue(event.currentTarget.value)}
+              placeholder="输入筛选条件"
+              name={`markdown-table-text-filter-${columnIndex}`}
+            />
+          </>
+        )}
+      </div>
+
+      <div className={styles.filterFooter}>
+        <button
+          className={styles.secondaryButton}
+          type="button"
+          onClick={clearFilter}
+        >
+          重置
+        </button>
+        <span className={styles.footerSpacer} />
+        <button
+          className={styles.secondaryButton}
+          type="button"
+          onClick={onClose}
+        >
+          取消
+        </button>
+        <button
+          className={styles.primaryButton}
+          type="button"
+          onClick={applyDraft}
+        >
+          确认
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
+  const table = useMemo(() => parseTable(children), [children]);
+  const [sort, setSort] = useState<SortState | null>(null);
+  const [filters, setFilters] = useState<Record<number, ColumnFilter>>({});
+  const [selection, setSelection] = useState<SelectionRange | null>(null);
+  const [openFilterMenu, setOpenFilterMenu] = useState<OpenFilterMenu | null>(
+    null,
+  );
+  const draggingRef = useRef(false);
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const stopDragging = () => {
+      draggingRef.current = false;
+    };
+    window.addEventListener('mouseup', stopDragging);
+    return () => window.removeEventListener('mouseup', stopDragging);
+  }, []);
+
+  useEffect(() => {
+    const closeMenu = (event: MouseEvent) => {
+      if (!shellRef.current?.contains(event.target as Node)) {
+        setOpenFilterMenu(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenFilterMenu(null);
+    };
+    document.addEventListener('mousedown', closeMenu);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeMenu);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, []);
+
+  const filteredRows = useMemo(
+    () => applyFilters(table.rows, filters),
+    [filters, table.rows],
+  );
+  const visibleRows = useMemo(
+    () => sortRows(filteredRows, sort),
+    [filteredRows, sort],
+  );
+  const columnOptions = useMemo(
+    () =>
+      table.headers.map((_, columnIndex) =>
+        getColumnOptions(
+          applyFilters(table.rows, filters, columnIndex),
+          columnIndex,
+        ),
+      ),
+    [filters, table.headers, table.rows],
+  );
+  const numericColumns = useMemo(
+    () =>
+      table.headers.map((_, columnIndex) =>
+        isMostlyNumericColumn(table.rows, columnIndex),
+      ),
+    [table.headers, table.rows],
+  );
+
+  if (table.columnCount === 0) return null;
+
+  const setColumnFilter = (
+    columnIndex: number,
+    nextFilter: ColumnFilter | undefined,
+  ) => {
+    setSelection(null);
+    setFilters((current) => {
+      const next = { ...current };
+      if (nextFilter && isFilterActive(nextFilter)) {
+        next[columnIndex] = nextFilter;
+      } else {
+        delete next[columnIndex];
+      }
+      return next;
+    });
+    setOpenFilterMenu(null);
+  };
+
+  const setColumnSort = (
+    columnIndex: number,
+    direction: SortState['direction'] | null,
+  ) => {
+    setSelection(null);
+    setSort(direction ? { columnIndex, direction } : null);
+  };
+
+  const toggleSort = (columnIndex: number) => {
+    setSelection(null);
+    setSort((current) => {
+      if (current?.columnIndex !== columnIndex) {
+        return { columnIndex, direction: 'asc' };
+      }
+      if (current.direction === 'asc') {
+        return { columnIndex, direction: 'desc' };
+      }
+      return null;
+    });
+  };
+
+  const toggleFilterMenu = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    columnIndex: number,
+  ) => {
+    setSelection(null);
+    const shellRect = shellRef.current?.getBoundingClientRect();
+    const buttonRect = event.currentTarget.getBoundingClientRect();
+    const menuWidth = 300;
+    const menuHeight = 430;
+    const nextMenu = shellRect
+      ? {
+          columnIndex,
+          left: Math.max(
+            6,
+            Math.min(
+              buttonRect.right - shellRect.left - menuWidth,
+              shellRect.width - menuWidth - 6,
+            ),
+          ),
+          top:
+            window.innerHeight - buttonRect.bottom < menuHeight
+              ? Math.max(
+                  8 - shellRect.top,
+                  buttonRect.top - shellRect.top - menuHeight - 2,
+                )
+              : buttonRect.bottom - shellRect.top + 2,
+        }
+      : { columnIndex, left: 6, top: 36 };
+
+    setOpenFilterMenu((current) =>
+      current?.columnIndex === columnIndex ? null : nextMenu,
+    );
+  };
+
+  const isCellSelected = (rowIndex: number, columnIndex: number): boolean => {
+    if (!selection) return false;
+    const { minRow, maxRow, minCol, maxCol } = getSelectionBounds(selection);
+    return (
+      rowIndex >= minRow &&
+      rowIndex <= maxRow &&
+      columnIndex >= minCol &&
+      columnIndex <= maxCol
+    );
+  };
+
+  const startSelection = (
+    event: ReactMouseEvent<HTMLTableCellElement>,
+    rowIndex: number,
+    columnIndex: number,
+  ) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    containerRef.current?.focus({ preventScroll: true });
+    draggingRef.current = true;
+    setSelection({
+      anchorRow: rowIndex,
+      anchorCol: columnIndex,
+      focusRow: rowIndex,
+      focusCol: columnIndex,
+    });
+  };
+
+  const extendSelection = (rowIndex: number, columnIndex: number) => {
+    if (!draggingRef.current) return;
+    setSelection((current) =>
+      current
+        ? { ...current, focusRow: rowIndex, focusCol: columnIndex }
+        : current,
+    );
+  };
+
+  const copySelection = () => {
+    const text = getSelectionText(selection, visibleRows);
+    if (!text || !navigator.clipboard) return;
+    void navigator.clipboard.writeText(text).catch(() => {});
+  };
+
+  const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {
+    const text = getSelectionText(selection, visibleRows);
+    if (!text) return;
+    event.preventDefault();
+    event.clipboardData.setData('text/plain', text);
+  };
+
+  const selectedCount = selectionSize(selection);
+  const activeFilterCount =
+    Object.values(filters).filter(isFilterActive).length;
+  const rowSummary =
+    visibleRows.length === table.rows.length
+      ? `${table.rows.length} rows`
+      : `${visibleRows.length}/${table.rows.length} rows`;
+  const openFilterHeader =
+    openFilterMenu === null
+      ? undefined
+      : table.headers[openFilterMenu.columnIndex];
+  const openFilterColumnName = openFilterHeader
+    ? openFilterHeader.text || `Column ${openFilterMenu!.columnIndex + 1}`
+    : '';
+
+  return (
+    <div ref={shellRef} className={styles.tableShell}>
+      <div className={styles.toolbar}>
+        <span className={styles.summary}>{rowSummary}</span>
+        <span className={styles.hint}>
+          Click headers to sort, open filters from ▾.
+        </span>
+        {activeFilterCount > 0 && (
+          <span className={styles.selection}>{activeFilterCount} filters</span>
+        )}
+        {selectedCount > 0 && (
+          <>
+            <span className={styles.selection}>
+              {selectedCount} cells selected
+            </span>
+            <button
+              className={styles.copyButton}
+              type="button"
+              onClick={copySelection}
+            >
+              Copy TSV
+            </button>
+          </>
+        )}
+      </div>
+      <div
+        ref={containerRef}
+        className={styles.scroller}
+        tabIndex={0}
+        onCopy={handleCopy}
+      >
+        <table className={styles.table}>
+          <thead>
+            <tr>
+              {table.headers.map((header, columnIndex) => {
+                const isSorted = sort?.columnIndex === columnIndex;
+                const isFiltered = isFilterActive(filters[columnIndex]);
+                const isMenuOpen = openFilterMenu?.columnIndex === columnIndex;
+                const sortLabel = isSorted
+                  ? sort.direction === 'asc'
+                    ? '↑'
+                    : '↓'
+                  : '↕';
+                const columnName = header.text || `Column ${columnIndex + 1}`;
+                return (
+                  <th key={header.key} className={styles.headerCell}>
+                    <div className={styles.headerControls}>
+                      <button
+                        className={styles.headerButton}
+                        type="button"
+                        onClick={() => toggleSort(columnIndex)}
+                        aria-label={`Sort by ${columnName}`}
+                      >
+                        <span className={styles.headerText}>
+                          {header.content}
+                        </span>
+                        <span className={styles.sortIcon}>{sortLabel}</span>
+                      </button>
+                      <button
+                        className={`${styles.filterTrigger} ${
+                          isFiltered ? styles.filterTriggerActive : ''
+                        }`}
+                        type="button"
+                        onClick={(event) =>
+                          toggleFilterMenu(event, columnIndex)
+                        }
+                        aria-label={`Filter ${columnName}`}
+                        aria-expanded={isMenuOpen}
+                      >
+                        ▾
+                      </button>
+                    </div>
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {visibleRows.map((row, rowIndex) => (
+              <tr key={row.key}>
+                {row.cells.map((cell, columnIndex) => (
+                  <td
+                    key={cell.key}
+                    className={`${styles.cell} ${
+                      isCellSelected(rowIndex, columnIndex)
+                        ? styles.selectedCell
+                        : ''
+                    }`}
+                    onMouseDown={(event) =>
+                      startSelection(event, rowIndex, columnIndex)
+                    }
+                    onMouseEnter={() => extendSelection(rowIndex, columnIndex)}
+                  >
+                    {cell.content}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {visibleRows.length === 0 && (
+          <div className={styles.emptyState}>No rows match the filters.</div>
+        )}
+      </div>
+      {openFilterMenu && openFilterHeader && (
+        <ColumnFilterMenu
+          columnName={openFilterColumnName}
+          columnIndex={openFilterMenu.columnIndex}
+          filter={filters[openFilterMenu.columnIndex]}
+          isNumeric={numericColumns[openFilterMenu.columnIndex] ?? false}
+          options={columnOptions[openFilterMenu.columnIndex] ?? []}
+          sort={sort}
+          style={{ left: openFilterMenu.left, top: openFilterMenu.top }}
+          onApply={setColumnFilter}
+          onClose={() => setOpenFilterMenu(null)}
+          onSort={setColumnSort}
+        />
+      )}
+    </div>
+  );
+}

@@ -11,12 +11,14 @@ import {
   useWebShellCustomization,
   type MarkdownContentSource,
 } from '../../customization';
+import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 import styles from './Markdown.module.css';
 
 interface MarkdownProps {
   content: string;
   source?: MarkdownContentSource;
   deferMermaid?: boolean;
+  enhanceTables?: boolean;
 }
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -322,7 +324,10 @@ function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
 
-function createComponents(deferMermaid?: boolean): Components {
+function createComponents(
+  deferMermaid?: boolean,
+  enhanceTables?: boolean,
+): Components {
   return {
     code({
       className,
@@ -361,6 +366,9 @@ function createComponents(deferMermaid?: boolean): Components {
       );
     },
     table({ children }: { children?: ReactNode }) {
+      if (enhanceTables) {
+        return <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>;
+      }
       return (
         <div className={styles.tableWrapper}>
           <table className={styles.table}>{children}</table>
@@ -376,11 +384,14 @@ function createComponents(deferMermaid?: boolean): Components {
 
 const COMPONENTS_DEFAULT = createComponents();
 const COMPONENTS_DEFER_MERMAID = createComponents(true);
+const COMPONENTS_ENHANCED_TABLES = createComponents(false, true);
+const COMPONENTS_ENHANCED_TABLES_DEFER_MERMAID = createComponents(true, true);
 
 export const Markdown = memo(function Markdown({
   content,
   source,
   deferMermaid,
+  enhanceTables,
 }: MarkdownProps) {
   const { markdown } = useWebShellCustomization();
 
@@ -391,9 +402,13 @@ export const Markdown = memo(function Markdown({
     source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
-  const components = deferMermaid
-    ? COMPONENTS_DEFER_MERMAID
-    : COMPONENTS_DEFAULT;
+  const components = enhanceTables
+    ? deferMermaid
+      ? COMPONENTS_ENHANCED_TABLES_DEFER_MERMAID
+      : COMPONENTS_ENHANCED_TABLES
+    : deferMermaid
+      ? COMPONENTS_DEFER_MERMAID
+      : COMPONENTS_DEFAULT;
   const renderedComponents = sourceMarkdown?.components
     ? { ...components, ...sourceMarkdown.components }
     : components;
