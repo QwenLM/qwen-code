@@ -17,6 +17,7 @@ export const ToolListStep: React.FC<ToolListStepProps> = ({
   tools,
   onSelect,
   onBack,
+  isActive = true,
 }) => {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
@@ -63,7 +64,7 @@ export const ToolListStep: React.FC<ToolListStepProps> = ({
         }
       }
     },
-    { isActive: true },
+    { isActive },
   );
 
   if (tools.length === 0) {

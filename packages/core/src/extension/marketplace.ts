@@ -124,27 +124,62 @@ function isGitUrl(source: string): boolean {
   );
 }
 
+/** Max time to wait for a single marketplace network request. */
+const MARKETPLACE_FETCH_TIMEOUT_MS = 10000;
+
+/** Max marketplace response body. A marketplace.json is tiny; this guards
+ * against a hostile source streaming unbounded data to exhaust memory. */
+const MARKETPLACE_MAX_BODY_BYTES = 10 * 1024 * 1024;
+
 /**
- * Fetch content from a URL
+ * Fetch content from a URL. Resolves to null on non-200, error, timeout, or
+ * oversized body so a slow/unreachable/hostile marketplace can never hang
+ * discovery indefinitely or exhaust process memory.
  */
 function fetchUrl(
   url: string,
   headers: Record<string, string>,
 ): Promise<string | null> {
   return new Promise((resolve) => {
-    https
-      .get(url, { headers }, (res) => {
-        if (res.statusCode !== 200) {
-          resolve(null);
+    let settled = false;
+    const done = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardDeadline);
+      resolve(value);
+    };
+    // `req.setTimeout` only fires on socket inactivity and resets on every
+    // chunk, so a server trickling bytes can keep the request alive forever.
+    // Pair it with an absolute wall-clock deadline.
+    const hardDeadline = setTimeout(() => {
+      req.destroy();
+      done(null);
+    }, MARKETPLACE_FETCH_TIMEOUT_MS);
+    const req = https.get(url, { headers }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume(); // drain so the socket can be freed
+        done(null);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      res.on('data', (chunk) => {
+        total += chunk.length;
+        if (total > MARKETPLACE_MAX_BODY_BYTES) {
+          req.destroy();
+          done(null);
           return;
         }
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          resolve(Buffer.concat(chunks).toString());
-        });
-      })
-      .on('error', () => resolve(null));
+        chunks.push(chunk);
+      });
+      res.on('end', () => done(Buffer.concat(chunks).toString()));
+      res.on('error', () => done(null));
+    });
+    req.on('error', () => done(null));
+    req.setTimeout(MARKETPLACE_FETCH_TIMEOUT_MS, () => {
+      req.destroy();
+      done(null);
+    });
   });
 }
 
@@ -208,6 +243,92 @@ async function readLocalMarketplaceConfig(
   } catch {
     return null;
   }
+}
+
+/**
+ * Loads a Claude-format marketplace config (`.claude-plugin/marketplace.json`)
+ * from any supported source string, without installing anything. Used by the
+ * marketplace registry / Discover view to enumerate installable plugins.
+ *
+ * Supported sources:
+ * - Local directory containing `.claude-plugin/marketplace.json`
+ * - Local path directly to a `marketplace.json` file
+ * - `owner/repo`, `https://github.com/owner/repo`, `git@github.com:owner/repo.git`
+ * - Arbitrary `https://host/.../marketplace.json` returning the JSON document
+ *
+ * Returns `null` when no marketplace config can be resolved.
+ */
+export async function loadMarketplaceConfigFromSource(
+  source: string,
+): Promise<ClaudeMarketplaceConfig | null> {
+  const trimmed = source.trim();
+
+  // Priority 1: local path (directory with .claude-plugin/marketplace.json,
+  // or a direct marketplace.json file).
+  try {
+    const stats = await stat(trimmed);
+    if (stats.isDirectory()) {
+      return await readLocalMarketplaceConfig(trimmed);
+    }
+    if (stats.isFile()) {
+      try {
+        const content = await fs.promises.readFile(trimmed, 'utf-8');
+        return JSON.parse(content) as ClaudeMarketplaceConfig;
+      } catch {
+        return null;
+      }
+    }
+  } catch {
+    // Not a local path; continue.
+  }
+
+  // Priority 2: http(s) URL — try GitHub repo first, then a direct JSON doc.
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    try {
+      const { owner, repo } = parseGitHubRepoForReleases(trimmed);
+      const ghConfig = await fetchGitHubMarketplaceConfig(owner, repo);
+      if (ghConfig) {
+        return ghConfig;
+      }
+    } catch {
+      // Not a github.com repo URL — fall through to direct-JSON fetch.
+    }
+    const content = await fetchUrl(trimmed, { 'User-Agent': 'qwen-code' });
+    if (!content) {
+      return null;
+    }
+    try {
+      return JSON.parse(content) as ClaudeMarketplaceConfig;
+    } catch {
+      return null;
+    }
+  }
+
+  // Priority 3: ssh/sso git URLs -> resolve owner/repo via github.
+  if (trimmed.startsWith('git@') || trimmed.startsWith('sso://')) {
+    // `git@github.com:owner/repo(.git)` isn't a parseable URL, so extract
+    // owner/repo directly before falling back to the URL-based parser.
+    const sshMatch = trimmed.match(
+      /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/,
+    );
+    if (sshMatch) {
+      return fetchGitHubMarketplaceConfig(sshMatch[1], sshMatch[2]);
+    }
+    try {
+      const { owner, repo } = parseGitHubRepoForReleases(trimmed);
+      return await fetchGitHubMarketplaceConfig(owner, repo);
+    } catch {
+      return null;
+    }
+  }
+
+  // Priority 4: owner/repo shorthand.
+  if (isOwnerRepoFormat(trimmed)) {
+    const [owner, repo] = trimmed.split('/');
+    return await fetchGitHubMarketplaceConfig(owner, repo);
+  }
+
+  return null;
 }
 
 export async function parseInstallSource(

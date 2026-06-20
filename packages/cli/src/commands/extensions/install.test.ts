@@ -10,6 +10,9 @@ import yargs from 'yargs';
 
 const mockInstallExtension = vi.hoisted(() => vi.fn());
 const mockRefreshCache = vi.hoisted(() => vi.fn());
+const mockSetExtensionScope = vi.hoisted(() => vi.fn());
+const mockEnableExtension = vi.hoisted(() => vi.fn());
+const mockDisableExtension = vi.hoisted(() => vi.fn());
 const mockParseInstallSource = vi.hoisted(() => vi.fn());
 const mockRequestConsentNonInteractive = vi.hoisted(() => vi.fn());
 const mockRequestConsentOrFail = vi.hoisted(() => vi.fn());
@@ -22,6 +25,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   ExtensionManager: vi.fn().mockImplementation(() => ({
     installExtension: mockInstallExtension,
     refreshCache: mockRefreshCache,
+    setExtensionScope: mockSetExtensionScope,
+    enableExtension: mockEnableExtension,
+    disableExtension: mockDisableExtension,
   })),
   parseInstallSource: mockParseInstallSource,
 }));
@@ -38,6 +44,12 @@ vi.mock('../../config/trustedFolders.js', () => ({
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: mockLoadSettings,
+  SettingScope: {
+    User: 'User',
+    Workspace: 'Workspace',
+    System: 'System',
+    SystemDefaults: 'SystemDefaults',
+  },
 }));
 
 vi.mock('../../utils/errors.js', () => ({
@@ -224,5 +236,134 @@ describe('handleInstall', () => {
     expect(processSpy).toHaveBeenCalledWith(1);
 
     processSpy.mockRestore();
+  });
+
+  it('should re-scope enablement to the workspace for a project-scope install', async () => {
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'scoped-extension' });
+
+    await handleInstall({ source: 'git@some-url', scope: 'project' });
+
+    expect(mockSetExtensionScope).toHaveBeenCalledWith(
+      'scoped-extension',
+      'project',
+    );
+    expect(mockDisableExtension).toHaveBeenCalledWith(
+      'scoped-extension',
+      'User',
+    );
+    expect(mockEnableExtension).toHaveBeenCalledWith(
+      'scoped-extension',
+      'Workspace',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Extension "scoped-extension" installed successfully and enabled for the current workspace.',
+    );
+  });
+
+  it('rolls back the User-scope disable when the Workspace enable fails', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'scoped-extension' });
+    // Workspace enable (first call) fails; the rollback User enable succeeds.
+    mockEnableExtension.mockRejectedValueOnce(
+      new Error('workspace enable failed'),
+    );
+    mockEnableExtension.mockResolvedValueOnce(undefined);
+
+    await handleInstall({ source: 'git@some-url', scope: 'project' });
+
+    expect(mockDisableExtension).toHaveBeenCalledWith(
+      'scoped-extension',
+      'User',
+    );
+    // Both the failed Workspace enable and the rollback User enable were attempted.
+    expect(mockEnableExtension).toHaveBeenNthCalledWith(
+      1,
+      'scoped-extension',
+      'Workspace',
+    );
+    expect(mockEnableExtension).toHaveBeenNthCalledWith(
+      2,
+      'scoped-extension',
+      'User',
+    );
+    // The original failure is surfaced and the command exits non-zero.
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('workspace enable failed');
+    expect(processSpy).toHaveBeenCalledWith(1);
+    processSpy.mockRestore();
+  });
+
+  it('surfaces a rollback failure when the recovery enable also fails', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'scoped-extension' });
+    // Both the Workspace enable and the rollback User enable fail.
+    mockEnableExtension.mockRejectedValueOnce(
+      new Error('workspace enable failed'),
+    );
+    mockEnableExtension.mockRejectedValueOnce(new Error('rollback failed'));
+
+    await handleInstall({ source: 'git@some-url', scope: 'project' });
+
+    // A warning naming the failed rollback, plus the original error, are shown.
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('failed to roll back the scope change'),
+    );
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('workspace enable failed');
+    expect(processSpy).toHaveBeenCalledWith(1);
+    processSpy.mockRestore();
+  });
+
+  it('should accept workspace as an alias of project scope', async () => {
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'scoped-extension' });
+
+    await handleInstall({ source: 'git@some-url', scope: 'workspace' });
+
+    expect(mockSetExtensionScope).toHaveBeenCalledWith(
+      'scoped-extension',
+      'project',
+    );
+    expect(mockEnableExtension).toHaveBeenCalledWith(
+      'scoped-extension',
+      'Workspace',
+    );
+  });
+
+  it('should record user scope without re-scoping enablement', async () => {
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'user-extension' });
+
+    await handleInstall({ source: 'git@some-url', scope: 'user' });
+
+    expect(mockSetExtensionScope).toHaveBeenCalledWith(
+      'user-extension',
+      'user',
+    );
+    expect(mockDisableExtension).not.toHaveBeenCalled();
+    expect(mockEnableExtension).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Extension "user-extension" installed successfully and enabled.',
+    );
   });
 });
