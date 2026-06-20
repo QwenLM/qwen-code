@@ -63,12 +63,17 @@ afterEach(async () => {
 });
 
 describe('isValidRefName', () => {
-  it.each(['main', 'feature/foo', 'release/2.0', 'v1.2.3', 'fix-123', 'a_b'])(
-    'accepts %s',
-    (name) => {
-      expect(isValidRefName(name)).toBe(true);
-    },
-  );
+  it.each([
+    'main',
+    'feature/foo',
+    'release/2.0',
+    'v1.2.3',
+    'fix-123',
+    'a_b',
+    `long/${'x'.repeat(255)}`, // >255 total, but each component within the cap
+  ])('accepts %s', (name) => {
+    expect(isValidRefName(name)).toBe(true);
+  });
 
   it.each([
     '',
@@ -116,6 +121,15 @@ describe('isValidGitSha', () => {
 describe('readGitHead', () => {
   it('parses a branch', async () => {
     const repo = await makeRepo('ref: refs/heads/main\n');
+    expect(await readGitHead(path.join(repo, '.git'))).toEqual({
+      type: 'branch',
+      name: 'main',
+    });
+  });
+
+  it('bounds the read and parses only the first line of a huge HEAD', async () => {
+    const repo = await makeRepo(`ref: refs/heads/main\n${'x'.repeat(100_000)}`);
+    // The 100 KB tail is never loaded; only the first line is parsed.
     expect(await readGitHead(path.join(repo, '.git'))).toEqual({
       type: 'branch',
       name: 'main',

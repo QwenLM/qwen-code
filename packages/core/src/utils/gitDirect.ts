@@ -32,7 +32,12 @@ const SHORT_SHA_LENGTH = 7;
 // (watcher errors) emit a debug line, consistent with the other utils here.
 const debug = createDebugLogger('gitDirect');
 
-const MAX_REF_NAME_LENGTH = 255;
+// Bound the HEAD read: it is one short line, never megabytes.
+const MAX_HEAD_BYTES = 4096;
+// git's per-component length cap (a filesystem limit). Applied per
+// slash-separated component, NOT to the whole ref — a valid ref can be longer
+// than one component's limit.
+const MAX_REF_COMPONENT_LENGTH = 255;
 
 // Control chars (C0 0x00-0x1f, space 0x20, DEL 0x7f, C1 0x80-0x9f), the Unicode
 // line separators, and the characters git disallows in a ref name: ~ ^ : ? * [
@@ -51,7 +56,7 @@ const INVALID_REF_CHARS = /[\x00-\x20\x7f-\x9f\u2028\u2029~^:?*[\\]/;
  * git itself forbids.
  */
 export function isValidRefName(name: string): boolean {
-  if (!name || name.length > MAX_REF_NAME_LENGTH) return false;
+  if (!name) return false;
   if (name.startsWith('/') || name.endsWith('/')) return false;
   if (name.startsWith('.') || name.endsWith('.')) return false;
   if (name.endsWith('.lock')) return false;
@@ -61,6 +66,11 @@ export function isValidRefName(name: string): boolean {
   if (name.includes('/.') || name.includes('.lock/')) return false;
   if (name.includes('@{')) return false;
   if (INVALID_REF_CHARS.test(name)) return false;
+  // Length limit is per slash-separated component (a filesystem cap), not the
+  // whole ref — a deeply nested but valid ref can exceed any single component.
+  if (name.split('/').some((c) => c.length > MAX_REF_COMPONENT_LENGTH)) {
+    return false;
+  }
   return true;
 }
 
@@ -175,10 +185,15 @@ export async function readGitHead(gitDir: string): Promise<GitHead | null> {
     // to plain O_RDONLY where the flag is absent (Windows omits O_NOFOLLOW).
     const fh = await fsPromises.open(
       headPath,
-      (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
+      (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NOFOLLOW ?? 0),
     );
     try {
-      content = (await fh.readFile('utf-8')).trim();
+      // HEAD is a single short line; read a bounded prefix and parse only the
+      // first line, so a pathologically large file isn't loaded into memory.
+      const buf = Buffer.allocUnsafe(MAX_HEAD_BYTES);
+      const { bytesRead } = await fh.read(buf, 0, MAX_HEAD_BYTES, 0);
+      const firstLine = buf.toString('utf-8', 0, bytesRead).split('\n', 1)[0];
+      content = (firstLine ?? '').trim();
     } finally {
       await fh.close();
     }
@@ -258,7 +273,7 @@ export async function watchRepoBranch(
   if (!entry) {
     const logsHeadPath = path.join(gitDir, 'logs', 'HEAD');
     try {
-      await fsPromises.access(logsHeadPath, fs.constants.F_OK);
+      await fsPromises.access(logsHeadPath, fs.constants?.F_OK ?? 0);
       // Refuse a symlinked reflog: we'd otherwise place a persistent watch on a
       // file outside the repo. A residual lstat→watch TOCTOU remains (fs.watch
       // has no O_NOFOLLOW form), but the watch only ever fires readGitHead —
