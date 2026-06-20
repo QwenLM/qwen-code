@@ -841,6 +841,7 @@ describe('Session', () => {
         mockConfig,
         expect.any(AbortSignal),
         'acp',
+        mockSettings,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -884,6 +885,7 @@ describe('Session', () => {
         mockConfig,
         expect.any(AbortSignal),
         'acp',
+        mockSettings,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
