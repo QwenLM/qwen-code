@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'os'
-import { dirname, join } from 'path'
+import { dirname, isAbsolute, join, relative, resolve } from 'path'
 import { promisify } from 'node:util'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getWorkspaceByNameOrId, addWorkspace, setActiveWorkspace, updateWorkspaceRemoteServer } from '@craft-agent/shared/config'
@@ -43,6 +43,67 @@ function getWorktreeDirName(branchName: string): string {
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^[.-]+|[.-]+$/g, '') || 'worktree'
+}
+
+function isPathWithinDirectory(baseDir: string, targetPath: string): boolean {
+  const relativePath = relative(baseDir, targetPath)
+  return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath))
+}
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch (error) {
+    const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+    return code !== 'ENOENT' && code !== 'ENOTDIR'
+  }
+}
+
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync.native(path)
+  } catch {
+    return null
+  }
+}
+
+function isExistingWorkspacePath(workspaceRoot: string, targetPath: string): boolean {
+  const resolvedRoot = resolve(workspaceRoot)
+  const resolvedTarget = resolve(targetPath)
+
+  if (!isPathWithinDirectory(resolvedRoot, resolvedTarget)) return false
+
+  const realRoot = realpathOrNull(resolvedRoot)
+  const realTarget = realpathOrNull(resolvedTarget)
+  if (!realRoot || !realTarget) return false
+
+  return isPathWithinDirectory(realRoot, realTarget)
+}
+
+function isWorkspacePathAllowingMissingTarget(workspaceRoot: string, targetPath: string): boolean {
+  const resolvedRoot = resolve(workspaceRoot)
+  const resolvedTarget = resolve(targetPath)
+
+  if (!isPathWithinDirectory(resolvedRoot, resolvedTarget)) return false
+
+  const realRoot = realpathOrNull(resolvedRoot)
+  if (!realRoot) return false
+
+  if (pathEntryExists(resolvedTarget)) {
+    return isExistingWorkspacePath(workspaceRoot, resolvedTarget)
+  }
+
+  let current = dirname(resolvedTarget)
+  while (true) {
+    if (pathEntryExists(current)) {
+      const realCurrent = realpathOrNull(current)
+      return !!realCurrent && isPathWithinDirectory(realRoot, realCurrent)
+    }
+    const parent = dirname(current)
+    if (parent === current) return false
+    current = parent
+  }
 }
 
 async function localBranchExists(repoRoot: string, branchName: string): Promise<boolean> {
@@ -297,8 +358,8 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     // Resolve path relative to workspace root
     const absolutePath = normalize(join(workspace.rootPath, relativePath))
 
-    // Double-check the resolved path is still within workspace
-    if (!absolutePath.startsWith(workspace.rootPath)) {
+    // Double-check the resolved path is still within workspace, including symlink targets.
+    if (!isWorkspacePathAllowingMissingTarget(workspace.rootPath, absolutePath)) {
       throw new Error('Invalid path: outside workspace directory')
     }
 
@@ -351,8 +412,8 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     // Resolve path relative to workspace root
     const absolutePath = normalize(join(workspace.rootPath, relativePath))
 
-    // Double-check the resolved path is still within workspace
-    if (!absolutePath.startsWith(workspace.rootPath)) {
+    // Double-check the resolved path is still within workspace, including symlink targets.
+    if (!isWorkspacePathAllowingMissingTarget(workspace.rootPath, absolutePath)) {
       throw new Error('Invalid path: outside workspace directory')
     }
 
