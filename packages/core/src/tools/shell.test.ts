@@ -331,6 +331,29 @@ describe('ShellTool', () => {
       );
     });
 
+    it('should reject sibling-prefix directories outside the workspace', async () => {
+      const workspaceContext = createMockWorkspaceContext('/test/dir', [
+        '/tmp/project',
+      ]);
+      vi.mocked(workspaceContext.isPathWithinWorkspace).mockReturnValue(false);
+      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+        workspaceContext,
+      );
+
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/tmp/project-other',
+          is_background: false,
+        }),
+      ).toThrow(
+        "Directory '/tmp/project-other' is not within any of the registered workspace directories.",
+      );
+      expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
+        '/tmp/project-other',
+      );
+    });
+
     it('should throw an error for a directory within the user skills directory', async () => {
       expect(() =>
         shellTool.build({

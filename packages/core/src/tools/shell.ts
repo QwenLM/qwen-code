@@ -4809,12 +4809,8 @@ export class ShellTool extends BaseDeclarativeTool<
         return `Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.`;
       }
 
-      const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
-      const isWithinWorkspace = workspaceDirs.some((wsDir) =>
-        params.directory!.startsWith(wsDir),
-      );
-
-      if (!isWithinWorkspace) {
+      const workspaceContext = this.config.getWorkspaceContext();
+      if (!workspaceContext.isPathWithinWorkspace(params.directory)) {
         return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
       }
     }
