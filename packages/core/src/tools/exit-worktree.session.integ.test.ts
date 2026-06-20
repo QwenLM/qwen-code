@@ -16,8 +16,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { EnterWorktreeTool } from './enter-worktree.js';
 import { ExitWorktreeTool } from './exit-worktree.js';
-import { readWorktreeSession } from '../services/worktreeSessionService.js';
+import {
+  readWorktreeSession,
+  writeWorktreeSession,
+} from '../services/worktreeSessionService.js';
 import { SessionService } from '../services/sessionService.js';
+import { GitWorktreeService } from '../services/gitWorktreeService.js';
+import { Storage } from '../config/storage.js';
+import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
 import type { Config } from '../config/config.js';
 
 // Real git invocations + user-global hooks can take 10-20s on slow
@@ -45,10 +51,12 @@ describe('ExitWorktreeTool — WorktreeSession sidecar cleanup', () => {
     });
 
     sessionService = new SessionService(repoRoot);
+    Storage.setRuntimeBaseDir(path.join(repoRoot, '.runtime'));
     sessionId = 'session-' + Math.random().toString(36).slice(2, 10);
   });
 
   afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
     await fs.rm(repoRoot, { recursive: true, force: true });
   });
 
@@ -155,5 +163,210 @@ describe('ExitWorktreeTool — WorktreeSession sidecar cleanup', () => {
       .execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
     // No throw is the assertion.
+  });
+
+  it('removes a re-attached worktree when the old marker owner is inactive', async () => {
+    sessionId = 'old-session';
+    await enterWorktree('reattached-stale');
+    const wtPath = new GitWorktreeService(repoRoot).getUserWorktreePath(
+      'reattached-stale',
+    );
+
+    const currentSessionId = 'new-session';
+    const currentSessionService = new SessionService(wtPath);
+    const currentSessionPath =
+      currentSessionService.getWorktreeSessionPath(currentSessionId);
+    await writeRuntimeStatus(
+      new Storage(wtPath).getRuntimeStatusPath('old-session'),
+      {
+        sessionId: 'old-session',
+        workDir: wtPath,
+        pid: 2147483647,
+      },
+    );
+    const originalHeadCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim();
+    await writeWorktreeSession(currentSessionPath, {
+      slug: 'reattached-stale',
+      worktreePath: wtPath,
+      worktreeBranch: 'worktree-reattached-stale',
+      originalCwd: repoRoot,
+      originalBranch: 'main',
+      originalHeadCommit,
+    });
+
+    const exitConfig = {
+      getTargetDir: () => wtPath,
+      getSessionId: () => currentSessionId,
+      getSessionService: () => currentSessionService,
+    } as unknown as Config;
+    const result = await new ExitWorktreeTool(exitConfig)
+      .build({
+        name: 'reattached-stale',
+        action: 'remove',
+        discard_changes: true,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    await expect(fs.access(wtPath)).rejects.toBeDefined();
+    expect(await readWorktreeSession(currentSessionPath)).toBeNull();
+  });
+
+  it('removes a stale-owned worktree when launched from inside it without a sidecar', async () => {
+    sessionId = 'old-session';
+    await enterWorktree('cwd-stale');
+    const wtPath = new GitWorktreeService(repoRoot).getUserWorktreePath(
+      'cwd-stale',
+    );
+    const nestedCwd = path.join(wtPath, 'nested');
+    await fs.mkdir(nestedCwd);
+    await writeRuntimeStatus(
+      new Storage(wtPath).getRuntimeStatusPath('old-session'),
+      {
+        sessionId: 'old-session',
+        workDir: wtPath,
+        pid: 2147483647,
+      },
+    );
+
+    const currentSessionService = new SessionService(wtPath);
+    const exitConfig = {
+      getTargetDir: () => nestedCwd,
+      getSessionId: () => 'new-session',
+      getSessionService: () => currentSessionService,
+    } as unknown as Config;
+    const invocation = new ExitWorktreeTool(exitConfig).build({
+      name: 'cwd-stale',
+      action: 'remove',
+      discard_changes: true,
+    });
+    const details = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    expect(details.type).toBe('exec');
+    if (details.type === 'exec') {
+      expect(details.command).toContain(`git worktree remove ${wtPath}`);
+      expect(details.command).not.toContain(
+        path.join(nestedCwd, '.qwen', 'worktrees', 'cwd-stale'),
+      );
+    }
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    await expect(fs.access(wtPath)).rejects.toBeDefined();
+  });
+
+  it('refuses a re-attached remove when the marker owner runtime is active', async () => {
+    sessionId = 'old-session';
+    await enterWorktree('reattached-active');
+    const wtPath = new GitWorktreeService(repoRoot).getUserWorktreePath(
+      'reattached-active',
+    );
+
+    await writeRuntimeStatus(
+      new Storage(wtPath).getRuntimeStatusPath('old-session'),
+      {
+        sessionId: 'old-session',
+        workDir: wtPath,
+        pid: process.pid,
+      },
+    );
+
+    const currentSessionId = 'new-session';
+    const currentSessionService = new SessionService(wtPath);
+    const originalHeadCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim();
+    await writeWorktreeSession(
+      currentSessionService.getWorktreeSessionPath(currentSessionId),
+      {
+        slug: 'reattached-active',
+        worktreePath: wtPath,
+        worktreeBranch: 'worktree-reattached-active',
+        originalCwd: repoRoot,
+        originalBranch: 'main',
+        originalHeadCommit,
+      },
+    );
+
+    const exitConfig = {
+      getTargetDir: () => wtPath,
+      getSessionId: () => currentSessionId,
+      getSessionService: () => currentSessionService,
+    } as unknown as Config;
+    const result = await new ExitWorktreeTool(exitConfig)
+      .build({
+        name: 'reattached-active',
+        action: 'remove',
+        discard_changes: true,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toMatch(
+      /different session.*owner=old-session/i,
+    );
+    await expect(fs.access(wtPath)).resolves.toBeUndefined();
+  });
+
+  it('refuses a re-attached remove when the owner is active under a repo-subdir relative runtime dir', async () => {
+    sessionId = 'old-session';
+    await enterWorktree('reattached-relative-active');
+    const wtPath = new GitWorktreeService(repoRoot).getUserWorktreePath(
+      'reattached-relative-active',
+    );
+
+    const packageDir = path.join(repoRoot, 'packages', 'app');
+    await fs.mkdir(packageDir, { recursive: true });
+    Storage.setRuntimeBaseDir('.qwen', packageDir);
+    await writeRuntimeStatus(
+      new Storage(packageDir).getRuntimeStatusPath('old-session'),
+      {
+        sessionId: 'old-session',
+        workDir: packageDir,
+        pid: process.pid,
+      },
+    );
+
+    Storage.setRuntimeBaseDir('.qwen', wtPath);
+    const currentSessionId = 'new-session';
+    const currentSessionService = new SessionService(wtPath);
+    const originalHeadCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim();
+    await writeWorktreeSession(
+      currentSessionService.getWorktreeSessionPath(currentSessionId),
+      {
+        slug: 'reattached-relative-active',
+        worktreePath: wtPath,
+        worktreeBranch: 'worktree-reattached-relative-active',
+        originalCwd: repoRoot,
+        originalBranch: 'main',
+        originalHeadCommit,
+      },
+    );
+
+    const exitConfig = {
+      getTargetDir: () => wtPath,
+      getSessionId: () => currentSessionId,
+      getSessionService: () => currentSessionService,
+    } as unknown as Config;
+    const result = await new ExitWorktreeTool(exitConfig)
+      .build({
+        name: 'reattached-relative-active',
+        action: 'remove',
+        discard_changes: true,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toMatch(
+      /different session.*owner=old-session/i,
+    );
+    await expect(fs.access(wtPath)).resolves.toBeUndefined();
   });
 });

@@ -386,11 +386,9 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
       durationMs != null
         ? `${t('Thought for')} ${formatDuration(durationMs)}`
         : t('Thinking');
-    // TODO(follow-up): restore "(ctrl+o to expand)" hint once Ctrl+O is
-    // decoupled from compactMode so it can toggle thinking blocks independently.
     return (
       <Text dimColor italic>
-        {label}
+        {label} {t('(ctrl+o to expand)')}
       </Text>
     );
   }

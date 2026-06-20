@@ -55,6 +55,10 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
     },
     { name: 'output', description: '设置 LLM 输出语言' },
   ],
+  extensions: [
+    { name: 'manage', description: '管理扩展' },
+    { name: 'install', description: '安装扩展' },
+  ],
 };
 
 const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
@@ -82,6 +86,10 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
       ],
     },
     { name: 'output', description: 'Set LLM output language' },
+  ],
+  extensions: [
+    { name: 'manage', description: 'Manage installed extensions' },
+    { name: 'install', description: 'Install an extension from a source' },
   ],
 };
 

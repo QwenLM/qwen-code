@@ -923,6 +923,26 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('registers loop_wakeup when cron is enabled', async () => {
+      const config = new Config({ ...baseParams, cronEnabled: true });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.LOOP_WAKEUP);
+    });
+
+    it('does not register loop_wakeup when cron is disabled', async () => {
+      const config = new Config({ ...baseParams, cronEnabled: false });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.LOOP_WAKEUP);
+    });
+
     it('skips inline MCP discovery by default (progressive availability)', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();
@@ -983,6 +1003,38 @@ describe('Server Config (config.ts)', () => {
         excludedMcpServers: ['off'],
       } as ConfigParameters);
       expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('isMcpServerDisabled consults extension preferences only for the contributing extension', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        // baseParams pins overrideExtensions to []; lift it so the mocked
+        // loaded extension is visible to getActiveExtensions().
+        overrideExtensions: undefined,
+        // A user-configured server that shadows the extension's same-named one.
+        mcpServers: { foo: new MCPServerConfig() },
+      } as ConfigParameters);
+      const manager = config.getExtensionManager();
+      vi.spyOn(manager, 'getLoadedExtensions').mockReturnValue([
+        {
+          name: 'my-ext',
+          isActive: true,
+          config: { name: 'my-ext', mcpServers: { bar: {}, foo: {} } },
+        } as unknown as ReturnType<typeof manager.getLoadedExtensions>[number],
+      ]);
+      vi.spyOn(manager, 'getDisabledMcpServers').mockImplementation(
+        (extensionName: string) =>
+          extensionName === 'my-ext' ? ['bar', 'foo'] : [],
+      );
+      // `bar` is contributed by the extension and disabled in its preferences.
+      expect(config.isMcpServerDisabled('bar')).toBe(true);
+      // `foo` is shadowed by the user config (no extensionName on the merged
+      // entry), so the extension's disable record must not affect it.
+      expect(config.isMcpServerDisabled('foo')).toBe(false);
+      // The global exclusion list still applies to anything.
+      config.setExcludedMcpServers(['foo']);
+      expect(config.isMcpServerDisabled('foo')).toBe(true);
     });
 
     it('getFailedMcpServerNames skips pending approval servers', () => {
@@ -2572,6 +2624,21 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('Response tokens/sec display configuration', () => {
+    it('should default to false when not provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getShowResponseTokensPerSecond()).toBe(false);
+    });
+
+    it('should set showResponseTokensPerSecond when provided as true', () => {
+      const config = new Config({
+        ...baseParams,
+        showResponseTokensPerSecond: true,
+      });
+      expect(config.getShowResponseTokensPerSecond()).toBe(true);
+    });
+  });
+
   describe('createToolRegistry', () => {
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
@@ -4071,6 +4138,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['toolResultContentFormat']: 'string',
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -4080,6 +4148,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        toolResultContentFormat: { kind: 'settings' },
       },
     });
 
@@ -4099,6 +4168,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['toolResultContentFormat']).toBe('string');
 
     // Verify sources are also updated
     const sources = config.getContentGeneratorConfigSources();
@@ -4108,6 +4178,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['toolResultContentFormat']?.kind).toBe('settings');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {

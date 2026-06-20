@@ -645,7 +645,7 @@ describe('TodoWriteTool', () => {
     });
 
     it('should have correct display name', () => {
-      expect(tool.displayName).toBe('TodoWrite');
+      expect(tool.displayName).toBe('TodoList');
     });
 
     it('should have correct kind', () => {

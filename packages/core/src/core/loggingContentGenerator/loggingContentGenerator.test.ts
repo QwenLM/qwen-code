@@ -1576,6 +1576,7 @@ describe('LoggingContentGenerator', () => {
       authType: AuthType.USE_OPENAI,
       enableOpenAILogging: true,
       modalities: { image: true },
+      toolResultContentFormat: 'string' as const,
     };
     const generator = new LoggingContentGenerator(
       wrapped,
@@ -1609,6 +1610,7 @@ describe('LoggingContentGenerator', () => {
       expect.objectContaining({
         model: 'test-model',
         modalities: { image: true },
+        toolResultContentFormat: 'string',
       }),
       { cleanOrphanToolCalls: false },
     );
@@ -1631,6 +1633,61 @@ describe('LoggingContentGenerator', () => {
         ],
       },
     ]);
+  });
+
+  it('uses string tool result content in reconstructed OpenAI logs when configured', async () => {
+    convertGeminiRequestToOpenAISpy.mockImplementationOnce(
+      (request, requestContext, options) =>
+        realConvertGeminiRequestToOpenAI(request, requestContext, options),
+    );
+
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-tool-log', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      toolResultContentFormat: 'string',
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: [
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call_1', name: 'shell', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                name: 'shell',
+                response: { output: 'hello world' },
+              },
+            },
+          ],
+        },
+      ],
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-tool-log');
+
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    const [openaiRequest] = openaiLoggerInstance.logInteraction.mock
+      .calls[0] as [OpenAI.Chat.ChatCompletionCreateParams];
+    const toolMessage = openaiRequest.messages.find(
+      (message) => message.role === 'tool',
+    );
+    expect(toolMessage?.content).toBe('hello world');
   });
 
   it('logs the captured wire request including provider-injected fields (generateContent)', async () => {

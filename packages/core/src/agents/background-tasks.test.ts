@@ -354,10 +354,7 @@ describe('BackgroundTaskRegistry', () => {
       isBackgrounded: true,
       outputFile: '/tmp/test.jsonl',
     });
-    registry.addPendingApproval(
-      'paused-approval',
-      makeApproval('c1', respond),
-    );
+    registry.addPendingApproval('paused-approval', makeApproval('c1', respond));
     registry.get('paused-approval')!.status = 'paused';
 
     registry.abandon('paused-approval');

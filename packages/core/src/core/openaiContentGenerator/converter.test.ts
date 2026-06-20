@@ -908,6 +908,53 @@ describe('OpenAIContentConverter', () => {
       expect(img?.image_url?.url).toBe('data:image/png;base64,aaa');
     });
 
+    it('should keep embedded media as content parts when string tool content is requested but splitToolMedia is false', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'c1', name: 'shot', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'shot',
+                  response: { output: 'screenshot' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: false,
+        toolResultContentFormat: 'string',
+      });
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(Array.isArray(toolMessage?.content)).toBe(true);
+      const toolContent = toolMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(toolContent.find((p) => p.type === 'text')?.text).toBe(
+        'screenshot',
+      );
+      expect(
+        toolContent.find((p) => p.type === 'image_url')?.image_url?.url,
+      ).toBe('data:image/png;base64,aaa');
+    });
+
     it('should convert function responses with fileData to tool message with embedded image_url', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
@@ -1507,6 +1554,23 @@ describe('OpenAIContentConverter', () => {
       expect(contentArray[0].text).toBe('Plain text output');
 
       // No user message should be created when there's no media
+      const userMessage = messages.find((message) => message.role === 'user');
+      expect(userMessage).toBeUndefined();
+    });
+
+    it('should serialize text-only tool content as a string when requested', () => {
+      const request = createRequestWithFunctionResponse({
+        output: 'Plain text output',
+      });
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        toolResultContentFormat: 'string',
+      });
+      const toolMessage = messages.find((message) => message.role === 'tool');
+
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage?.content).toBe('Plain text output');
       const userMessage = messages.find((message) => message.role === 'user');
       expect(userMessage).toBeUndefined();
     });
@@ -2626,6 +2690,36 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(response.candidates).toEqual([]);
+    });
+
+    it('keeps the estimated prompt/completion split summing to total tokens', () => {
+      // When a provider reports only total_tokens, the 70/30 estimate must
+      // still add back up to the total instead of rounding each half on its
+      // own (5 would otherwise become 4 + 2 = 6).
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'hi' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 5 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      const usage = response.usageMetadata;
+      expect(usage?.totalTokenCount).toBe(5);
+      expect(
+        (usage?.promptTokenCount ?? 0) + (usage?.candidatesTokenCount ?? 0),
+      ).toBe(5);
     });
   });
 
@@ -4183,6 +4277,38 @@ describe('OpenAIContentConverter', () => {
         type: 'array',
         minItems: 0,
         maxItems: 10,
+      });
+    });
+
+    it('should not truncate non-integer length constraints', () => {
+      const params = {
+        type: 'object',
+        properties: {
+          text: {
+            type: 'string',
+            minLength: '1.5',
+            maxLength: '   ',
+          },
+          items: {
+            type: 'array',
+            minItems: '10px',
+            maxItems: '1.5',
+          },
+        },
+      };
+
+      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const properties = result?.['properties'] as Record<string, unknown>;
+
+      expect(properties?.['text']).toEqual({
+        type: 'string',
+        minLength: '1.5',
+        maxLength: '   ',
+      });
+      expect(properties?.['items']).toEqual({
+        type: 'array',
+        minItems: '10px',
+        maxItems: '1.5',
       });
     });
 

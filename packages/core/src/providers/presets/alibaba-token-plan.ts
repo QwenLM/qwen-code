@@ -27,7 +27,6 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     id: 'qwen3.6-flash',
     contextWindowSize: 1000000,
     enableThinking: true,
-    modalities: { image: true, video: true },
   },
   { id: 'deepseek-v4-pro', contextWindowSize: 1000000 },
   { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
@@ -36,7 +35,6 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     id: 'kimi-k2.6',
     contextWindowSize: 262144,
     enableThinking: true,
-    modalities: { image: true, video: true },
   },
   {
     id: 'kimi-k2.5',

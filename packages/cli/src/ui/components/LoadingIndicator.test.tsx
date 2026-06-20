@@ -323,6 +323,84 @@ describe('<LoadingIndicator />', () => {
       expect(output).toContain('(5s · ↓ 5.4k tokens · esc to cancel)');
     });
 
+    it('should not show response tokens/sec by default', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator {...defaultProps} candidatesTokens={500} />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 500 tokens');
+      expect(output).not.toContain('t/s');
+    });
+
+    it('should show response tokens/sec when enabled', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={500}
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 500 tokens');
+      expect(output).toContain('100 t/s');
+    });
+
+    it('should calculate response tokens/sec from tokens produced after the timer reset', () => {
+      const streamingCharsRef = { current: 400 };
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={550}
+          taskStartTokens={500}
+          taskStartStreamingChars={200}
+          streamingCharsRef={streamingCharsRef}
+          isStreaming
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 650 tokens');
+      expect(output).toContain('20 t/s');
+      expect(output).not.toContain('130 t/s');
+    });
+
+    it('should format sub-10 response tokens/sec with one decimal place', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          currentLoadingPhrase="Working..."
+          elapsedTime={8}
+          candidatesTokens={25}
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('3.1 t/s');
+    });
+
+    it('should not show response tokens/sec before content arrives', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={500}
+          showResponseTokensPerSecond
+          isReceivingContent={false}
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↑ 500 tokens');
+      expect(output).not.toContain('t/s');
+    });
+
     it('should show ↑ arrow when waiting for API response', () => {
       const { lastFrame } = renderWithContext(
         <LoadingIndicator

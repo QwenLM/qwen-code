@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { CommandModule } from 'yargs';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import { normalizeProxyUrl, Storage } from '@qwen-code/qwen-code-core';
@@ -64,6 +65,13 @@ function loadChannelsConfig(): Record<string, unknown> {
   return channels || {};
 }
 
+export function resolveExtensionChannelEntrySpecifier(
+  extensionPath: string,
+  entry: string,
+): string {
+  return pathToFileURL(path.join(extensionPath, entry)).href;
+}
+
 /**
  * Load channel plugins from active extensions.
  * Extensions declare channels in their qwen-extension.json manifest.
@@ -85,9 +93,12 @@ async function loadChannelsFromExtensions(): Promise<number> {
           continue;
         }
 
-        const entryPath = path.join(ext.path, channelDef.entry);
+        const entrySpecifier = resolveExtensionChannelEntrySpecifier(
+          ext.path,
+          channelDef.entry,
+        );
         try {
-          const module = (await import(entryPath)) as {
+          const module = (await import(entrySpecifier)) as {
             plugin?: ChannelPlugin;
           };
           const plugin = module.plugin;

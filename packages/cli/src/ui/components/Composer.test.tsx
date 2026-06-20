@@ -38,14 +38,28 @@ import { StreamingState } from '../types.js';
 vi.mock('./LoadingIndicator.js', () => ({
   LoadingIndicator: ({
     currentLoadingPhrase,
+    candidatesTokens,
+    taskStartTokens,
+    taskStartStreamingChars,
+    showResponseTokensPerSecond,
   }: {
     currentLoadingPhrase?: string;
+    candidatesTokens?: number;
+    taskStartTokens?: number;
+    taskStartStreamingChars?: number;
+    showResponseTokensPerSecond?: boolean;
   }) => (
-      <Text>
-        LoadingIndicator
-        {currentLoadingPhrase ? `: ${currentLoadingPhrase}` : ''}
-      </Text>
-    ),
+    <Text>
+      LoadingIndicator
+      {currentLoadingPhrase ? `: ${currentLoadingPhrase}` : ''}
+      {typeof candidatesTokens === 'number' ? `: ${candidatesTokens}` : ''}
+      {typeof taskStartTokens === 'number' ? `: start ${taskStartTokens}` : ''}
+      {typeof taskStartStreamingChars === 'number'
+        ? `: chars ${taskStartStreamingChars}`
+        : ''}
+      {showResponseTokensPerSecond ? ': show t/s' : ''}
+    </Text>
+  ),
 }));
 
 vi.mock('./ContextSummaryDisplay.js', () => ({
@@ -129,6 +143,8 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     nightly: false,
     isTrustedFolder: true,
     taskStartTokens: 0,
+    taskStartStreamingChars: 0,
+    responseCandidateTokens: 0,
     streamingResponseLengthRef: { current: 0 },
     isReceivingContent: false,
     pendingGeminiHistoryItems: [],
@@ -152,6 +168,7 @@ const createMockConfig = (overrides = {}) => ({
   getTargetDir: vi.fn(() => '/test/dir'),
   getDebugMode: vi.fn(() => false),
   getAccessibility: vi.fn(() => ({})),
+  getShowResponseTokensPerSecond: vi.fn(() => false),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
   ...overrides,
@@ -199,6 +216,25 @@ describe('Composer', () => {
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
       expect(output).toContain('LoadingIndicator: Analyzing');
+    });
+
+    it('passes the response token rate setting to LoadingIndicator', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        currentLoadingPhrase: 'Analyzing',
+        responseCandidateTokens: 550,
+        taskStartTokens: 500,
+        taskStartStreamingChars: 200,
+      });
+      const config = createMockConfig({
+        getShowResponseTokensPerSecond: vi.fn(() => true),
+      });
+
+      const { lastFrame } = renderComposer(uiState, config);
+
+      expect(lastFrame()).toContain('LoadingIndicator: Analyzing');
+      expect(lastFrame()).toContain(': 550: start 500: chars 200');
+      expect(lastFrame()).toContain(': show t/s');
     });
 
     // ─── Narrow-terminal suppression (suppressBottomLoadingIndicator) ───

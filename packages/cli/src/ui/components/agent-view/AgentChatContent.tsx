@@ -129,7 +129,10 @@ export const AgentChatContent = ({
   useEffect(() => {
     if (readonly) return;
     setAgentShellFocused(embeddedShellFocused);
-    return () => setAgentShellFocused(false);
+    // Intentionally not resetting on unmount: calling setState on a parent
+    // context provider during effect cleanup triggers React error #185
+    // ("Cannot update a component while rendering a different component")
+    // when both child and provider unmount in the same commit phase.
   }, [embeddedShellFocused, readonly, setAgentShellFocused]);
 
   useEffect(() => {

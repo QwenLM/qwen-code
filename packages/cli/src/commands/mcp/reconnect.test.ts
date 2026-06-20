@@ -8,6 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { reconnectCommand } from './reconnect.js';
 import { loadSettings } from '../../config/settings.js';
 import { assembleMcpServers } from '../../config/mcpServers.js';
+import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { Config, ExtensionManager } from '@qwen-code/qwen-code-core';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -15,6 +16,7 @@ const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockProcessExit = vi.hoisted(() => vi.fn());
 const mockGetPendingGatedMcpServers = vi.hoisted(() => vi.fn());
 const mockAssembleMcpServers = vi.hoisted(() => vi.fn());
+const mockIsWorkspaceTrusted = vi.hoisted(() => vi.fn());
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
@@ -30,7 +32,7 @@ vi.mock('../../config/mcpServers.js', () => ({
 }));
 
 vi.mock('../../config/trustedFolders.js', () => ({
-  isWorkspaceTrusted: vi.fn().mockReturnValue(true),
+  isWorkspaceTrusted: mockIsWorkspaceTrusted,
 }));
 
 vi.mock('../../config/mcpApprovals.js', () => ({
@@ -46,6 +48,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 
 const mockedLoadSettings = loadSettings as vi.Mock;
 const mockedAssembleMcpServers = assembleMcpServers as vi.Mock;
+const mockedIsWorkspaceTrusted = isWorkspaceTrusted as vi.Mock;
 const MockedConfig = Config as vi.Mock;
 const MockedExtensionManager = ExtensionManager as vi.Mock;
 
@@ -87,6 +90,10 @@ describe('mcp reconnect command', () => {
     MockedExtensionManager.mockImplementation(() => mockExtensionManager);
     mockGetPendingGatedMcpServers.mockReturnValue([]);
     mockedAssembleMcpServers.mockImplementation((servers) => servers ?? {});
+    mockedIsWorkspaceTrusted.mockReturnValue({
+      isTrusted: true,
+      source: 'file',
+    });
 
     Object.defineProperty(process, 'exit', {
       value: mockProcessExit,
@@ -147,6 +154,31 @@ describe('mcp reconnect command', () => {
       );
       expect(mockToolRegistry.discoverToolsForServer).toHaveBeenCalledWith(
         'approved',
+      );
+    });
+
+    it('passes explicit untrusted workspace state to the extension manager', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(MockedExtensionManager).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isWorkspaceTrusted: false,
+        }),
       );
     });
 

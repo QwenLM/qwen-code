@@ -300,6 +300,7 @@ describe('useProviderUpdates', () => {
     expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
       'qwen3.5-plus',
+      undefined,
     );
   });
 

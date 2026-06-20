@@ -187,6 +187,27 @@ export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
 export * from './services/sleepInhibitor.js';
+// Named exports keep @internal test helpers out of the barrel.
+export {
+  apiResponseEventToTokenUsageRecord,
+  exportTokenUsageSummary,
+  formatTokenUsageSummaryAsCsv,
+  formatTokenUsageSummaryAsJson,
+  getTokenUsageFilePath,
+  queryTokenUsage,
+  recordTokenUsageFromApiResponse,
+  recordTokenUsageFromApiResponseBestEffort,
+} from './services/tokenUsageService.js';
+export type {
+  TokenUsageExportFormat,
+  TokenUsageExportOptions,
+  TokenUsageGroupSummary,
+  TokenUsagePeriod,
+  TokenUsageQuery,
+  TokenUsageRecord,
+  TokenUsageSummary,
+  TokenUsageTotals,
+} from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
@@ -201,6 +222,7 @@ export * from './agents/workflow-run-registry.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';
+export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
 // Managed Auto-Memory

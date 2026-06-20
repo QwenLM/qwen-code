@@ -153,8 +153,27 @@ const CONN_ROUTED_METHODS = new Set<string>([
 // shared module to avoid churning the 2987-line server.ts near merge; a
 // follow-up may lift all three to a `serve/limits.ts`.)
 const MAX_NAME_LENGTH = 256;
+const DEFAULT_FILE_GLOB_MAX_RESULTS = 5000;
+const MAX_FILE_GLOB_MAX_RESULTS = 50_000;
 
 class AcpParamError extends Error {}
+
+function parseOptionalPositiveInteger(
+  value: unknown,
+  fallback: number,
+  max: number,
+): number | null {
+  if (value === undefined) return fallback;
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > max
+  ) {
+    return null;
+  }
+  return value;
+}
 
 /**
  * Validate an optional `cwd` param the same way the REST `POST /session`
@@ -800,7 +819,7 @@ export class AcpDispatcher {
             sessions: result.sessions.map((s) => ({
               sessionId: s.sessionId,
               cwd: s.workspaceCwd,
-              title: s.title,
+              title: s.displayName,
               updatedAt: s.updatedAt,
             })),
             ...(result.nextCursor != null
@@ -1607,14 +1626,22 @@ export class AcpDispatcher {
             originatorClientId: conn.clientId,
             route: `ACP ${method}`,
           });
-          const MAX_GLOB = 5000;
-          const maxResults =
-            typeof params['maxResults'] === 'number'
-              ? Math.max(
-                  1,
-                  Math.min(Number(params['maxResults']) || 5000, 50000),
-                )
-              : MAX_GLOB;
+          const maxResults = parseOptionalPositiveInteger(
+            params['maxResults'],
+            DEFAULT_FILE_GLOB_MAX_RESULTS,
+            MAX_FILE_GLOB_MAX_RESULTS,
+          );
+          if (maxResults === null) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`maxResults` must be an integer between 1 and 50000',
+                ),
+              );
+            return;
+          }
           const matches = await fs.glob(pattern, {
             maxResults: maxResults + 1,
           });

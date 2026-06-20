@@ -186,7 +186,11 @@ export const ToolConfirmationMessage: React.FC<
         key: 'Yes, allow always',
       });
     }
-    if ((!config.getIdeMode() || !isDiffingEnabled) && preferredEditor) {
+    if (
+      !confirmationDetails.hideModify &&
+      (!config.getIdeMode() || !isDiffingEnabled) &&
+      preferredEditor
+    ) {
       options.push({
         label: t('Modify with external editor'),
         value: ToolConfirmationOutcome.ModifyWithEditor,

@@ -420,12 +420,58 @@ export default {
   'Auto Edit': 'Automatisch bearbeiten',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim-Modus ein-/ausschalten',
-  'check session stats. Usage: /stats [model|tools]':
-    'Sitzungsstatistiken prüfen. Verwendung: /stats [model|tools]',
   'Show model-specific usage statistics.':
     'Modellspezifische Nutzungsstatistiken anzeigen.',
   'Show tool-specific usage statistics.':
     'Werkzeugspezifische Nutzungsstatistiken anzeigen.',
+  'Show daily token usage statistics.':
+    'Tägliche Token-Nutzungsstatistiken anzeigen.',
+  'Show monthly token usage statistics.':
+    'Monatliche Token-Nutzungsstatistiken anzeigen.',
+  'Export token usage statistics to CSV or JSON.':
+    'Token-Nutzungsstatistiken als CSV oder JSON exportieren.',
+  'No usage data.': 'Keine Nutzungsdaten.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} Tokens ({{requests}} Anfragen)',
+  'Daily token usage for {{value}}': 'Tägliche Token-Nutzung für {{value}}',
+  'Monthly token usage for {{value}}': 'Monatliche Token-Nutzung für {{value}}',
+  'Total: {{tokens}} tokens': 'Gesamt: {{tokens}} Tokens',
+  'Requests: {{requests}}': 'Anfragen: {{requests}}',
+  'Breakdown:': 'Aufschlüsselung:',
+  'Input: {{tokens}}': 'Eingabe: {{tokens}}',
+  'Output: {{tokens}}': 'Ausgabe: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (in Eingabe enthalten): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Gedanken: {{tokens}}',
+  'By model:': 'Nach Modell:',
+  'By auth type:': 'Nach Authentifizierungstyp:',
+  'By model/auth type:': 'Nach Modell/Authentifizierungstyp:',
+  'By source:': 'Nach Quelle:',
+  'Failed to load token usage stats: {{error}}':
+    'Token-Nutzungsstatistiken konnten nicht geladen werden: {{error}}',
+  'Expected --format csv or --format json.':
+    '--format csv oder --format json erwartet.',
+  'Expected a file path after --output.':
+    'Nach --output wird ein Dateipfad erwartet.',
+  'Unexpected argument: {{argument}}': 'Unerwartetes Argument: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Verwendung: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Der Exportpfad für die Token-Nutzung muss im Arbeitsverzeichnis des Projekts liegen.',
+  'Export target does not exist: {{path}}':
+    'Exportziel existiert nicht: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    'Der Exportpfad kann nicht innerhalb des Arbeitsverzeichnisses aufgelöst werden.',
+  'Could not create a temporary export file.':
+    'Temporäre Exportdatei konnte nicht erstellt werden.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token-Nutzung nach {{format}} exportiert: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Token-Nutzungsstatistiken konnten nicht exportiert werden: {{error}}',
+  'Unclosed quote in arguments.':
+    'Nicht geschlossenes Anführungszeichen in Argumenten.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Hinweis: Generierungszeiten (TTFT/TPS) gehören zu den Generierungsmetriken.',
   'exit the cli': 'CLI beenden',
   'Manage workspace directories': 'Arbeitsbereichsverzeichnisse verwalten',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -1989,6 +2035,26 @@ export default {
     'Weitere Dream-Läufe können als gesperrt übersprungen werden, bis der nächste Stale-Sweep der Sitzung die Datei bereinigt.',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     'Das Scheduler-Gate hat den Zeitstempel dieses Dream-Laufs nicht gesehen; der nächste Dream-Zyklus kann früher als üblich erneut starten.',
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Geschichte eingeklappt: {{n}} Nachrichten ausgeblendet. Verwenden Sie /history expand-now zum Anzeigen.',
+
   // === Same-as-English optimization ===
   'Agents:': 'Agenten:',
   Prompt: 'Eingabe',

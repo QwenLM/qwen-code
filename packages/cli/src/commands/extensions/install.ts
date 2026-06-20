@@ -9,17 +9,18 @@ import type { CommandModule } from 'yargs';
 import {
   ExtensionManager,
   parseInstallSource,
+  type ExtensionScope,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   requestConsentOrFail,
   requestConsentNonInteractive,
   requestChoicePluginNonInteractive,
 } from './consent.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface InstallArgs {
   source: string;
@@ -28,6 +29,12 @@ interface InstallArgs {
   allowPreRelease?: boolean;
   consent?: boolean;
   registry?: string;
+  scope?: string;
+}
+
+// "workspace" is accepted as an alias of "project" to match enable/disable.
+function normalizeScope(scope: string | undefined): ExtensionScope {
+  return scope === 'project' || scope === 'workspace' ? 'project' : 'user';
 }
 
 export async function handleInstall(args: InstallArgs) {
@@ -70,9 +77,9 @@ export async function handleInstall(args: InstallArgs) {
     const workspaceDir = process.cwd();
     const extensionManager = new ExtensionManager({
       workspaceDir,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(workspaceDir).merged,
-      ),
+      locale: getCurrentLanguage(),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
       requestConsent,
       requestChoicePlugin: requestChoicePluginNonInteractive,
     });
@@ -87,10 +94,55 @@ export async function handleInstall(args: InstallArgs) {
       },
       requestConsent,
     );
+    const scope = normalizeScope(args.scope);
+    if (args.scope) {
+      // installExtension auto-enables at the user (global) scope. For a
+      // project-scoped install, re-scope enablement to this workspace only —
+      // BEFORE recording the scope preference, so a failed Workspace enable
+      // (which rolls back to User) can't leave the prefs claiming "project".
+      if (scope === 'project') {
+        await extensionManager.disableExtension(
+          extension.name,
+          SettingScope.User,
+        );
+        try {
+          await extensionManager.enableExtension(
+            extension.name,
+            SettingScope.Workspace,
+          );
+        } catch (enableError) {
+          // The User-scope disable already landed. If the Workspace enable
+          // fails, the extension would be left disabled everywhere — roll the
+          // User enable back so it isn't silently dead, then surface the error.
+          try {
+            await extensionManager.enableExtension(
+              extension.name,
+              SettingScope.User,
+            );
+          } catch (rollbackError) {
+            // Rollback failed too: the extension is now disabled at every
+            // scope. Surface this so the user knows recovery also failed,
+            // before the original error is reported below.
+            writeStderrLine(
+              `Warning: failed to roll back the scope change for "${extension.name}"; it may be disabled at all scopes: ${getErrorMessage(rollbackError)}`,
+            );
+          }
+          throw enableError;
+        }
+      }
+      // Enablement succeeded (or scope is user/local with no enablement change):
+      // now it's safe to persist the scope preference.
+      extensionManager.setExtensionScope(extension.name, scope);
+    }
     writeStdoutLine(
-      t('Extension "{{name}}" installed successfully and enabled.', {
-        name: extension.name,
-      }),
+      scope === 'project'
+        ? t(
+            'Extension "{{name}}" installed successfully and enabled for the current workspace.',
+            { name: extension.name },
+          )
+        : t('Extension "{{name}}" installed successfully and enabled.', {
+            name: extension.name,
+          }),
     );
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
@@ -135,6 +187,13 @@ export const installCommand: CommandModule = {
         type: 'boolean',
         default: false,
       })
+      .option('scope', {
+        describe: t(
+          'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).',
+        ),
+        type: 'string',
+        choices: ['user', 'project', 'workspace'],
+      })
       .check((argv) => {
         if (!argv.source) {
           throw new Error(t('The source argument must be provided.'));
@@ -149,6 +208,7 @@ export const installCommand: CommandModule = {
       allowPreRelease: argv['pre-release'] as boolean | undefined,
       consent: argv['consent'] as boolean | undefined,
       registry: argv['registry'] as string | undefined,
+      scope: argv['scope'] as string | undefined,
     });
   },
 };

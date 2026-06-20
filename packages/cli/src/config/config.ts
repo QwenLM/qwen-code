@@ -85,8 +85,17 @@ import {
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
+import { detectSystemLanguage } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('CONFIG');
+
+function resolveLocaleForExtensions(settings: Settings): string {
+  const envLang = process.env['QWEN_CODE_LANG'];
+  if (envLang) return envLang;
+  const settingsLang = settings.general?.language as string | undefined;
+  if (settingsLang && settingsLang !== 'auto') return settingsLang;
+  return detectSystemLanguage();
+}
 
 const VALID_APPROVAL_MODE_VALUES = [
   'plan',
@@ -1377,6 +1386,13 @@ export async function loadCliConfig(
    * demoted below a project `.mcp.json` by `assembleMcpServers`. See issue #4615.
    */
   sessionMcpServers?: Record<string, MCPServerConfig>,
+  /**
+   * Lifecycle handle for the settings file watcher started in `gemini.tsx`
+   * before `Config.initialize()`. Passed through to `Config` so it can be
+   * stopped during shutdown — only `stopWatching()` is exposed here to keep
+   * core decoupled from the CLI-owned `SettingsWatcher` implementation.
+   */
+  settingsWatcher?: { stopWatching(): void },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
@@ -1877,6 +1893,8 @@ export async function loadCliConfig(
       ...settings.ui?.accessibility,
       screenReader,
     },
+    showResponseTokensPerSecond:
+      settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
@@ -1908,6 +1926,7 @@ export async function loadCliConfig(
       settings.tools?.computerUse?.maxImageDimension,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
+    locale: resolveLocaleForExtensions(settings),
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
     authType: selectedAuthType,
@@ -1933,6 +1952,7 @@ export async function loadCliConfig(
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
+    skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
@@ -1996,6 +2016,7 @@ export async function loadCliConfig(
           symlinkDirectories: settings.worktree.symlinkDirectories,
         }
       : undefined,
+    settingsWatcher,
   };
 
   const config = new Config(configParams);

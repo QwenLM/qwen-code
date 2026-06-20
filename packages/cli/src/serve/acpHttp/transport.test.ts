@@ -18,6 +18,11 @@ import {
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import { SessionService } from '@qwen-code/qwen-code-core';
+import type {
+  ResolvedPath,
+  WorkspaceFileSystem,
+  WorkspaceFileSystemFactory,
+} from '../fs/index.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
 
@@ -329,6 +334,19 @@ const fakeWorkspace = {
   },
 } as unknown as DaemonWorkspaceService;
 
+function makeGlobFsFactory(glob: WorkspaceFileSystem['glob']) {
+  return {
+    forRequest: () =>
+      ({
+        glob,
+      }) as unknown as WorkspaceFileSystem,
+  } satisfies WorkspaceFileSystemFactory;
+}
+
+function resolvedPath(value: string): ResolvedPath {
+  return value as ResolvedPath;
+}
+
 // ── SSE client helper ────────────────────────────────────────────────
 async function* readSse(
   res: Response,
@@ -443,6 +461,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   async function restartServer(opts: {
     sessionShellCommandEnabled?: boolean;
     nextBridge?: FakeBridge;
+    fsFactory?: WorkspaceFileSystemFactory;
   }): Promise<void> {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
@@ -453,6 +472,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       boundWorkspace: '/ws',
       workspace: fakeWorkspace,
       enabled: true,
+      fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
     });
     await new Promise<void>((resolve) => {
@@ -2470,6 +2490,76 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
+
+    it('_qwen/file/glob honors a valid maxResults limit', async () => {
+      const glob = vi.fn(async () => [
+        resolvedPath('a'),
+        resolvedPath('b'),
+        resolvedPath('c'),
+      ]);
+      await restartServer({ fsFactory: makeGlobFsFactory(glob) });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 95,
+        method: '_qwen/file/glob',
+        params: { pattern: '**/*', maxResults: 2 },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: {
+          pattern: '**/*',
+          matches: ['a', 'b'],
+          truncated: true,
+        },
+      });
+      expect(glob).toHaveBeenCalledWith('**/*', { maxResults: 3 });
+    });
+
+    it('_qwen/file/glob defaults maxResults when omitted', async () => {
+      const glob = vi.fn(async () => []);
+      await restartServer({ fsFactory: makeGlobFsFactory(glob) });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 95,
+        method: '_qwen/file/glob',
+        params: { pattern: '**/*' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: {
+          pattern: '**/*',
+          matches: [],
+          truncated: false,
+        },
+      });
+      expect(glob).toHaveBeenCalledWith('**/*', { maxResults: 5001 });
+    });
+
+    it.each([0, -1, 1.5, 50_001, '2', null])(
+      '_qwen/file/glob rejects invalid maxResults (%s)',
+      async (maxResults) => {
+        const glob = vi.fn(async () => []);
+        await restartServer({ fsFactory: makeGlobFsFactory(glob) });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 95,
+          method: '_qwen/file/glob',
+          params: { pattern: '**/*', maxResults },
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+        expect(glob).not.toHaveBeenCalled();
+      },
+    );
   });
 });
 

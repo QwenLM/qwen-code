@@ -37,6 +37,7 @@ export const ToolNames = {
   CRON_CREATE: 'cron_create',
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
+  LOOP_WAKEUP: 'loop_wakeup',
   TASK_STOP: 'task_stop',
   TASK_CREATE: 'task_create',
   TASK_UPDATE: 'task_update',
@@ -71,7 +72,7 @@ export const ToolDisplayNames = {
   GREP: 'Grep',
   GLOB: 'Glob',
   SHELL: 'Shell',
-  TODO_WRITE: 'TodoWrite',
+  TODO_WRITE: 'TodoList',
   MEMORY: 'SaveMemory',
   AGENT: 'Agent',
   SKILL: 'Skill',
@@ -84,6 +85,7 @@ export const ToolDisplayNames = {
   CRON_CREATE: 'CronCreate',
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
+  LOOP_WAKEUP: 'LoopWakeup',
   TASK_STOP: 'TaskStop',
   TASK_CREATE: 'TaskCreate',
   TASK_UPDATE: 'TaskUpdate',
@@ -117,4 +119,5 @@ export const ToolDisplayNamesMigration = {
   FindFiles: ToolDisplayNames.GLOB, // Old display name for Glob
   ReadFolder: ToolDisplayNames.LS, // Old display name for ListFiles
   Task: ToolDisplayNames.AGENT, // Old display name for Agent (renamed from Task)
+  TodoWrite: ToolDisplayNames.TODO_WRITE, // Old display name for TodoList (renamed from TodoWrite)
 } as const;

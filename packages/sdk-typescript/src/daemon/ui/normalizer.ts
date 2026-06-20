@@ -267,6 +267,9 @@ export function normalizeDaemonEvent(
     case 'mcp_server_restart_refused':
       return normalizeMcpServerRestartRefused(event, base);
 
+    case 'extensions_changed':
+      return normalizeExtensionsChanged(event, base);
+
     // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
       return normalizeAuthDeviceFlowStarted(event, base);
@@ -704,7 +707,7 @@ function normalizePlanUpdate(
     toolCallId: planCallId,
     title: 'Updated Plan',
     status: 'completed',
-    toolName: 'TodoWrite',
+    toolName: 'todo_write',
     toolKind: 'updated_plan',
     content: [
       {
@@ -1248,6 +1251,46 @@ function normalizeMcpServerRestartRefused(
       type: 'workspace.mcp.server_restart_refused',
       serverName,
       reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+    },
+  ];
+}
+
+function normalizeExtensionsChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const refreshed = numberField(event.data, 'refreshed');
+  const failed = numberField(event.data, 'failed');
+  const status = getString(event.data, 'status');
+  const source = getString(event.data, 'source');
+  const name = getString(event.data, 'name');
+  const version = getString(event.data, 'version');
+  const error = getString(event.data, 'error');
+  if (refreshed === undefined || failed === undefined) {
+    return fallbackDebug(event, base, 'malformed extensions_changed payload');
+  }
+  if (
+    status !== undefined &&
+    status !== 'installed' &&
+    status !== 'enabled' &&
+    status !== 'disabled' &&
+    status !== 'updated' &&
+    status !== 'uninstalled' &&
+    status !== 'failed'
+  ) {
+    return fallbackDebug(event, base, 'malformed extensions_changed payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.extensions.changed',
+      refreshed,
+      failed,
+      ...(status ? { status } : {}),
+      ...(source ? { source } : {}),
+      ...(name ? { name } : {}),
+      ...(version ? { version } : {}),
+      ...(error ? { error } : {}),
     },
   ];
 }

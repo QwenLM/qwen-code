@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { waitFor } from '@testing-library/react';
+import { act, waitFor } from '@testing-library/react';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import {
   BaseSelectionList,
@@ -22,6 +22,16 @@ const mockTheme = {
   text: { primary: 'COLOR_PRIMARY', secondary: 'COLOR_SECONDARY' },
   status: { success: 'COLOR_SUCCESS' },
 } as typeof theme;
+
+const renderSelectionList = (
+  component: Parameters<typeof renderWithProviders>[0],
+): ReturnType<typeof renderWithProviders> => {
+  let rendered!: ReturnType<typeof renderWithProviders>;
+  act(() => {
+    rendered = renderWithProviders(component);
+  });
+  return rendered;
+};
 
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
@@ -74,7 +84,7 @@ describe('BaseSelectionList', () => {
       ...props,
     };
 
-    return renderWithProviders(<BaseSelectionList {...defaultProps} />);
+    return renderSelectionList(<BaseSelectionList {...defaultProps} />);
   };
 
   beforeEach(() => {
@@ -286,7 +296,7 @@ describe('BaseSelectionList', () => {
         ),
       );
 
-      const { rerender, lastFrame } = renderWithProviders(
+      const { rerender, lastFrame } = renderSelectionList(
         <BaseSelectionList {...componentProps} />,
       );
 
@@ -297,7 +307,10 @@ describe('BaseSelectionList', () => {
           setActiveIndex: vi.fn(),
         });
 
-        rerender(<BaseSelectionList {...componentProps} />);
+        await act(async () => {
+          rerender(<BaseSelectionList {...componentProps} />);
+        });
+        await act(async () => {});
 
         await waitFor(() => {
           expect(lastFrame()).toContain(longList[newIndex]!.label);
@@ -316,7 +329,7 @@ describe('BaseSelectionList', () => {
       expect(output).not.toContain('Item 4');
     });
 
-    it.skip('should scroll up when activeIndex moves before the visible window', async () => {
+    it('should scroll up when activeIndex moves before the visible window', async () => {
       const { updateActiveIndex, lastFrame } = renderScrollableList(0);
 
       await updateActiveIndex(4);

@@ -226,24 +226,37 @@ export function buildInstallPlan(
   const protocol = inputs.protocol ?? config.protocol;
   const envKey = resolveEnvKey(config, inputs);
   const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  const ownsModel = config.mergeModelsByIdentity
+    ? undefined
+    : resolveOwnsModel(config);
+  const firstModel = models[0];
   if (models.length === 0) {
     throw new Error(
       `No models configured for provider "${config.id}". Check model list or provider configuration.`,
     );
   }
-  const firstModelId = models[0]?.id;
+  const firstModelId = firstModel?.id;
+  const modelSelection =
+    firstModelId === undefined
+      ? undefined
+      : {
+          modelId: firstModelId,
+          ...(config.mergeModelsByIdentity && firstModel.baseUrl
+            ? { baseUrl: firstModel.baseUrl }
+            : {}),
+        };
 
   return {
     providerId: config.id,
     authType: protocol,
     env: { [envKey]: inputs.apiKey },
-    ...(firstModelId ? { modelSelection: { modelId: firstModelId } } : {}),
+    ...(modelSelection ? { modelSelection } : {}),
     modelProviders: [
       {
         authType: protocol,
         models,
         mergeStrategy: 'prepend-and-remove-owned' as const,
-        ownsModel: resolveOwnsModel(config),
+        ...(ownsModel ? { ownsModel } : {}),
       },
     ],
     providerState: resolveProviderState(config, inputs.baseUrl, models),
