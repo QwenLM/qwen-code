@@ -52,6 +52,7 @@ export type DaemonUiEventType =
   | 'workspace.mcp.child_refused'
   | 'workspace.mcp.server_restarted'
   | 'workspace.mcp.server_restart_refused'
+  | 'workspace.extensions.changed'
   // Auth flow events (Wave 4 OAuth)
   | 'auth.device_flow.started'
   | 'auth.device_flow.throttled'
@@ -431,6 +432,23 @@ export interface DaemonUiMcpServerRestartRefusedEvent
   reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
 }
 
+export interface DaemonUiExtensionsChangedEvent extends DaemonUiEventBase {
+  type: 'workspace.extensions.changed';
+  refreshed: number;
+  failed: number;
+  status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  source?: string;
+  name?: string;
+  version?: string;
+  error?: string;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Auth device-flow events (Wave 4 OAuth, RFC 8628)
  * ──────────────────────────────────────────────────────────────────────── */
@@ -513,6 +531,7 @@ export type DaemonUiEvent =
   | DaemonUiMcpChildRefusedEvent
   | DaemonUiMcpServerRestartedEvent
   | DaemonUiMcpServerRestartRefusedEvent
+  | DaemonUiExtensionsChangedEvent
   // Auth device-flow events
   | DaemonUiAuthDeviceFlowEvent;
 

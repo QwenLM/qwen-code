@@ -76,6 +76,11 @@ export type InvokeWorkspaceCommandFn = <T>(
   opts?: { timeoutMs?: number },
 ) => Promise<T>;
 
+export type RefreshExtensionsForAllSessionsFn = () => Promise<{
+  refreshed: number;
+  failed: number;
+}>;
+
 /**
  * The unified facade for workspace-scoped daemon operations. Routes
  * delegate here instead of reaching into the bridge for workspace
@@ -143,6 +148,12 @@ export interface DaemonWorkspaceService {
 
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
+
+  /** Broadcast extension refresh to all active sessions (fire-and-forget). */
+  refreshExtensionsForAllSessions(): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
 }
 
 // -- Result types for workspace mutations --
@@ -231,6 +242,12 @@ export interface DaemonWorkspaceServiceDeps {
    * For commands like tool-toggle, MCP restart, init-workspace.
    */
   invokeWorkspaceCommand: InvokeWorkspaceCommandFn;
+
+  /**
+   * Broadcast an extension refresh to every live session. This must not
+   * delegate to `invokeWorkspaceCommand`, which targets only one live channel.
+   */
+  refreshExtensionsForAllSessions?: RefreshExtensionsForAllSessionsFn;
 
   /**
    * Publish a workspace-wide event to all sessions' SSE buses.

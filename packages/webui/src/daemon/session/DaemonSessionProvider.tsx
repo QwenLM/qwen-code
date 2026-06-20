@@ -142,6 +142,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   toolsVersion: 0,
   settingsVersion: 0,
   mcpVersion: 0,
+  extensionsVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -1578,7 +1579,7 @@ function getNumber(
 }
 
 function bumpWorkspaceEventSignals(
-  events: ReadonlyArray<{ type: string }>,
+  events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
 ): void {
   let memory = 0;
@@ -1586,6 +1587,10 @@ function bumpWorkspaceEventSignals(
   let tools = 0;
   let settings = 0;
   let mcp = 0;
+  let extensions = 0;
+  let lastExtensionChange:
+    | DaemonWorkspaceEventSignals['lastExtensionChange']
+    | undefined;
   let init = 0;
   let auth = 0;
 
@@ -1609,6 +1614,18 @@ function bumpWorkspaceEventSignals(
       case 'workspace.mcp.server_restart_refused':
         mcp += 1;
         break;
+      case 'workspace.extensions.changed':
+        extensions += 1;
+        lastExtensionChange = {
+          ...(event.status ? { status: event.status } : {}),
+          ...(event.source ? { source: event.source } : {}),
+          ...(event.name ? { name: event.name } : {}),
+          ...(event.version ? { version: event.version } : {}),
+          ...(event.error ? { error: event.error } : {}),
+          refreshed: event.refreshed,
+          failed: event.failed,
+        };
+        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -1624,7 +1641,8 @@ function bumpWorkspaceEventSignals(
     }
   }
 
-  if (memory + agents + tools + settings + mcp + init + auth === 0) return;
+  if (memory + agents + tools + settings + mcp + extensions + init + auth === 0)
+    return;
 
   setSignals((current) => ({
     memoryVersion: current.memoryVersion + memory,
@@ -1632,6 +1650,8 @@ function bumpWorkspaceEventSignals(
     toolsVersion: current.toolsVersion + tools,
     settingsVersion: current.settingsVersion + settings,
     mcpVersion: current.mcpVersion + mcp,
+    extensionsVersion: current.extensionsVersion + extensions,
+    ...(lastExtensionChange ? { lastExtensionChange } : {}),
     initVersion: current.initVersion + init,
     authVersion: current.authVersion + auth,
   }));
