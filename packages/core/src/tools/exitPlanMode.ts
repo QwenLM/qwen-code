@@ -294,12 +294,13 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
             };
           }
           case 'unavailable': {
-            // Gate is broken — fall back to pre-plan mode (auto-execute)
+            // Gate is broken — fall back to DEFAULT mode so the user
+            // gets a real confirmation dialog on the next action,
             // instead of trapping in plan mode with no escape hatch.
             debugLogger.warn(
-              `Gate unavailable, falling back to pre-plan mode: ${decision.reason}`,
+              `Gate unavailable, falling back to DEFAULT mode: ${decision.reason}`,
             );
-            return this.fallbackToAutoExecute(plan, currentPrePlanMode);
+            return this.fallbackToUserDecision(plan);
           }
           default: {
             const _exhaustive: never = decision;
@@ -402,15 +403,13 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Gate unavailable fallback — restore the pre-plan mode so the gate
-   * won't be triggered again, but do NOT auto-execute. Instead, return
-   * the plan to the model so it can ask the user whether to proceed.
+   * Gate unavailable fallback — switch to DEFAULT mode so the next
+   * action triggers a real user confirmation dialog. This breaks the
+   * gate trap while forcing the model to present the plan for approval
+   * rather than auto-executing in AUTO/YOLO.
    */
-  private fallbackToAutoExecute(
-    plan: string,
-    targetMode: ApprovalMode,
-  ): ToolResult {
-    this.setApprovalModeSafely(targetMode);
+  private fallbackToUserDecision(plan: string): ToolResult {
+    this.setApprovalModeSafely(ApprovalMode.DEFAULT);
 
     // Save plan so it's on disk even if the model proceeds.
     try {

@@ -589,9 +589,9 @@ describe('ExitPlanModeTool', () => {
       // Should NOT set gate pending flags
       expect(gateState.needsUserPending).toBe(false);
       expect(gateState.capEscalationPending).toBe(false);
-      // Should restore approval mode and save plan
+      // Should restore to DEFAULT (not pre-plan YOLO) to force confirmation dialog
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.YOLO,
+        ApprovalMode.DEFAULT,
       );
       expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
     });
