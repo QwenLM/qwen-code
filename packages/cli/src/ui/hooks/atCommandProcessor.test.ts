@@ -12,6 +12,7 @@ import {
   FileDiscoveryService,
   StandardFileSystemService,
   COMMON_IGNORE_PATTERNS,
+  Storage,
   // DEFAULT_FILE_EXCLUDES,
 } from '@qwen-code/qwen-code-core';
 import * as os from 'node:os';
@@ -150,6 +151,80 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays).toBeDefined();
     expect(result.toolDisplays).toHaveLength(1);
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+  });
+
+  it('should only allow actual temp directory paths outside the workspace', async () => {
+    const tempParentDir = await fsPromises.mkdtemp(
+      path.join(os.tmpdir(), 'at-command-temp-'),
+    );
+    const projectTempDir = path.join(tempParentDir, 'tmp');
+    const tempSiblingDir = `${projectTempDir}-sibling`;
+    const tempFileContent = 'allowed temp content';
+    const siblingFileContent = 'sibling secret content';
+    const tempFilePath = await createTestFile(
+      path.join(projectTempDir, 'allowed.txt'),
+      tempFileContent,
+    );
+    const siblingFilePath = await createTestFile(
+      path.join(tempSiblingDir, 'secret.txt'),
+      siblingFileContent,
+    );
+    const tempDirSpy = vi
+      .spyOn(Storage, 'getGlobalTempDir')
+      .mockReturnValue(projectTempDir);
+    const isWithinWorkspace = (candidate: string) => {
+      const absoluteCandidate = path.isAbsolute(candidate)
+        ? candidate
+        : path.resolve(testRootDir, candidate);
+      const relative = path.relative(testRootDir, absoluteCandidate);
+      return (
+        relative === '' ||
+        (!relative.startsWith('..') && !path.isAbsolute(relative))
+      );
+    };
+    mockConfig = {
+      ...mockConfig,
+      getWorkspaceContext: () => ({
+        isPathWithinWorkspace: isWithinWorkspace,
+        getDirectories: () => [testRootDir],
+      }),
+    } as unknown as Config;
+
+    try {
+      const tempResult = await handleAtCommand({
+        query: `@${tempFilePath}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 126,
+        signal: abortController.signal,
+      });
+
+      expect(tempResult.processedQuery).toContainEqual({
+        text: tempFileContent,
+      });
+
+      mockOnDebugMessage.mockClear();
+      const siblingResult = await handleAtCommand({
+        query: `@${siblingFilePath}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 127,
+        signal: abortController.signal,
+      });
+
+      expect(siblingResult.processedQuery).toEqual([
+        { text: `@${siblingFilePath}` },
+      ]);
+      expect(JSON.stringify(siblingResult.processedQuery)).not.toContain(
+        siblingFileContent,
+      );
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Path ${siblingFilePath} is not in the workspace and will be skipped.`,
+      );
+    } finally {
+      tempDirSpy.mockRestore();
+      await fsPromises.rm(tempParentDir, { recursive: true, force: true });
+    }
   });
 
   it('should process a valid directory path', async () => {

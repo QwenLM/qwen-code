@@ -12,6 +12,7 @@ import {
   getErrorMessage,
   isNodeError,
   Storage,
+  isSubpath,
   unescapePath,
   readManyFiles,
 } from '@qwen-code/qwen-code-core';
@@ -191,7 +192,7 @@ export async function resolveAtCommandQuery({
       : path.resolve(workspaceContext.getDirectories()[0] || '', pathName);
 
     if (
-      !absolutePathName.startsWith(projectTempDir) &&
+      !isSubpath(projectTempDir, absolutePathName) &&
       !workspaceContext.isPathWithinWorkspace(pathName)
     ) {
       onDebugMessage(
