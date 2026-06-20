@@ -61,7 +61,7 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
     const suffix = '/v1';
 
     // Normalize the URL: add protocol if missing, ensure /v1 suffix
-    const normalizedUrl = baseEndpoint.startsWith('http')
+    const normalizedUrl = /^https?:\/\//i.test(baseEndpoint)
       ? baseEndpoint
       : `https://${baseEndpoint}`;
 
