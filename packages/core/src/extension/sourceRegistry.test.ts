@@ -171,6 +171,60 @@ describe('discoverPlugins', () => {
     expect(plugin.lastUpdated).toBe('Jun 5, 2026');
   });
 
+  it('strips ANSI/control sequences from untrusted display fields', async () => {
+    // Every displayed field renders in the pre-consent Discover view, so a
+    // hostile marketplace must not smuggle terminal escapes (cursor moves, line
+    // clears, OSC title-injection) through any of them. Payload mirrors the PoC
+    // from the PR #4850 verification report.
+    const ESC = '\x1b';
+    const BEL = '\x07';
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config(`Hostile${ESC}[2K`, [
+        {
+          name: `evil${ESC}[31m-plugin${ESC}[2K`,
+          version: `9.9.9${ESC}[5m`,
+          description: `Totally safe${ESC}[1A${ESC}]0;PWNED${BEL} — trust me${ESC}[7m`,
+          author: { name: `mallory${ESC}[0m` },
+          homepage: `https://e${ESC}[31mvil.com`,
+          category: `tools${BEL}`,
+          skills: [`pdf${ESC}]0;t${BEL}-audit`],
+          lastUpdated: `Jun 5${ESC}[2K, 2026`,
+          source: 'anthropics/skills',
+        } as never,
+      ]),
+    );
+
+    const [plugin] = await discoverPlugins(
+      [{ name: 'Skills', source: 'anthropics/skills', type: 'github' }],
+      new Set(),
+    );
+
+    expect(plugin.marketplaceName).toBe('Hostile');
+    expect(plugin.name).toBe('evil-plugin');
+    expect(plugin.version).toBe('9.9.9');
+    expect(plugin.description).toBe('Totally safe — trust me');
+    expect(plugin.author).toBe('mallory');
+    expect(plugin.homepage).toBe('https://evil.com');
+    expect(plugin.category).toBe('tools');
+    expect(plugin.lastUpdated).toBe('Jun 5, 2026');
+    expect(plugin.components?.skills).toEqual(['pdf-audit']);
+
+    // Belt-and-braces: no escape/control byte survives in any rendered field.
+    const rendered = [
+      plugin.marketplaceName,
+      plugin.name,
+      plugin.version,
+      plugin.description,
+      plugin.author,
+      plugin.homepage,
+      plugin.category,
+      plugin.lastUpdated,
+      ...(plugin.components?.skills ?? []),
+    ].join('|');
+    expect(rendered).not.toContain(ESC);
+    expect(rendered).not.toContain(BEL);
+  });
+
   it('derives install source from per-plugin source for http sources', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
       config('Remote', [
