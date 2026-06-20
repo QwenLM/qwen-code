@@ -17,7 +17,7 @@
 
 import { getSessionPlansPath, getSessionPath } from '../sessions/storage.ts';
 import { DOC_REFS } from '../docs/index.ts';
-import { basename } from 'node:path';
+import { basename, isAbsolute, relative, sep } from 'node:path';
 import { createLocalMcpServer, localTool, type LocalTool } from '../mcp/local-tools.ts';
 
 // Import from session-tools-core: registry + schemas + base descriptions
@@ -140,7 +140,13 @@ export function getSessionPlansDir(workspacePath: string, sessionId: string): st
  */
 export function isPathInPlansDir(path: string, workspacePath: string, sessionId: string): boolean {
   const plansDir = getSessionPlansDir(workspacePath, sessionId);
-  return path.startsWith(plansDir);
+  const relativePath = relative(plansDir, path);
+  return (
+    relativePath === '' ||
+    (!relativePath.startsWith(`..${sep}`) &&
+      relativePath !== '..' &&
+      !isAbsolute(relativePath))
+  );
 }
 
 // ============================================================
