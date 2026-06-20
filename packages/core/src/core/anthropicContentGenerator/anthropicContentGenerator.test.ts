@@ -70,16 +70,20 @@ const importConverter = async (): Promise<{
 }> => import('./converter.js');
 
 describe('AnthropicContentGenerator', () => {
+  const MAX_OUTPUT_TOKENS_ENV = 'QWEN_CODE_MAX_OUTPUT_TOKENS';
   let mockConfig: Config;
   let anthropicState: {
     constructorOptions?: Record<string, unknown>;
     lastCreateArgs?: AnthropicCreateArgs;
     createImpl: ReturnType<typeof vi.fn>;
   };
+  let savedMaxOutputTokensEnv: string | undefined;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
+    delete process.env[MAX_OUTPUT_TOKENS_ENV];
 
     mockTokenizer.calculateTokens.mockResolvedValue({
       totalTokens: 50,
@@ -106,6 +110,11 @@ describe('AnthropicContentGenerator', () => {
   });
 
   afterEach(() => {
+    if (savedMaxOutputTokensEnv === undefined) {
+      delete process.env[MAX_OUTPUT_TOKENS_ENV];
+    } else {
+      process.env[MAX_OUTPUT_TOKENS_ENV] = savedMaxOutputTokensEnv;
+    }
     vi.restoreAllMocks();
   });
 
@@ -1617,6 +1626,75 @@ describe('AnthropicContentGenerator', () => {
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
           expect.objectContaining({ max_tokens: 8000 }),
+        );
+      });
+
+      it('ignores malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+
+        for (const envValue of ['1.5', '2k', 'abc']) {
+          process.env[MAX_OUTPUT_TOKENS_ENV] = envValue;
+          anthropicState.createImpl.mockResolvedValueOnce({
+            id: `anthropic-${envValue}`,
+            model: 'claude-sonnet-4',
+            content: [{ type: 'text', text: 'hi' }],
+          });
+
+          const generator = new AnthropicContentGenerator(
+            {
+              model: 'claude-sonnet-4',
+              apiKey: 'test-key',
+              timeout: 10_000,
+              maxRetries: 2,
+              samplingParams: {},
+              schemaCompliance: 'auto',
+            },
+            mockConfig,
+          );
+
+          await generator.generateContent({
+            model: 'models/ignored',
+            contents: 'Hello',
+          } as unknown as GenerateContentParameters);
+
+          const [anthropicRequest] =
+            anthropicState.lastCreateArgs as AnthropicCreateArgs;
+          expect(anthropicRequest).toEqual(
+            expect.objectContaining({ max_tokens: 8000 }),
+          );
+        }
+      });
+
+      it('respects a valid QWEN_CODE_MAX_OUTPUT_TOKENS value', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        process.env[MAX_OUTPUT_TOKENS_ENV] = '9000';
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-sonnet-4',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-sonnet-4',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: {},
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ max_tokens: 9000 }),
         );
       });
 

@@ -10,6 +10,7 @@ import {
   loadMarketplaceConfigFromSource,
 } from './marketplace.js';
 import * as fs from 'node:fs/promises';
+import * as http from 'node:http';
 import * as https from 'node:https';
 
 // Mock dependencies
@@ -24,6 +25,10 @@ vi.mock('node:fs', () => ({
 }));
 
 vi.mock('node:https', () => ({
+  get: vi.fn(),
+}));
+
+vi.mock('node:http', () => ({
   get: vi.fn(),
 }));
 
@@ -50,6 +55,17 @@ describe('parseInstallSource', () => {
         callback(mockRes as never);
       }
       return { on: vi.fn() } as never;
+    });
+    vi.mocked(http.get).mockImplementation((_url, _options, callback) => {
+      const mockRes = {
+        statusCode: 404,
+        resume: vi.fn(),
+        on: vi.fn(),
+      };
+      if (typeof callback === 'function') {
+        callback(mockRes as never);
+      }
+      return { on: vi.fn(), setTimeout: vi.fn(), destroy: vi.fn() } as never;
     });
   });
 
@@ -343,6 +359,45 @@ describe('parseInstallSource', () => {
   });
 
   describe('loadMarketplaceConfigFromSource', () => {
+    it('fetches direct HTTP marketplace JSON with the HTTP client', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+      const cfg = {
+        name: 'http-marketplace',
+        owner: { name: 'Owner' },
+        plugins: [{ name: 'p1' }],
+      };
+      vi.mocked(http.get).mockImplementation((_url, _options, callback) => {
+        const mockRes = {
+          statusCode: 200,
+          resume: vi.fn(),
+          on: vi.fn((event, handler) => {
+            if (event === 'data') {
+              handler(Buffer.from(JSON.stringify(cfg)));
+            }
+            if (event === 'end') {
+              handler();
+            }
+          }),
+        };
+        if (typeof callback === 'function') {
+          callback(mockRes as never);
+        }
+        return { on: vi.fn(), setTimeout: vi.fn(), destroy: vi.fn() } as never;
+      });
+
+      const result = await loadMarketplaceConfigFromSource(
+        'http://example.com/marketplace.json',
+      );
+
+      expect(result).toEqual(cfg);
+      expect(http.get).toHaveBeenCalledWith(
+        'http://example.com/marketplace.json',
+        { headers: { 'User-Agent': 'qwen-code' } },
+        expect.any(Function),
+      );
+      expect(https.get).not.toHaveBeenCalled();
+    });
+
     it('resolves a marketplace from a git@ SSH source', async () => {
       vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
       const cfg = {

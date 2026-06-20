@@ -30,7 +30,18 @@ describe('parseNoProxyRules', () => {
 
   it('parses host:port', () => {
     const rules = parseNoProxyRules('example.com:8080');
-    expect(rules).toEqual([{ host: 'example.com', port: 8080, wildcard: false }]);
+    expect(rules).toEqual([
+      { host: 'example.com', port: 8080, wildcard: false },
+    ]);
+  });
+
+  it('does not parse malformed port suffixes', () => {
+    expect(parseNoProxyRules('example.com:443abc')).toEqual([
+      { host: 'example.com:443abc', wildcard: false },
+    ]);
+    expect(parseNoProxyRules('[::1]:abc')).toEqual([
+      { host: '[::1]:abc', wildcard: false },
+    ]);
   });
 });
 
@@ -55,7 +66,9 @@ describe('shouldBypassProxy', () => {
   it('respects port-scoped rules', () => {
     const rules = parseNoProxyRules('example.com:8080');
     expect(shouldBypassProxy('http://example.com:8080/path', rules)).toBe(true);
-    expect(shouldBypassProxy('http://example.com:9090/path', rules)).toBe(false);
+    expect(shouldBypassProxy('http://example.com:9090/path', rules)).toBe(
+      false,
+    );
   });
 
   it('matches implicit default ports', () => {
@@ -71,7 +84,9 @@ describe('shouldBypassProxy', () => {
 
     // Explicit port that differs from rule should not match
     const rules8080 = parseNoProxyRules('example.com:8080');
-    expect(shouldBypassProxy('https://example.com/path', rules8080)).toBe(false);
+    expect(shouldBypassProxy('https://example.com/path', rules8080)).toBe(
+      false,
+    );
   });
 
   it('wildcard bypasses everything', () => {
@@ -82,6 +97,27 @@ describe('shouldBypassProxy', () => {
   it('handles IPv6 literal', () => {
     const rules = parseNoProxyRules('[::1]');
     expect(shouldBypassProxy('http://[::1]:3000/path', rules)).toBe(true);
+  });
+
+  it('respects IPv6 port-scoped rules', () => {
+    const rules = parseNoProxyRules('[::1]:3000');
+    expect(shouldBypassProxy('http://[::1]:3000/path', rules)).toBe(true);
+    expect(shouldBypassProxy('http://[::1]:3001/path', rules)).toBe(false);
+  });
+
+  it('does not bypass for malformed port suffixes', () => {
+    expect(
+      shouldBypassProxy(
+        'https://example.com/path',
+        parseNoProxyRules('example.com:443abc'),
+      ),
+    ).toBe(false);
+    expect(
+      shouldBypassProxy(
+        'http://[::1]:3000/path',
+        parseNoProxyRules('[::1]:abc'),
+      ),
+    ).toBe(false);
   });
 
   it('matches exact IP literal', () => {

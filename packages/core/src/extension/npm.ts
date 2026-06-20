@@ -182,6 +182,17 @@ function getNpmAuthToken(registryUrl: string): string | undefined {
 /**
  * Fetch JSON from a URL, handling both https and http.
  */
+function clientForUrl(url: string): typeof https | typeof http {
+  const protocol = new URL(url).protocol.toLowerCase();
+  if (protocol === 'https:') {
+    return https;
+  }
+  if (protocol === 'http:') {
+    return http;
+  }
+  throw new Error(`Unsupported npm registry URL protocol: ${protocol}`);
+}
+
 function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -190,7 +201,7 @@ function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = url.startsWith('https://') ? https : http;
+  const client = clientForUrl(url);
 
   return new Promise((resolve, reject) => {
     client
@@ -242,7 +253,7 @@ function downloadNpmFile(
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = url.startsWith('https://') ? https : http;
+  const client = clientForUrl(url);
 
   return new Promise((resolve, reject) => {
     client

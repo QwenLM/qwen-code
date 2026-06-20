@@ -239,10 +239,12 @@ export async function listWorkspaceSessionsForResponse(
   workspaceCwd: string,
   options?: ListWorkspaceSessionsOptions,
 ): Promise<ListWorkspaceSessionsResult> {
-  const pageSize = Math.min(
-    Math.max(options?.size ?? DEFAULT_SESSION_PAGE_SIZE, 1),
-    MAX_SESSION_PAGE_SIZE,
-  );
+  const rawSize = options?.size;
+  const requestedSize =
+    typeof rawSize === 'number' && Number.isSafeInteger(rawSize)
+      ? rawSize
+      : DEFAULT_SESSION_PAGE_SIZE;
+  const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
 
   let numericCursor: number | undefined;
   if (options?.cursor) {
@@ -309,6 +311,16 @@ export async function listWorkspaceSessionsForResponse(
     persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
+}
+
+function parseSessionPageSizeQuery(raw: unknown): number | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!/^[+-]?\d+$/.test(trimmed)) return undefined;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed)) return undefined;
+  if (Number.isSafeInteger(parsed)) return parsed;
+  return trimmed.startsWith('-') ? 1 : MAX_SESSION_PAGE_SIZE;
 }
 
 const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
@@ -3483,12 +3495,10 @@ export function createServeApp(
         typeof req.query['cursor'] === 'string'
           ? req.query['cursor']
           : undefined;
-      const sizeParam = req.query['size'];
-      const size =
-        typeof sizeParam === 'string' ? parseInt(sizeParam, 10) : undefined;
+      const size = parseSessionPageSizeQuery(req.query['size']);
       const result = await listWorkspaceSessionsForResponse(bridge, key, {
         cursor,
-        size: Number.isFinite(size) ? size : undefined,
+        size,
       });
       res.status(200).json({
         sessions: result.sessions,
