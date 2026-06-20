@@ -69,6 +69,8 @@ describe('OpenRouterOpenAICompatibleProvider', () => {
         { baseUrl: 'https://api.anthropic.com/v1' },
         { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
         { baseUrl: 'https://example.com/api/v1' }, // different domain
+        { baseUrl: 'https://example.com/openrouter.ai/v1' },
+        { baseUrl: 'https://openrouter.ai.evil.example/v1' },
         { baseUrl: '' },
         { baseUrl: undefined },
       ];
