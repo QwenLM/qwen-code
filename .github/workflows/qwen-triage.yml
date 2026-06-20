@@ -47,7 +47,8 @@ jobs:
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'issue_comment' &&
         (startsWith(github.event.comment.body, '@qwen-code /triage') ||
-         startsWith(github.event.comment.body, '@qwen-code /tmux'))) ||
+         github.event.comment.body == '@qwen-code /tmux' ||
+         startsWith(github.event.comment.body, '@qwen-code /tmux '))) ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
     runs-on: 'ubuntu-latest'
@@ -81,7 +82,7 @@ jobs:
               # permission (whose code runs), not the commenter's. /triage only
               # reads content, so the commenter's permission gates it.
               case "$COMMENT_BODY" in
-                '@qwen-code /tmux'*) principal="$ISSUE_AUTHOR" ;;
+                '@qwen-code /tmux'|'@qwen-code /tmux '*) principal="$ISSUE_AUTHOR" ;;
                 *) principal="$COMMENT_USER" ;;
               esac
               ;;
@@ -227,7 +228,8 @@ jobs:
       (
         (github.event_name == 'issue_comment' &&
          github.event.issue.pull_request &&
-         startsWith(github.event.comment.body, '@qwen-code /tmux') &&
+         (github.event.comment.body == '@qwen-code /tmux' ||
+          startsWith(github.event.comment.body, '@qwen-code /tmux ')) &&
          needs.authorize.outputs.should_run == 'true') ||
         (github.event_name == 'workflow_dispatch' &&
          github.event.inputs.tmux_pr != '' &&
@@ -240,7 +242,7 @@ jobs:
     concurrency:
       group: '${{ github.workflow }}-tmux-${{ github.event.issue.number || github.event.inputs.tmux_pr }}'
       cancel-in-progress: false
-    timeout-minutes: 25
+    timeout-minutes: 45
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -283,13 +285,12 @@ jobs:
         run: |-
           set -euo pipefail
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-          # One API call per attempt for everything the job gates on (state +
-          # file list). Right after a /tmux comment GitHub may not have computed
-          # mergeability yet (mergeable=UNKNOWN), and refs/pull/N/merge is only
-          # current once it has — so give it a few seconds to settle before
-          # deciding, rather than checking out a stale/missing ref.
+          # Right after a /tmux comment GitHub may not have computed mergeability
+          # yet (mergeable=UNKNOWN), and refs/pull/N/merge is only current once it
+          # has — so give it a few seconds to settle before deciding, rather than
+          # checking out a stale/missing ref.
           for attempt in 1 2 3 4 5; do
-            data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,mergeable,files)"
+            data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,mergeable)"
             mergeable="$(jq -r '.mergeable' <<< "$data")"
             [ "$mergeable" != "UNKNOWN" ] && break
             echo "::notice::Mergeability for PR #${PR_NUMBER} not computed yet; retry ${attempt}/5."
@@ -321,9 +322,10 @@ jobs:
             echo "decision=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename')"
           # Only drive the app for PRs that touch a user-facing/TUI surface;
           # otherwise a real-user test has nothing to exercise (e.g. CI-only PRs).
-          if jq -r '.files[].path' <<< "$data" | grep -qE 'packages/cli/src/ui/|packages/cli/.*\.tsx$|windowTitle|packages/web-shell/client/'; then
+          if printf '%s\n' "$files" | grep -qE 'packages/cli/src/ui/|packages/cli/.*\.tsx$|windowTitle|packages/web-shell/client/'; then
             echo "decision=run" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::PR #${PR_NUMBER} touches no TUI surface; tmux testing is not applicable."
@@ -347,6 +349,18 @@ jobs:
           persist-credentials: false
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
+
+      - name: 'Install and build PR app'
+        if: "steps.pr.outputs.decision == 'run'"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |-
+          set -euo pipefail
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          chown -R node:node "$GITHUB_WORKSPACE"
+          runuser -u node -- npm ci --prefer-offline --no-audit --progress=false
+          runuser -u node -- npm run build
 
       - name: 'Run tmux real-user testing'
         if: "steps.pr.outputs.decision == 'run'"
@@ -480,6 +494,12 @@ jobs:
               target.pathname = path;
               target.search = incoming.search;
 
+              if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
+                res.writeHead(403, { 'content-type': 'text/plain' });
+                res.end('proxy: only POST /chat/completions is allowed\n');
+                return;
+              }
+
               const headers = new Headers(req.headers);
               headers.delete('host');
               headers.delete('content-length');
@@ -494,7 +514,21 @@ jobs:
                 init.duplex = 'half';
               }
 
-              const upstream = await fetch(target, init);
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), 120_000);
+              let upstream;
+              try {
+                upstream = await fetch(target, { ...init, signal: controller.signal });
+              } catch (error) {
+                if (error instanceof Error && error.name === 'AbortError') {
+                  res.writeHead(504, { 'content-type': 'text/plain' });
+                  res.end('proxy error: upstream request timed out\n');
+                  return;
+                }
+                throw error;
+              } finally {
+                clearTimeout(timer);
+              }
               const responseHeaders = {};
               upstream.headers.forEach((value, key) => {
                 const lower = key.toLowerCase();
@@ -581,9 +615,6 @@ jobs:
             "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
             "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
           )
-          if [ -n "${OPENAI_MODEL:-}" ]; then
-            QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
-          fi
 
           set +e
           timeout --kill-after=10s 20m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
@@ -651,6 +682,7 @@ jobs:
     if: >-
       always() && github.event.inputs.skip_comment != 'true' &&
       (needs.tmux-testing.result == 'failure' ||
+       needs.tmux-testing.result == 'cancelled' ||
        (needs.tmux-testing.result == 'success' &&
         needs.tmux-testing.outputs.verdict != '' &&
         needs.tmux-testing.outputs.verdict != 'n/a'))
@@ -705,7 +737,14 @@ jobs:
             printf '</code></pre>\n\n</details>\n\n'
           }
 
-          if [ "${TMUX_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
+          if [ "${TMUX_RESULT:-}" = "cancelled" ]; then
+            {
+              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+              printf '**tmux real-user testing: cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The testing job was cancelled before producing a verdict. See the workflow run for details.\n\n'
+              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+            } > "$BODY_FILE"
+          elif [ "${TMUX_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
             # tmux-testing did not finish (infrastructure error): report it so the
             # requester is not left with silence.
             {

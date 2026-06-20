@@ -1,5 +1,5 @@
 self-hosted-runner:
   labels:
-    - ecs-qwen
+    - 'ecs-qwen'
 
 config-variables: null
