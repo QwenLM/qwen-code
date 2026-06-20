@@ -1399,6 +1399,7 @@ describe('convertClaudePluginPackage — string URL source', () => {
           JSON.stringify({ name: 'p', version: '1.0.0' }),
           'utf-8',
         );
+        return { tagName: 'v1.0.0', type: 'github-release' };
       },
     );
 
