@@ -550,7 +550,7 @@ describe('ExitPlanModeTool', () => {
       },
     );
 
-    it('should fallback to user confirmation when gate is unavailable', async () => {
+    it('should ask user to confirm when gate is unavailable', async () => {
       approvalMode = ApprovalMode.PLAN;
       const gateState = {
         entryId: 1,
@@ -582,10 +582,10 @@ describe('ExitPlanModeTool', () => {
       // Should return plan_summary (NOT rejected) so user is not trapped
       expect(result.returnDisplay).toEqual({
         type: 'plan_summary',
-        message: expect.stringContaining('Falling back'),
+        message: expect.stringContaining('confirm whether to execute'),
         plan: params.plan,
       });
-      expect(result.llmContent).toContain('Falling back');
+      expect(result.llmContent).toContain('Ask the user');
       // Should NOT set gate pending flags
       expect(gateState.needsUserPending).toBe(false);
       expect(gateState.capEscalationPending).toBe(false);

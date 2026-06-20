@@ -402,8 +402,9 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Gate unavailable fallback — restore the pre-plan mode so the model
-   * can auto-execute instead of being trapped in plan mode with no escape.
+   * Gate unavailable fallback — restore the pre-plan mode so the gate
+   * won't be triggered again, but do NOT auto-execute. Instead, return
+   * the plan to the model so it can ask the user whether to proceed.
    */
   private fallbackToAutoExecute(
     plan: string,
@@ -422,11 +423,11 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent:
-        'Gate unavailable. Falling back to pre-plan mode (auto-execute). You may proceed or cancel to stay in plan mode.',
+        'Gate is unavailable and cannot review the plan. Ask the user whether to execute this plan or stay in plan mode to revise it.',
       returnDisplay: {
         type: 'plan_summary',
         message:
-          'Plan gate is unavailable. Falling back to pre-plan mode (auto-execute). You may proceed or cancel to stay in plan mode.',
+          'Plan gate is unavailable. The plan has been saved — please confirm whether to execute it.',
         plan,
       },
     };
