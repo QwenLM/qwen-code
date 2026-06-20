@@ -132,7 +132,7 @@ export async function resolveBranchName(
 }
 
 interface RepoBranchWatch {
-  watcher: fs.FSWatcher | undefined;
+  watcher: fs.FSWatcher;
   subscribers: Set<() => void>;
 }
 
@@ -158,35 +158,44 @@ export async function watchRepoBranch(
 
   let entry = repoBranchWatches.get(gitDir);
   if (!entry) {
-    const created: RepoBranchWatch = {
-      watcher: undefined,
-      subscribers: new Set(),
-    };
     const logsHeadPath = path.join(gitDir, 'logs', 'HEAD');
     try {
       await fsPromises.access(logsHeadPath, fs.constants.F_OK);
-      // A concurrent caller may have registered the entry while we awaited;
-      // the post-await block below runs atomically w.r.t. other microtasks, so
-      // re-checking here guarantees a single watcher per gitDir.
-      const existing = repoBranchWatches.get(gitDir);
-      if (existing) {
-        entry = existing;
-      } else {
-        created.watcher = fs.watch(logsHeadPath, (eventType: string) => {
-          if (eventType === 'change' || eventType === 'rename') {
-            repoBranchWatches.get(gitDir)?.subscribers.forEach((cb) => cb());
-          }
-        });
-        repoBranchWatches.set(gitDir, created);
-        entry = created;
-      }
     } catch {
-      // No reflog (unborn repo) or unreadable: still register the entry so
-      // subscribers dedupe; the branch just won't auto-refresh.
-      entry = repoBranchWatches.get(gitDir) ?? created;
-      if (!repoBranchWatches.has(gitDir)) {
-        repoBranchWatches.set(gitDir, created);
-      }
+      // No reflog yet (unborn repo) or unreadable. Return a no-op without
+      // caching a watcher-less entry, so a later caller can establish the
+      // watch once the reflog appears (e.g. after the first commit).
+      return () => {};
+    }
+    // A concurrent caller may have registered the entry while we awaited
+    // access(); this post-await block runs atomically w.r.t. other microtasks,
+    // so re-checking here guarantees a single watcher per gitDir.
+    const existing = repoBranchWatches.get(gitDir);
+    if (existing) {
+      entry = existing;
+    } else {
+      const watcher = fs.watch(logsHeadPath, (eventType: string) => {
+        if (eventType === 'change' || eventType === 'rename') {
+          repoBranchWatches.get(gitDir)?.subscribers.forEach((cb) => cb());
+        }
+      });
+      // fs.FSWatcher is an EventEmitter: an unhandled 'error' (reflog removed
+      // by `git gc` / `reflog expire`, worktree removal, inode change, or a
+      // platform watch limit) would crash the process. Tear the watch down
+      // instead — subscribers simply stop auto-refreshing.
+      watcher.on('error', () => {
+        const current = repoBranchWatches.get(gitDir);
+        if (current?.watcher === watcher) {
+          try {
+            watcher.close();
+          } catch {
+            // already closed
+          }
+          repoBranchWatches.delete(gitDir);
+        }
+      });
+      entry = { watcher, subscribers: new Set() };
+      repoBranchWatches.set(gitDir, entry);
     }
   }
 
@@ -200,7 +209,7 @@ export async function watchRepoBranch(
     if (!e) return;
     e.subscribers.delete(onChange);
     if (e.subscribers.size === 0) {
-      e.watcher?.close();
+      e.watcher.close();
       repoBranchWatches.delete(gitDir);
     }
   };

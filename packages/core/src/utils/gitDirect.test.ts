@@ -210,16 +210,32 @@ describe('resolveBranchName', () => {
 });
 
 describe('watchRepoBranch', () => {
-  it('shares one watcher across subscribers and tears down on last unsubscribe', async () => {
-    let fire: ((eventType: string) => void) | undefined;
+  // Mock fs.watch to return an observable FSWatcher: a close() spy plus
+  // captured change/error listeners we can fire from the test.
+  function installWatchMock() {
+    let listener: ((eventType: string) => void) | undefined;
+    let errorHandler: (() => void) | undefined;
     const close = vi.fn();
     watchMock.mockImplementation(
-      (_p: string, listener: (eventType: string) => void) => {
-        fire = listener;
-        return { close } as unknown as fs.FSWatcher;
+      (_p: string, l: (eventType: string) => void) => {
+        listener = l;
+        return {
+          close,
+          on: (event: string, handler: () => void) => {
+            if (event === 'error') errorHandler = handler;
+          },
+        } as unknown as fs.FSWatcher;
       },
     );
+    return {
+      close,
+      fire: (eventType: string) => listener?.(eventType),
+      emitError: () => errorHandler?.(),
+    };
+  }
 
+  it('shares one watcher across subscribers and tears down on last unsubscribe', async () => {
+    const w = installWatchMock();
     const repo = await makeRepo('ref: refs/heads/main\n');
     const s1 = vi.fn();
     const s2 = vi.fn();
@@ -232,49 +248,84 @@ describe('watchRepoBranch', () => {
       expect.any(Function),
     );
 
-    fire?.('change');
+    w.fire('change');
     expect(s1).toHaveBeenCalledTimes(1);
     expect(s2).toHaveBeenCalledTimes(1);
 
     dispose1();
-    expect(close).not.toHaveBeenCalled();
-    fire?.('change');
+    expect(w.close).not.toHaveBeenCalled();
+    w.fire('change');
     expect(s1).toHaveBeenCalledTimes(1); // unsubscribed
     expect(s2).toHaveBeenCalledTimes(2);
 
     dispose2();
-    expect(close).toHaveBeenCalledTimes(1);
+    expect(w.close).toHaveBeenCalledTimes(1);
   });
 
   it('refreshes on rename events but ignores unknown ones', async () => {
-    let fire: ((eventType: string) => void) | undefined;
-    watchMock.mockImplementation(
-      (_p: string, listener: (eventType: string) => void) => {
-        fire = listener;
-        return { close: vi.fn() } as unknown as fs.FSWatcher;
-      },
-    );
+    const w = installWatchMock();
     const repo = await makeRepo('ref: refs/heads/main\n');
     const sub = vi.fn();
     const dispose = await watchRepoBranch(repo, sub);
 
-    fire?.('rename');
+    w.fire('rename');
     expect(sub).toHaveBeenCalledTimes(1);
-    fire?.('something-else');
+    w.fire('something-else');
     expect(sub).toHaveBeenCalledTimes(1);
     dispose();
   });
 
-  it('does not watch when there is no reflog yet', async () => {
-    const repo = await makeRepo('ref: refs/heads/main\n', {
-      withReflog: false,
-    });
-    const dispose = await watchRepoBranch(repo, vi.fn());
-    expect(watchMock).not.toHaveBeenCalled();
+  it("tears down the watch on an FSWatcher 'error' instead of crashing", async () => {
+    const w = installWatchMock();
+    const repo = await makeRepo('ref: refs/heads/main\n');
+    const sub = vi.fn();
+    const dispose = await watchRepoBranch(repo, sub);
+
+    // An unhandled 'error' on an EventEmitter would throw; ours must not.
+    expect(() => w.emitError()).not.toThrow();
+    expect(w.close).toHaveBeenCalledTimes(1);
+
+    // The dead watch is gone: a stale event no longer reaches the subscriber,
+    // and disposing is a safe no-op.
+    w.fire('change');
+    expect(sub).not.toHaveBeenCalled();
     expect(() => dispose()).not.toThrow();
   });
 
+  it('does not watch without a reflog, but watches once it appears', async () => {
+    installWatchMock();
+    const repo = await makeRepo('ref: refs/heads/main\n', {
+      withReflog: false,
+    });
+    const dispose1 = await watchRepoBranch(repo, vi.fn());
+    expect(watchMock).not.toHaveBeenCalled();
+    expect(() => dispose1()).not.toThrow();
+
+    // The reflog appears (e.g. first commit); a later caller must be able to
+    // establish the watch — the earlier miss must not be cached.
+    await fsp.mkdir(path.join(repo, '.git', 'logs'), { recursive: true });
+    await fsp.writeFile(path.join(repo, '.git', 'logs', 'HEAD'), 'reflog\n');
+    const dispose2 = await watchRepoBranch(repo, vi.fn());
+    expect(watchMock).toHaveBeenCalledTimes(1);
+    dispose2();
+  });
+
+  it('dedupes concurrent subscribers into a single watcher', async () => {
+    installWatchMock();
+    const repo = await makeRepo('ref: refs/heads/main\n');
+    // Both calls race through getCachedGitDir + access() before either registers
+    // the entry, exercising the post-await re-check path.
+    const [dispose1, dispose2] = await Promise.all([
+      watchRepoBranch(repo, vi.fn()),
+      watchRepoBranch(repo, vi.fn()),
+    ]);
+    expect(watchMock).toHaveBeenCalledTimes(1);
+    dispose1();
+    dispose2();
+  });
+
   it('returns a no-op disposer outside a repository', async () => {
+    installWatchMock();
     const dir = await makeBareDir();
     const dispose = await watchRepoBranch(dir, vi.fn());
     expect(watchMock).not.toHaveBeenCalled();

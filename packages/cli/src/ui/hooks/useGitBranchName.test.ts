@@ -142,4 +142,29 @@ describe('useGitBranchName', () => {
 
     expect(dispose).toHaveBeenCalledTimes(1);
   });
+
+  it('re-subscribes when cwd changes', async () => {
+    mockResolve.mockResolvedValue('main');
+    const dispose1 = vi.fn();
+    const dispose2 = vi.fn();
+    mockWatch.mockResolvedValueOnce(dispose1).mockResolvedValueOnce(dispose2);
+
+    const { rerender } = renderHook(({ cwd }) => useGitBranchName(cwd), {
+      initialProps: { cwd: '/repo-a' },
+    });
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    expect(mockWatch).toHaveBeenCalledWith('/repo-a', expect.any(Function));
+
+    rerender({ cwd: '/repo-b' });
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+
+    // The old repo's watcher is disposed, and the new cwd is resolved + watched.
+    expect(dispose1).toHaveBeenCalledTimes(1);
+    expect(mockResolve).toHaveBeenCalledWith('/repo-b');
+    expect(mockWatch).toHaveBeenCalledWith('/repo-b', expect.any(Function));
+  });
 });
