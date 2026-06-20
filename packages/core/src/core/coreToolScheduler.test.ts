@@ -8574,6 +8574,70 @@ describe('Fire hook functions integration', () => {
       expect(startIndices.every((i) => i < firstEnd)).toBe(true);
     });
 
+    it('ignores malformed QWEN_CODE_MAX_TOOL_CONCURRENCY values', async () => {
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2abc';
+      const executionLog: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      const agentTool = new MockTool({
+        name: 'agent',
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`start:${id}`);
+          await gate;
+          executionLog.push(`end:${id}`);
+          return {
+            llmContent: `Agent ${id} done`,
+            returnDisplay: `Agent ${id} done`,
+          };
+        },
+      });
+
+      const tools = new Map([['agent', agentTool]]);
+      const scheduler = createScheduler(tools, vi.fn(), vi.fn());
+      const abortController = new AbortController();
+      const schedulePromise = scheduler.schedule(
+        [
+          {
+            callId: '1',
+            name: 'agent',
+            args: { id: 'A' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          {
+            callId: '2',
+            name: 'agent',
+            args: { id: 'B' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          {
+            callId: '3',
+            name: 'agent',
+            args: { id: 'C' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+        ],
+        abortController.signal,
+      );
+
+      try {
+        await vi.waitFor(() => {
+          expect(
+            executionLog.filter((e) => e.startsWith('start:')),
+          ).toHaveLength(3);
+        });
+      } finally {
+        release();
+        await schedulePromise;
+      }
+    });
+
     it('should run concurrency-safe tools in parallel and unsafe tools sequentially', async () => {
       const executionLog: string[] = [];
 
