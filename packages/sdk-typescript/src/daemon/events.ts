@@ -83,6 +83,10 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // `DELETE /workspace/mcp/servers/:name` when an entry was actually
   // removed. Idempotent skip ('not_present') does NOT emit.
   'mcp_server_removed',
+  // Extensions lifecycle events. Fired by background extension install/refresh
+  // work. Carries refreshed/failed session counts, and may include install
+  // success/failure details.
+  'extensions_changed',
   // Multi-client permission coordination events.
   // `permission_partial_vote` only fires under `consensus` policy;
   // `permission_forbidden` fires under `designated` (originator
@@ -738,6 +742,28 @@ export type DaemonMcpServerRemovedEvent = DaemonEventEnvelope<
   DaemonMcpServerRemovedData
 >;
 
+export interface DaemonExtensionsChangedData {
+  readonly refreshed: number;
+  readonly failed: number;
+  readonly status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  readonly source?: string;
+  readonly name?: string;
+  readonly version?: string;
+  readonly error?: string;
+  [key: string]: unknown;
+}
+
+export type DaemonExtensionsChangedEvent = DaemonEventEnvelope<
+  'extensions_changed',
+  DaemonExtensionsChangedData
+>;
+
 export interface DaemonSessionSnapshotData {
   sessionId: string;
   currentModelId: string | null;
@@ -968,7 +994,8 @@ export type DaemonMcpGuardrailEvent =
  */
 export type DaemonWorkspaceMutationEvent =
   | DaemonMemoryChangedEvent
-  | DaemonAgentChangedEvent;
+  | DaemonAgentChangedEvent
+  | DaemonExtensionsChangedEvent;
 
 /**
  * Daemon assist push events — non-terminal UX hints emitted by the ACP
@@ -1469,6 +1496,10 @@ export function asKnownDaemonEvent(
       return isMcpServerRemovedData(event.data)
         ? (event as DaemonMcpServerRemovedEvent)
         : undefined;
+    case 'extensions_changed':
+      return isExtensionsChangedData(event.data)
+        ? (event as DaemonExtensionsChangedEvent)
+        : undefined;
     case 'turn_complete':
       return isTurnCompleteData(event.data)
         ? (event as DaemonTurnCompleteEvent)
@@ -1860,6 +1891,7 @@ export function reduceDaemonSessionEvent(
     case 'mcp_server_added':
     case 'mcp_server_removed':
     case 'settings_reloaded':
+    case 'extensions_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
       return base;
     case 'session_rewound':
@@ -2631,6 +2663,38 @@ function isMcpServerRemovedData(
   if (!isNonEmptyString(value['name'])) return false;
   if (typeof value['wasShadowingSettings'] !== 'boolean') return false;
   if (!isNonEmptyString(value['originatorClientId'])) return false;
+  return true;
+}
+
+function isExtensionsChangedData(
+  value: unknown,
+): value is DaemonExtensionsChangedData {
+  if (!isRecord(value)) return false;
+  if (typeof value['refreshed'] !== 'number') return false;
+  if (typeof value['failed'] !== 'number') return false;
+  if (
+    value['status'] !== undefined &&
+    value['status'] !== 'installed' &&
+    value['status'] !== 'enabled' &&
+    value['status'] !== 'disabled' &&
+    value['status'] !== 'updated' &&
+    value['status'] !== 'uninstalled' &&
+    value['status'] !== 'failed'
+  ) {
+    return false;
+  }
+  if (value['source'] !== undefined && typeof value['source'] !== 'string') {
+    return false;
+  }
+  if (value['name'] !== undefined && typeof value['name'] !== 'string') {
+    return false;
+  }
+  if (value['version'] !== undefined && typeof value['version'] !== 'string') {
+    return false;
+  }
+  if (value['error'] !== undefined && typeof value['error'] !== 'string') {
+    return false;
+  }
   return true;
 }
 

@@ -139,22 +139,45 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
       uiGroup: 'third-party',
     },
   ],
-  findProviderById: vi.fn((id: string) =>
-    id === 'deepseek'
-      ? {
-          id: 'deepseek',
-          label: 'DeepSeek API Key',
-          description: 'Quick setup for DeepSeek',
-          protocol: 'openai',
-          baseUrl: 'https://api.deepseek.com',
-          envKey: 'DEEPSEEK_API_KEY',
-          models: [{ id: 'deepseek-chat' }],
-          modelsEditable: true,
-          modelNamePrefix: 'DeepSeek',
-          uiGroup: 'third-party',
-        }
-      : undefined,
-  ),
+  findProviderById: vi.fn((id: string) => {
+    if (id === 'deepseek') {
+      return {
+        id: 'deepseek',
+        label: 'DeepSeek API Key',
+        description: 'Quick setup for DeepSeek',
+        protocol: 'openai',
+        baseUrl: 'https://api.deepseek.com',
+        envKey: 'DEEPSEEK_API_KEY',
+        models: [{ id: 'deepseek-chat' }],
+        modelsEditable: true,
+        modelNamePrefix: 'DeepSeek',
+        uiGroup: 'third-party',
+      };
+    }
+    if (id === 'custom-openai-compatible') {
+      return {
+        id: 'custom-openai-compatible',
+        label: 'Custom Provider',
+        description: 'Manually connect a custom provider',
+        protocol: 'openai',
+        protocolOptions: ['openai', 'anthropic', 'gemini'],
+        baseUrl: undefined,
+        envKey: (protocol: string, baseUrl: string) =>
+          `QWEN_CUSTOM_API_KEY_${protocol}_${baseUrl.replace(
+            /[^A-Za-z0-9]/g,
+            '_',
+          )}`,
+        models: undefined,
+        modelsEditable: true,
+        modelNamePrefix: '',
+        uiGroup: 'third-party',
+        ownsModel: (model: { envKey?: string }) =>
+          typeof model.envKey === 'string' &&
+          model.envKey.startsWith('QWEN_CUSTOM_API_KEY_'),
+      };
+    }
+    return undefined;
+  }),
   getDefaultBaseUrlForProtocol: vi.fn(() => 'https://api.openai.com/v1'),
   getDefaultModelIds: vi.fn(
     (provider: { models?: Array<{ id: string }> }) =>
@@ -172,8 +195,12 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
           : (selectedBaseUrl ?? ''),
   ),
   resolveOwnsModel: vi.fn(
-    (provider: { envKey: string }) => (model: { envKey?: string }) =>
-      model.envKey === provider.envKey,
+    (provider: {
+      envKey: string;
+      ownsModel?: (model: { envKey?: string }) => boolean;
+    }) =>
+      provider.ownsModel ??
+      ((model: { envKey?: string }) => model.envKey === provider.envKey),
   ),
   ExtensionManager: vi.fn().mockImplementation(() => ({
     refreshCache: mockExtensionManagerState.refreshCache,
@@ -206,12 +233,19 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     TodoCreated: 'TodoCreated',
     TodoCompleted: 'TodoCompleted',
   },
-  buildInstallPlan: vi.fn((provider, inputs) => ({
-    providerId: provider.id,
-    authType: inputs.protocol ?? provider.protocol,
-    env: { [provider.envKey]: inputs.apiKey },
-    modelSelection: { modelId: inputs.modelIds[0] },
-  })),
+  buildInstallPlan: vi.fn((provider, inputs) => {
+    const authType = inputs.protocol ?? provider.protocol;
+    const envKey =
+      typeof provider.envKey === 'function'
+        ? provider.envKey(authType, inputs.baseUrl)
+        : provider.envKey;
+    return {
+      providerId: provider.id,
+      authType,
+      env: { [envKey]: inputs.apiKey },
+      modelSelection: { modelId: inputs.modelIds[0] },
+    };
+  }),
   applyProviderInstallPlan: vi.fn().mockResolvedValue({
     updatedModelProviders: {},
   }),
@@ -3846,6 +3880,78 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/connect reuses the custom apiKey for the requested baseUrl only', async () => {
+    const customEnvKey = (protocol: string, baseUrl: string) =>
+      `QWEN_CUSTOM_API_KEY_${protocol}_${baseUrl.replace(
+        /[^A-Za-z0-9]/g,
+        '_',
+      )}`;
+    const firstBaseUrl = 'https://api.first.example/v1';
+    const secondBaseUrl = 'https://api.second.example/v1';
+    const firstEnvKey = customEnvKey('openai', firstBaseUrl);
+    const secondEnvKey = customEnvKey('openai', secondBaseUrl);
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: {
+          [firstEnvKey]: 'sk-first',
+          [secondEnvKey]: 'sk-second',
+        },
+        modelProviders: {
+          openai: [
+            {
+              id: 'custom-model',
+              baseUrl: firstBaseUrl,
+              envKey: firstEnvKey,
+            },
+            {
+              id: 'custom-model',
+              baseUrl: secondBaseUrl,
+              envKey: secondEnvKey,
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        baseUrl: secondBaseUrl,
+        modelIds: ['custom-model'],
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'custom-openai-compatible',
+    });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        apiKey: 'sk-second',
+        baseUrl: secondBaseUrl,
+      }),
+    );
+    expect(buildInstallPlan).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ apiKey: 'sk-first' }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/skills setEnabled resolves user and project skill files through ACP', async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
     const tempProject = await fs.mkdtemp(
@@ -6135,6 +6241,118 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(
       cfgFail.getGeminiClient().refreshSystemInstruction,
     ).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('refreshes extension commands for the live session', async () => {
+    const extensionManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshTools: vi.fn().mockResolvedValue(undefined),
+    };
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-ext'),
+      getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+    });
+    const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-ext'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          sendAvailableCommandsUpdate,
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/ext', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
+        sessionId: 's-ext',
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('still sends available commands update when extension tool refresh fails', async () => {
+    const extensionManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshTools: vi.fn().mockRejectedValue(new Error('bad tool schema')),
+    };
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-ext'),
+      getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+    });
+    const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-ext'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          sendAvailableCommandsUpdate,
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/ext', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
+        sessionId: 's-ext',
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;

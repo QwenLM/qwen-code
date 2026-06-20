@@ -355,6 +355,7 @@ const EN: Messages = {
   'bug.popupBlocked': 'Popup blocked — please allow popups and try again.',
   'bug.submitted': 'Bug report opened in a new tab.',
   'clear.blocked': 'Cannot clear while streaming — cancel first (Esc).',
+  'error.unknown': 'Unknown error',
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
@@ -457,6 +458,84 @@ const EN: Messages = {
   'local.status': 'Show version info',
   'local.theme': 'Change theme',
   'local.settings': 'View and edit settings',
+  'local.extensions':
+    'Manage extensions. Usage: /extensions manage|install <source>',
+  'extensions.label': 'extension',
+  'extensions.action.failed': (v) =>
+    `Extension action failed${
+      v?.name ? ` for "${v.name}"` : v?.source ? ` from "${v.source}"` : ''
+    }: ${v?.error ?? 'Unknown error'}`,
+  'extensions.commands.refreshFailed': 'Failed to refresh extension commands.',
+  'extensions.install.failed': (v) =>
+    `Failed to install extension${
+      v?.source ? ` from "${v.source}"` : ''
+    }: ${v?.error ?? 'Unknown error'}`,
+  'extensions.manage.agents': 'Agents:',
+  'extensions.manage.checkingUpdates': 'Checking for updates...',
+  'extensions.manage.commands': 'Commands:',
+  'extensions.manage.contextFiles': 'Context files:',
+  'extensions.manage.count': (v) => `${v?.count ?? 0} extensions installed`,
+  'extensions.manage.detailsTitle': 'Extension Details',
+  'extensions.manage.disable': 'Disable Extension',
+  'extensions.manage.disabled': (v) =>
+    `Extension "${v?.name ?? 'extension'}" disabled.`,
+  'extensions.manage.empty': 'No extensions installed.',
+  'extensions.manage.enable': 'Enable Extension',
+  'extensions.manage.enabled': (v) =>
+    `Extension "${v?.name ?? 'extension'}" enabled.`,
+  'extensions.manage.footer.back': 'Esc to go back',
+  'extensions.manage.footer.confirm': 'Enter confirm · Esc cancel',
+  'extensions.manage.footer.list':
+    '↑↓ to navigate · Enter select · r refresh · Esc close',
+  'extensions.manage.footer.select': '↑↓ to navigate · Enter select · Esc back',
+  'extensions.manage.loading': 'Loading extensions...',
+  'extensions.manage.mcpServers': 'MCP servers:',
+  'extensions.manage.name': 'Name:',
+  'extensions.manage.notUpdatable': 'not updatable',
+  'extensions.manage.path': 'Path:',
+  'extensions.manage.queued': (v) =>
+    `Extension action queued for "${v?.name ?? 'extension'}".`,
+  'extensions.manage.refreshed': (v) =>
+    `Extensions refreshed in ${v?.refreshed ?? 0} session(s), ${v?.failed ?? 0} failed.`,
+  'extensions.manage.settings': 'Settings:',
+  'extensions.manage.skills': 'Skills:',
+  'extensions.manage.source': 'Source:',
+  'extensions.manage.status': 'Status:',
+  'extensions.manage.status.disabled': 'disabled',
+  'extensions.manage.status.enabled': 'enabled',
+  'extensions.manage.title': 'Manage Extensions',
+  'extensions.manage.unknownUpdate': 'unknown',
+  'extensions.manage.uninstalled': (v) =>
+    `Extension "${v?.name ?? 'extension'}" uninstalled.`,
+  'extensions.manage.uninstallAction': 'Uninstall Extension',
+  'extensions.manage.uninstallConfirm': (v) =>
+    `Uninstall extension "${v?.name ?? 'extension'}"?`,
+  'extensions.manage.upToDate': 'up to date',
+  'extensions.manage.update': 'Update Extension',
+  'extensions.manage.updateAvailable': 'update available',
+  'extensions.manage.updateError': 'update check failed',
+  'extensions.manage.updated': (v) =>
+    `Extension "${v?.name ?? 'extension'}" updated.`,
+  'extensions.manage.updatedWithVersion': (v) =>
+    `Extension "${v?.name ?? 'extension'}" updated to v${v?.version ?? ''}.`,
+  'extensions.manage.version': 'Version:',
+  'extensions.manage.viewDetails': 'View Details',
+  'extensions.install.installed': (v) =>
+    `Extension "${v?.name ?? 'extension'}" installed.`,
+  'extensions.install.installedWithVersion': (v) =>
+    `Extension "${v?.name ?? 'extension'}" v${v?.version ?? ''} installed.`,
+  'extensions.install.missingOptionValue': (v) =>
+    `Missing value for ${v?.option ?? 'option'}`,
+  'extensions.install.requestFailed': 'Failed to install extension',
+  'extensions.install.started': (v) =>
+    `Installing extension from "${v?.source ?? ''}"...`,
+  'extensions.install.unknownOption': (v) =>
+    `Unknown option ${v?.option ?? ''}`,
+  'extensions.install.usage': 'Usage: /extensions manage|install <source>',
+  'extensions.install.waitForSession':
+    'Wait for the session to connect before installing an extension.',
+  'extensions.install.waitForTurn':
+    'Wait for the current turn to finish before installing an extension.',
   'local.tools': 'List available tools. Usage: /tools [desc]',
   'loadWarning.commands':
     'Failed to load command list; slash commands may be incomplete.',
@@ -1249,6 +1328,7 @@ const ZH: Messages = {
   'bug.popupBlocked': '弹窗被拦截，请允许弹窗后重试。',
   'bug.submitted': 'Bug 报告已在新标签页中打开。',
   'clear.blocked': '流式输出中无法清屏 — 先按 Esc 取消。',
+  'error.unknown': '未知错误',
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
@@ -1347,6 +1427,75 @@ const ZH: Messages = {
   'local.status': '查看版本信息',
   'local.theme': '切换主题',
   'local.settings': '查看和编辑设置',
+  'local.extensions': '管理扩展。用法: /extensions manage|install <source>',
+  'extensions.label': '扩展',
+  'extensions.action.failed': (v) =>
+    `扩展操作失败${v?.name ? `（${v.name}）` : v?.source ? `（${v.source}）` : ''}：${
+      v?.error ?? '未知错误'
+    }`,
+  'extensions.commands.refreshFailed': '刷新扩展命令失败。',
+  'extensions.install.failed': (v) =>
+    `安装扩展失败${v?.source ? `（${v.source}）` : ''}：${
+      v?.error ?? '未知错误'
+    }`,
+  'extensions.manage.agents': '智能体：',
+  'extensions.manage.checkingUpdates': '正在检查更新...',
+  'extensions.manage.commands': '命令：',
+  'extensions.manage.contextFiles': '上下文文件：',
+  'extensions.manage.count': (v) => `已安装 ${v?.count ?? 0} 个扩展`,
+  'extensions.manage.detailsTitle': '扩展详情',
+  'extensions.manage.disable': '禁用扩展',
+  'extensions.manage.disabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已禁用。`,
+  'extensions.manage.empty': '未安装扩展。',
+  'extensions.manage.enable': '启用扩展',
+  'extensions.manage.enabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已启用。`,
+  'extensions.manage.footer.back': 'Esc 返回',
+  'extensions.manage.footer.confirm': 'Enter 确认 · Esc 取消',
+  'extensions.manage.footer.list': '↑↓ 导航 · Enter 选择 · r 刷新 · Esc 关闭',
+  'extensions.manage.footer.select': '↑↓ 导航 · Enter 选择 · Esc 返回',
+  'extensions.manage.loading': '正在加载扩展...',
+  'extensions.manage.mcpServers': 'MCP servers：',
+  'extensions.manage.name': '名称：',
+  'extensions.manage.notUpdatable': '不可更新',
+  'extensions.manage.path': '路径：',
+  'extensions.manage.queued': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" 的操作已提交。`,
+  'extensions.manage.refreshed': (v) =>
+    `已刷新 ${v?.refreshed ?? 0} 个 session，${v?.failed ?? 0} 个失败。`,
+  'extensions.manage.settings': '设置：',
+  'extensions.manage.skills': 'Skills：',
+  'extensions.manage.source': '来源：',
+  'extensions.manage.status': '状态：',
+  'extensions.manage.status.disabled': '已禁用',
+  'extensions.manage.status.enabled': '已启用',
+  'extensions.manage.title': '管理扩展',
+  'extensions.manage.unknownUpdate': '未知',
+  'extensions.manage.uninstalled': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" 已卸载。`,
+  'extensions.manage.uninstallAction': '卸载扩展',
+  'extensions.manage.uninstallConfirm': (v) =>
+    `确定卸载扩展 "${v?.name ?? '扩展'}"？`,
+  'extensions.manage.upToDate': '已是最新',
+  'extensions.manage.update': '更新扩展',
+  'extensions.manage.updateAvailable': '有可用更新',
+  'extensions.manage.updateError': '检查更新失败',
+  'extensions.manage.updated': (v) => `扩展 "${v?.name ?? '扩展'}" 已更新。`,
+  'extensions.manage.updatedWithVersion': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" 已更新到 v${v?.version ?? ''}。`,
+  'extensions.manage.version': '版本：',
+  'extensions.manage.viewDetails': '查看详情',
+  'extensions.install.installed': (v) => `扩展 "${v?.name ?? '扩展'}" 已安装。`,
+  'extensions.install.installedWithVersion': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" v${v?.version ?? ''} 已安装。`,
+  'extensions.install.missingOptionValue': (v) =>
+    `${v?.option ?? '选项'} 缺少值`,
+  'extensions.install.requestFailed': '安装扩展失败',
+  'extensions.install.started': (v) =>
+    `正在从 "${v?.source ?? ''}" 安装扩展...`,
+  'extensions.install.unknownOption': (v) => `未知选项 ${v?.option ?? ''}`,
+  'extensions.install.usage': '用法: /extensions manage|install <source>',
+  'extensions.install.waitForSession': '等待会话连接后再安装扩展。',
+  'extensions.install.waitForTurn': '等待当前回合结束后再安装扩展。',
   'local.tools': '列出可用工具。用法: /tools [desc]',
   'loadWarning.commands': '命令列表加载失败，斜杠命令可能不完整。',
   'loadWarning.context': '会话上下文加载失败，当前模式可能不准确。',

@@ -34,6 +34,7 @@ import { forkCommand } from '../ui/commands/forkCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { goalCommand } from '../ui/commands/goalCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
+import { historyCommand } from '../ui/commands/historyCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
 import { importConfigCommand } from '../ui/commands/importConfigCommand.js';
@@ -130,6 +131,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       exportCommand,
       extensionsCommand,
       helpCommand,
+      historyCommand,
       hooksCommand,
       resolvedIdeCommand,
       importConfigCommand,

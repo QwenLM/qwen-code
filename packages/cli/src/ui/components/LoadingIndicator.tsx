@@ -22,6 +22,8 @@ interface LoadingIndicatorProps {
   elapsedTime: number;
   rightContent?: React.ReactNode;
   candidatesTokens?: number;
+  taskStartTokens?: number;
+  taskStartStreamingChars?: number;
   /**
    * Live-updating character counter for the streaming response. When provided
    * together with `isStreaming`, the indicator animates a token estimate
@@ -46,6 +48,8 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   elapsedTime,
   rightContent,
   candidatesTokens,
+  taskStartTokens = 0,
+  taskStartStreamingChars = 0,
   streamingCharsRef,
   isStreaming,
   showResponseTokensPerSecond = false,
@@ -76,6 +80,13 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
 
   const streamingTokens = streamingCharsRef ? Math.round(animatedChars / 4) : 0;
   const outputTokens = (candidatesTokens ?? 0) + streamingTokens;
+  const taskStartStreamingTokens = streamingCharsRef
+    ? Math.round(taskStartStreamingChars / 4)
+    : 0;
+  const outputTokensSinceTimerStart = Math.max(
+    0,
+    outputTokens - taskStartTokens - taskStartStreamingTokens,
+  );
   const showTokens = !isNarrow && outputTokens > 0;
   const tokenArrow = isReceivingContent ? '↓' : '↑';
 
@@ -90,7 +101,7 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
     showResponseTokensPerSecond &&
     isReceivingContent &&
     elapsedTime > 0
-      ? ` · ${formatTokensPerSecond(outputTokens / elapsedTime)}`
+      ? ` · ${formatTokensPerSecond(outputTokensSinceTimerStart / elapsedTime)}`
       : '';
 
   const cancelAndTimerContent =

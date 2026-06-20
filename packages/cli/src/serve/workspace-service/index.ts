@@ -139,6 +139,7 @@ export function createDaemonWorkspaceService(
     persistDisabledTools,
     queryWorkspaceStatus,
     invokeWorkspaceCommand,
+    refreshExtensionsForAllSessions: refreshExtensionsForAllSessionsOnBridge,
     publishWorkspaceEvent,
   } = deps;
 
@@ -619,6 +620,20 @@ export function createDaemonWorkspaceService(
         sessionsSkipped,
         childError,
       };
+    },
+
+    async refreshExtensionsForAllSessions() {
+      try {
+        if (!refreshExtensionsForAllSessionsOnBridge) {
+          throw new Error('refreshExtensionsForAllSessions is not wired');
+        }
+        return await refreshExtensionsForAllSessionsOnBridge();
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: refreshExtensionsForAllSessions failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { refreshed: 0, failed: 1 };
+      }
     },
   };
 }

@@ -26,6 +26,7 @@ export default tseslint.config(
       '.integration-tests/**',
       'packages/**/.integration-test/**',
       'dist/**',
+      'demo/**/dist/**',
       'docs-site/.next/**',
       'docs-site/out/**',
       '.qwen/**',

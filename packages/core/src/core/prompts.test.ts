@@ -67,6 +67,21 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('stop and ask the user for explicit approval');
   });
 
+  it('does not tell the model to enter plan mode without user opt-in', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Do not enter plan mode or call enter_plan_mode on your own',
+    );
+    expect(prompt).toContain(
+      'Use plan mode only when the user explicitly asks you to switch to plan mode',
+    );
+    expect(prompt).not.toContain(
+      'When the work requires a shared plan before execution, enter plan mode',
+    );
+  });
+
   it('should return the base prompt when userMemory is empty string', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt('');

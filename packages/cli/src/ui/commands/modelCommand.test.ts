@@ -230,7 +230,7 @@ describe('modelCommand', () => {
       content:
         "Model 'missing-model' is not available for auth type 'qwen-oauth'.\n" +
         "No models are configured for auth type 'qwen-oauth'.\n" +
-        'Configure models in settings.modelProviders or run /model to select an available model.',
+        'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model without arguments to choose from configured models.',
     });
   });
 
@@ -308,7 +308,7 @@ describe('modelCommand', () => {
       content:
         "Model 'definitely-not-a-model' is not available for auth type 'openai'.\n" +
         "Available models for 'openai': gpt-4.\n" +
-        'Configure models in settings.modelProviders or run /model to select an available model.',
+        'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model without arguments to choose from configured models.',
     });
   });
 
@@ -347,7 +347,7 @@ describe('modelCommand', () => {
       content:
         "Model 'gpt-4o' is not available for auth type 'openai'.\n" +
         "No models are configured for auth type 'openai'.\n" +
-        'Configure models in settings.modelProviders or run /model to select an available model.',
+        'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model without arguments to choose from configured models.',
     });
   });
 
@@ -545,7 +545,50 @@ describe('modelCommand', () => {
       content:
         "Fast model 'missing-model' is not configured for any auth type.\n" +
         'Configured models: qwen-turbo.\n' +
-        'Configure models in settings.modelProviders or run /model to select an available model.',
+        'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --fast without a model to choose from configured models.',
+    });
+  });
+
+  it('should reject unavailable authType-qualified fast models', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --fast openai:missing-model',
+        name: 'model',
+        args: '--fast openai:missing-model',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          }),
+          getAvailableModelsForAuthType: vi.fn((authType: AuthType) =>
+            authType === AuthType.USE_OPENAI
+              ? [{ id: 'gpt-4', label: 'GPT-4', authType }]
+              : [],
+          ),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast openai:missing-model',
+    );
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Fast model 'missing-model' is not available for auth type 'openai'.\n" +
+        "Available models for 'openai': gpt-4.\n" +
+        'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --fast without a model to choose from configured models.',
     });
   });
 
@@ -593,6 +636,45 @@ describe('modelCommand', () => {
   });
 
   describe('non-interactive mode', () => {
+    it('should use interactive-only wording for unavailable direct switches', async () => {
+      const setValue = vi.fn();
+      const switchModel = vi.fn();
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: {
+          raw: '/model missing-model',
+          name: 'model',
+          args: 'missing-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'qwen-plus',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAvailableModelsForAuthType: vi
+              .fn()
+              .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+            switchModel,
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, 'missing-model');
+
+      expect(switchModel).not.toHaveBeenCalled();
+      expect(setValue).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          "Model 'missing-model' is not available for auth type 'openai'.\n" +
+          "Available models for 'openai': gpt-4.\n" +
+          'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model without arguments to choose from configured models.',
+      });
+    });
+
     it('should return current model without triggering dialog when no args', async () => {
       mockContext = createMockCommandContext({
         executionMode: 'non_interactive',

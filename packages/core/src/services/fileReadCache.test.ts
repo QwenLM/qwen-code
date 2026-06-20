@@ -570,6 +570,39 @@ describe('FileReadCache', () => {
       );
     });
 
+    it('invalidates a stale resident entry by its last observed path', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+
+      expect(cache.invalidateByPath('/x/foo.ts')).toBe(true);
+      expect(cache.check(stats).state).toBe('unknown');
+    });
+
+    it('invalidates by a relative path that resolves to the recorded path', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      const relative = path.join('x', 'foo.ts');
+      cache.recordRead(path.resolve(relative), stats, {
+        full: true,
+        cacheable: true,
+      });
+
+      expect(cache.invalidateByPath(relative)).toBe(true);
+      expect(cache.check(stats).state).toBe('unknown');
+    });
+
+    it('returns false when no entry was recorded for the path', () => {
+      const cache = new FileReadCache();
+      cache.recordRead('/x/foo.ts', makeStats(), {
+        full: true,
+        cacheable: true,
+      });
+
+      expect(cache.invalidateByPath('/x/other.ts')).toBe(false);
+      expect(cache.size()).toBe(1);
+    });
+
     it('a subsequent real read re-arms the fast-path (resident again)', () => {
       const cache = new FileReadCache();
       const stats = makeStats();

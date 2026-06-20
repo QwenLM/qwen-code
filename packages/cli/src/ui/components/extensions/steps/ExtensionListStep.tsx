@@ -193,8 +193,8 @@ export const ExtensionListStep = ({
               {getExtensionDisplayName(extension, locale)}
             </Text>
           </Box>
-          <Box width={maxStatusWidth + 4} flexShrink={0}>
-            <Text color={activeColor}> ({activeString})</Text>
+          <Box marginLeft={2} width={maxStatusWidth + 2} flexShrink={0}>
+            <Text color={activeColor}>({activeString})</Text>
           </Box>
           {stateText && <Text color={stateColor}>[{stateText}]</Text>}
         </Box>

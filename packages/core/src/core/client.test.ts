@@ -1951,16 +1951,19 @@ describe('Gemini Client (client.ts)', () => {
   function mockFileReadCacheStub(): {
     clear: ReturnType<typeof vi.fn>;
     markReadEvictedFromHistory: ReturnType<typeof vi.fn>;
+    invalidateByPath: ReturnType<typeof vi.fn>;
   } {
     const clear = vi.fn();
     // Default: every disarm matches an entry (true). Tests that need
     // the inode-miss fallback override the return value per-call.
     const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+    const invalidateByPath = vi.fn();
     vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
       clear,
       markReadEvictedFromHistory,
+      invalidateByPath,
     } as unknown as ReturnType<Config['getFileReadCache']>);
-    return { clear, markReadEvictedFromHistory };
+    return { clear, markReadEvictedFromHistory, invalidateByPath };
   }
 
   describe('thinking block idle cleanup and latch', () => {
@@ -2432,12 +2435,13 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
-    it('falls back to a blanket clear when an evicted path cannot be stat’d (Codex P2)', async () => {
+    it('invalidates only the path when an evicted path cannot be stat’d', async () => {
       // Path is recovered (id linkage present) so it lands in
       // evictedReadPaths, but the file does not exist on disk, so the
-      // client's stat fails. Leaving the entry armed would risk a
-      // dangling placeholder, so it must fall back to the safe wipe.
-      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      // client's stat fails. The fallback should still target only the
+      // recovered path.
+      const { clear, markReadEvictedFromHistory, invalidateByPath } =
+        mockFileReadCacheStub();
 
       const history: Content[] = [];
       for (let i = 0; i < 6; i++) {
@@ -2486,15 +2490,19 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(clear).toHaveBeenCalled();
+      expect(invalidateByPath).toHaveBeenCalledWith(
+        join(mcTmpDir, 'ghost-0.ts'),
+      );
+      expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
-    it('falls back to a blanket clear on a MIXED batch — one path on disk, one a ghost (mimo F9)', async () => {
+    it('keeps a mixed batch targeted when one path is on disk and one is a ghost', async () => {
       // Most realistic production case: several files evicted, most on
-      // disk, one deleted since. A single unresolvable path must still
-      // force the safe blanket wipe rather than a partial disarm.
-      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      // disk, one deleted since. A single unresolvable path should not
+      // force unrelated cache entries to be wiped.
+      const { clear, markReadEvictedFromHistory, invalidateByPath } =
+        mockFileReadCacheStub();
 
       // keepRecent = 5 in this suite, so 7 results blank the 2 oldest:
       // index 0 (real, stats OK) and index 1 (ghost, stat fails).
@@ -2553,19 +2561,18 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      // The ghost path makes the batch not-fully-disarmed → safe wipe.
-      expect(clear).toHaveBeenCalled();
-      // The on-disk path was still attempted before the batch was
-      // deemed unresolvable.
-      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(invalidateByPath).toHaveBeenCalledWith(ghostPath);
+      expect(clear).not.toHaveBeenCalled();
     });
 
-    it('falls back to a blanket clear when an evicted path stats to a different inode (Codex P2)', async () => {
+    it('invalidates only the path when an evicted path stats to a different inode', async () => {
       // Path stats fine, but resolves to an inode the cache never
       // recorded (file replaced / symlink retargeted since the read),
       // so markReadEvictedFromHistory finds no entry and returns false.
-      // A stale entry could stay armed, so fall back to the safe wipe.
-      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      // The path fallback should remove only the matching resident entry.
+      const { clear, markReadEvictedFromHistory, invalidateByPath } =
+        mockFileReadCacheStub();
       markReadEvictedFromHistory.mockReturnValue(false);
 
       const { history } = await makeReadFileResponses(6);
@@ -2586,9 +2593,9 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      // It attempted the surgical disarm, found no entry, then wiped.
       expect(markReadEvictedFromHistory).toHaveBeenCalled();
-      expect(clear).toHaveBeenCalled();
+      expect(invalidateByPath).toHaveBeenCalledWith(join(mcTmpDir, '0.ts'));
+      expect(clear).not.toHaveBeenCalled();
     });
 
     it('does not touch the cache when the idle gap is below the threshold', async () => {
@@ -2947,9 +2954,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
-    it('performs surgical disarm and falls back to clear() on inode miss', async () => {
-      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+    it('uses targeted path fallback when fast compression sees an inode miss', async () => {
+      const { clear, markReadEvictedFromHistory, invalidateByPath } =
+        mockFileReadCacheStub();
       markReadEvictedFromHistory.mockReturnValueOnce(false); // inode mismatch
+      const evictedPath = join(mcTmpDir, 'test-file.ts');
       const compressFast = vi.fn().mockReturnValue({
         info: {
           originalTokenCount: 1000,
@@ -2958,7 +2967,7 @@ describe('Gemini Client (client.ts)', () => {
         },
         microcompactMeta: {
           unresolvedEvictedReads: 0,
-          evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          evictedReadPaths: [evictedPath],
           toolsCleared: 2,
           mediaCleared: 0,
           tokensSaved: 700,
@@ -2968,7 +2977,7 @@ describe('Gemini Client (client.ts)', () => {
           thresholdMinutes: 60,
         },
       });
-      await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
+      await writeFile(evictedPath, 'test content');
       client['chat'] = {
         compressFast,
       } as unknown as GeminiChat;
@@ -2978,7 +2987,8 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
-      expect(clear).toHaveBeenCalledOnce();
+      expect(invalidateByPath).toHaveBeenCalledWith(evictedPath);
+      expect(clear).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(true);
     });
 

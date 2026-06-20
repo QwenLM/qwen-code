@@ -324,6 +324,16 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should define context.importFormat as tree or flat', () => {
+      const importFormat = getSettingsSchema().context?.properties.importFormat;
+
+      expect(importFormat.type).toBe('enum');
+      expect(importFormat.options).toEqual([
+        { value: 'tree', label: 'Tree' },
+        { value: 'flat', label: 'Flat' },
+      ]);
+    });
+
     it('should have loadFromIncludeDirectories setting in schema', () => {
       expect(
         getSettingsSchema().context?.properties.loadFromIncludeDirectories,
@@ -388,6 +398,17 @@ describe('SettingsSchema', () => {
         getSettingsSchema().general.properties.debugKeystrokeLogging
           .description,
       ).toBe('Enable debug logging of keystrokes to the console.');
+    });
+
+    it('should define advanced.dnsResolutionOrder as ipv4first or verbatim', () => {
+      const dnsResolutionOrder =
+        getSettingsSchema().advanced.properties.dnsResolutionOrder;
+
+      expect(dnsResolutionOrder.type).toBe('enum');
+      expect(dnsResolutionOrder.options).toEqual([
+        { value: 'ipv4first', label: 'IPv4 First' },
+        { value: 'verbatim', label: 'Verbatim' },
+      ]);
     });
   });
 });

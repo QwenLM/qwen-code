@@ -20,6 +20,7 @@ import type {
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LSP');
+const MAX_TCP_PORT = 65_535;
 
 export class LspConfigLoader {
   constructor(private readonly workspaceRoot: string) {}
@@ -368,6 +369,26 @@ export class LspConfigLoader {
     return value;
   }
 
+  private normalizePort(value: unknown): number | undefined {
+    let port: number;
+    if (typeof value === 'number') {
+      port = value;
+    } else if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!/^\d+$/.test(trimmed)) {
+        return undefined;
+      }
+      port = Number(trimmed);
+    } else {
+      return undefined;
+    }
+
+    if (!Number.isSafeInteger(port) || port < 1 || port > MAX_TCP_PORT) {
+      return undefined;
+    }
+    return port;
+  }
+
   private normalizeSocketOptions(
     value: Record<string, unknown>,
   ): LspSocketOptions | undefined {
@@ -387,20 +408,14 @@ export class LspConfigLoader {
         : typeof source['socketPath'] === 'string'
           ? (source['socketPath'] as string)
           : undefined;
-    const portValue = source['port'];
-    const port =
-      typeof portValue === 'number'
-        ? portValue
-        : typeof portValue === 'string'
-          ? Number(portValue)
-          : undefined;
+    const port = this.normalizePort(source['port']);
 
     const socket: LspSocketOptions = {};
     if (host) {
       socket.host = host;
     }
-    if (Number.isFinite(port) && (port as number) > 0) {
-      socket.port = port as number;
+    if (port !== undefined) {
+      socket.port = port;
     }
     if (pathValue) {
       socket.path = pathValue;

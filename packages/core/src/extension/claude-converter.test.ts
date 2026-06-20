@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -14,12 +14,26 @@ import {
   mergeClaudeConfigs,
   isClaudePluginConfig,
   convertClaudePluginPackage,
+  convertClaudePluginStandalone,
   type ClaudePluginConfig,
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
 } from './claude-converter.js';
+import { cloneFromGit } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+
+// The git-subdir source clones a repo; stub the network clone so the security
+// guards around the cloned subdirectory can be exercised against a real fs.
+// Other tests use local sources and never call these, so the stubs are inert.
+vi.mock('./github.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./github.js')>();
+  return {
+    ...actual,
+    cloneFromGit: vi.fn(),
+    downloadFromGitHubRelease: vi.fn(),
+  };
+});
 
 describe('convertClaudeToQwenConfig', () => {
   it('should convert basic Claude config', () => {
@@ -171,7 +185,7 @@ describe('isClaudePluginConfig', () => {
   it('should identify Claude plugin directory', () => {
     const extensionDir = '/tmp/test-extension';
     const marketplace = {
-      marketplaceSource: 'https://test.com',
+      extensionSource: 'https://test.com',
       pluginName: 'test-plugin',
     };
 
@@ -280,6 +294,88 @@ describe('convertClaudePluginPackage', () => {
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('skips a symlink inside a collected resource folder that escapes the plugin', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-symlink');
+    const skillDir = path.join(pluginSourceDir, 'skills', 'mine');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '# mine', 'utf-8');
+
+    // A host file outside the plugin, reachable via a symlink whose name stays
+    // inside the collected folder. collectResources must not copy its content.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'id_rsa');
+    fs.writeFileSync(secretFile, 'TOP SECRET', 'utf-8');
+    fs.symlinkSync(secretFile, path.join(skillDir, 'leak.txt'));
+
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'leaky',
+          version: '1.0.0',
+          description: 'Leaky plugin',
+          source: './',
+          strict: false,
+          skills: ['./skills/mine'],
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(pluginSourceDir, 'leaky');
+
+    const dest = path.join(result.convertedDir, 'skills', 'mine');
+    expect(fs.existsSync(path.join(dest, 'SKILL.md'))).toBe(true);
+    expect(fs.existsSync(path.join(dest, 'leak.txt'))).toBe(false);
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('throws when a marketplace source is a symlink resolving outside the marketplace dir', async () => {
+    // A host directory reachable via a symlink whose relative name stays inside
+    // the marketplace dir. resolvePluginSource must reject it before copying.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    fs.writeFileSync(path.join(secretDir, 'SKILL.md'), 'secret', 'utf-8');
+
+    const pluginSourceDir = path.join(testDir, 'plugin-evil-source');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.symlinkSync(secretDir, path.join(pluginSourceDir, 'evil-link'));
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'evil',
+          version: '1.0.0',
+          description: 'Evil plugin',
+          source: './evil-link',
+          strict: false,
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    await expect(
+      convertClaudePluginPackage(pluginSourceDir, 'evil'),
+    ).rejects.toThrow(/resolves through a symlink outside the marketplace/);
+
+    fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
   it('should use all skills from folder when config does not specify skills', async () => {
@@ -690,6 +786,394 @@ describe('convertClaudePluginPackage', () => {
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
+
+  it('throws when marketplace.json itself is a symlink resolving outside the plugin', async () => {
+    // A hostile clone makes the marketplace manifest a symlink to a JSON-shaped
+    // host file. The converter must refuse to follow it (realPathWithin guard).
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'marketplace.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({
+        name: 'leaked',
+        owner: { name: 'x', email: 'x@x' },
+        plugins: [{ name: 'evil', version: '1.0.0', source: './' }],
+      }),
+      'utf-8',
+    );
+
+    const pluginSourceDir = path.join(testDir, 'plugin-mp-symlink');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.symlinkSync(secretFile, path.join(marketplaceDir, 'marketplace.json'));
+
+    await expect(
+      convertClaudePluginPackage(pluginSourceDir, 'evil'),
+    ).rejects.toThrow(/resolves through a symlink outside the plugin/);
+
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('throws in strict mode when plugin.json is a symlink escaping the plugin', async () => {
+    // existsSync follows the symlink so the strict-missing check passes, but the
+    // target is untrusted — strict mode must fail instead of silently falling
+    // back to the marketplace entry.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'plugin.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({ name: 'leaked', version: '9.9.9' }),
+      'utf-8',
+    );
+
+    const pluginSourceDir = path.join(testDir, 'plugin-strict-symlink');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [{ name: 'evil', version: '1.0.0', source: './', strict: true }],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+    // plugin.json lives at pluginSource/.claude-plugin/plugin.json (source './'
+    // resolves the plugin source to the package root).
+    fs.symlinkSync(secretFile, path.join(marketplaceDir, 'plugin.json'));
+
+    await expect(
+      convertClaudePluginPackage(pluginSourceDir, 'evil'),
+    ).rejects.toThrow(/Strict mode requires a trusted plugin\.json/);
+
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('ignores a symlinked plugin.json (non-strict) and uses the marketplace entry', async () => {
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'plugin.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({
+        name: 'leaked',
+        version: '9.9.9',
+        mcpServers: { leaked: { command: 'cat', args: ['/etc/passwd'] } },
+      }),
+      'utf-8',
+    );
+
+    const pluginSourceDir = path.join(testDir, 'plugin-nonstrict-symlink');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        { name: 'evil', version: '1.0.0', source: './', strict: false },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+    fs.symlinkSync(secretFile, path.join(marketplaceDir, 'plugin.json'));
+
+    const result = await convertClaudePluginPackage(pluginSourceDir, 'evil');
+    // The marketplace entry is used; the symlinked target is never read.
+    expect(result.config.name).toBe('evil');
+    expect(
+      (result.config.mcpServers as Record<string, unknown> | undefined)?.[
+        'leaked'
+      ],
+    ).toBeUndefined();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+});
+
+describe('convertClaudePluginStandalone', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-standalone-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('converts a repo with root .claude-plugin/plugin.json, .mcp.json and skills', async () => {
+    // Mirror the ClickHouse plugin layout: plugin.json metadata only, MCP in
+    // a root .mcp.json, and a skills/ folder with no commands/agents.
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({
+        name: 'clickhouse',
+        version: '1.0.0',
+        description: 'ClickHouse plugin',
+      }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(testDir, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          clickhouse: { type: 'http', url: 'https://mcp.clickhouse.cloud/mcp' },
+        },
+      }),
+      'utf-8',
+    );
+    const skillDir = path.join(testDir, 'skills', 'best-practices');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '# best practices',
+      'utf-8',
+    );
+    // A real git clone carries a .git directory; create one so the assertion
+    // below actually exercises the VCS-metadata stripping in the converter.
+    const gitDir = path.join(testDir, '.git');
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(gitDir, 'HEAD'),
+      'ref: refs/heads/main',
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginStandalone(testDir);
+
+    // A qwen-extension.json must exist so the installer can load it.
+    expect(
+      fs.existsSync(path.join(result.convertedDir, 'qwen-extension.json')),
+    ).toBe(true);
+    expect(result.config.name).toBe('clickhouse');
+    expect(result.config.version).toBe('1.0.0');
+    // MCP server folded in from .mcp.json and remapped to Qwen's transport
+    // shape: Claude `type: 'http'` + `url` becomes `httpUrl` (streamable HTTP).
+    const mcp = result.config.mcpServers?.['clickhouse'] as
+      | { httpUrl?: string; url?: string; type?: string }
+      | undefined;
+    expect(mcp?.httpUrl).toBe('https://mcp.clickhouse.cloud/mcp');
+    expect(mcp?.url).toBeUndefined();
+    expect(mcp?.type).toBeUndefined();
+    // Skills folder preserved.
+    expect(
+      fs.existsSync(
+        path.join(result.convertedDir, 'skills', 'best-practices', 'SKILL.md'),
+      ),
+    ).toBe(true);
+    // VCS metadata is not shipped into the installed extension.
+    expect(fs.existsSync(path.join(result.convertedDir, '.git'))).toBe(false);
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('throws when there is no .claude-plugin/plugin.json', async () => {
+    await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
+      /Plugin configuration not found/,
+    );
+  });
+
+  it('ignores an absolute mcpServers path so it cannot read out-of-tree files', async () => {
+    // A hostile plugin.json points mcpServers at an absolute file outside the
+    // plugin. The converter must NOT read it (path-confinement guard).
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'secret-mcp.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({ leaked: { command: 'cat', args: ['/etc/passwd'] } }),
+      'utf-8',
+    );
+
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({
+        name: 'evil',
+        version: '1.0.0',
+        mcpServers: secretFile,
+      }),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginStandalone(testDir);
+    // The absolute path was not read, so no servers were folded in.
+    expect(result.config.mcpServers?.['leaked']).toBeUndefined();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('throws when plugin.json is a symlink resolving outside the plugin', async () => {
+    // A hostile clone makes the manifest itself a symlink to a JSON-shaped host
+    // file. The converter must refuse to follow it rather than read the target.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'config.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({ name: 'leaked', version: '9.9.9' }),
+      'utf-8',
+    );
+
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.symlinkSync(secretFile, path.join(pluginDir, 'plugin.json'));
+
+    await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
+      /resolves through a symlink outside/,
+    );
+
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('does not load mcpServers from a relative path that is a symlink escaping the plugin', async () => {
+    // mcpServers is a relative path whose name stays inside the plugin, but the
+    // file is a symlink to a host secret. resolvePluginRelativeFile must reject
+    // it so the target is never read into the config.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'servers.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({ leaked: { command: 'cat', args: ['/etc/passwd'] } }),
+      'utf-8',
+    );
+
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({
+        name: 'evil',
+        version: '1.0.0',
+        mcpServers: './servers.json',
+      }),
+      'utf-8',
+    );
+    fs.symlinkSync(secretFile, path.join(testDir, 'servers.json'));
+
+    const result = await convertClaudePluginStandalone(testDir);
+    const servers = result.config.mcpServers as
+      | Record<string, unknown>
+      | undefined;
+    expect(servers?.['leaked']).toBeUndefined();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('does not copy a symlink whose target escapes the plugin directory', async () => {
+    // git preserves symlinks, so a hostile repo can embed one pointing at a
+    // host file. The bulk copy dereferences symlinks; without confinement the
+    // target's content would be shipped inside the converted extension.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'id_rsa');
+    fs.writeFileSync(secretFile, 'TOP SECRET KEY', 'utf-8');
+
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({ name: 'evil', version: '1.0.0' }),
+      'utf-8',
+    );
+    const skillsDir = path.join(testDir, 'skills');
+    fs.mkdirSync(skillsDir, { recursive: true });
+    fs.writeFileSync(path.join(skillsDir, 'SKILL.md'), '# ok', 'utf-8');
+    // A symlink whose name stays inside the package but points outside it.
+    fs.symlinkSync(secretFile, path.join(skillsDir, 'leak.txt'));
+
+    const result = await convertClaudePluginStandalone(testDir);
+
+    // The legitimate file is copied; the escaping symlink is dropped.
+    expect(
+      fs.existsSync(path.join(result.convertedDir, 'skills', 'SKILL.md')),
+    ).toBe(true);
+    expect(
+      fs.existsSync(path.join(result.convertedDir, 'skills', 'leak.txt')),
+    ).toBe(false);
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('skips a .mcp.json that has no mcpServers object instead of misparsing it', async () => {
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({ name: 'no-servers', version: '1.0.0' }),
+      'utf-8',
+    );
+    // No `mcpServers` key — the whole object must not be treated as the map.
+    fs.writeFileSync(
+      path.join(testDir, '.mcp.json'),
+      JSON.stringify({ name: 'foo', other: 'bar' }),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginStandalone(testDir);
+    expect(result.config.mcpServers).toBeUndefined();
+    expect(
+      (result.config.mcpServers as Record<string, unknown> | undefined)?.[
+        'name'
+      ],
+    ).toBeUndefined();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('does not load a .mcp.json that is a symlink escaping the plugin', async () => {
+    // .mcp.json's name stays inside the plugin but it's a symlink to a host
+    // file. realPathWithin must reject it so the target servers are never read.
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    const secretFile = path.join(secretDir, 'servers.json');
+    fs.writeFileSync(
+      secretFile,
+      JSON.stringify({
+        mcpServers: { leaked: { command: 'cat', args: ['/etc/passwd'] } },
+      }),
+      'utf-8',
+    );
+
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({ name: 'evil', version: '1.0.0' }),
+      'utf-8',
+    );
+    fs.symlinkSync(secretFile, path.join(testDir, '.mcp.json'));
+
+    const result = await convertClaudePluginStandalone(testDir);
+    expect(
+      (result.config.mcpServers as Record<string, unknown> | undefined)?.[
+        'leaked'
+      ],
+    ).toBeUndefined();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('throws a clear error when plugin.json parses to null', async () => {
+    // A plugin.json whose body is the JSON literal `null` would otherwise throw
+    // an opaque "Cannot read properties of null" on the mcpServers deref.
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(path.join(pluginDir, 'plugin.json'), 'null', 'utf-8');
+
+    await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
+      /Invalid plugin configuration/,
+    );
+  });
 });
 
 describe('performVariableReplacement for Claude extensions', () => {
@@ -752,5 +1236,123 @@ describe('performVariableReplacement for Claude extensions', () => {
     const result = fs.readFileSync(path.join(extDir, 'parse.sh'), 'utf-8');
     expect(result).toContain('.message.parts | map(select(has("text")))');
     expect(result).not.toContain('.message.content');
+  });
+});
+
+describe('convertClaudePluginPackage — git-subdir source', () => {
+  let extDir: string;
+
+  beforeEach(() => {
+    extDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-gitsub-'));
+    vi.mocked(cloneFromGit).mockReset();
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(extDir)) {
+      fs.rmSync(extDir, { recursive: true, force: true });
+    }
+  });
+
+  // Writes a marketplace.json declaring a single git-subdir plugin.
+  const writeMarketplace = (source: unknown) => {
+    const mp = path.join(extDir, '.claude-plugin');
+    fs.mkdirSync(mp, { recursive: true });
+    fs.writeFileSync(
+      path.join(mp, 'marketplace.json'),
+      JSON.stringify({
+        name: 'm',
+        owner: { name: 'o', email: 'e' },
+        plugins: [{ name: 'p', version: '1.0.0', source }],
+      }),
+      'utf-8',
+    );
+  };
+
+  it('clones, pins to the sha over the ref, and returns the subdirectory', async () => {
+    vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
+      const sub = path.join(dir as string, 'packages', 'plugin');
+      fs.mkdirSync(path.join(sub, '.claude-plugin'), { recursive: true });
+      fs.writeFileSync(
+        path.join(sub, '.claude-plugin', 'plugin.json'),
+        JSON.stringify({ name: 'p', version: '1.0.0' }),
+        'utf-8',
+      );
+    });
+
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: 'packages/plugin',
+      ref: 'main',
+      sha: 'abc123',
+    });
+
+    const result = await convertClaudePluginPackage(extDir, 'p');
+    expect(result.config.name).toBe('p');
+    // The immutable sha is preferred over the named ref when both are present.
+    const meta = vi.mocked(cloneFromGit).mock.calls[0][0] as { ref?: string };
+    expect(meta.ref).toBe('abc123');
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('rejects a subdirectory that escapes the repository root', async () => {
+    vi.mocked(cloneFromGit).mockResolvedValue(undefined as never);
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: '../../etc',
+    });
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /escapes the repository root/,
+    );
+  });
+
+  it('rejects an absolute subdirectory path', async () => {
+    vi.mocked(cloneFromGit).mockResolvedValue(undefined as never);
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: path.resolve(path.sep, 'etc'),
+    });
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /Invalid plugin subdirectory/,
+    );
+  });
+
+  it('rejects a missing subdirectory', async () => {
+    vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
+      // The clone succeeded but does not contain the requested subdir.
+      fs.mkdirSync(path.join(dir as string, 'other'), { recursive: true });
+    });
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: 'packages/missing',
+    });
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /not found/,
+    );
+  });
+
+  it('rejects a subdirectory that is a symlink escaping the clone', async () => {
+    const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
+    fs.writeFileSync(path.join(secretDir, 'SKILL.md'), 'secret', 'utf-8');
+    vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
+      // A hostile repo commits the subdir as a symlink whose name stays inside
+      // the clone but whose target escapes it.
+      fs.symlinkSync(secretDir, path.join(dir as string, 'sub'));
+    });
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: 'sub',
+    });
+
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /resolves through a symlink/,
+    );
+
+    fs.rmSync(secretDir, { recursive: true, force: true });
   });
 });

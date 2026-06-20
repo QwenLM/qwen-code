@@ -219,6 +219,17 @@
           "type": "boolean",
           "default": false
         },
+        "history": {
+          "description": "History display settings.",
+          "type": "object",
+          "properties": {
+            "collapseOnResume": {
+              "description": "Whether to collapse history by default when resuming a session.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
         "showLineNumbers": {
           "description": "Show line numbers in the code output.",
           "type": "boolean",
@@ -637,8 +648,11 @@
           "description": "The name of the context file or files."
         },
         "importFormat": {
-          "description": "The format to use when importing memory.",
-          "type": "string"
+          "description": "The format to use when importing memory. Options: tree, flat",
+          "enum": [
+            "tree",
+            "flat"
+          ]
         },
         "includeDirectories": {
           "description": "Additional directories to include in the workspace context. Missing directories will be skipped with a warning.",
@@ -1105,8 +1119,11 @@
           "default": false
         },
         "dnsResolutionOrder": {
-          "description": "The DNS resolution order.",
-          "type": "string"
+          "description": "The DNS resolution order. Options: ipv4first, verbatim",
+          "enum": [
+            "ipv4first",
+            "verbatim"
+          ]
         },
         "excludedEnvVars": {
           "description": "Environment variables to exclude from project context.",

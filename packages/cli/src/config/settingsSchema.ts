@@ -712,6 +712,27 @@ const SETTINGS_SCHEMA = {
         description: 'Hide helpful tips in the UI',
         showInDialog: true,
       },
+      history: {
+        type: 'object',
+        label: 'History',
+        category: 'UI',
+        requiresRestart: false,
+        default: {},
+        description: 'History display settings.',
+        showInDialog: false,
+        properties: {
+          collapseOnResume: {
+            type: 'boolean',
+            label: 'Collapse On Resume',
+            category: 'UI',
+            requiresRestart: false,
+            default: false,
+            description:
+              'Whether to collapse history by default when resuming a session.',
+            showInDialog: false,
+          },
+        },
+      },
       showLineNumbers: {
         type: 'boolean',
         label: 'Show Line Numbers in Code',
@@ -1458,13 +1479,17 @@ const SETTINGS_SCHEMA = {
         },
       },
       importFormat: {
-        type: 'string',
+        type: 'enum',
         label: 'Memory Import Format',
         category: 'Context',
         requiresRestart: false,
         default: undefined as MemoryImportFormat | undefined,
         description: 'The format to use when importing memory.',
         showInDialog: false,
+        options: [
+          { value: 'tree', label: 'Tree' },
+          { value: 'flat', label: 'Flat' },
+        ],
       },
       includeDirectories: {
         type: 'array',
@@ -2381,13 +2406,17 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       dnsResolutionOrder: {
-        type: 'string',
+        type: 'enum',
         label: 'DNS Resolution Order',
         category: 'Advanced',
         requiresRestart: true,
         default: undefined as DnsResolutionOrder | undefined,
         description: 'The DNS resolution order.',
         showInDialog: false,
+        options: [
+          { value: 'ipv4first', label: 'IPv4 First' },
+          { value: 'verbatim', label: 'Verbatim' },
+        ],
       },
       excludedEnvVars: {
         type: 'array',

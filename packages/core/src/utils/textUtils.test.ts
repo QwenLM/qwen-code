@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { safeLiteralReplace, normalizeContent } from './textUtils.js';
+import {
+  safeLiteralReplace,
+  normalizeContent,
+  stripAnsiAndControl,
+} from './textUtils.js';
 
 describe('safeLiteralReplace', () => {
   it('returns original string when oldString empty or not found', () => {
@@ -115,5 +119,32 @@ describe('normalizeContent', () => {
 
   it('handles strings without newlines or BOM', () => {
     expect(normalizeContent('Just a single line')).toBe('Just a single line');
+  });
+});
+
+describe('stripAnsiAndControl', () => {
+  const ESC = '\x1b';
+
+  it('leaves ordinary text untouched', () => {
+    expect(stripAnsiAndControl('hello world 123')).toBe('hello world 123');
+  });
+
+  it('strips ANSI/VT escape sequences (e.g. clear-screen, color)', () => {
+    expect(stripAnsiAndControl(`${ESC}[2Jevil`)).toBe('evil');
+    expect(stripAnsiAndControl(`${ESC}[31mred${ESC}[0m`)).toBe('red');
+  });
+
+  it('strips OSC 8 hyperlink sequences but keeps the link text', () => {
+    const osc = `${ESC}]8;;http://attacker\u0007click${ESC}]8;;\u0007`;
+    expect(stripAnsiAndControl(osc)).toBe('click');
+  });
+
+  it('removes residual C0 control chars and DEL', () => {
+    // NUL, BEL and DEL between letters are dropped (no escape prefix).
+    expect(stripAnsiAndControl('a\u0000b\u0007c\u007fd')).toBe('abcd');
+  });
+
+  it('removes C1 control chars (the range a drifted local copy missed)', () => {
+    expect(stripAnsiAndControl('x\u0080y\u0081z')).toBe('xyz');
   });
 });

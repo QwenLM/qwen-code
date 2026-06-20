@@ -815,6 +815,9 @@ export async function connectAndDiscover(
 
     // If we found anything, the server is connected
     updateMCPServerStatus(mcpServerName, MCPServerStatus.CONNECTED);
+    // A successful connect proves authentication works now — clear the sticky
+    // 401 marker so later unrelated outages aren't mislabeled as auth failures.
+    mcpServerRequiresOAuth.delete(mcpServerName);
 
     // Register any discovered tools
     for (const tool of tools) {

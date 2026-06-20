@@ -177,6 +177,8 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  taskStartStreamingChars: number;
+  responseCandidateTokens: number;
   // Real-time token display: ref to streaming output char length (polled, not state)
   streamingResponseLengthRef: React.RefObject<number>;
   // True = receiving content (↓), false = waiting for API response (↑)

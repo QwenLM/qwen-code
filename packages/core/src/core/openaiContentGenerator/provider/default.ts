@@ -9,6 +9,7 @@ import {
   tokenLimit,
   CAPPED_DEFAULT_MAX_TOKENS,
   hasExplicitOutputLimit,
+  parsePositiveIntegerEnvValue,
 } from '../../tokenLimits.js';
 
 type AssistantMessageWithReasoningFields =
@@ -187,9 +188,10 @@ export class DefaultOpenAICompatibleProvider
       // No explicit user config — check env var, then use capped default.
       // Capped default (8K) reduces GPU slot over-reservation by ~4×.
       // Requests hitting the cap get one clean retry at 64K (geminiChat.ts).
-      const envVal = process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
-      const envMaxTokens = envVal ? parseInt(envVal, 10) : NaN;
-      if (!isNaN(envMaxTokens) && envMaxTokens > 0) {
+      const envMaxTokens = parsePositiveIntegerEnvValue(
+        process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+      );
+      if (envMaxTokens !== undefined) {
         effectiveMaxTokens = isKnownModel
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;

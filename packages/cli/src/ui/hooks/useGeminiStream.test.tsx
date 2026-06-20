@@ -335,6 +335,7 @@ describe('useGeminiStream', () => {
           props.history,
           props.addItem,
           props.config,
+          true,
           props.loadedSettings,
           props.onDebugMessage,
           props.handleSlashCommand,
@@ -774,6 +775,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -873,6 +875,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1008,6 +1011,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1150,6 +1154,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1269,6 +1274,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1393,6 +1399,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1506,6 +1513,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1612,6 +1620,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1711,6 +1720,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1799,6 +1809,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1911,6 +1922,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2015,6 +2027,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2294,6 +2307,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2432,6 +2446,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2579,6 +2594,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2694,6 +2710,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2816,6 +2833,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -3017,6 +3035,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -3142,6 +3161,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -3280,6 +3300,7 @@ describe('useGeminiStream', () => {
           historyWithToolGroup,
           mockAddItem,
           config,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3461,6 +3482,7 @@ describe('useGeminiStream', () => {
           history,
           mockAddItem,
           config,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3958,6 +3980,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4007,6 +4030,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4063,6 +4087,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4122,6 +4147,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4203,6 +4229,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4258,6 +4285,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4315,6 +4343,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4388,6 +4417,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4736,6 +4766,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4793,6 +4824,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           testConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5286,6 +5318,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5341,6 +5374,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5397,6 +5431,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5509,6 +5544,7 @@ describe('useGeminiStream', () => {
             [],
             mockAddItem,
             mockConfig,
+            true,
             mockLoadedSettings,
             mockOnDebugMessage,
             mockHandleSlashCommand,
@@ -5563,6 +5599,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -5637,6 +5674,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5734,6 +5772,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -6140,6 +6179,7 @@ describe('useGeminiStream', () => {
             [],
             mockAddItem,
             mockConfig,
+            true,
             mockLoadedSettings,
             mockOnDebugMessage,
             mockHandleSlashCommand,
@@ -6256,6 +6296,7 @@ describe('useGeminiStream', () => {
             [],
             mockAddItem,
             mockConfig,
+            true,
             mockLoadedSettings,
             mockOnDebugMessage,
             mockHandleSlashCommand,
@@ -6329,6 +6370,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -6399,6 +6441,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -6528,6 +6571,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -6583,6 +6627,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -7649,6 +7694,150 @@ describe('useGeminiStream', () => {
           }),
           expect.any(Number),
         );
+      });
+    });
+  });
+
+  describe('cron scheduler initialization', () => {
+    // Renders useGeminiStream wired to a provided cron scheduler mock, with a
+    // controllable isConfigInitialized gate. `config` identity is stable across
+    // rerenders so the cron effect only re-runs when `initialized` flips.
+    const renderCronHook = (scheduler: unknown, initialized: boolean) => {
+      const cronConfig = {
+        ...mockConfig,
+        isCronEnabled: vi.fn(() => true),
+        getCronScheduler: vi.fn(() => scheduler),
+      } as unknown as Config;
+      return renderHook(
+        (props: { initialized: boolean }) =>
+          useGeminiStream(
+            new MockedGeminiClientClass(cronConfig),
+            [],
+            mockAddItem,
+            cronConfig,
+            props.initialized,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand as unknown as (
+              cmd: PartListUnion,
+            ) => Promise<SlashCommandProcessorResult | false>,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+          ),
+        { initialProps: { initialized } },
+      );
+    };
+
+    it('defers enableDurable and start until isConfigInitialized is true', async () => {
+      const callOrder: string[] = [];
+      const scheduler = {
+        // A real async gap before recording: a synchronous push would make the
+        // order assertion pass even if production dropped the `await`.
+        enableDurable: vi.fn().mockImplementation(async () => {
+          await new Promise((r) => setTimeout(r, 10));
+          callOrder.push('enableDurable');
+        }),
+        start: vi.fn().mockImplementation(() => {
+          callOrder.push('start');
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      const { rerender } = renderCronHook(scheduler, false);
+
+      // Before initialization: the scheduler must not be touched.
+      expect(scheduler.enableDurable).not.toHaveBeenCalled();
+      expect(scheduler.start).not.toHaveBeenCalled();
+
+      rerender({ initialized: true });
+
+      await waitFor(() => {
+        expect(scheduler.start).toHaveBeenCalled();
+      });
+      // enableDurable is awaited before start despite the 10ms gap.
+      expect(callOrder).toEqual(['enableDurable', 'start']);
+    });
+
+    it('does not start scheduler when isConfigInitialized remains false', async () => {
+      const scheduler = {
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      renderCronHook(scheduler, false);
+
+      // Give effects time to run.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(scheduler.enableDurable).not.toHaveBeenCalled();
+      expect(scheduler.start).not.toHaveBeenCalled();
+    });
+
+    it('does not start scheduler if unmounted during the enableDurable gap', async () => {
+      // enableDurable stays pending until we resolve it by hand, so we can
+      // unmount inside the async gap — the exact race the `stopped` flag guards.
+      let resolveEnable: () => void = () => {};
+      const scheduler = {
+        enableDurable: vi.fn().mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              resolveEnable = resolve;
+            }),
+        ),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      const { unmount } = renderCronHook(scheduler, true);
+
+      await waitFor(() => {
+        expect(scheduler.enableDurable).toHaveBeenCalled();
+      });
+      expect(scheduler.start).not.toHaveBeenCalled();
+
+      // Unmount while enableDurable is still in flight, then let it resolve.
+      unmount();
+      resolveEnable();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // The stopped guard must suppress the late start(); cleanup ran stop().
+      expect(scheduler.start).not.toHaveBeenCalled();
+      expect(scheduler.stop).toHaveBeenCalled();
+    });
+
+    it('still starts the scheduler when enableDurable rejects', async () => {
+      const scheduler = {
+        enableDurable: vi.fn().mockRejectedValue(new Error('lock contention')),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      renderCronHook(scheduler, true);
+
+      // A failed enableDurable must NOT skip start(): session-only cron tasks
+      // (created via cron_create during this session) still need the scheduler
+      // running — only durable/persistent tasks are lost. Regression guard for
+      // the catch falling through instead of returning (#5022 review).
+      await waitFor(() => {
+        expect(scheduler.start).toHaveBeenCalled();
       });
     });
   });

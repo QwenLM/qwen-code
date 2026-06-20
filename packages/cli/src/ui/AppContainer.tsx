@@ -67,9 +67,12 @@ import {
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
 } from '@qwen-code/qwen-code-core';
-import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import {
+  applyCollapsePolicyAndSummary,
+  buildResumedHistoryItems,
+  expandCollapsedHistory,
+} from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
-import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -123,6 +126,7 @@ import {
   computeApiTruncationIndex,
   isRealUserTurn,
 } from './utils/historyMapping.js';
+import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -256,6 +260,34 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+function getResponseCandidateTokens(
+  pendingGeminiHistoryItems: HistoryItemWithoutId[],
+): number {
+  let tokens = 0;
+
+  for (const item of pendingGeminiHistoryItems) {
+    if (item.type !== 'tool_group') {
+      continue;
+    }
+
+    for (const tool of item.tools) {
+      const display = tool.resultDisplay;
+      if (
+        typeof display === 'object' &&
+        display !== null &&
+        'type' in display &&
+        display.type === 'task_execution' &&
+        'tokenCount' in display &&
+        typeof display.tokenCount === 'number'
+      ) {
+        tokens += display.tokenCount;
+      }
+    }
+  }
+
+  return tokens;
 }
 
 function useStableStickyTodos(todos: TodoItem[] | null): TodoItem[] | null {
@@ -563,9 +595,13 @@ export const AppContainer = (props: AppContainerProps) => {
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
-        const historyItems = buildResumedHistoryItems(
-          resumedSessionData,
-          config,
+        const rawItems = buildResumedHistoryItems(resumedSessionData, config);
+        const collapseOnResume =
+          settings.merged.ui?.history?.collapseOnResume ?? false;
+
+        const historyItems = applyCollapsePolicyAndSummary(
+          rawItems,
+          collapseOnResume,
         );
         historyManager.loadHistory(historyItems);
 
@@ -1062,6 +1098,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleResume,
   } = useResumeCommand({
     config,
+    settings,
     historyManager,
     startNewSession,
     setSessionName,
@@ -1070,6 +1107,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { handleBranch } = useBranchCommand({
     config,
+    settings,
     historyManager,
     startNewSession,
     setSessionName,
@@ -1229,10 +1267,11 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useSlashCommandProcessor(
     config,
     settings,
+    historyManager.history,
     historyManager.addItem,
     historyManager.clearItems,
     historyManager.loadHistory,
-    remountStaticHistory,
+    refreshStatic,
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
@@ -1455,6 +1494,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.history,
     historyManager.addItem,
     config,
+    isConfigInitialized,
     settings,
     onDebugMessage,
     handleSlashCommand,
@@ -2646,7 +2686,12 @@ export const AppContainer = (props: AppContainerProps) => {
           !(option === 'both' && hasRestoreFailure)
         ) {
           const originalHistory = historyManager.history;
-          const originalLength = originalHistory.length;
+          const hasSummary = originalHistory.some(
+            (h) => h.display?.kind === 'collapse-summary',
+          );
+          const effectiveLength = hasSummary
+            ? originalHistory.length - 1
+            : originalHistory.length;
 
           let targetTurnIndex = 0;
           for (const h of originalHistory) {
@@ -2656,7 +2701,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
           geminiClient.truncateHistory(apiTruncateIndex);
 
-          const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+          // Strip suppressOnRestore flags and filter out collapse-summary items
+          // so rewound items remain visible without stale summary text
+          const truncatedUi = expandCollapsedHistory(
+            originalHistory.filter((h) => h.id < userItem.id),
+          );
           historyManager.loadHistory(truncatedUi);
 
           refreshStatic();
@@ -2677,7 +2726,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
           config.getChatRecordingService()?.rewindRecording(
             targetTurnIndex,
-            { truncatedCount: originalLength - truncatedUi.length },
+            { truncatedCount: effectiveLength - truncatedUi.length },
             !hasRestoreFailure
               ? config
                   .getFileHistoryService()
@@ -2837,16 +2886,21 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager, setShowCommandMigrationNudge, config.storage],
   );
 
-  const currentCandidatesTokens = Object.values(
-    sessionStats.metrics?.models ?? {},
-  ).reduce((acc, model) => acc + (model.tokens?.candidates ?? 0), 0);
+  const responseCandidateTokens = getResponseCandidateTokens(
+    pendingGeminiHistoryItems,
+  );
 
-  const { elapsedTime, currentLoadingPhrase, taskStartTokens } =
-    useLoadingIndicator(
-      streamingState,
-      settings.merged.ui?.customWittyPhrases,
-      currentCandidatesTokens,
-    );
+  const {
+    elapsedTime,
+    currentLoadingPhrase,
+    taskStartTokens,
+    taskStartStreamingChars,
+  } = useLoadingIndicator(
+    streamingState,
+    settings.merged.ui?.customWittyPhrases,
+    responseCandidateTokens,
+    streamingResponseLengthRef.current,
+  );
 
   useAttentionNotifications({
     isFocused,
@@ -3441,6 +3495,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      taskStartStreamingChars,
+      responseCandidateTokens,
       // Real-time token display
       streamingResponseLengthRef,
       isReceivingContent,
@@ -3574,6 +3630,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      taskStartStreamingChars,
+      responseCandidateTokens,
       // Real-time token display
       streamingResponseLengthRef,
       isReceivingContent,

@@ -7,6 +7,156 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  'Cannot disable an extension-provided MCP server here.':
+    '无法在此处禁用扩展提供的 MCP 服务器。',
+  'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',
+  'MCP "{{name}}" disabled for all projects.':
+    'MCP "{{name}}" 已在所有项目中禁用。',
+  'Enable extension "{{name}}" to manage this MCP server.':
+    '启用扩展 "{{name}}" 后才能管理此 MCP 服务器。',
+  'Extension-provided MCP servers cannot be favorited.':
+    '扩展提供的 MCP 服务器无法单独收藏。',
+
+  'User level': '用户级',
+  'Project level': '项目级',
+
+  // ==========================================================================
+  // Extensions manager dialog (Installed / Discover / Sources tabs)
+  // ==========================================================================
+  ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}}（Tab 清除）',
+  '"{{name}}" {{state}}.': '"{{name}}" {{state}}。',
+  '(Tab / ←→ to switch)': '(Tab / ←→ 切换)',
+  '+ Add new marketplace': '+ 添加新市场源',
+  '+ Install a new extension': '+ 安装一个新扩展',
+  Actions: '操作',
+  'Add Marketplace': '添加市场源',
+  'Add a marketplace in the Sources tab to discover extensions.':
+    '在“来源”标签页中添加市场源以发现扩展。',
+  'Add new': '新增',
+  'Add to Favorites': '添加到收藏',
+  'Added "{{name}}" to favorites.': '已将 "{{name}}" 添加到收藏。',
+  'Added marketplace "{{name}}".': '已添加市场源 "{{name}}"。',
+  'Adding...': '添加中...',
+  'Back to extension list': '返回扩展列表',
+  'Browse extensions ({{count}})': '浏览扩展（{{count}}）',
+  'By: {{a}}': '作者：{{a}}',
+  'Change scope': '更改作用域',
+  'Change scope for "{{name}}":': '更改 "{{name}}" 的作用域：',
+  'Changing scope...': '正在更改作用域...',
+  'Uninstalling "{{name}}"...': '正在卸载 "{{name}}"...',
+  'Update available for "{{name}}".': '"{{name}}" 有可用更新。',
+  '"{{name}}" is already up to date.': '"{{name}}" 已是最新。',
+  'Checking "{{name}}" for updates...': '正在检查 "{{name}}" 的更新...',
+  '"{{name}}" does not support update checks.': '"{{name}}" 不支持检查更新。',
+  '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).':
+    '"{{name}}" 无法检查更新（Claude 市场源插件需卸载后重装来更新）。',
+  'Failed to check "{{name}}" for updates.': '检查 "{{name}}" 的更新失败。',
+  'Claude plugin marketplace': 'Claude 插件市场',
+  Commands: '命令',
+  'Components:': '组件：',
+  'Could not load this marketplace.': '无法加载该市场源。',
+  'Current: {{scope}}': '当前：{{scope}}',
+  Disabled: '已禁用',
+  Discover: '发现',
+  'Disabling "{{name}}"...': '正在禁用 "{{name}}"...',
+  'Disabling MCP "{{name}}"...': '正在禁用 MCP "{{name}}"...',
+  'Discover extensions': '发现扩展',
+  'Discovering extensions...': '正在发现扩展...',
+  'Enabling "{{name}}"...': '正在启用 "{{name}}"...',
+  'Enabling MCP "{{name}}"...': '正在启用 MCP "{{name}}"...',
+  'Enter extension source:': '输入扩展来源：',
+  'Enter marketplace source (Claude format):':
+    '输入市场源地址（Claude 格式）：',
+  'Examples:': '示例：',
+  'Extension details': '扩展详情',
+  'Extension v{{version}}': '扩展 v{{version}}',
+  'Extensions are not available in this environment.': '当前环境中扩展不可用。',
+  'Failed to open {{url}}': '打开 {{url}} 失败',
+  Favorites: '收藏',
+  'Global (User Scope)': '全局（用户作用域）',
+  'Install Extension': '安装扩展',
+  'Install for the current workspace (project scope)':
+    '为当前工作区安装（项目作用域）',
+  'Install for you (user scope)': '全局安装（用户作用域）',
+  'Install {{count}} extension(s) to which scope?':
+    '将 {{count}} 个扩展安装到哪个作用域？',
+  Installed: '已安装',
+  'Installed extension "{{name}}".': '已安装扩展 "{{name}}"。',
+  'Installed extensions ({{count}}):': '已安装的扩展（{{count}}）：',
+  'Installed {{count}} extension(s).': '已安装 {{count}} 个扩展。',
+  '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.':
+    '{{name}}：已安装,但作用域回滚失败 —— 该扩展可能在所有作用域均被禁用;请在“已安装”页重新启用。',
+  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})':
+    '无法更改作用域,且回滚也失败 ——“{{name}}”可能在所有作用域均被禁用。请在“已安装”页重新启用。({{error}})',
+  'Installed {{ok}}, failed {{fail}}: {{detail}}':
+    '成功 {{ok}} 个，失败 {{fail}} 个：{{detail}}',
+  'Installing...': '安装中...',
+  'Last updated: {{date}}': '最近更新：{{date}}',
+  MCP: 'MCP',
+  'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}。',
+  'MCP servers': 'MCP 服务器',
+  'Mark for Update': '标记为待更新',
+  Marketplaces: '市场源',
+  'No extensions discovered.': '未发现任何扩展。',
+  'No extensions match your search.': '没有与搜索匹配的扩展。',
+  'No extensions or marketplaces added yet.': '尚未添加任何扩展或市场源。',
+  'No homepage available.': '没有可用的主页。',
+  'No installable extensions selected.': '未选择可安装的扩展。',
+  'No plugins or MCP servers installed.': '尚未安装任何插件或 MCP 服务器。',
+  None: '无',
+  'Note: Uninstall permanently removes this extension.':
+    '注意：卸载将永久移除此扩展。',
+  'Open homepage': '打开主页',
+  'Project (Workspace)': '项目（工作区）',
+  'Refreshed {{count}} extension(s).': '已刷新 {{count}} 个扩展。',
+  'Remove from Favorites': '从收藏中移除',
+  'Remove marketplace': '移除市场源',
+  'Remove marketplace "{{name}}"?': '移除市场源 "{{name}}"？',
+  'Removed "{{name}}" from favorites.': '已将 "{{name}}" 从收藏中移除。',
+  'Removed marketplace "{{name}}".': '已移除市场源 "{{name}}"。',
+  'Scope:': '作用域：',
+  'Set "{{name}}" scope to {{scope}}.':
+    '已将 "{{name}}" 的作用域设为 {{scope}}。',
+  Sources: '来源',
+  'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
+    '输入以搜索 · Space 切换 · Enter 查看 · Ctrl+R 刷新 · Esc 返回',
+  Uninstall: '卸载',
+  'Uninstalled "{{name}}".': '已卸载 "{{name}}"。',
+  'Update Now': '立即更新',
+  'Update marketplace': '更新市场源',
+  'Update marketplace (last updated {{date}})':
+    '更新市场源（最近更新 {{date}}）',
+  'Could not update marketplace "{{name}}".': '无法更新市场源 "{{name}}"。',
+  'Updated "{{name}}".': '已更新 "{{name}}"。',
+  'Updated marketplace "{{name}}".': '已更新市场源 "{{name}}"。',
+  'Use the Discover tab to find and install plugins.':
+    '使用“发现”标签页查找并安装扩展。',
+  'Version: {{v}}': '版本：{{v}}',
+  'Will install:': '将安装：',
+  'Would open: {{url}}': '将打开：{{url}}',
+  'Y/Enter to confirm · N/Esc to cancel': 'Y/Enter 确认 · N/Esc 取消',
+  'Press R to retry · Esc to go back': '按 R 重试 · Esc 返回',
+  'Enter to select · R refresh · Esc to go back':
+    'Enter 选择 · R 刷新 · Esc 返回',
+  'from {{marketplace}}': '来自 {{marketplace}}',
+  installed: '已安装',
+  '{{count}} Agents': '{{count}} 个智能体',
+  '{{count}} Commands': '{{count}} 个命令',
+  '{{count}} MCP': '{{count}} 个 MCP',
+  '{{count}} Skills': '{{count}} 个技能',
+  '{{count}} available extensions': '{{count}} 个可用扩展',
+  '↑ more above': '↑ 上方更多',
+  '↑↓ navigate · Enter open · d remove marketplace · Esc close':
+    '↑↓ 导航 · Enter 打开 · d 移除市场源 · Esc 关闭',
+  '↑↓ navigate · Enter select · Esc close': '↑↓ 导航 · Enter 选择 · Esc 关闭',
+  '↑↓ navigate · Enter select · d remove marketplace · Esc close':
+    '↑↓ 导航 · Enter 选择 · d 移除市场源 · Esc 关闭',
+  '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close':
+    '↑↓ 导航 · Space 启用/禁用 · f 收藏 · Enter 查看详情 · Esc 关闭',
+  '↓ more below': '↓ 下方更多',
+  '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
+    '⚠ 在安装、更新或使用扩展前，请确保你信任它。我们无法验证扩展包含哪些 MCP 服务器、文件或其他软件，也无法保证其按预期工作。更多信息请查看扩展主页。',
+
   // ============================================================================
   // Tool display names (chat-stream badge labels)
   // ----------------------------------------------------------------------------
@@ -606,6 +756,27 @@ export default {
   'Uninstall an extension': '卸载扩展',
   'No extensions installed.': '未安装扩展。',
   'Extension "{{name}}" not found.': '未找到扩展 "{{name}}"。',
+  'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).':
+    '安装扩展的作用域："user"（全局，默认）或 "project"（仅当前工作区）。',
+  'Extension "{{name}}" installed successfully and enabled for the current workspace.':
+    '扩展 "{{name}}" 安装成功，并已在当前工作区启用。',
+  'Marketplace "{{name}}" not found.': '未找到市场源 "{{name}}"。',
+  'No marketplace sources added yet.': '尚未添加任何市场源。',
+  'No marketplaces added yet.': '尚未添加任何市场源。',
+  'Adds a marketplace source (Claude format).':
+    '添加一个市场源（Claude 格式）。',
+  'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
+    '要添加的市场源：owner/repo（GitHub）、git 或 https URL，或本地路径。',
+  'Removes a marketplace source.': '移除一个市场源。',
+  'The name of the marketplace to remove.': '要移除的市场源名称。',
+  'Lists configured marketplace sources.': '列出已配置的市场源。',
+  'Re-fetches a marketplace source and its plugin listing.':
+    '重新拉取市场源及其插件列表。',
+  'The name of the marketplace to update.': '要更新的市场源名称。',
+  'Manage marketplace sources for discovering extensions.':
+    '管理用于发现扩展的市场源。',
+  'You need at least one command before continuing.':
+    '需要至少提供一个子命令。',
   'No extensions to update.': '没有可更新的扩展。',
   'Usage: /extensions install <source>': '用法：/extensions install <来源>',
   'Installing extension from "{{source}}"...':
@@ -639,6 +810,16 @@ export default {
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     '要安装的扩展的 GitHub URL、本地路径或市场源（marketplace-url:plugin-name）。',
   'The git ref to install from.': '要安装的 Git 引用。',
+  '--registry is only applicable for npm extensions.':
+    '--registry 仅适用于 npm 扩展。',
+  'Custom npm registry URL (only for npm extensions).':
+    '自定义 npm registry URL（仅适用于 npm 扩展）。',
+  '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).':
+    '--ref 不适用于 npm 扩展。请改用 @version 后缀（例如 @scope/package@1.2.0）。',
+  'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).':
+    '从 Git 仓库 URL、本地路径、带作用域的 npm 包（@scope/name）或 Claude 市场源（marketplace-url:plugin-name）安装扩展。',
+  Description: '描述',
+  'Delete Session': '删除会话',
   'Enable auto-update for this extension.': '为此扩展启用自动更新。',
   'Enable pre-release versions for this extension.': '为此扩展启用预发布版本。',
   'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
@@ -1060,6 +1241,7 @@ export default {
   connected: '已连接',
   connecting: '连接中',
   disconnected: '已断开',
+  'needs authentication': '需要认证',
 
   // MCP Server List
   'User MCPs': '用户 MCP',
@@ -2013,6 +2195,24 @@ export default {
   reqs: '请求',
   in: '输入',
   out: '输出',
+
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    '恢复会话时默认折叠历史记录',
+  'Set history to expand by default when resuming a session':
+    '恢复会话时默认展开历史记录',
+  'Expand the currently collapsed history transcript': '展开当前折叠的历史记录',
+  'Control history display preferences and visibility':
+    '控制历史记录显示偏好和可见性',
+  'History will be collapsed by default for future resumed sessions.':
+    '未来恢复的会话将默认折叠历史记录。',
+  'History will be expanded by default for future resumed sessions.':
+    '未来恢复的会话将默认展开历史记录。',
+  'History is already expanded in this session.': '当前会话的历史记录已展开。',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    '用法：/history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    '历史记录已折叠：{{n}} 条消息已隐藏。使用 /history expand-now 展开。',
 
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型注册表中）',
