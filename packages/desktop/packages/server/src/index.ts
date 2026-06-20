@@ -30,7 +30,7 @@ import { homedir } from 'node:os'
 import { readFileSync, existsSync } from 'node:fs'
 import { version as packageVersion } from '../package.json'
 import { enableDebug } from '@craft-agent/shared/utils/debug'
-import { bootstrapServer, startHealthHttpServer, generateServerToken } from '@craft-agent/server-core/bootstrap'
+import { bootstrapServer, startHealthHttpServer, generateServerToken, parseServerPort } from '@craft-agent/server-core/bootstrap'
 import { validateSession, createWebuiHandler, nodeHttpAdapter } from '@craft-agent/server-core/webui'
 import type { WebuiHandler } from '@craft-agent/server-core/webui'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
@@ -90,6 +90,15 @@ function parseOptionalWebSocketUrl(name: string, value: string | undefined): str
   }
 }
 
+function parseServerPortOrExit(name: string, value: string | undefined, defaultPort: number): number {
+  try {
+    return parseServerPort(name, value, defaultPort)
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  }
+}
+
 // In dev (monorepo), bundled assets root is the repo root (4 levels up from this file).
 // In packaged mode, use CRAFT_BUNDLED_ASSETS_ROOT env or cwd.
 const bundledAssetsRoot = process.env.CRAFT_BUNDLED_ASSETS_ROOT
@@ -117,6 +126,7 @@ const webuiEnabled = webuiDir && existsSync(webuiDir)
 const webuiSecureCookies = parseOptionalBooleanEnv('CRAFT_WEBUI_SECURE_COOKIE', process.env.CRAFT_WEBUI_SECURE_COOKIE)
 const webuiWsUrl = parseOptionalWebSocketUrl('CRAFT_WEBUI_WS_URL', process.env.CRAFT_WEBUI_WS_URL)
 const serverToken = process.env.CRAFT_SERVER_TOKEN
+const healthPort = parseServerPortOrExit('CRAFT_HEALTH_PORT', process.env.CRAFT_HEALTH_PORT, 0)
 
 // ---------------------------------------------------------------------------
 // Create WebUI handler early so it can be embedded in the WsRpcServer.
@@ -132,7 +142,7 @@ let webuiNodeHandler: ReturnType<typeof nodeHttpAdapter> | undefined
 let healthCheckFn: (() => { status: string }) | null = null
 
 if (webuiEnabled && serverToken) {
-  const rpcPort = parseInt(process.env.CRAFT_RPC_PORT ?? '9100', 10)
+  const rpcPort = parseServerPortOrExit('CRAFT_RPC_PORT', process.env.CRAFT_RPC_PORT, 9100)
   const rpcProtocol = tls ? 'wss' as const : 'ws' as const
 
   webuiHandler = createWebuiHandler({
@@ -296,7 +306,6 @@ if (webuiHandler) {
 }
 
 // Start HTTP health endpoint if CRAFT_HEALTH_PORT is set
-const healthPort = parseInt(process.env.CRAFT_HEALTH_PORT ?? '0', 10)
 const healthServer = await startHealthHttpServer({
   port: healthPort,
   deps: { sessionManager: instance.sessionManager },
