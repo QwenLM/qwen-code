@@ -6008,6 +6008,115 @@ describe('Session', () => {
           .map((p) => p.functionResponse?.id);
         expect(ids).toEqual(['call-a', 'call-b']);
       });
+
+      it('ignores malformed QWEN_CODE_MAX_TOOL_CONCURRENCY values', async () => {
+        const previousMaxConcurrency =
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '1abc';
+        try {
+          type Deferred<T> = {
+            promise: Promise<T>;
+            resolve: (v: T) => void;
+          };
+          const makeDeferred = <T>(): Deferred<T> => {
+            let resolve!: (v: T) => void;
+            const promise = new Promise<T>((r) => {
+              resolve = r;
+            });
+            return { promise, resolve };
+          };
+
+          const called: Record<string, Deferred<void>> = {
+            'call-a': makeDeferred<void>(),
+            'call-b': makeDeferred<void>(),
+          };
+          const result: Record<string, Deferred<core.ToolResult>> = {
+            'call-a': makeDeferred<core.ToolResult>(),
+            'call-b': makeDeferred<core.ToolResult>(),
+          };
+
+          const agentTool = {
+            name: core.ToolNames.AGENT,
+            kind: core.Kind.Think,
+            build: vi
+              .fn()
+              .mockImplementation((args: Record<string, unknown>) => {
+                const id = args['_test_id'] as string;
+                return {
+                  params: args,
+                  eventEmitter: undefined,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue(`agent ${id}`),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: vi.fn().mockImplementation(() => {
+                    called[id].resolve();
+                    return result[id].promise;
+                  }),
+                };
+              }),
+          };
+
+          mockToolRegistry.getTool.mockImplementation((name: string) =>
+            name === core.ToolNames.AGENT ? agentTool : undefined,
+          );
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.DEFAULT);
+          mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-a',
+                        name: core.ToolNames.AGENT,
+                        args: { _test_id: 'call-a', subagent_type: 'explore' },
+                      },
+                      {
+                        id: 'call-b',
+                        name: core.ToolNames.AGENT,
+                        args: { _test_id: 'call-b', subagent_type: 'explore' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValueOnce(createEmptyStream());
+
+          const promptPromise = session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'spawn two agents' }],
+          });
+
+          await Promise.all([
+            called['call-a'].promise,
+            called['call-b'].promise,
+          ]);
+
+          result['call-a'].resolve({
+            llmContent: 'A-done',
+            returnDisplay: 'A',
+          });
+          result['call-b'].resolve({
+            llmContent: 'B-done',
+            returnDisplay: 'B',
+          });
+
+          await promptPromise;
+        } finally {
+          if (previousMaxConcurrency === undefined) {
+            delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+          } else {
+            process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+              previousMaxConcurrency;
+          }
+        }
+      });
     });
 
     describe('system reminders', () => {
