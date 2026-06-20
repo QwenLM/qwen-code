@@ -17,6 +17,7 @@ import {
 } from './voiceModel.js';
 
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
+const INFERENCE_TIMEOUT_MS = 60_000;
 
 export type VoiceTransport =
   | 'qwen-asr-chat'
@@ -250,7 +251,10 @@ function tokenize(value: string): string[] {
  * are almost entirely keyterms — so the bias list never lands in the prompt.
  * Short results are left alone so genuine terse utterances ("grep regex") pass.
  */
-function isKeytermEcho(transcript: string, keytermsContext?: string): boolean {
+export function isKeytermEcho(
+  transcript: string,
+  keytermsContext?: string,
+): boolean {
   if (!keytermsContext) {
     return false;
   }
@@ -266,6 +270,11 @@ function isKeytermEcho(transcript: string, keytermsContext?: string): boolean {
 // Qwen-ASR caps each audio file at 10 MB / 5 minutes. Our 16 kHz mono 16-bit WAV
 // is ~32 KB/s, so guard before encoding to give a clear error on overlong holds.
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+
+function sanitizeResponseDetails(raw: string): string {
+  const redacted = raw.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+  return redacted.length > 200 ? `${redacted.slice(0, 200)}...` : redacted;
+}
 
 /**
  * Transcribe via the DashScope/Qwen-ASR OpenAI-compatible protocol: the audio
@@ -323,13 +332,14 @@ async function transcribeViaQwenAsr(
         messages,
         asr_options: asrOptions,
       }),
+      signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
     },
   );
 
   if (!response.ok) {
     let details = '';
     try {
-      details = await response.text();
+      details = sanitizeResponseDetails(await response.text());
     } catch {
       details = '';
     }

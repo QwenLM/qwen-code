@@ -68,6 +68,7 @@ import {
 } from '../hooks/useVoiceInput.js';
 import { createVoiceRecorder } from '../voice/voiceRecorder.js';
 import {
+  isKeytermEcho,
   isStreamingVoiceModel,
   resolveVoiceStreamConfig,
   transcribeVoiceAudio,
@@ -357,7 +358,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         streamConfig.transport === 'qwen-asr-realtime'
           ? openQwenAsrRealtimeStream(streamConfig, callbacks)
           : openVoiceStream(streamConfig, callbacks),
-      );
+      ).then((session) => ({
+        ...session,
+        finish: async () => {
+          const transcript = await session.finish();
+          return isKeytermEcho(transcript, streamConfig.keytermsContext)
+            ? ''
+            : transcript;
+        },
+      }));
     },
     [config, settings, voiceModel],
   );

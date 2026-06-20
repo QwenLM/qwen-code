@@ -28,6 +28,15 @@ const voiceKey: Key = {
   paste: false,
 };
 
+const escapeKey: Key = {
+  name: 'escape',
+  sequence: '\x1b',
+  ctrl: false,
+  meta: false,
+  shift: false,
+  paste: false,
+};
+
 function createBuffer(text = '') {
   const testBuffer = {
     text,
@@ -476,6 +485,50 @@ describe('useVoiceInput', () => {
       expect(result.current.status).toBe('idle');
     });
     expect(addItem).not.toHaveBeenCalled();
+    expect(buffer.insert).not.toHaveBeenCalled();
+  });
+
+  it('cancels transcription and ignores a late transcript', async () => {
+    buffer = createBuffer();
+    const transcript = deferred<string>();
+    const recorder = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue({
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'audio/wav',
+      }),
+    };
+
+    const { result } = renderHook(() =>
+      useVoiceInput({
+        enabled: true,
+        mode: 'tap',
+        voiceModel: 'qwen3-asr-flash',
+        buffer,
+        createRecorder: () => recorder,
+        transcribe: vi.fn(() => transcript.promise),
+      }),
+    );
+
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+      result.current.handleKeypress(voiceKey);
+    });
+
+    await waitFor(() => {
+      expect(result.current.status).toBe('transcribing');
+    });
+
+    act(() => {
+      expect(result.current.handleKeypress(escapeKey)).toBe(true);
+    });
+    expect(result.current.status).toBe('idle');
+
+    await act(async () => {
+      transcript.resolve('late text');
+      await transcript.promise;
+    });
+
     expect(buffer.insert).not.toHaveBeenCalled();
   });
 });

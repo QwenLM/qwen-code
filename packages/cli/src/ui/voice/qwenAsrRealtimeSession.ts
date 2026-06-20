@@ -28,6 +28,7 @@ export interface QwenRealtimeDeps {
 }
 
 const CONNECT_TIMEOUT_MS = 8000;
+const FINISH_TIMEOUT_MS = 60_000;
 
 export function deriveQwenRealtimeUrl(baseUrl: string, model: string): string {
   const host = new URL(baseUrl).host;
@@ -71,6 +72,9 @@ export function openQwenAsrRealtimeStream(
     let finishPromise: Promise<string> | null = null;
     let finishResolve: ((text: string) => void) | null = null;
     let finishReject: ((error: unknown) => void) | null = null;
+    let finishTimer: ReturnType<typeof setTimeout> | null = null;
+    let connectTimer: ReturnType<typeof setTimeout> | null = null;
+    let terminalError: Error | null = null;
 
     const sendJson = (body: Record<string, unknown>) => {
       ws.send(JSON.stringify({ event_id: randomUUID(), ...body }));
@@ -84,20 +88,40 @@ export function openQwenAsrRealtimeStream(
       }
     };
 
+    const clearFinishTimer = () => {
+      if (finishTimer) {
+        clearTimeout(finishTimer);
+        finishTimer = null;
+      }
+    };
+
+    const clearConnectTimer = () => {
+      if (connectTimer) {
+        clearTimeout(connectTimer);
+        connectTimer = null;
+      }
+    };
+
     const fail = (error: unknown) => {
       const normalized = toError(error);
+      clearConnectTimer();
+      clearFinishTimer();
       close();
       if (finishReject) {
         finishReject(normalized);
+        finishResolve = null;
+        finishReject = null;
         return;
       }
       if (!openSettled) {
         openSettled = true;
         reject(normalized);
+        return;
       }
+      terminalError = normalized;
     };
 
-    const connectTimer = setTimeout(() => {
+    connectTimer = setTimeout(() => {
       if (!opened) fail(new Error('Qwen ASR realtime connection timed out.'));
     }, CONNECT_TIMEOUT_MS);
 
@@ -142,7 +166,7 @@ export function openQwenAsrRealtimeStream(
         case 'session.updated':
           opened = true;
           openSettled = true;
-          clearTimeout(connectTimer);
+          clearConnectTimer();
           resolve({
             pushAudio: (pcm) => {
               if (ws.readyState !== ws.OPEN || pcm.length === 0) return;
@@ -154,13 +178,20 @@ export function openQwenAsrRealtimeStream(
             finish: () => {
               if (finishPromise) return finishPromise;
               finishPromise = new Promise<string>((res, rej) => {
+                if (terminalError) {
+                  rej(terminalError);
+                  return;
+                }
                 finishResolve = res;
                 finishReject = rej;
+                finishTimer = setTimeout(() => {
+                  fail(new Error('Qwen ASR realtime finish timed out.'));
+                }, FINISH_TIMEOUT_MS);
                 try {
                   sendJson({ type: 'input_audio_buffer.commit' });
                   sendJson({ type: 'session.finish' });
                 } catch (error) {
-                  rej(error);
+                  fail(error);
                 }
               });
               return finishPromise;
@@ -191,7 +222,10 @@ export function openQwenAsrRealtimeStream(
           );
           break;
         case 'session.finished':
+          clearFinishTimer();
           finishResolve?.(committed.trim());
+          finishResolve = null;
+          finishReject = null;
           close();
           break;
         case 'error':
@@ -210,13 +244,18 @@ export function openQwenAsrRealtimeStream(
 
     ws.on('error', fail);
     ws.on('close', () => {
-      clearTimeout(connectTimer);
+      clearConnectTimer();
+      clearFinishTimer();
       if (!openSettled) {
         openSettled = true;
         reject(new Error('Qwen ASR realtime connection closed.'));
         return;
       }
-      finishResolve?.(committed.trim());
+      if (finishReject) {
+        finishReject(new Error('Qwen ASR realtime connection closed.'));
+        finishResolve = null;
+        finishReject = null;
+      }
     });
   });
 }

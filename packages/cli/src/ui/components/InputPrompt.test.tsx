@@ -330,6 +330,8 @@ describe('InputPrompt', () => {
     );
     mockedUseVoiceInput.mockReturnValue({
       status: 'idle',
+      interimText: '',
+      audioLevel: 0,
       handleKeypress: vi.fn(() => false),
     });
 
@@ -362,6 +364,8 @@ describe('InputPrompt', () => {
     const handleVoiceKeypress = vi.fn(() => true);
     mockedUseVoiceInput.mockReturnValue({
       status: 'idle',
+      interimText: '',
+      audioLevel: 0,
       handleKeypress: handleVoiceKeypress,
     });
 
@@ -379,6 +383,8 @@ describe('InputPrompt', () => {
     const handleVoiceKeypress = vi.fn(() => true);
     mockedUseVoiceInput.mockReturnValue({
       status: 'idle',
+      interimText: '',
+      audioLevel: 0,
       handleKeypress: handleVoiceKeypress,
     });
     props.buffer.setText('hello');
@@ -397,6 +403,8 @@ describe('InputPrompt', () => {
     const handleVoiceKeypress = vi.fn(() => true);
     mockedUseVoiceInput.mockReturnValue({
       status: 'recording',
+      interimText: '',
+      audioLevel: 0,
       handleKeypress: handleVoiceKeypress,
     });
     props.shellModeActive = true;
@@ -415,6 +423,8 @@ describe('InputPrompt', () => {
     const handleVoiceKeypress = vi.fn(() => false);
     mockedUseVoiceInput.mockReturnValue({
       status: 'recording',
+      interimText: '',
+      audioLevel: 0,
       handleKeypress: handleVoiceKeypress,
     });
 

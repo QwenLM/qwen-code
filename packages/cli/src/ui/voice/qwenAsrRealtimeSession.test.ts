@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deriveQwenRealtimeUrl,
   openQwenAsrRealtimeStream,
@@ -45,6 +45,10 @@ function parseSent(socket: FakeSocket, index: number): Record<string, unknown> {
 }
 
 describe('qwenAsrRealtimeSession', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('derives the Qwen realtime endpoint from the provider host', () => {
     expect(
       deriveQwenRealtimeUrl(
@@ -142,5 +146,62 @@ describe('qwenAsrRealtimeSession', () => {
     );
 
     await expect(transcriptPromise).resolves.toBe('hello world');
+  });
+
+  it('rejects finish when the server never sends session.finished', async () => {
+    vi.useFakeTimers();
+    const socket = new FakeSocket();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    const transcriptPromise = session.finish();
+    const expectation = await expect(transcriptPromise).rejects.toThrow(
+      'Qwen ASR realtime finish timed out.',
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    await expectation;
+    expect(socket.readyState).toBe(3);
+  });
+
+  it('preserves transcription failures that arrive before finish', async () => {
+    const socket = new FakeSocket();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    socket.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.failed',
+        error: { message: 'server failed' },
+      }),
+      false,
+    );
+
+    await expect(session.finish()).rejects.toThrow('server failed');
   });
 });

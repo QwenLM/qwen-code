@@ -52,6 +52,7 @@ export interface VoiceStreamDeps {
 }
 
 const CONNECT_TIMEOUT_MS = 8000;
+const FINISH_TIMEOUT_MS = 60_000;
 
 export function deriveStreamUrl(baseUrl: string): string {
   const host = new URL(baseUrl).host;
@@ -80,25 +81,53 @@ export function openVoiceStream(
     let started = false;
     let settled = false;
     let committed = '';
+    let finishPromise: Promise<string> | null = null;
     let finishResolve: ((text: string) => void) | null = null;
     let finishReject: ((error: unknown) => void) | null = null;
+    let finishTimer: ReturnType<typeof setTimeout> | null = null;
+    let connectTimer: ReturnType<typeof setTimeout> | null = null;
+    let terminalError: Error | null = null;
+
+    const clearFinishTimer = () => {
+      if (finishTimer) {
+        clearTimeout(finishTimer);
+        finishTimer = null;
+      }
+    };
+
+    const clearConnectTimer = () => {
+      if (connectTimer) {
+        clearTimeout(connectTimer);
+        connectTimer = null;
+      }
+    };
 
     const fail = (error: unknown) => {
       if (settled) return;
-      settled = true;
+      const normalized =
+        error instanceof Error ? error : new Error(String(error));
+      clearConnectTimer();
+      clearFinishTimer();
       try {
         ws.close();
       } catch {
         /* ignore */
       }
       if (finishReject) {
-        finishReject(error);
+        settled = true;
+        finishReject(normalized);
+        finishResolve = null;
+        finishReject = null;
       } else {
-        reject(error instanceof Error ? error : new Error(String(error)));
+        terminalError = normalized;
+        if (!started) {
+          settled = true;
+          reject(normalized);
+        }
       }
     };
 
-    const connectTimer = setTimeout(() => {
+    connectTimer = setTimeout(() => {
       if (!started) fail(new Error('Voice stream connection timed out.'));
     }, CONNECT_TIMEOUT_MS);
 
@@ -150,15 +179,23 @@ export function openVoiceStream(
       const event = msg.header?.event;
       if (event === 'task-started') {
         started = true;
-        clearTimeout(connectTimer);
+        clearConnectTimer();
         resolve({
           pushAudio: (pcm) => {
             if (ws.readyState === ws.OPEN && pcm.length > 0) ws.send(pcm);
           },
-          finish: () =>
-            new Promise<string>((res, rej) => {
+          finish: () => {
+            if (finishPromise) return finishPromise;
+            finishPromise = new Promise<string>((res, rej) => {
+              if (terminalError) {
+                rej(terminalError);
+                return;
+              }
               finishResolve = res;
               finishReject = rej;
+              finishTimer = setTimeout(() => {
+                fail(new Error('Voice stream finish timed out.'));
+              }, FINISH_TIMEOUT_MS);
               try {
                 ws.send(
                   JSON.stringify({
@@ -171,9 +208,11 @@ export function openVoiceStream(
                   }),
                 );
               } catch (error) {
-                rej(error);
+                fail(error);
               }
-            }),
+            });
+            return finishPromise;
+          },
           abort: () => {
             try {
               ws.close();
@@ -203,7 +242,8 @@ export function openVoiceStream(
         }
       } else if (event === 'task-finished') {
         settled = true;
-        clearTimeout(connectTimer);
+        clearConnectTimer();
+        clearFinishTimer();
         try {
           ws.close();
         } catch {
@@ -211,7 +251,7 @@ export function openVoiceStream(
         }
         finishResolve?.(committed.trim());
       } else if (event === 'task-failed') {
-        clearTimeout(connectTimer);
+        clearConnectTimer();
         fail(
           new Error(
             `Voice stream failed (${msg.header?.error_code ?? 'error'}): ${
@@ -223,19 +263,30 @@ export function openVoiceStream(
     });
 
     ws.on('error', (...args: unknown[]) => {
-      clearTimeout(connectTimer);
+      clearConnectTimer();
       const error = args[0];
       fail(error instanceof Error ? error : new Error(String(error)));
     });
 
     ws.on('close', () => {
-      clearTimeout(connectTimer);
+      clearConnectTimer();
+      clearFinishTimer();
       if (settled) return;
       if (started && finishResolve) {
         settled = true;
-        finishResolve(committed.trim());
+        finishReject?.(
+          new Error(
+            'Voice stream connection closed unexpectedly. Transcript may be incomplete.',
+          ),
+        );
+        finishResolve = null;
+        finishReject = null;
       } else if (!started) {
         fail(new Error('Voice stream closed before it started.'));
+      } else {
+        terminalError ??= new Error(
+          'Voice stream connection closed unexpectedly. Transcript may be incomplete.',
+        );
       }
     });
   });

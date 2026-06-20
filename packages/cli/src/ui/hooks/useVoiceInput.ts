@@ -104,6 +104,10 @@ function insertTranscript(
   return true;
 }
 
+function isCancelKey(key: Key): boolean {
+  return key.name === 'escape' || (key.ctrl && key.name === 'c');
+}
+
 export function useVoiceInput({
   enabled,
   mode = 'hold',
@@ -298,7 +302,7 @@ export function useVoiceInput({
           return transcribe(audio, { voiceModel });
         })
         .then((transcript) => {
-          if (!mountedRef.current) {
+          if (!mountedRef.current || recorderRef.current !== recorder) {
             return;
           }
           const inserted = insertTranscript(buffer, transcript);
@@ -307,6 +311,9 @@ export function useVoiceInput({
           }
         })
         .catch((error: unknown) => {
+          if (recorderRef.current !== recorder) {
+            return;
+          }
           if (wasStreaming) {
             void Promise.resolve()
               .then(() => recorder.stop())
@@ -357,6 +364,7 @@ export function useVoiceInput({
     streamSessionPromiseRef.current = null;
     resetStreamUi();
     const recorder = recorderRef.current;
+    setVoiceStatus('idle');
     if (!recorder) {
       return;
     }
@@ -367,9 +375,7 @@ export function useVoiceInput({
     void startPromise
       .then(() => recorder.stop())
       .catch(() => undefined)
-      .finally(() => {
-        setVoiceStatus('idle');
-      });
+      .finally(() => setVoiceStatus('idle'));
   }, [clearPump, clearReleaseTimer, resetStreamUi, setVoiceStatus]);
   cancelRecordingRef.current = cancelRecording;
 
@@ -415,6 +421,10 @@ export function useVoiceInput({
         !voiceModel ||
         !keyMatchers[Command.VOICE_PUSH_TO_TALK](key)
       ) {
+        if (statusRef.current !== 'idle' && isCancelKey(key)) {
+          cancelRecording();
+          return true;
+        }
         return false;
       }
 
@@ -443,7 +453,15 @@ export function useVoiceInput({
 
       return true;
     },
-    [armReleaseTimer, enabled, finalize, mode, startRecording, voiceModel],
+    [
+      armReleaseTimer,
+      cancelRecording,
+      enabled,
+      finalize,
+      mode,
+      startRecording,
+      voiceModel,
+    ],
   );
 
   return { status, interimText, audioLevel, handleKeypress };

@@ -284,6 +284,13 @@ jobs:
         run: |-
           QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
 
+  audio_capture_prebuilds:
+    name: 'Audio Capture Prebuilds'
+    needs: 'prepare'
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    uses: './.github/workflows/audio-capture-prebuilds.yml'
+
   publish:
     name: 'Publish Release'
     runs-on: 'ubuntu-latest'
@@ -292,10 +299,12 @@ jobs:
       - 'quality'
       - 'integration_none'
       - 'integration_docker'
+      - 'audio_capture_prebuilds'
     if: |-
       ${{
         always() &&
         needs.prepare.result == 'success' &&
+        needs.audio_capture_prebuilds.result == 'success' &&
         (
           github.event.inputs.force_skip_tests == 'true' ||
           (
@@ -385,6 +394,12 @@ jobs:
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
+
+      - name: 'Download audio capture prebuilds'
+        uses: 'actions/download-artifact@v4'
+        with:
+          name: 'audio-capture-prebuilds'
+          path: 'packages/audio-capture/prebuilds'
 
       - name: 'Publish @qwen-code/audio-capture'
         working-directory: 'packages/audio-capture'
