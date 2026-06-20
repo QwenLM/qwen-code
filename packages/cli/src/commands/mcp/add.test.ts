@@ -115,6 +115,16 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should auto-detect http transport when commandOrUrl uses an uppercase URL scheme', async () => {
+    await parser.parseAsync('add http-server HTTPS://example.com/mcp');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'http-server': {
+        httpUrl: 'HTTPS://example.com/mcp',
+      },
+    });
+  });
+
   it('should respect explicit transport even when commandOrUrl is a URL', async () => {
     await parser.parseAsync(
       'add --transport sse sse-server https://example.com/sse-endpoint',
