@@ -104,10 +104,25 @@ export async function handleInstall(args: InstallArgs) {
           extension.name,
           SettingScope.User,
         );
-        await extensionManager.enableExtension(
-          extension.name,
-          SettingScope.Workspace,
-        );
+        try {
+          await extensionManager.enableExtension(
+            extension.name,
+            SettingScope.Workspace,
+          );
+        } catch (enableError) {
+          // The User-scope disable already landed. If the Workspace enable
+          // fails, the extension would be left disabled everywhere — roll the
+          // User enable back so it isn't silently dead, then surface the error.
+          try {
+            await extensionManager.enableExtension(
+              extension.name,
+              SettingScope.User,
+            );
+          } catch {
+            // Best-effort rollback; report the original failure below.
+          }
+          throw enableError;
+        }
       }
     }
     writeStdoutLine(

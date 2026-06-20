@@ -11,6 +11,7 @@ import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { loadMarketplaceConfigFromSource } from './marketplace.js';
+import { quarantineCorruptFile } from './corruptFile.js';
 import type {
   ClaudeMarketplaceConfig,
   ClaudeMarketplacePluginConfig,
@@ -86,11 +87,13 @@ function asMcpNames(
 function pluginComponents(
   plugin: ClaudeMarketplacePluginConfig,
 ): DiscoveredPluginComponents | undefined {
+  // Component names render raw in the Discover "Will install" summary, so scrub
+  // them like the other untrusted marketplace fields to block ANSI injection.
   const components: DiscoveredPluginComponents = {
-    skills: asNameList(plugin.skills),
-    commands: asNameList(plugin.commands),
-    agents: asNameList(plugin.agents),
-    mcpServers: asMcpNames(plugin.mcpServers),
+    skills: asNameList(plugin.skills)?.map((s) => sanitizeDisplay(s)),
+    commands: asNameList(plugin.commands)?.map((s) => sanitizeDisplay(s)),
+    agents: asNameList(plugin.agents)?.map((s) => sanitizeDisplay(s)),
+    mcpServers: asMcpNames(plugin.mcpServers)?.map((s) => sanitizeDisplay(s)),
   };
   return Object.values(components).some(Boolean) ? components : undefined;
 }
@@ -210,11 +213,15 @@ function pluginsFromConfig(
     marketplaceName: sanitizeDisplay(config.name || marketplace.name),
     name: sanitizeDisplay(plugin.name),
     description: sanitizeDisplay(plugin.description),
-    version: plugin.version,
+    // `version` and `lastUpdated` render in the pre-consent Discover detail via
+    // `t()` (no escaping), so they need the same scrubbing as the other
+    // untrusted display fields. `category` has no sink today but is wrapped for
+    // consistency / future-proofing.
+    version: sanitizeDisplay(plugin.version),
     author: sanitizeDisplay(plugin.author?.name),
     homepage: sanitizeDisplay(plugin.homepage),
-    category: plugin.category,
-    lastUpdated: pluginLastUpdated(plugin),
+    category: sanitizeDisplay(plugin.category),
+    lastUpdated: sanitizeDisplay(pluginLastUpdated(plugin)),
     installs: pluginInstalls(plugin),
     components: pluginComponents(plugin),
     installSource: resolveInstallSource(marketplace, plugin),
@@ -242,6 +249,10 @@ export class SourceRegistryStore {
         return [];
       }
       debugLogger.error('Error reading marketplace registry:', error);
+      // Move the unreadable file aside so the next `add`/`remove` write doesn't
+      // clobber a recoverable (e.g. truncated) source list with the empty
+      // default returned below.
+      quarantineCorruptFile(this.filePath);
       return [];
     }
   }

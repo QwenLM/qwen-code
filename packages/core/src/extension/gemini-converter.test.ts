@@ -20,6 +20,11 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
+    // The symlink-confinement guard (realPathWithin) resolves both the config
+    // path and its dir via realpathSync. These unit tests use in-memory mock
+    // dirs that don't exist on disk, so resolve paths to themselves — keeping
+    // the config inside its (mock) extension dir so the guard passes.
+    realpathSync: vi.fn((p: string) => p),
   };
 });
 

@@ -103,6 +103,13 @@ describe('DiffDialog', () => {
       unmount?.();
       if (original) {
         Object.defineProperty(process.stdout, 'columns', original);
+      } else {
+        // Non-TTY (CI/piped stdout): `columns` is inherited from the prototype,
+        // so there was no own-property to restore. Delete the override we added
+        // so it doesn't leak into later test files via useTerminalSize.
+        delete (process.stdout as unknown as Record<string, unknown>)[
+          'columns'
+        ];
       }
     }
   });

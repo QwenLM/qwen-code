@@ -206,7 +206,11 @@ export const DiscoverTab = ({
   }, [pendingInstall, onLockChange, onStatus]);
 
   const runInstall = useCallback(
-    async (targets: DiscoveredPlugin[], scope: ExtensionScope) => {
+    async (
+      targets: DiscoveredPlugin[],
+      scope: ExtensionScope,
+      origin: 'detail' | 'list',
+    ) => {
       if (!extensionManager || targets.length === 0) return;
       setInstalling(true);
       let installed = 0;
@@ -271,18 +275,24 @@ export const DiscoverTab = ({
       onInstalled();
       if (errors.length === 0) {
         goToList();
-      } else {
-        // On failure, stay on the extension detail so the error remains
-        // visible and the user can retry, instead of dropping to the list.
+      } else if (origin === 'detail') {
+        // Single install from a plugin's detail: stay on detail so the error
+        // remains visible over the right plugin and the user can retry.
         setView('detail');
         onLockChange(true);
+      } else {
+        // Batch install started from the list: the detail view renders
+        // filtered[cursor] — an arbitrary row unrelated to what failed — so
+        // returning there would offer a misleading retry. Keep the error over
+        // the list instead.
+        goToList();
       }
     },
     [extensionManager, onStatus, load, onInstalled, goToList, onLockChange],
   );
 
   const installWithScope = useCallback(
-    (scope: ExtensionScope) => void runInstall(pendingInstall(), scope),
+    (scope: ExtensionScope) => void runInstall(pendingInstall(), scope, 'list'),
     [runInstall, pendingInstall],
   );
 
@@ -336,7 +346,7 @@ export const DiscoverTab = ({
       } else if (action === 'homepage') {
         if (selected) void openHomepage(selected);
       } else if (selected) {
-        void runInstall([selected], action);
+        void runInstall([selected], action, 'detail');
       }
     },
     [selected, goToList, openHomepage, runInstall],

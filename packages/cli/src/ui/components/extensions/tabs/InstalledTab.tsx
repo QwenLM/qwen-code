@@ -530,14 +530,15 @@ export const InstalledTab = ({
           }
           return;
         }
-        // Enable: clear the extension-scoped flag, then fall through to the
-        // shared enable path (which also clears any manual exclusions).
-        extensionManager?.setMcpServerDisabled(
-          item.parentExtension,
-          item.name,
-          false,
-        );
+        // Enable: clear the extension-scoped flag inside the try below (so a
+        // write failure routes to the error toast instead of crashing as an
+        // unhandled rejection), then fall through to the shared enable path
+        // (which also clears any manual exclusions).
       }
+      // Whether this is the bundled-MCP enable fall-through that still needs the
+      // extension-scoped disable flag cleared.
+      const clearBundledDisable =
+        Boolean(item.parentExtension) && !item.isActive;
       const toolRegistry = config.getToolRegistry();
       mutatingRef.current = true;
       // Enabling rediscovers the server's tools, which can take a while.
@@ -548,6 +549,13 @@ export const InstalledTab = ({
           : t('Enabling MCP "{{name}}"...', { name: item.name }),
       });
       try {
+        if (clearBundledDisable && extensionManager && item.parentExtension) {
+          extensionManager.setMcpServerDisabled(
+            item.parentExtension,
+            item.name,
+            false,
+          );
+        }
         const settings = loadSettings();
         const targetScope =
           item.mcp.scope === 'project'

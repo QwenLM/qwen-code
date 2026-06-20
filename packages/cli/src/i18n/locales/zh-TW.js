@@ -124,6 +124,7 @@ export default {
   'Update marketplace': '更新市場來源',
   'Update marketplace (last updated {{date}})':
     '更新市場來源（最近更新 {{date}}）',
+  'Could not update marketplace "{{name}}".': '無法更新市場來源 "{{name}}"。',
   'Updated "{{name}}".': '已更新 "{{name}}"。',
   'Updated marketplace "{{name}}".': '已更新市場來源 "{{name}}"。',
   'Use the Discover tab to find and install plugins.':
@@ -153,7 +154,6 @@ export default {
   '↓ more below': '↓ 下方更多',
   '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
     '⚠ 在安裝、更新或使用擴展前，請確保你信任它。我們無法驗證擴展包含哪些 MCP 伺服器、檔案或其他軟體，也無法保證其按預期運作。更多資訊請查看擴展主頁。',
-
 
   // Tool display names (chat-stream badge labels)
   // ----------------------------------------------------------------------------

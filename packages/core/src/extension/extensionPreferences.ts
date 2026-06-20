@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { quarantineCorruptFile } from './corruptFile.js';
 
 const debugLogger = createDebugLogger('EXT_PREFERENCES');
 
@@ -105,6 +106,10 @@ export class ExtensionPreferencesStore {
         return emptyPreferences();
       }
       debugLogger.error('Error reading extension preferences:', error);
+      // Move the unreadable file aside so the next toggleFavorite/setScope/
+      // setMcpServerDisabled write doesn't clobber recoverable favorites/scopes
+      // with the empty default returned below.
+      quarantineCorruptFile(this.filePath);
       return emptyPreferences();
     }
   }

@@ -31,8 +31,23 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { substituteHookVariables } from './variables.js';
+import { stripVTControlCharacters } from 'node:util';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
+
+// C0/C1 control chars left behind after escape-sequence stripping.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/**
+ * Strips terminal escape/control sequences from untrusted values before they
+ * are interpolated into error messages. Conversion errors here propagate to the
+ * TUI install status area, so a hostile plugin `source`/`path` could otherwise
+ * smuggle ANSI/OSC sequences to the terminal during a failed install.
+ */
+function sanitizeForError(text: string): string {
+  return stripVTControlCharacters(text).replace(CONTROL_CHARS_RE, '');
+}
 
 export interface ClaudePluginConfig {
   name: string;
@@ -495,6 +510,15 @@ export async function convertClaudePluginPackage(
     const pluginConfig: ClaudePluginConfig = JSON.parse(pluginContent);
     mergedConfig = mergeClaudeConfigs(marketplacePlugin, pluginConfig);
   } else {
+    // `existsSync` follows symlinks, so the strict check at line 500 passes
+    // when plugin.json is a symlink to an existing host file — but the file is
+    // not trusted (`realPathWithin` rejected it). Strict mode must fail here
+    // rather than silently fall back to the marketplace entry.
+    if (strict) {
+      throw new Error(
+        `Strict mode requires a trusted plugin.json at ${pluginJsonPath}`,
+      );
+    }
     if (fs.existsSync(pluginJsonPath)) {
       debugLogger.warn(
         `Ignoring plugin.json at ${pluginJsonPath}; it resolves through a symlink outside the plugin.`,
@@ -698,9 +722,23 @@ export async function convertClaudePluginStandalone(
     );
   }
 
-  const mergedConfig: ClaudePluginConfig = JSON.parse(
+  const parsedConfig: unknown = JSON.parse(
     fs.readFileSync(pluginJsonPath, 'utf-8'),
   );
+  // A plugin.json whose body is `null`, an array, or a scalar would otherwise
+  // throw an opaque `Cannot read properties of null` on the deref below. Fail
+  // with a clear message instead (the marketplace path tolerates this via
+  // `mergeClaudeConfigs`, so guard the standalone path to match).
+  if (
+    typeof parsedConfig !== 'object' ||
+    parsedConfig === null ||
+    Array.isArray(parsedConfig)
+  ) {
+    throw new Error(
+      `Invalid plugin configuration at ${pluginJsonPath}: expected a JSON object`,
+    );
+  }
+  const mergedConfig = parsedConfig as ClaudePluginConfig;
 
   if (!mergedConfig.mcpServers) {
     const mcpJsonPath = path.join(extensionDir, '.mcp.json');
@@ -729,6 +767,13 @@ export async function convertClaudePluginStandalone(
           `Failed to parse .mcp.json at ${mcpJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    } else if (fs.existsSync(mcpJsonPath)) {
+      // The file exists but resolves through a symlink outside the plugin.
+      // Mirror the plugin.json skip-warning so a missing-MCP-servers
+      // investigation has a breadcrumb instead of a silent drop.
+      debugLogger.warn(
+        `Ignoring .mcp.json at ${mcpJsonPath}; it resolves through a symlink outside the plugin.`,
+      );
     }
   }
 
@@ -990,19 +1035,21 @@ async function resolvePluginSource(
       !resolvedSource.startsWith(marketplaceBase + path.sep)
     ) {
       throw new Error(
-        `Plugin source "${source}" escapes the marketplace directory`,
+        `Plugin source "${sanitizeForError(source)}" escapes the marketplace directory`,
       );
     }
 
     if (!fs.existsSync(sourcePath)) {
-      throw new Error(`Plugin source not found at ${sourcePath}`);
+      throw new Error(
+        `Plugin source not found at ${sanitizeForError(sourcePath)}`,
+      );
     }
 
     // The lexical check is string-only; reject a source that reaches outside
     // the marketplace dir through a symlink before copying it in.
     if (!realPathWithin(sourcePath, marketplaceDir)) {
       throw new Error(
-        `Plugin source "${source}" resolves through a symlink outside the marketplace directory`,
+        `Plugin source "${sanitizeForError(source)}" resolves through a symlink outside the marketplace directory`,
       );
     }
 
@@ -1059,19 +1106,29 @@ async function resolvePluginSource(
     // repo so a value like "../../.ssh" (or an absolute path) cannot escape.
     if (!source.path || source.path === '.' || path.isAbsolute(source.path)) {
       throw new Error(
-        `Invalid plugin subdirectory "${source.path}" for ${source.url}`,
+        `Invalid plugin subdirectory "${sanitizeForError(String(source.path))}" for ${sanitizeForError(source.url)}`,
       );
     }
     const subDir = path.resolve(pluginDir, source.path);
     const repoRoot = path.resolve(pluginDir);
     if (!subDir.startsWith(repoRoot + path.sep)) {
       throw new Error(
-        `Plugin subdirectory "${source.path}" escapes the repository root of ${source.url}`,
+        `Plugin subdirectory "${sanitizeForError(source.path)}" escapes the repository root of ${sanitizeForError(source.url)}`,
       );
     }
     if (!fs.existsSync(subDir)) {
       throw new Error(
-        `Plugin subdirectory "${source.path}" not found in ${source.url} (ref: ${source.ref ?? source.sha ?? 'HEAD'})`,
+        `Plugin subdirectory "${sanitizeForError(source.path)}" not found in ${sanitizeForError(source.url)} (ref: ${source.ref ?? source.sha ?? 'HEAD'})`,
+      );
+    }
+    // The lexical `startsWith` check above is string-only; `cloneFromGit`
+    // checks out symlinks on macOS/Linux, so a hostile repo can commit the
+    // subdir as a symlink whose name stays inside the clone but whose target
+    // escapes it (e.g. `evil -> /etc`). Re-verify the real path before
+    // returning it as the copy source.
+    if (!realPathWithin(subDir, pluginDir)) {
+      throw new Error(
+        `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`,
       );
     }
     return subDir;

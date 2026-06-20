@@ -36,6 +36,14 @@ export function convertGeminiToQwenConfig(
   extensionDir: string,
 ): ExtensionConfig {
   const configFilePath = path.join(extensionDir, 'gemini-extension.json');
+  // The manifest may be a symlink in an untrusted clone; refuse to follow it
+  // outside the extension (would read an arbitrary JSON-shaped host file),
+  // matching the Claude-format manifest guards.
+  if (!realPathWithin(configFilePath, extensionDir)) {
+    throw new Error(
+      `Gemini extension config at ${configFilePath} resolves through a symlink outside the extension`,
+    );
+  }
   const configContent = fs.readFileSync(configFilePath, 'utf-8');
   const geminiConfig: GeminiExtensionConfig = JSON.parse(configContent);
   // Validate required fields
@@ -248,6 +256,10 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
 export function isGeminiExtensionConfig(extensionDir: string) {
   const configFilePath = path.join(extensionDir, 'gemini-extension.json');
   if (!fs.existsSync(configFilePath)) {
+    return false;
+  }
+  // Don't read through a symlink that escapes the extension during detection.
+  if (!realPathWithin(configFilePath, extensionDir)) {
     return false;
   }
 

@@ -128,6 +128,8 @@ export default {
   'Update marketplace': 'Update marketplace',
   'Update marketplace (last updated {{date}})':
     'Update marketplace (last updated {{date}})',
+  'Could not update marketplace "{{name}}".':
+    'Could not update marketplace "{{name}}".',
   'Updated "{{name}}".': 'Updated "{{name}}".',
   'Updated marketplace "{{name}}".': 'Updated marketplace "{{name}}".',
   'Use the Discover tab to find and install plugins.':

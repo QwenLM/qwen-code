@@ -258,14 +258,25 @@ export const SourcesTab = ({
 
   const removeSource = useCallback(() => {
     if (!extensionManager || !detailSource) return;
-    const removed = extensionManager.removeSource(detailSource.name);
-    if (removed) {
-      onStatus({
-        type: 'success',
-        text: t('Removed marketplace "{{name}}".', { name: detailSource.name }),
-      });
-      void load();
-      onChanged();
+    // removeSource() -> atomicWriteFileSync can throw (EACCES/EROFS/ENOSPC, or
+    // a Windows lock on marketplaces.json). Unlike the async sibling handlers,
+    // this runs synchronously inside the keypress broadcast loop, so an
+    // unguarded throw would tear down the whole TUI session. Degrade to an
+    // error toast instead.
+    try {
+      const removed = extensionManager.removeSource(detailSource.name);
+      if (removed) {
+        onStatus({
+          type: 'success',
+          text: t('Removed marketplace "{{name}}".', {
+            name: detailSource.name,
+          }),
+        });
+        void load();
+        onChanged();
+      }
+    } catch (error) {
+      onStatus({ type: 'error', text: getErrorMessage(error) });
     }
     goToList();
   }, [extensionManager, detailSource, onStatus, load, onChanged, goToList]);
@@ -276,6 +287,19 @@ export const SourcesTab = ({
     try {
       const cfg = await extensionManager.loadSource(detailSource.source);
       setDetailConfig(cfg ?? null);
+      // loadSource returns null when the marketplace is unreachable / invalid.
+      // Only advance the lastUpdated timestamp and report success on a real
+      // refresh — otherwise a failed update would show "Updated marketplace X".
+      if (cfg === null) {
+        onStatus({
+          type: 'error',
+          text: t('Could not update marketplace "{{name}}".', {
+            name: detailSource.name,
+          }),
+        });
+        await load();
+        return;
+      }
       extensionManager.markSourceUpdated(detailSource.name);
       await load();
       onChanged();
@@ -584,7 +608,7 @@ export const SourcesTab = ({
       <Box flexDirection="column" gap={1}>
         <Text color={theme.status.warning}>
           {t('Remove marketplace "{{name}}"?', {
-            name: detailSource?.name ?? '',
+            name: stripUnsafeCharacters(detailSource?.name ?? ''),
           })}
         </Text>
         <Text color={theme.text.secondary}>
@@ -649,7 +673,10 @@ export const SourcesTab = ({
           {sources.map((source, j) =>
             renderRow(
               sourcesStart + j,
-              source.name,
+              // Persisted marketplace name is stored raw from untrusted config;
+              // scrub it at the render site (also defends already-persisted
+              // entries) like the detail header does.
+              stripUnsafeCharacters(source.name),
               `${redactUrlCredentials(source.source)} (${source.type})`,
             ),
           )}

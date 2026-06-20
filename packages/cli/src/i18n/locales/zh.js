@@ -122,6 +122,7 @@ export default {
   'Update marketplace': '更新市场源',
   'Update marketplace (last updated {{date}})':
     '更新市场源（最近更新 {{date}}）',
+  'Could not update marketplace "{{name}}".': '无法更新市场源 "{{name}}"。',
   'Updated "{{name}}".': '已更新 "{{name}}"。',
   'Updated marketplace "{{name}}".': '已更新市场源 "{{name}}"。',
   'Use the Discover tab to find and install plugins.':
