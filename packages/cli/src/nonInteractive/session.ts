@@ -527,7 +527,8 @@ class Session {
       });
     } catch (error) {
       debugLogger.error('[Session] Continue turn execution error:', error);
-      throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Continue turn failed: ${message}`, { cause: error });
     } finally {
       this.continueTurnInProgress = false;
     }

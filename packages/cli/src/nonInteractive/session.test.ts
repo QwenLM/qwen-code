@@ -474,7 +474,7 @@ describe('runNonInteractiveStreamJson', () => {
     expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
       expect.objectContaining({
         isError: true,
-        errorMessage: 'continue failed',
+        errorMessage: 'Continue turn failed: continue failed',
       }),
     );
   });

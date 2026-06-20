@@ -2147,9 +2147,9 @@ export class GeminiClient {
       };
 
       const resultStream = turn.run(model, requestToSend, signal);
-      retrySendStarted = true;
       let didUpdateIdeContextState = false;
       for await (const event of resultStream) {
+        retrySendStarted = true;
         if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
           this.lastSentIdeContext = nextIdeContext;
           this.forceFullIdeContext = false;

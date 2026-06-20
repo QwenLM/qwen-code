@@ -1411,8 +1411,6 @@ export class Session implements SessionContext {
                 ];
               }
 
-              await this.#snapshotFileHistory(promptId);
-
               let turnCount = 0;
               let continueSendStarted = false;
               // When we have orphaned entries to restore, `restoreStrippedPromptEntries`
@@ -2080,6 +2078,14 @@ ${this.pendingWorktreeNotice}
               }
             }
           } catch (error) {
+            if (
+              pendingSend.signal.aborted &&
+              pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
+              (this.#isAbortError(error) || error === USER_CANCEL_ABORT_REASON)
+            ) {
+              return { stopReason: 'cancelled' };
+            }
+
             // Fire StopFailure hook (fire-and-forget)
             const errorStatus = getErrorStatus(error);
             const errorMessage =

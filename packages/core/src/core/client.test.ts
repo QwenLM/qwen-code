@@ -6456,6 +6456,44 @@ Other open files:
         ).toHaveBeenCalledOnce();
       });
 
+      it('restores stripped retry entries when the retry stream throws before its first event', async () => {
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'retry me' }],
+        };
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValueOnce(1).mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-pre-event-failure',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed before first event');
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
+      });
+
       it('should not increment sessionTurnCount for retry', async () => {
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),

@@ -1141,13 +1141,15 @@ export async function runNonInteractive(
         // Start assistant message for this turn
         adapter.startAssistantMessage();
         let eventSeen = false;
+        const isSendStartEvent = (event: { type: GeminiEventType }) =>
+          event.type !== GeminiEventType.SessionTokenLimitExceeded;
 
         for await (const event of responseStream) {
-          if (event.type === GeminiEventType.SessionTokenLimitExceeded) {
+          if (!isSendStartEvent(event)) {
             restoreStrippedContinuationEntries();
           }
           if (!eventSeen) {
-            if (event.type !== GeminiEventType.SessionTokenLimitExceeded) {
+            if (isSendStartEvent(event)) {
               continuationSendStarted = true;
             }
             eventSeen = true;

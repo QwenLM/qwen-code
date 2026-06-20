@@ -1441,6 +1441,77 @@ describe('Session', () => {
       );
     });
 
+    it('feeds model tool calls back through the continuation loop', async () => {
+      setHistoryTail([
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+        },
+      ]);
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      });
+      const tool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        }),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-2',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await expect(session.continueTurn()).resolves.toMatchObject({
+        stopReason: 'end_turn',
+        resumed: true,
+        interruption: 'interrupted_turn',
+      });
+
+      expect(executeSpy).toHaveBeenCalledTimes(1);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        'qwen3-code-plus',
+        {
+          message: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'call-2',
+                name: 'read_file',
+              }),
+            }),
+          ],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        'test-session-id########0',
+      );
+    });
+
     it('adds system reminders without moving function responses', async () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       setHistoryTail([
@@ -1525,7 +1596,7 @@ describe('Session', () => {
       );
     });
 
-    it('snapshots file state before a continued turn sends', async () => {
+    it('does not create a duplicate file snapshot for a continued turn', async () => {
       setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
       getStripSpy().mockReturnValue([]);
       mockChat.sendMessageStream = vi
@@ -1534,9 +1605,7 @@ describe('Session', () => {
 
       await session.continueTurn();
 
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
-        'test-session-id########0',
-      );
+      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
     });
 
     it('logs continuation detection and stripped-entry counts', async () => {
@@ -6049,6 +6118,56 @@ describe('Session', () => {
               },
             },
           });
+        });
+
+        it('treats user cancellation during a Stop hook continuation as cancelled', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          let sendCount = 0;
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            sendCount++;
+            if (sendCount === 1) {
+              return createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      { content: { parts: [{ text: 'response' }] } },
+                    ],
+                  },
+                },
+              ]);
+            }
+            await session.cancelPendingPrompt();
+            return Promise.reject('qwen:user-cancel');
+          });
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'cancelled' });
         });
       });
 
