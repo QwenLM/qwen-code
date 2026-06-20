@@ -245,7 +245,15 @@ export async function watchRepoBranch(
       try {
         watcher = fs.watch(logsHeadPath, (eventType: string) => {
           if (eventType === 'change' || eventType === 'rename') {
-            repoBranchWatches.get(gitDir)?.subscribers.forEach((cb) => cb());
+            repoBranchWatches.get(gitDir)?.subscribers.forEach((cb) => {
+              // Isolate subscriber failures: in this shared-watcher fan-out one
+              // throwing callback must not halt the others or crash the watch.
+              try {
+                cb();
+              } catch {
+                // ignore a subscriber's own error
+              }
+            });
           }
         });
       } catch {

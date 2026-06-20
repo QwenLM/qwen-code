@@ -343,6 +343,25 @@ describe('watchRepoBranch', () => {
     expect(w.close).toHaveBeenCalledTimes(1);
   });
 
+  it('isolates a throwing subscriber from the others', async () => {
+    const w = installWatchMock();
+    const repo = await makeRepo('ref: refs/heads/main\n');
+    const bad = vi.fn(() => {
+      throw new Error('subscriber boom');
+    });
+    const good = vi.fn();
+    const disposeBad = await watchRepoBranch(repo, bad);
+    const disposeGood = await watchRepoBranch(repo, good);
+
+    // One subscriber throwing must not halt the fan-out or escape the watch.
+    expect(() => w.fire('change')).not.toThrow();
+    expect(bad).toHaveBeenCalledTimes(1);
+    expect(good).toHaveBeenCalledTimes(1);
+
+    disposeBad();
+    disposeGood();
+  });
+
   it('refreshes on rename events but ignores unknown ones', async () => {
     const w = installWatchMock();
     const repo = await makeRepo('ref: refs/heads/main\n');
