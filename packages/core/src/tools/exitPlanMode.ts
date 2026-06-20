@@ -22,7 +22,6 @@ import {
   formatBlockedResponse,
   formatNeedsUserResponse,
   formatCapEscalationResponse,
-  formatUnavailableResponse,
   formatApprovedNotes,
 } from '../plan-gate/planApprovalGate.js';
 import type { EvidenceBundle } from '../plan-gate/types.js';
@@ -295,16 +294,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
             };
           }
           case 'unavailable': {
-            const llmContent = formatUnavailableResponse(decision);
-            const message = `Plan gate: unavailable - ${decision.reason}`;
-            return {
-              llmContent,
-              returnDisplay: this.buildRejectedGateDisplay(
-                message,
-                plan,
-                llmContent,
-              ),
-            };
+            // Gate is broken — fall back to user confirmation instead of
+            // trapping in plan mode with no escape hatch.
+            debugLogger.warn(
+              `Gate unavailable, falling back to user confirmation: ${decision.reason}`,
+            );
+            return this.fallbackToUserConfirmation(plan, currentPrePlanMode);
           }
           default: {
             const _exhaustive: never = decision;
@@ -401,6 +396,37 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       returnDisplay: {
         type: 'plan_summary',
         message: displayMessage,
+        plan,
+      },
+    };
+  }
+
+  /**
+   * Gate unavailable fallback — grant provisional approval so the user
+   * can decide instead of being trapped in plan mode with no escape.
+   */
+  private fallbackToUserConfirmation(
+    plan: string,
+    targetMode: ApprovalMode,
+  ): ToolResult {
+    this.setApprovalModeSafely(targetMode);
+
+    // Save plan so it's on disk even if user proceeds.
+    try {
+      this.config.savePlan(plan);
+    } catch (error) {
+      debugLogger.warn(
+        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    return {
+      llmContent:
+        'Gate unavailable. Falling back to user confirmation — you may proceed manually or cancel to stay in plan mode.',
+      returnDisplay: {
+        type: 'plan_summary',
+        message:
+          'Plan gate is unavailable. Falling back to user confirmation — you may proceed manually or cancel to stay in plan mode.',
         plan,
       },
     };
