@@ -6,8 +6,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { stripVTControlCharacters } from 'node:util';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { loadMarketplaceConfigFromSource } from './marketplace.js';
@@ -184,10 +184,6 @@ function resolveInstallSource(
   return plugin.name;
 }
 
-// C0/C1 control chars left behind after escape-sequence stripping.
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
-
 /**
  * Strips terminal escape/control sequences from untrusted marketplace text.
  * Plugin metadata is rendered in the TUI before the user consents to install,
@@ -200,8 +196,8 @@ function sanitizeDisplay(text: string): string;
 function sanitizeDisplay(text: string | undefined): string | undefined;
 function sanitizeDisplay(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
-  // Drop ANSI/VT escape sequences, then any remaining C0/C1 control chars.
-  return stripVTControlCharacters(text).replace(CONTROL_CHARS_RE, '');
+  // Delegates to the single shared implementation so the rule can't drift.
+  return stripAnsiAndControl(text);
 }
 
 function pluginsFromConfig(
@@ -236,10 +232,9 @@ export class SourceRegistryStore {
   constructor(private readonly filePath: string) {}
 
   read(): ExtensionSource[] {
+    let content: string;
     try {
-      const content = fs.readFileSync(this.filePath, 'utf-8');
-      const parsed = JSON.parse(content);
-      return Array.isArray(parsed) ? (parsed as ExtensionSource[]) : [];
+      content = fs.readFileSync(this.filePath, 'utf-8');
     } catch (error) {
       if (
         error instanceof Error &&
@@ -248,10 +243,19 @@ export class SourceRegistryStore {
       ) {
         return [];
       }
+      // A transient read error (permission/too-many-files/…) — the file may be
+      // valid, so do NOT quarantine it; only a parse failure below does that.
       debugLogger.error('Error reading marketplace registry:', error);
-      // Move the unreadable file aside so the next `add`/`remove` write doesn't
-      // clobber a recoverable (e.g. truncated) source list with the empty
-      // default returned below.
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(content);
+      return Array.isArray(parsed) ? (parsed as ExtensionSource[]) : [];
+    } catch (parseError) {
+      // Genuine corruption: move the file aside so the next `add`/`remove`
+      // write can't clobber a recoverable (e.g. truncated) source list with
+      // the empty default returned below.
+      debugLogger.error('Corrupt marketplace registry:', parseError);
       quarantineCorruptFile(this.filePath);
       return [];
     }

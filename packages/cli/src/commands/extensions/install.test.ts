@@ -264,6 +264,70 @@ describe('handleInstall', () => {
     );
   });
 
+  it('rolls back the User-scope disable when the Workspace enable fails', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'scoped-extension' });
+    // Workspace enable (first call) fails; the rollback User enable succeeds.
+    mockEnableExtension.mockRejectedValueOnce(
+      new Error('workspace enable failed'),
+    );
+    mockEnableExtension.mockResolvedValueOnce(undefined);
+
+    await handleInstall({ source: 'git@some-url', scope: 'project' });
+
+    expect(mockDisableExtension).toHaveBeenCalledWith(
+      'scoped-extension',
+      'User',
+    );
+    // Both the failed Workspace enable and the rollback User enable were attempted.
+    expect(mockEnableExtension).toHaveBeenNthCalledWith(
+      1,
+      'scoped-extension',
+      'Workspace',
+    );
+    expect(mockEnableExtension).toHaveBeenNthCalledWith(
+      2,
+      'scoped-extension',
+      'User',
+    );
+    // The original failure is surfaced and the command exits non-zero.
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('workspace enable failed');
+    expect(processSpy).toHaveBeenCalledWith(1);
+    processSpy.mockRestore();
+  });
+
+  it('surfaces a rollback failure when the recovery enable also fails', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'scoped-extension' });
+    // Both the Workspace enable and the rollback User enable fail.
+    mockEnableExtension.mockRejectedValueOnce(
+      new Error('workspace enable failed'),
+    );
+    mockEnableExtension.mockRejectedValueOnce(new Error('rollback failed'));
+
+    await handleInstall({ source: 'git@some-url', scope: 'project' });
+
+    // A warning naming the failed rollback, plus the original error, are shown.
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('failed to roll back the scope change'),
+    );
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('workspace enable failed');
+    expect(processSpy).toHaveBeenCalledWith(1);
+    processSpy.mockRestore();
+  });
+
   it('should accept workspace as an alias of project scope', async () => {
     mockParseInstallSource.mockResolvedValue({
       type: 'git',

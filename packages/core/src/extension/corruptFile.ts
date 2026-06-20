@@ -25,10 +25,21 @@ export function quarantineCorruptFile(filePath: string): void {
   const quarantinePath = `${filePath}.corrupted`;
   try {
     fs.renameSync(filePath, quarantinePath);
+    // `debugLogger.warn` is gated behind QWEN_DEBUG_LOG_FILE (unset for almost
+    // all users), so without this the user's favorites/scopes/sources would
+    // appear to vanish with no trail. Surface the quarantine on stderr too.
+    process.stderr.write(
+      `[warn] Corrupt extension state file ${filePath} moved aside to ${quarantinePath}\n`,
+    );
     debugLogger.warn(
       `Corrupt file ${filePath} could not be parsed; moved aside to ${quarantinePath}.`,
     );
   } catch (error) {
+    process.stderr.write(
+      `[warn] Corrupt extension state file ${filePath} could not be moved aside: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`,
+    );
     debugLogger.warn(
       `Corrupt file ${filePath} could not be parsed and could not be moved aside: ${
         error instanceof Error ? error.message : String(error)

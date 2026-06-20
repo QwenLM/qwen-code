@@ -69,7 +69,18 @@ export class ExtensionPreferencesStore {
         return structuredClone(this.cache.prefs);
       }
       const content = fs.readFileSync(this.filePath, 'utf-8');
-      const parsed = JSON.parse(content) as Partial<ExtensionPreferences>;
+      let parsed: Partial<ExtensionPreferences>;
+      try {
+        parsed = JSON.parse(content) as Partial<ExtensionPreferences>;
+      } catch (parseError) {
+        // Only a genuine parse failure means the content is corrupt — move it
+        // aside so the next write can't clobber recoverable favorites/scopes.
+        // Transient read errors (EACCES/EMFILE/EISDIR/…) fall through to the
+        // outer catch, which must NOT quarantine an otherwise-valid file.
+        debugLogger.error('Corrupt extension preferences:', parseError);
+        quarantineCorruptFile(this.filePath);
+        return emptyPreferences();
+      }
       const rawScopes =
         parsed.scopes && typeof parsed.scopes === 'object' ? parsed.scopes : {};
       const scopes: Record<string, ExtensionScope> = {};
@@ -105,11 +116,10 @@ export class ExtensionPreferencesStore {
       ) {
         return emptyPreferences();
       }
+      // A transient read error (permission/too-many-files/…) — the file may be
+      // perfectly valid, so do NOT quarantine it here; only parse failures
+      // above do that. Return the default for this read.
       debugLogger.error('Error reading extension preferences:', error);
-      // Move the unreadable file aside so the next toggleFavorite/setScope/
-      // setMcpServerDisabled write doesn't clobber recoverable favorites/scopes
-      // with the empty default returned below.
-      quarantineCorruptFile(this.filePath);
       return emptyPreferences();
     }
   }

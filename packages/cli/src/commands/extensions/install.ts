@@ -118,8 +118,13 @@ export async function handleInstall(args: InstallArgs) {
               extension.name,
               SettingScope.User,
             );
-          } catch {
-            // Best-effort rollback; report the original failure below.
+          } catch (rollbackError) {
+            // Rollback failed too: the extension is now disabled at every
+            // scope. Surface this so the user knows recovery also failed,
+            // before the original error is reported below.
+            writeStderrLine(
+              `Warning: failed to roll back the scope change for "${extension.name}"; it may be disabled at all scopes: ${getErrorMessage(rollbackError)}`,
+            );
           }
           throw enableError;
         }

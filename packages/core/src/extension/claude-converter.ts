@@ -29,25 +29,19 @@ import {
   stringify as stringifyYaml,
 } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { normalizeContent } from '../utils/textUtils.js';
+import { normalizeContent, stripAnsiAndControl } from '../utils/textUtils.js';
 import { substituteHookVariables } from './variables.js';
-import { stripVTControlCharacters } from 'node:util';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
-
-// C0/C1 control chars left behind after escape-sequence stripping.
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
 
 /**
  * Strips terminal escape/control sequences from untrusted values before they
  * are interpolated into error messages. Conversion errors here propagate to the
  * TUI install status area, so a hostile plugin `source`/`path` could otherwise
- * smuggle ANSI/OSC sequences to the terminal during a failed install.
+ * smuggle ANSI/OSC sequences to the terminal during a failed install. Aliases
+ * the shared `stripAnsiAndControl` so the rule stays in one place.
  */
-function sanitizeForError(text: string): string {
-  return stripVTControlCharacters(text).replace(CONTROL_CHARS_RE, '');
-}
+const sanitizeForError = stripAnsiAndControl;
 
 export interface ClaudePluginConfig {
   name: string;
@@ -1118,7 +1112,7 @@ async function resolvePluginSource(
     }
     if (!fs.existsSync(subDir)) {
       throw new Error(
-        `Plugin subdirectory "${sanitizeForError(source.path)}" not found in ${sanitizeForError(source.url)} (ref: ${source.ref ?? source.sha ?? 'HEAD'})`,
+        `Plugin subdirectory "${sanitizeForError(source.path)}" not found in ${sanitizeForError(source.url)} (ref: ${sanitizeForError(source.ref ?? source.sha ?? 'HEAD')})`,
       );
     }
     // The lexical `startsWith` check above is string-only; `cloneFromGit`
