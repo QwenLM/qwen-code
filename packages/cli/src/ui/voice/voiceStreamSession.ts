@@ -104,6 +104,7 @@ export function openVoiceStream(
 
     const fail = (error: unknown) => {
       if (settled) return;
+      settled = true;
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       clearConnectTimer();
@@ -114,14 +115,12 @@ export function openVoiceStream(
         /* ignore */
       }
       if (finishReject) {
-        settled = true;
         finishReject(normalized);
         finishResolve = null;
         finishReject = null;
       } else {
         terminalError = normalized;
         if (!started) {
-          settled = true;
           reject(normalized);
         }
       }
@@ -250,6 +249,8 @@ export function openVoiceStream(
           /* ignore */
         }
         finishResolve?.(committed.trim());
+        finishResolve = null;
+        finishReject = null;
       } else if (event === 'task-failed') {
         clearConnectTimer();
         fail(
@@ -272,7 +273,7 @@ export function openVoiceStream(
       clearConnectTimer();
       clearFinishTimer();
       if (settled) return;
-      if (started && finishResolve) {
+      if (started && finishReject) {
         settled = true;
         finishReject?.(
           new Error(

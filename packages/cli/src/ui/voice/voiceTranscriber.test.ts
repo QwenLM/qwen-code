@@ -340,6 +340,76 @@ describe('voiceTranscriber', () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
+  it('redacts and truncates failed batch transcription responses', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      text: vi.fn().mockResolvedValue(`Bearer sk-secret ${'x'.repeat(500)}`),
+    });
+
+    let error: unknown;
+    try {
+      await transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Qwen ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://dashscope.example/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ]),
+          settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+          voiceModel: 'qwen3-asr-flash',
+          fetchFn,
+        },
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain('Bearer [REDACTED]');
+    expect(message).not.toContain('sk-secret');
+    expect(message).toMatch(/\.\.\.$/);
+  });
+
+  it('sends an inference timeout signal and reports timeout clearly', async () => {
+    let signal: AbortSignal | undefined;
+    const fetchFn = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return Promise.reject(new DOMException('TimeoutError', 'TimeoutError'));
+    });
+
+    await expect(
+      transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Qwen ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://dashscope.example/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ]),
+          settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+          voiceModel: 'qwen3-asr-flash',
+          fetchFn,
+        },
+      ),
+    ).rejects.toThrow(
+      'Voice transcription timed out after 60s. Check ASR service health and retry.',
+    );
+
+    expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
   it('ignores legacy protocol settings and routes batch models by model id', async () => {
     const fetchFn = vi.fn();
     const settings = {

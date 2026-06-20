@@ -167,7 +167,7 @@ describe('qwenAsrRealtimeSession', () => {
     const session = await sessionPromise;
 
     const transcriptPromise = session.finish();
-    const expectation = await expect(transcriptPromise).rejects.toThrow(
+    const expectation = expect(transcriptPromise).rejects.toThrow(
       'Qwen ASR realtime finish timed out.',
     );
     await vi.advanceTimersByTimeAsync(60_000);

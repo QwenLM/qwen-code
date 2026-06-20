@@ -78,12 +78,32 @@ describe('voiceStreamSession', () => {
     const session = await startSession(socket);
 
     const transcriptPromise = session.finish();
-    const expectation = await expect(transcriptPromise).rejects.toThrow(
+    const expectation = expect(transcriptPromise).rejects.toThrow(
       'Voice stream finish timed out.',
     );
     await vi.advanceTimersByTimeAsync(60_000);
 
     await expectation;
     expect(socket.readyState).toBe(3);
+  });
+
+  it('rejects finish when the server sends task-failed', async () => {
+    const socket = new FakeSocket();
+    const session = await startSession(socket);
+
+    const transcriptPromise = session.finish();
+    socket.emit(
+      'message',
+      JSON.stringify({
+        header: {
+          event: 'task-failed',
+          error_code: '429',
+          error_message: 'rate limited',
+        },
+      }),
+      false,
+    );
+
+    await expect(transcriptPromise).rejects.toThrow('rate limited');
   });
 });

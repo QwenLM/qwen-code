@@ -322,19 +322,29 @@ async function transcribeViaQwenAsr(
     headers['Authorization'] = `Bearer ${voiceConfig.apiKey}`;
   }
 
-  const response = await fetchFn(
-    `${trimTrailingSlashes(voiceConfig.baseUrl)}/chat/completions`,
-    {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: voiceConfig.model,
-        messages,
-        asr_options: asrOptions,
-      }),
-      signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
-    },
-  );
+  let response: Response;
+  try {
+    response = await fetchFn(
+      `${trimTrailingSlashes(voiceConfig.baseUrl)}/chat/completions`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: voiceConfig.model,
+          messages,
+          asr_options: asrOptions,
+        }),
+        signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
+      },
+    );
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      throw new Error(
+        `Voice transcription timed out after ${INFERENCE_TIMEOUT_MS / 1000}s. Check ASR service health and retry.`,
+      );
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     let details = '';
