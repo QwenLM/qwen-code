@@ -42,12 +42,13 @@ const cliOnly = process.argv.includes('--cli-only');
 // 2. web-templates (embeddable web templates - used by cli)
 // 3. channel-base (base channel infrastructure - used by channel adapters and cli)
 // 4. channel adapters (depend on channel-base)
-// 5. acp-bridge (depends on core - used by cli)
-// 6. cli (depends on core, acp-bridge, web-templates, channel packages)
-// 7. webui (shared UI components - used by vscode companion)
-// 8. sdk (build-time devDep on acp-bridge for shared constants)
-// 9. web-shell (depends on webui and sdk)
-// 10. vscode-ide-companion (depends on webui)
+// 5. audio-capture (native microphone backend used by cli)
+// 6. acp-bridge (depends on core - used by cli)
+// 7. cli (depends on core, acp-bridge, web-templates, channel packages)
+// 8. webui (shared UI components - used by vscode companion)
+// 9. sdk (build-time devDep on acp-bridge for shared constants)
+// 10. web-shell (depends on webui and sdk)
+// 11. vscode-ide-companion (depends on webui)
 const buildOrder = [
   'packages/core',
   'packages/web-templates',
@@ -58,6 +59,7 @@ const buildOrder = [
   'packages/channels/feishu',
   'packages/channels/qqbot',
   'packages/channels/plugin-example',
+  'packages/audio-capture',
   'packages/acp-bridge',
   'packages/cli',
   ...(cliOnly

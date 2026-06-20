@@ -61,6 +61,9 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).toContain('examples');
+    expect(distPackageJson.optionalDependencies).toMatchObject({
+      '@qwen-code/audio-capture': '0.17.0',
+    });
     expect(
       existsSync(
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),

@@ -47,6 +47,7 @@ import { SCREEN_READER_USER_PREFIX } from '../textConstants.js';
 import { useShellFocusState } from '../contexts/ShellFocusContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import {
   useAgentViewState,
@@ -61,6 +62,17 @@ import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
 import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
+import {
+  useVoiceInput,
+  type VoiceTranscriber,
+} from '../hooks/useVoiceInput.js';
+import { createVoiceRecorder } from '../voice/voiceRecorder.js';
+import {
+  resolveVoiceStreamConfig,
+  transcribeVoiceAudio,
+} from '../voice/voiceTranscriber.js';
+import { openVoiceStream } from '../voice/voiceStreamSession.js';
+import { VoiceIndicator } from './VoiceIndicator.js';
 
 /**
  * Represents an attachment (e.g., pasted image) displayed above the input prompt
@@ -151,6 +163,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const settings = useSettings();
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
@@ -290,6 +303,71 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     isFocused: isShellFocused,
   });
 
+  const rawVoiceModel = settings.merged.voiceModel;
+  const voiceModel =
+    typeof rawVoiceModel === 'string' && rawVoiceModel.trim().length > 0
+      ? rawVoiceModel.trim()
+      : undefined;
+  const voiceEnabled =
+    settings.merged.general?.voice?.enabled === true && Boolean(voiceModel);
+  const voiceMode =
+    settings.merged.general?.voice?.mode === 'tap' ? 'tap' : 'hold';
+  // handleSubmitAndClear is defined below; bridge with a ref so tap-mode voice
+  // can submit the prompt once the transcript is inserted.
+  const voiceSubmitRef = useRef<() => void>(() => {});
+  const transcribeVoice = useCallback<VoiceTranscriber>(
+    (audio, { voiceModel }) =>
+      transcribeVoiceAudio(audio, { config, settings, voiceModel }),
+    [config, settings],
+  );
+  const voiceMicWarnedRef = useRef(false);
+  const warmupVoice = useCallback(() => {
+    const recorder = createVoiceRecorder();
+    void Promise.resolve(recorder.warmup?.()).catch(() => {});
+    void Promise.resolve(recorder.microphoneStatus?.())
+      .then((status) => {
+        if (status === 'denied' && !voiceMicWarnedRef.current) {
+          voiceMicWarnedRef.current = true;
+          uiState.historyManager?.addItem(
+            {
+              type: 'error',
+              text: 'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.',
+            },
+            Date.now(),
+          );
+        }
+      })
+      .catch(() => {});
+  }, [uiState.historyManager]);
+  const voiceStreaming =
+    (settings.merged.general as { voice?: { protocol?: unknown } } | undefined)
+      ?.voice?.protocol === 'dashscope-realtime';
+  const openVoiceStreamSession = useCallback(
+    (callbacks: { onInterim: (text: string) => void }) => {
+      if (!voiceModel) {
+        return Promise.reject(new Error('No voice model selected.'));
+      }
+      return openVoiceStream(
+        resolveVoiceStreamConfig({ config, settings, voiceModel }),
+        callbacks,
+      );
+    },
+    [config, settings, voiceModel],
+  );
+  const voiceInput = useVoiceInput({
+    enabled: voiceEnabled,
+    mode: voiceMode,
+    voiceModel,
+    buffer,
+    addItem: uiState.historyManager?.addItem,
+    createRecorder: createVoiceRecorder,
+    transcribe: transcribeVoice,
+    onSubmit: () => voiceSubmitRef.current(),
+    warmup: warmupVoice,
+    streaming: voiceStreaming,
+    openStream: voiceStreaming ? openVoiceStreamSession : undefined,
+  });
+
   const resetCompletionState = completion.resetCompletionState;
   const dismissCompletion = completion.dismissCompletion;
   const resetReverseSearchCompletionState =
@@ -427,6 +505,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     ],
   );
 
+  // Tap-mode voice dictation submits the prompt after the transcript lands.
+  voiceSubmitRef.current = () => handleSubmitAndClear(buffer.text);
+
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
       buffer.setText(newText);
@@ -553,6 +634,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleInput = useCallback(
     (key: Key): boolean => {
+      if (voiceInput.status !== 'idle') {
+        voiceInput.handleKeypress(key);
+        return true;
+      }
+
       // When the Arena tab bar or background pill has focus, block
       // non-printable keys so arrow keys and shortcuts don't interfere.
       // Printable characters fall through to BaseTextInput's default
@@ -726,6 +812,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           uiActions.temporaryCloseFeedbackDialog();
           // Continue processing the key for normal input handling
         }
+      }
+
+      if (
+        !shellModeActive &&
+        !reverseSearchActive &&
+        !commandSearchActive &&
+        !showCompletionSuggestions &&
+        !isAttachmentMode &&
+        buffer.text.length === 0 &&
+        voiceInput.handleKeypress(key)
+      ) {
+        return true;
       }
 
       // Helper: pop all queued messages into the input buffer,
@@ -1469,6 +1567,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       exportCompletion,
       isHistoryRestoredText,
       showCompletionSuggestions,
+      voiceInput,
     ],
   );
 
@@ -1677,6 +1776,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ? (statusColor ?? theme.border.focused)
       : theme.border.default;
 
+  const voiceStatusLabel =
+    voiceInput.status === 'recording'
+      ? t('Voice: recording')
+      : voiceInput.status === 'transcribing'
+        ? t('Voice: transcribing')
+        : undefined;
+
   const prefixNode = (
     <Text
       color={statusColor ?? theme.text.accent}
@@ -1730,6 +1836,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           ))}
         </Box>
       )}
+      <VoiceIndicator
+        status={voiceInput.status}
+        interimText={voiceInput.interimText}
+        audioLevel={voiceInput.audioLevel}
+      />
       <BaseTextInput
         buffer={buffer}
         onSubmit={handleSubmitAndClear}
@@ -1739,7 +1850,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         prefix={prefixNode}
         prefixWidth={prefixWidth}
         borderColor={borderColor}
-        topRightLabel={uiState.sessionName || undefined}
+        topRightLabel={voiceStatusLabel ?? uiState.sessionName ?? undefined}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
       />
