@@ -411,9 +411,16 @@ describe('voiceTranscriber', () => {
   });
 
   it('detects keyterm echoes in non-Latin scripts', () => {
-    expect(isKeytermEcho('提交 分支 架构 测试', '提交 分支 架构 测试')).toBe(
-      true,
-    );
+    expect(isKeytermEcho('提交分支架构测试', '提交 分支 架构 测试')).toBe(true);
+  });
+
+  it('keeps terse speech that happens to use a few keyterms', () => {
+    expect(
+      isKeytermEcho(
+        'commit schema endpoint async',
+        'commit schema endpoint async await api cli npm grep regex json refactor',
+      ),
+    ).toBe(false);
   });
 
   it('posts audio to chat/completions as input_audio content', async () => {

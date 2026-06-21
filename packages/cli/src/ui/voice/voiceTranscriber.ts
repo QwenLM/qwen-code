@@ -19,6 +19,8 @@ import {
 
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
 const INFERENCE_TIMEOUT_MS = 60_000;
+const MIN_KEYTERM_ECHO_TOKENS = 8;
+const MIN_HAN_KEYTERM_ECHO_TOKENS = 4;
 
 export type VoiceTransport =
   | 'qwen-asr-chat'
@@ -337,6 +339,36 @@ function tokenize(value: string): string[] {
     .filter(Boolean);
 }
 
+function compactLettersAndNumbers(value: string): string {
+  return value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+function hasHan(value: string): boolean {
+  return /\p{Script=Han}/u.test(value);
+}
+
+function isUnsegmentedHanKeytermEcho(
+  transcript: string,
+  keyterms: string[],
+): boolean {
+  const transcriptText = compactLettersAndNumbers(transcript);
+  if (!hasHan(transcriptText)) {
+    return false;
+  }
+
+  const hanKeyterms = keyterms.filter(hasHan);
+  if (hanKeyterms.length < MIN_HAN_KEYTERM_ECHO_TOKENS) {
+    return false;
+  }
+
+  const matched = hanKeyterms.filter((term) => transcriptText.includes(term));
+  const matchedChars = matched.reduce((sum, term) => sum + term.length, 0);
+  return (
+    matched.length >= MIN_HAN_KEYTERM_ECHO_TOKENS &&
+    matchedChars / transcriptText.length >= 0.9
+  );
+}
+
 /**
  * On non-speech audio (silence/noise) Qwen-ASR can hallucinate the keyterm
  * context back as the transcript. Detect that — a multi-word result whose tokens
@@ -351,12 +383,13 @@ export function isKeytermEcho(
     return false;
   }
   const tokens = tokenize(transcript);
+  const keyterms = tokenize(keytermsContext);
+  const keyset = new Set(keyterms);
   if (tokens.length < 4) {
-    return false;
+    return isUnsegmentedHanKeytermEcho(transcript, keyterms);
   }
-  const keyset = new Set(tokenize(keytermsContext));
   const overlap = tokens.filter((t) => keyset.has(t)).length;
-  return overlap / tokens.length >= 0.9;
+  return overlap >= MIN_KEYTERM_ECHO_TOKENS && overlap / tokens.length >= 0.9;
 }
 
 // Qwen-ASR caps each audio file at 10 MB / 5 minutes. Our 16 kHz mono 16-bit WAV

@@ -243,15 +243,11 @@ export function openQwenAsrRealtimeStream(
           break;
         case 'session.finished':
           if (!openSettled) {
-            failed = true;
-            openSettled = true;
-            clearConnectTimer();
-            reject(
+            fail(
               new Error(
                 'Qwen ASR realtime session finished before it was ready.',
               ),
             );
-            close();
             break;
           }
           failed = true;
