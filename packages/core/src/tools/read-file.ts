@@ -201,9 +201,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const result = await processSingleFileContent(
       this.params.file_path,
       this.config,
-      this.params.offset,
-      this.params.limit,
-      this.params.pages,
+      {
+        offset: this.params.offset,
+        limit: this.params.limit,
+        pages: this.params.pages,
+      },
     );
 
     if (result.error) {

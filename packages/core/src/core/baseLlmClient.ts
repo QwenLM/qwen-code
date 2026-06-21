@@ -581,9 +581,11 @@ export class BaseLlmClient {
     selector: ResolvedModelId | undefined,
     baseUrl?: string,
   ): Promise<ContentGenerator> {
-    const cacheKey = selector
-      ? `${selector.authType ?? ''}:${selector.modelId}:${baseUrl ?? ''}`
-      : `${model}:${baseUrl ?? ''}`;
+    const cacheKey = JSON.stringify({
+      authType: selector?.authType,
+      model: selector?.modelId ?? model,
+      baseUrl,
+    });
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 

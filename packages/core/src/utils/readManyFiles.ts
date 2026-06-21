@@ -188,14 +188,9 @@ async function readFileContent(
   preserveUnsupportedImage = false,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
-    const fileReadResult = await processSingleFileContent(
-      filePath,
-      config,
-      undefined, // offset
-      undefined, // limit
-      undefined, // pages
+    const fileReadResult = await processSingleFileContent(filePath, config, {
       preserveUnsupportedImage,
-    );
+    });
 
     const prefixText: Part = { text: `\nContent from ${filePath}:\n` };
 

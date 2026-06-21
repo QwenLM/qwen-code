@@ -1127,10 +1127,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testImageFilePath,
         mockConfigNoImage,
-        undefined,
-        undefined,
-        undefined,
-        true,
+        { preserveUnsupportedImage: true },
       );
       expect(typeof result.llmContent).toBe('object');
       expect(
@@ -1138,6 +1135,29 @@ describe('fileUtils', () => {
           .mimeType,
       ).toBe('image/png');
       expect(result.returnDisplay).toContain('Read image file');
+    });
+
+    it('keeps image inline when preserveUnsupportedImage is true even if bridge config is disabled', async () => {
+      const fakePngData = Buffer.from('fake png data');
+      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigBridgeDisabled = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+        getVisionBridgeConfig: () => ({ enabled: false }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfigBridgeDisabled,
+        { preserveUnsupportedImage: true },
+      );
+      expect(typeof result.llmContent).toBe('object');
+      expect(
+        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
+          .mimeType,
+      ).toBe('image/png');
     });
 
     it('still strips image for agent reads (no preserve flag) even when the bridge is enabled', async () => {
@@ -1229,9 +1249,7 @@ describe('fileUtils', () => {
         const result = await processSingleFileContent(
           testPdfFilePath,
           mockConfigNoPdf,
-          undefined,
-          undefined,
-          '1-5',
+          { pages: '1-5' },
         );
 
         // Must not be rejected by the generic 10MB gate.
@@ -1365,8 +1383,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        5,
-        5,
+        { offset: 5, limit: 5 },
       ); // Read lines 6-10
       const expectedContent = lines.slice(5, 10).join('\n');
 
@@ -1385,8 +1402,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        10,
-        10,
+        { offset: 10, limit: 10 },
       );
       const expectedContent = lines.slice(10, 20).join('\n');
 
@@ -1404,8 +1420,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        0,
-        10,
+        { offset: 0, limit: 10 },
       );
       const expectedContent = lines.join('\n');
 
@@ -1447,8 +1462,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        0,
-        5,
+        { offset: 0, limit: 5 },
       );
 
       expect(result.isTruncated).toBe(true);
@@ -1465,8 +1479,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        0,
-        11,
+        { offset: 0, limit: 11 },
       );
 
       expect(result.isTruncated).toBe(true);
@@ -1490,8 +1503,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        0,
-        10,
+        { offset: 0, limit: 10 },
       );
       expect(result.isTruncated).toBe(true);
       expect(result.returnDisplay).toBe(
@@ -1551,9 +1563,7 @@ describe('fileUtils', () => {
         const result = await processSingleFileContent(
           testPdfFilePath,
           mockConfigNoPdf,
-          undefined,
-          undefined,
-          '1-5',
+          { pages: '1-5' },
         );
 
         expect(result.error).toMatch(/exceeds extraction size limit/i);
