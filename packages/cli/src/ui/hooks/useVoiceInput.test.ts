@@ -150,6 +150,47 @@ describe('useVoiceInput', () => {
     });
   });
 
+  it('sanitizes ASR transcripts before inserting and submitting', async () => {
+    buffer = createBuffer();
+    const recorder = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue({
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'audio/wav',
+      }),
+    };
+    const transcribe = vi
+      .fn()
+      .mockResolvedValue('send this\x1b[8m hidden\x1b[0m');
+    const onSubmit = vi.fn();
+
+    const { result } = renderHook(() =>
+      useVoiceInput({
+        enabled: true,
+        mode: 'tap',
+        voiceModel: 'qwen3-asr-flash',
+        buffer,
+        createRecorder: () => recorder,
+        transcribe,
+        onSubmit,
+      }),
+    );
+
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+      result.current.handleKeypress(voiceKey);
+    });
+
+    await waitFor(() => {
+      expect(buffer.insert).toHaveBeenCalledWith(
+        'send this\\u001b[8m hidden\\u001b[0m',
+      );
+      expect(onSubmit).toHaveBeenCalledWith(
+        'send this\\u001b[8m hidden\\u001b[0m',
+      );
+    });
+  });
+
   it('hold mode: starts the recorder without silence detection', async () => {
     buffer = createBuffer();
     const recorder = {

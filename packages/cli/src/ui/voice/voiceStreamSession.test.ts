@@ -201,4 +201,28 @@ describe('voiceStreamSession', () => {
       'wss://dashscope.example/api-ws/v1/inference',
     );
   });
+
+  it('sanitizes and caps task-failed server messages', async () => {
+    const socket = new FakeSocket();
+    const session = await startSession(socket);
+
+    const transcriptPromise = session.finish();
+    const longMessage = `bad\x1b[8mhidden\x1b[0m ${'x'.repeat(300)}`;
+    socket.emit(
+      'message',
+      JSON.stringify({
+        header: {
+          event: 'task-failed',
+          error_code: '500',
+          error_message: longMessage,
+        },
+      }),
+      false,
+    );
+
+    await expect(transcriptPromise).rejects.toThrow(
+      'bad\\u001b[8mhidden\\u001b[0m',
+    );
+    await expect(transcriptPromise).rejects.not.toThrow('x'.repeat(220));
+  });
 });

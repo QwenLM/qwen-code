@@ -7,6 +7,7 @@
 import { Box, Text } from 'ink';
 import type { VoiceInputStatus } from '../hooks/useVoiceInput.js';
 import { t } from '../../i18n/index.js';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 interface VoiceIndicatorProps {
   status: VoiceInputStatus;
@@ -51,7 +52,7 @@ export function VoiceIndicator({
       </Box>
       {interimText ? (
         <Text dimColor wrap="truncate-end">
-          {interimText}
+          {escapeAnsiCtrlCodes(interimText)}
         </Text>
       ) : null}
     </Box>

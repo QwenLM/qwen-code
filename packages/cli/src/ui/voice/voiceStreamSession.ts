@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import WebSocket from 'ws';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 // Streaming ASR over the DashScope realtime "task" WebSocket protocol
 // (paraformer-realtime / fun-asr-realtime). Audio is pushed as raw binary PCM
@@ -58,6 +59,7 @@ export interface VoiceStreamDeps {
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 const MAX_BUFFERED_AUDIO_BYTES = 1024 * 1024;
+const MAX_SERVER_ERROR_MESSAGE_LENGTH = 200;
 const debugLogger = createDebugLogger('VOICE_STREAM_SESSION');
 
 export function deriveWebSocketBase(baseUrl: string): string {
@@ -74,6 +76,11 @@ export function deriveWebSocketBase(baseUrl: string): string {
 
 export function deriveStreamUrl(baseUrl: string): string {
   return `${deriveWebSocketBase(baseUrl)}/api-ws/v1/inference`;
+}
+
+function formatServerErrorMessage(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw : 'unknown';
+  return escapeAnsiCtrlCodes(text).slice(0, MAX_SERVER_ERROR_MESSAGE_LENGTH);
 }
 
 export function openVoiceStream(
@@ -301,9 +308,9 @@ export function openVoiceStream(
         clearConnectTimer();
         fail(
           new Error(
-            `Voice stream failed at ${streamUrl} task ${taskId} (${msg.header?.error_code ?? 'error'}): ${
-              msg.header?.error_message ?? 'unknown'
-            }`,
+            `Voice stream failed at ${streamUrl} task ${taskId} (${msg.header?.error_code ?? 'error'}): ${formatServerErrorMessage(
+              msg.header?.error_message,
+            )}`,
           ),
         );
       }

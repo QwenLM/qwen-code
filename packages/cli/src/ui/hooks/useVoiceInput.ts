@@ -9,6 +9,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { Command, keyMatchers } from '../keyMatchers.js';
 import type { HistoryItemWithoutId } from '../types.js';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 import type { VoiceStreamSession } from '../voice/voiceStreamSession.js';
 import type { Key } from './useKeypress.js';
 
@@ -120,7 +121,7 @@ function insertTranscript(
   buffer: Pick<TextBuffer, 'text' | 'insert'>,
   transcript: string,
 ): string | null {
-  const text = transcript.trim();
+  const text = escapeAnsiCtrlCodes(transcript).trim();
   if (!text) {
     return null;
   }
