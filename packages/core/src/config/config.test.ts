@@ -1291,7 +1291,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
-    it('returns undefined for bare Qwen OAuth fast models under OpenAI auth', () => {
+    it('returns undefined for bare Qwen OAuth fast models under active OpenAI auth', async () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_OPENAI,
@@ -1308,6 +1308,8 @@ describe('Server Config (config.ts)', () => {
           ],
         },
       });
+
+      await config.refreshAuth(AuthType.USE_OPENAI);
 
       expect(config.getFastModel()).toBeUndefined();
     });
