@@ -68,6 +68,8 @@ describe('qwen-triage tmux workflow', () => {
       'Launched the changed app in a real tmux session and exercised the affected flow.',
     );
     expect(postStep).toContain('produced an unrecognized verdict');
+    expect(postStep).toContain('"$VERDICT_LABEL" "$RUN_URL"');
+    expect(postStep).toContain('printf \'%s\\n\\n\' "$DESCRIPTION"');
   });
 
   it('installs the heavy tmux test harness only for runnable PRs', () => {
@@ -76,6 +78,14 @@ describe('qwen-triage tmux workflow', () => {
 
     expect(resolverStep).toContain('apt-get install');
     expect(installStep).toContain('if: "steps.pr.outputs.decision == \'run\'"');
+    expect(installStep).toContain(
+      'apt-get install -y --no-install-recommends tmux util-linux',
+    );
+    expect(installStep).toContain(
+      "npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'",
+    );
+    expect(installStep).toContain('qwen --version');
+    expect(installStep).toContain('tmux -V');
     expect(resolverStep).not.toContain('tmux');
     expect(resolverStep).not.toContain('npm install');
     expect(resolverStep).not.toContain('qwen --version');

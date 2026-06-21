@@ -372,7 +372,7 @@ jobs:
           set -euo pipefail
           apt-get install -y --no-install-recommends tmux util-linux
 
-          npm install -g '@qwen-code/qwen-code@latest'
+          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
           qwen --version
           tmux -V
 
