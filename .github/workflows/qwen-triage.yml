@@ -362,11 +362,14 @@ jobs:
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
 
+      # Heavy tmux/qwen/util-linux setup is deferred here (gated on
+      # decision == 'run') so non-TUI PRs skip it. Any step added between
+      # 'Resolve PR and check state' and this one must not need tmux, qwen, or
+      # util-linux/runuser; those are installed here, not in resolver tools.
       - name: 'Install tmux runner tools'
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
           set -euo pipefail
-          apt-get update
           apt-get install -y --no-install-recommends tmux util-linux
 
           npm install -g '@qwen-code/qwen-code@latest'
@@ -789,11 +792,15 @@ jobs:
               truncated=$'\n\n...truncated -- full log in the run artifacts.'
             fi
             if ! content="$(
+              set -o pipefail
               {
-                head -c "$max" "$file"
+                head_status=0
+                head -c "$max" "$file" || head_status=$?
                 printf '%s' "$truncated"
+                exit "$head_status"
               } | tr -d '\000' | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
             )"; then
+              echo "::warning::emit_block failed while rendering $summary; see run artifacts." >&2
               content='<em>Log could not be rendered; see run artifacts.</em>'
             fi
             printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary"
@@ -840,8 +847,10 @@ jobs:
               DESCRIPTION='The tmux test did not complete because the qwen process failed or was killed. This is not a pass/fail result for the affected flow; check runner resources and PR code for crashes or memory leaks.'
             elif [ "${VERDICT:-}" = "timeout" ]; then
               DESCRIPTION='The tmux test did not complete before the time limit. This is not a pass/fail result for the affected flow; see the workflow run and artifacts for details.'
-            else
+            elif [ "${VERDICT:-}" = "pass" ] || [ "${VERDICT:-}" = "fail" ]; then
               DESCRIPTION='Launched the changed app in a real tmux session and exercised the affected flow.'
+            else
+              DESCRIPTION='The tmux test produced an unrecognized verdict, so this is not a pass/fail result for the affected flow. See the workflow run and artifacts for details.'
             fi
             {
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
