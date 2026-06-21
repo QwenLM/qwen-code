@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdtempSync, renameSync } from 'fs';
-import { extname, basename, resolve, join, relative, isAbsolute, sep } from 'path';
+import { extname, basename, resolve, join, relative } from 'path';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
+import { isPathInsideOrEqual } from '@craft-agent/session-tools-core';
 
 /**
  * Strip UTF-8 BOM (Byte Order Mark) from a string.
@@ -832,12 +833,7 @@ export function formatSinglePathToRelative(absolutePath: string, cwd?: string): 
   const targetPath = resolve(absolutePath);
   const relativePath = relative(basePath, targetPath);
 
-  if (
-    relativePath &&
-    relativePath !== '..' &&
-    !relativePath.startsWith(`..${sep}`) &&
-    !isAbsolute(relativePath)
-  ) {
+  if (relativePath && isPathInsideOrEqual(basePath, targetPath)) {
     return './' + relativePath;
   }
 
