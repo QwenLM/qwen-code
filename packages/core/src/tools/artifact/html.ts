@@ -52,6 +52,7 @@ export function validateSelfContained(fragment: string): string | null {
   if (!fragment.trim()) {
     return 'Artifact file is empty — write the page content (a body-only HTML fragment) first.';
   }
+  const scan = normalizeAttributeQuotes(fragment);
 
   // Must be a fragment, not a whole document — publishing adds the skeleton.
   // Only inspect the start (after leading whitespace and HTML comments) so a
@@ -69,25 +70,29 @@ export function validateSelfContained(fragment: string): string | null {
 
   // External resource references (src=/href=/srcset=/poster= → http(s):// or //).
   const extResource =
-    /\b(?:src|href|srcset|poster)\s*=\s*["']?\s*(?:https?:)?\/\//i.exec(
-      fragment,
-    );
+    /\b(?:src|srcset|poster)\s*=\s*["']?\s*(?:https?:)?\/\//i.exec(scan) ??
+    /<link\b[^>]*\bhref\s*=\s*["']?\s*(?:https?:)?\/\//i.exec(scan);
   if (extResource) {
     return `Artifact must be self-contained — found an external reference (${truncate(extResource[0])}). Inline scripts/styles and embed assets as data: URIs.`;
   }
 
+  const jsUri = /\b(?:href|src)\s*=\s*["']?\s*javascript\s*:/i.exec(scan);
+  if (jsUri) {
+    return `Artifact must be self-contained — found a javascript: URI (${truncate(jsUri[0])}). Use inline <script> blocks instead.`;
+  }
+
   const extScript =
     /\b(?:fetch|WebSocket)\s*\(\s*["']\s*(?:https?|wss?):\/\//i.exec(
-      fragment,
+      scan,
     ) ??
-    /\bnavigator\.sendBeacon\s*\(\s*["']\s*(?:https?:)?\/\//i.exec(fragment);
+    /\bnavigator\.sendBeacon\s*\(\s*["']\s*(?:https?:)?\/\//i.exec(scan);
   if (extScript) {
     return `Artifact must be self-contained — found browser network egress (${truncate(extScript[0])}). Embed data in the artifact instead of fetching it at runtime.`;
   }
 
   const metaRefresh =
     /<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*\burl\s*=\s*(?:https?:)?\/\//i.exec(
-      fragment,
+      scan,
     );
   if (metaRefresh) {
     return `Artifact must be self-contained — found a meta refresh redirect (${truncate(metaRefresh[0])}).`;
@@ -95,12 +100,18 @@ export function validateSelfContained(fragment: string): string | null {
 
   // External CSS via @import or url(...) (fonts, background images, etc.).
   const extCss =
-    /(?:@import\s+(?:url\()?|url\()\s*["']?\s*(?:https?:)?\/\//i.exec(fragment);
+    /(?:@import\s+(?:url\()?|url\()\s*["']?\s*(?:https?:)?\/\//i.exec(scan);
   if (extCss) {
     return `Artifact must be self-contained — found an external CSS reference (${truncate(extCss[0])}). Inline CSS and embed fonts/images as data: URIs.`;
   }
 
   return null;
+}
+
+function normalizeAttributeQuotes(s: string): string {
+  return s
+    .replace(/&quot;|&#34;|&#x22;/gi, '"')
+    .replace(/&apos;|&#39;|&#x27;/gi, "'");
 }
 
 function truncate(s: string, max = 60): string {
@@ -122,7 +133,7 @@ export function wrapArtifactHtml(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none';">
 <title>${safeTitle}</title>
 <style>${CSS_RESET}</style>
 </head>

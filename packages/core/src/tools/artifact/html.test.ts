@@ -46,6 +46,11 @@ describe('artifact html helpers', () => {
       expect(validateSelfContained(ok)).toBeNull();
     });
 
+    it('accepts external hyperlinks', () => {
+      const ok = `<a href="https://github.com/QwenLM/qwen-code/pull/1">PR</a>`;
+      expect(validateSelfContained(ok)).toBeNull();
+    });
+
     it('allows document tags mentioned in a leading comment or body text', () => {
       // Regression: the wrapper check looks only at the start (after leading
       // comments), so mentioning these tags in a comment or escaped code
@@ -70,6 +75,7 @@ describe('artifact html helpers', () => {
       '<script src="https://cdn.example.com/x.js"></script>',
       '<link rel="stylesheet" href="https://fonts.example.com/x.css">',
       '<img srcset="https://cdn.example.com/a.png 1x">',
+      '<img src=&quot;https://cdn.example.com/a.png&quot;>',
       '<img src="//cdn.example.com/a.png">',
       '<video poster="https://cdn.example.com/poster.png"></video>',
       '<script src="http://evil/x.js"></script>',
@@ -94,6 +100,13 @@ describe('artifact html helpers', () => {
     ])('rejects browser network egress %s', (frag) => {
       expect(validateSelfContained(frag)).toMatch(/self-contained/i);
     });
+
+    it.each([
+      '<a href="javascript:alert(1)">click</a>',
+      '<a href=&quot;javascript:alert(1)&quot;>click</a>',
+    ])('rejects javascript URIs %s', (frag) => {
+      expect(validateSelfContained(frag)).toMatch(/javascript: URI/i);
+    });
   });
 
   describe('wrapArtifactHtml', () => {
@@ -110,6 +123,7 @@ describe('artifact html helpers', () => {
       expect(html).toContain('Content-Security-Policy');
       expect(html).toContain("connect-src 'none'");
       expect(html).toContain("default-src 'none'");
+      expect(html).toContain("form-action 'none'");
     });
 
     it('escapes the title', () => {
