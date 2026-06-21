@@ -345,6 +345,17 @@ jobs:
             echo "decision=na" >> "$GITHUB_OUTPUT"
           fi
 
+      # Install before checkout so PR-controlled .npmrc cannot affect npm.
+      - name: 'Install tmux runner tools'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -euo pipefail
+          apt-get install -y --no-install-recommends tmux util-linux
+
+          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
+          qwen --version
+          tmux -V
+
       - name: 'Clean stale review worktrees'
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
@@ -361,20 +372,6 @@ jobs:
           persist-credentials: false
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
-
-      # Heavy tmux/qwen/util-linux setup is deferred here (gated on
-      # decision == 'run') so non-TUI PRs skip it. Any step added between
-      # 'Resolve PR and check state' and this one must not need tmux, qwen, or
-      # util-linux/runuser; those are installed here, not in resolver tools.
-      - name: 'Install tmux runner tools'
-        if: "steps.pr.outputs.decision == 'run'"
-        run: |-
-          set -euo pipefail
-          apt-get install -y --no-install-recommends tmux util-linux
-
-          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
-          qwen --version
-          tmux -V
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -793,15 +790,12 @@ jobs:
             fi
             if ! content="$(
               set -o pipefail
-              {
-                head_status=0
-                head -c "$max" "$file" || head_status=$?
-                printf '%s' "$truncated"
-                exit "$head_status"
-              } | tr -d '\000' | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+              head -c "$max" "$file" | tr -d '\000' | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
             )"; then
               echo "::warning::emit_block failed while rendering $summary; see run artifacts." >&2
               content='<em>Log could not be rendered; see run artifacts.</em>'
+            elif [ -n "$truncated" ]; then
+              content="${content}${truncated}"
             fi
             printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary"
             printf '%s\n' "$content"

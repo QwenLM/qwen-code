@@ -37,7 +37,6 @@ describe('qwen-triage tmux workflow', () => {
     expect(postStep).toContain('Log could not be rendered');
     expect(postStep).toContain('if ! content="$(');
     expect(postStep).toContain('set -o pipefail');
-    expect(postStep).toContain('head_status=0');
     expect(postStep).toContain('::warning::emit_block failed');
   });
 
@@ -92,5 +91,8 @@ describe('qwen-triage tmux workflow', () => {
     expect(
       workflow.indexOf("- name: 'Resolve PR and check state'"),
     ).toBeLessThan(workflow.indexOf("- name: 'Install tmux runner tools'"));
+    expect(
+      workflow.indexOf("- name: 'Install tmux runner tools'"),
+    ).toBeLessThan(workflow.indexOf("- name: 'Checkout PR merge ref'"));
   });
 });
