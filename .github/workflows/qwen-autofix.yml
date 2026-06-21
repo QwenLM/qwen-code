@@ -482,10 +482,10 @@ jobs:
           CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
           CHANGED_PKGS="$(echo "${CHANGED_FILES}" | grep -oE '^packages/[^/]+' | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
-            if echo "${CHANGED_FILES}" | grep -Eq '^(\.github/(actions|scripts|workflows)/|integration-tests/|scripts/|package(-lock)?\.json$)'; then
-              echo "ℹ️ No package-specific tests for release/CI-only changes."
+            if echo "${CHANGED_FILES}" | grep -Eq '^(\.github/|scripts/|package(-lock)?\.json$)'; then
+              echo "ℹ️ No package-specific tests for automation/root-manifest-only changes."
             else
-              echo "❌ Fix does not touch any package or release/CI automation file"
+              echo "❌ Fix does not touch any package or automation/root manifest file"
               exit 1
             fi
           else
@@ -972,10 +972,11 @@ jobs:
           CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
           CHANGED_PKGS="$(echo "${CHANGED_FILES}" | grep -oE '^packages/[^/]+' | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
-            if echo "${CHANGED_FILES}" | grep -Eq '^(\.github/(actions|scripts|workflows)/|integration-tests/|scripts/|package(-lock)?\.json$)'; then
-              echo "ℹ️ No package-specific tests for release/CI-only changes."
+            if echo "${CHANGED_FILES}" | grep -Eq '^(\.github/|scripts/|package(-lock)?\.json$)'; then
+              echo "ℹ️ No package-specific tests for automation/root-manifest-only changes."
+              echo "outcome=automation-only" >> "${GITHUB_OUTPUT}"
             else
-              echo "❌ PR does not touch any package or release/CI automation file"
+              echo "❌ PR does not touch any package or automation/root manifest file"
               echo "outcome=failed" >> "${GITHUB_OUTPUT}"
               exit 1
             fi
@@ -984,8 +985,8 @@ jobs:
               echo "🧪 Testing ${p}..."
               npm run test --workspace "${p}" --if-present
             done
+            echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
           fi
-          echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
 
       - name: 'Show run artifacts'
         if: |-
@@ -1013,7 +1014,7 @@ jobs:
 
       - name: 'Push and report'
         if: |-
-          ${{ always() && inputs.dry_run != true && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}
+          ${{ always() && inputs.dry_run != true && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'automation-only' || steps.verify.outputs.outcome == 'noop') }}
         env:
           # CI_DEV_BOT_PAT (the qwen-code-dev-bot PAT) pushes the branch and
           # posts the report as qwen-code-dev-bot, the same identity that opened
@@ -1029,7 +1030,7 @@ jobs:
             exit 1
           fi
 
-          if [[ "${OUTCOME}" == "fixed" ]]; then
+          if [[ "${OUTCOME}" == "fixed" || "${OUTCOME}" == "automation-only" ]]; then
             NEXT_ROUND="$(( ROUND + 1 ))"
             git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
             git push --force-with-lease origin "${BRANCH}"
@@ -1044,7 +1045,11 @@ jobs:
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} -->"
             } > "${WORKDIR}/report.md"
-            STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
+            if [[ "${OUTCOME}" == "automation-only" ]]; then
+              STATUS="pushed automation-only change (round ${NEXT_ROUND}/${MAX_ROUNDS})"
+            else
+              STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
+            fi
           else
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
@@ -1066,7 +1071,7 @@ jobs:
             echo "### PR #${PR} (issue #${ISSUE}) — ${STATUS}"
             echo "- Base conflict: ${CONFLICT}"
             echo
-            if [[ "${OUTCOME}" == "fixed" ]]; then
+            if [[ "${OUTCOME}" == "fixed" || "${OUTCOME}" == "automation-only" ]]; then
               cat "${WORKDIR}/address-summary.md"
             else
               cat "${WORKDIR}/no-action.md"
