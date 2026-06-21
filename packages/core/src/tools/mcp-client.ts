@@ -511,11 +511,14 @@ export class McpClient {
       throw new Error('Client is not connected.');
     }
 
-    // Only request resources if the server supports them.
-    if (this.client.getServerCapabilities()?.resources == null) {
-      throw new Error('MCP server does not support resources.');
-    }
-
+    // No `getServerCapabilities()?.resources` precheck, to match the lenient
+    // `listMcpResources` discovery path: a server that answers `resources/list`
+    // but under-declares the `resources` capability would otherwise have its
+    // resources discovered, listed in `/mcp`, and offered in `@server:`
+    // completion, yet fail on read with a misleading "does not support
+    // resources" error. The underlying `request` is the raw `Protocol.request`
+    // (no capability assertion); a server that genuinely lacks resources
+    // answers `-32601`, which surfaces naturally to the caller.
     return this.client.request(
       { method: 'resources/read', params: { uri } },
       ReadResourceResultSchema,

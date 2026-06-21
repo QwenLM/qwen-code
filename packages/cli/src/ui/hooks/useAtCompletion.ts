@@ -16,9 +16,10 @@ import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
  * server (so a plain file path containing ':' is never hijacked); returns
  * `null` otherwise to let the caller fall through to filesystem search.
  *
- * Matching prefers a URI prefix match, then a looser substring match. The
- * resource list comes from the post-discovery `ResourceRegistry`, so an
- * empty result before discovery completes simply shows no suggestions.
+ * Matching is a case-sensitive substring on the URI (an empty partial matches
+ * every resource — `'x'.includes('')` is `true`). The resource list comes
+ * from the post-discovery `ResourceRegistry`, so an empty result before
+ * discovery completes simply shows no suggestions.
  */
 function getMcpResourceSuggestions(
   config: Config | undefined,
@@ -37,11 +38,7 @@ function getMcpResourceSuggestions(
   const partialUri = pattern.slice(colon + 1);
   const resources =
     config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
-  const matches = resources.filter(
-    (r) =>
-      r.uri.startsWith(partialUri) ||
-      (partialUri.length > 0 && r.uri.includes(partialUri)),
-  );
+  const matches = resources.filter((r) => r.uri.includes(partialUri));
   return matches.slice(0, MAX_SUGGESTIONS_TO_SHOW * 3).map((r) => ({
     label: `${serverName}:${r.uri}`,
     value: `${serverName}:${r.uri}`,

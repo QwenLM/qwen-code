@@ -161,6 +161,45 @@ describe('mcp-client', () => {
       expect(client.getInstructions()).toBe('Use concise replies.');
     });
 
+    it('readResource does not gate on the resources capability (lenient read)', async () => {
+      // Regression guard for the discover/read parity bug: a server that
+      // answers resources/read but under-declares the `resources` capability
+      // must still be readable (matching the lenient `listMcpResources`).
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}), // not declared
+        request: vi.fn().mockResolvedValue({
+          contents: [{ uri: 'res://doc', text: 'BODY' }],
+        }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const result = await client.readResource('res://doc');
+      expect(mockedClient.request).toHaveBeenCalledWith(
+        { method: 'resources/read', params: { uri: 'res://doc' } },
+        expect.anything(),
+        undefined,
+      );
+      expect((result.contents[0] as { text: string }).text).toBe('BODY');
+    });
+
     it('should not skip tools even if a parameter is missing a type', async () => {
       const mockedClient = {
         connect: vi.fn(),

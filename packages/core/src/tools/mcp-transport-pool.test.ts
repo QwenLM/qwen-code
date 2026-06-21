@@ -1209,26 +1209,37 @@ describe('McpTransportPool', () => {
       // Assert by counting `removeMcpToolsByServer` calls on the
       // session registry (SessionMcpView's `applyTools` removes
       // existing tools then re-registers).
-      mockMcpSuccess({ toolNames: ['original'] });
+      mockMcpSuccess({ toolNames: ['original'], resourceNames: ['res://r'] });
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r = mkSessionRegistries();
       await pool.acquire('srv', cfg, 's1', r.tools, r.prompts, r.resources);
-      // Initial attach calls applyTools once → one removeMcpToolsByServer.
+      // Initial attach calls applyTools / applyResources once each → one
+      // removeMcpToolsByServer + one removeResourcesByServer.
       const initialRemoveCalls = (
         r.tools.removeMcpToolsByServer as ReturnType<typeof vi.fn>
       ).mock.calls.length;
+      const initialResourceRemoveCalls = (
+        r.resources.removeResourcesByServer as ReturnType<typeof vi.fn>
+      ).mock.calls.length;
       expect(initialRemoveCalls).toBeGreaterThanOrEqual(1);
+      expect(initialResourceRemoveCalls).toBeGreaterThanOrEqual(1);
       const results = await pool.restartByName('srv');
       expect(results[0].restarted).toBe(true);
-      // Post-restart fan-out → additional applyTools call → one more
-      // removeMcpToolsByServer (R3 contract: subscribers see the new
-      // snapshot via direct `view.applyTools` invocation, not via
-      // event subscription).
+      // Post-restart fan-out → additional applyTools AND applyResources call
+      // → one more removeMcpToolsByServer + removeResourcesByServer (R3
+      // contract: subscribers see the new snapshot via direct
+      // `view.applyTools` / `view.applyResources`, not via event subscription).
       const finalRemoveCalls = (
         r.tools.removeMcpToolsByServer as ReturnType<typeof vi.fn>
       ).mock.calls.length;
+      const finalResourceRemoveCalls = (
+        r.resources.removeResourcesByServer as ReturnType<typeof vi.fn>
+      ).mock.calls.length;
       expect(finalRemoveCalls).toBeGreaterThan(initialRemoveCalls);
+      expect(finalResourceRemoveCalls).toBeGreaterThan(
+        initialResourceRemoveCalls,
+      );
     });
   });
 

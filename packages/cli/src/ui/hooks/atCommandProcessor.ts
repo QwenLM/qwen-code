@@ -389,9 +389,12 @@ export async function resolveAtCommandQuery({
       const result = await config
         .getToolRegistry()
         .readMcpResource(ref.serverName, ref.uri, { signal });
+      let textChars = 0;
+      let blobCount = 0;
       for (const content of result.contents ?? []) {
         if ('text' in content && typeof content.text === 'string') {
           resourceParts.push({ text: content.text });
+          textChars += content.text.length;
         } else if ('blob' in content && typeof content.blob === 'string') {
           resourceParts.push({
             inlineData: {
@@ -402,15 +405,30 @@ export async function resolveAtCommandQuery({
               data: content.blob,
             },
           });
+          blobCount += 1;
         }
       }
       resourceLabels.push(label);
+      // Reflect what was actually injected so a success card never hides an
+      // empty read (no `contents`, or only non-text/non-blob entries such as
+      // resource links / metadata) — otherwise a partially-empty multi-ref
+      // read would be invisible.
+      const summary: string[] = [];
+      if (textChars > 0) {
+        summary.push(`${textChars} chars`);
+      }
+      if (blobCount > 0) {
+        summary.push(`${blobCount} attachment${blobCount === 1 ? '' : 's'}`);
+      }
       resourceDisplays.push({
         callId: `client-mcp-resource-${userMessageTimestamp}-${i}`,
         name: 'Read MCP Resource',
         description: `Read resource ${label}`,
         status: ToolCallStatus.Success,
-        resultDisplay: undefined,
+        resultDisplay:
+          summary.length > 0
+            ? `Injected ${summary.join(' + ')}`
+            : '(no readable content)',
         confirmationDetails: undefined,
       });
     } catch (error) {

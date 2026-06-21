@@ -1279,7 +1279,61 @@ describe('handleAtCommand', () => {
       expect(JSON.stringify(result.processedQuery)).toContain('RESOURCE BODY');
       expect(result.toolDisplays).toHaveLength(1);
       expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+      // The success card reflects what was injected ('RESOURCE BODY' = 13).
+      expect(result.toolDisplays![0].resultDisplay).toBe('Injected 13 chars');
       expect(result.filesRead).toContain('myserver:res://doc');
+    });
+
+    it('injects both a @file and a @server:uri resource, surfacing both tool cards', async () => {
+      const fileContent = 'FILE BODY';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'doc.txt'),
+        fileContent,
+      );
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://r', text: 'RESOURCE BODY' }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: `@${filePath} and @myserver:res://r`,
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 604,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const serialized = JSON.stringify(result.processedQuery);
+      // Both the file body and the resource body land in the prompt.
+      expect(serialized).toContain('FILE BODY');
+      expect(serialized).toContain('RESOURCE BODY');
+      const names = (result.toolDisplays ?? []).map((d) => d.name);
+      expect(names).toContain('Read File');
+      expect(names).toContain('Read MCP Resource');
+      expect(result.filesRead).toContain('myserver:res://r');
+    });
+
+    it('marks the success card "(no readable content)" when a resource yields no parts', async () => {
+      // A valid MCP response with empty `contents` (or only resource-link /
+      // metadata entries) must not look like a silent successful injection.
+      const readMcpResource = vi.fn().mockResolvedValue({ contents: [] });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://empty',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 606,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.toolDisplays).toHaveLength(1);
+      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+      expect(result.toolDisplays![0].resultDisplay).toBe(
+        '(no readable content)',
+      );
     });
 
     it('does NOT treat @prefix:uri as a resource when prefix is not a configured server', async () => {
