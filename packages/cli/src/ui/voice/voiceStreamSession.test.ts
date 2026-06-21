@@ -10,6 +10,7 @@ import { deriveStreamUrl, openVoiceStream } from './voiceStreamSession.js';
 class FakeSocket {
   readonly OPEN = 1;
   readyState = this.OPEN;
+  bufferedAmount = 0;
   readonly sent: Array<string | Uint8Array> = [];
   private readonly handlers = new Map<
     string,
@@ -102,6 +103,17 @@ describe('voiceStreamSession', () => {
     );
 
     await expect(session.finish()).resolves.toBe('hello world');
+  });
+
+  it('drops audio chunks when the socket buffer is backed up', async () => {
+    const socket = new FakeSocket();
+    const session = await startSession(socket);
+    socket.sent.length = 0;
+
+    socket.bufferedAmount = 1024 * 1024 + 1;
+    session.pushAudio(new Uint8Array([1, 2, 3]));
+
+    expect(socket.sent).toEqual([]);
   });
 
   it('rejects finish when the task never finishes', async () => {

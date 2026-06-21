@@ -54,6 +54,7 @@ export interface VoiceStreamDeps {
 
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
+const MAX_BUFFERED_AUDIO_BYTES = 1024 * 1024;
 
 export function deriveWebSocketBase(baseUrl: string): string {
   const url = new URL(baseUrl);
@@ -194,7 +195,13 @@ export function openVoiceStream(
         clearConnectTimer();
         resolve({
           pushAudio: (pcm) => {
-            if (ws.readyState === ws.OPEN && pcm.length > 0) ws.send(pcm);
+            if (
+              ws.readyState === ws.OPEN &&
+              pcm.length > 0 &&
+              (ws.bufferedAmount ?? 0) <= MAX_BUFFERED_AUDIO_BYTES
+            ) {
+              ws.send(pcm);
+            }
           },
           finish: () => {
             if (finishPromise) return finishPromise;

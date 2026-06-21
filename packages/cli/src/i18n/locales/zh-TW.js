@@ -1215,6 +1215,15 @@ export default {
   'Set a lighter model for prompt suggestions and speculative execution':
     '設置用於輸入建議和推測執行的輕量模型',
   'Toggle voice dictation input': '切換語音聽寫輸入',
+  'Set the model for voice transcription': '設定語音轉寫模型',
+  'Select Voice Model': '選擇語音模型',
+  'Selected voice model is unavailable.': '所選語音模型不可用。',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "語音模型 '{{model}}' 被配置了多次。請先移除重複的模型 ID，再將其選為語音轉寫模型。",
+  'Voice: recording': '語音：錄音中',
+  'Voice: transcribing': '語音：轉寫中',
+  'listening…': '聆聽中…',
+  'transcribing…': '轉寫中…',
   'Content generator configuration not available.': '內容生成器配置不可用',
   'Authentication type not available.': '認證類型不可用',
   'No models available for the current authentication type ({{authType}}).':

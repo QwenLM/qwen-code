@@ -1416,6 +1416,17 @@ export default {
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
   'Toggle voice dictation input': 'Toggle voice dictation input',
+  'Set the model for voice transcription':
+    'Set the model for voice transcription',
+  'Select Voice Model': 'Select Voice Model',
+  'Selected voice model is unavailable.':
+    'Selected voice model is unavailable.',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
+  'Voice: recording': 'Voice: recording',
+  'Voice: transcribing': 'Voice: transcribing',
+  'listening…': 'listening…',
+  'transcribing…': 'transcribing…',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',

@@ -1329,6 +1329,15 @@ export default {
   'Set a lighter model for prompt suggestions and speculative execution':
     '设置用于输入建议和推测执行的轻量模型',
   'Toggle voice dictation input': '切换语音听写输入',
+  'Set the model for voice transcription': '设置语音转写模型',
+  'Select Voice Model': '选择语音模型',
+  'Selected voice model is unavailable.': '所选语音模型不可用。',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "语音模型 '{{model}}' 被配置了多次。请先移除重复的模型 ID，再将其选为语音转写模型。",
+  'Voice: recording': '语音：录音中',
+  'Voice: transcribing': '语音：转写中',
+  'listening…': '聆听中…',
+  'transcribing…': '转写中…',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
