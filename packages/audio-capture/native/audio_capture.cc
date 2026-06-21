@@ -33,6 +33,7 @@ namespace {
 // before the user speaks does not trigger a stop.
 constexpr double kSilenceThreshold = 0.03 * 32768.0;
 constexpr double kSilenceDurationSecs = 2.0;
+// Reserve room for the 44-byte WAV header so ToWav output stays under 10 MiB.
 constexpr size_t kMaxPcmBytes = 10 * 1024 * 1024 - 44;
 constexpr size_t kMaxPcmSamples = kMaxPcmBytes / sizeof(int16_t);
 

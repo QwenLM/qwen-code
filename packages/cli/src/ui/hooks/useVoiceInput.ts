@@ -421,7 +421,11 @@ export function useVoiceInput({
         await recorder.stop();
       })
       .catch(() => undefined)
-      .finally(() => setVoiceStatus('idle'));
+      .finally(() => {
+        if (recorderRef.current === null) {
+          setVoiceStatus('idle');
+        }
+      });
     stopPromiseRef.current = stopPromise;
     void stopPromise.finally(() => {
       if (stopPromiseRef.current === stopPromise) {

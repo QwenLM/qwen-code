@@ -180,6 +180,58 @@ describe('qwenAsrRealtimeSession', () => {
     expect(socket.sent).toEqual([]);
   });
 
+  it('resumes sending after realtime socket backpressure clears', async () => {
+    const socket = new FakeSocket();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    socket.bufferedAmount = 1024 * 1024 + 1;
+    session.pushAudio(new Uint8Array([1, 2, 3]));
+    socket.bufferedAmount = 0;
+    session.pushAudio(new Uint8Array([4, 5, 6]));
+
+    expect(socket.sent).toHaveLength(1);
+    expect(parseSent(socket, 0)).toMatchObject({
+      type: 'input_audio_buffer.append',
+      audio: 'BAUG',
+    });
+  });
+
+  it('rejects when the server finishes before the session is ready', async () => {
+    const socket = new FakeSocket();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.finished', event_id: 'finished' }),
+      false,
+    );
+
+    await expect(sessionPromise).rejects.toThrow(
+      'Qwen ASR realtime session finished before it was ready.',
+    );
+    expect(socket.readyState).toBe(3);
+  });
+
   it('rejects finish when the server never sends session.finished', async () => {
     vi.useFakeTimers();
     const socket = new FakeSocket();

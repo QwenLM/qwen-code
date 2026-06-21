@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import WebSocket from 'ws';
 import type {
   SocketLike,
@@ -24,6 +25,7 @@ export interface QwenRealtimeDeps {
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 const MAX_BUFFERED_AUDIO_BYTES = 1024 * 1024;
+const debugLogger = createDebugLogger('VOICE_QWEN_REALTIME');
 
 export function deriveQwenRealtimeUrl(baseUrl: string, model: string): string {
   return `${deriveWebSocketBase(baseUrl)}/api-ws/v1/realtime?model=${encodeURIComponent(model)}`;
@@ -71,6 +73,7 @@ export function openQwenAsrRealtimeStream(
     let finishedTranscript: string | null = null;
     let terminalError: Error | null = null;
     let failed = false;
+    let backpressureWarned = false;
 
     const sendJson = (body: Record<string, unknown>) => {
       ws.send(JSON.stringify({ event_id: randomUUID(), ...body }));
@@ -168,7 +171,16 @@ export function openQwenAsrRealtimeStream(
           resolve({
             pushAudio: (pcm) => {
               if (ws.readyState !== ws.OPEN || pcm.length === 0) return;
-              if ((ws.bufferedAmount ?? 0) > MAX_BUFFERED_AUDIO_BYTES) return;
+              if ((ws.bufferedAmount ?? 0) > MAX_BUFFERED_AUDIO_BYTES) {
+                if (!backpressureWarned) {
+                  backpressureWarned = true;
+                  debugLogger.warn(
+                    '[voice] dropping Qwen ASR realtime audio due to socket backpressure.',
+                  );
+                }
+                return;
+              }
+              backpressureWarned = false;
               sendJson({
                 type: 'input_audio_buffer.append',
                 audio: Buffer.from(pcm).toString('base64'),
@@ -225,6 +237,18 @@ export function openQwenAsrRealtimeStream(
           );
           break;
         case 'session.finished':
+          if (!openSettled) {
+            failed = true;
+            openSettled = true;
+            clearConnectTimer();
+            reject(
+              new Error(
+                'Qwen ASR realtime session finished before it was ready.',
+              ),
+            );
+            close();
+            break;
+          }
           failed = true;
           clearFinishTimer();
           finishedTranscript = committed.trim();
