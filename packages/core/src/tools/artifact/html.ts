@@ -82,9 +82,7 @@ export function validateSelfContained(fragment: string): string | null {
   }
 
   const extScript =
-    /\b(?:fetch|WebSocket)\s*\(\s*["']\s*(?:https?|wss?):\/\//i.exec(
-      scan,
-    ) ??
+    /\b(?:fetch|WebSocket)\s*\(\s*["']\s*(?:https?|wss?):\/\//i.exec(scan) ??
     /\bnavigator\.sendBeacon\s*\(\s*["']\s*(?:https?:)?\/\//i.exec(scan);
   if (extScript) {
     return `Artifact must be self-contained — found browser network egress (${truncate(extScript[0])}). Embed data in the artifact instead of fetching it at runtime.`;
@@ -133,7 +131,7 @@ export function wrapArtifactHtml(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none';">
 <title>${safeTitle}</title>
 <style>${CSS_RESET}</style>
 </head>

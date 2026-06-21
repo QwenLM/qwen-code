@@ -177,6 +177,7 @@ export default {
   'toolDisplayName.TodoList': '任务清单',
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Artifact': '制品',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '进入计划模式',
   'toolDisplayName.ExitPlanMode': '退出计划模式',

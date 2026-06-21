@@ -124,6 +124,8 @@ describe('artifact html helpers', () => {
       expect(html).toContain("connect-src 'none'");
       expect(html).toContain("default-src 'none'");
       expect(html).toContain("form-action 'none'");
+      expect(html).toContain("base-uri 'none'");
+      expect(html).toContain("frame-ancestors 'none'");
     });
 
     it('escapes the title', () => {
