@@ -588,7 +588,8 @@ jobs:
           if [[ -n "${existing_issue_url}" ]]; then
             issue_url="${existing_issue_url}"
             issue_number="${issue_url##*/}"
-            gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}"
+            gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
+              || echo "::warning::Failed to comment on existing issue; continuing with dispatch."
           else
             issue_url="$(gh issue create --repo "${GH_REPO}" \
               --title "${issue_title}" \
