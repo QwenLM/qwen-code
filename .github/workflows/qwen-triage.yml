@@ -287,7 +287,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends gh
 
-          npm install -g '@qwen-code/qwen-code@0.18.2'
+          npm install -g '@qwen-code/qwen-code@latest'
           qwen --version
           gh --version
           tmux -V
