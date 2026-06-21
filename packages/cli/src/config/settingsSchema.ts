@@ -2706,6 +2706,16 @@ const SETTINGS_SCHEMA = {
           'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
         showInDialog: true,
       },
+      artifact: {
+        type: 'boolean',
+        label: 'Enable Artifacts',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. Can also be enabled via QWEN_CODE_ENABLE_ARTIFACT=1, or hard-disabled via QWEN_DISABLE_ARTIFACT=1.',
+        showInDialog: true,
+      },
       emitToolUseSummaries: {
         type: 'boolean',
         label: 'Tool Use Summaries',
@@ -2715,6 +2725,137 @@ const SETTINGS_SCHEMA = {
         description:
           'Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
         showInDialog: true,
+      },
+    },
+  },
+
+  artifact: {
+    type: 'object',
+    label: 'Artifacts',
+    category: 'Experimental',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
+    showInDialog: false,
+    properties: {
+      publisher: {
+        type: 'enum',
+        label: 'Artifact Publisher',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: 'local',
+        description:
+          "Where artifacts are published: 'local' (a file:// page on disk, the default) or 'host' (upload via artifact.host.uploadCommand and return a shareable link).",
+        showInDialog: false,
+        options: [
+          { value: 'local', label: 'Local (file://)' },
+          { value: 'host', label: 'Host (shareable link)' },
+          { value: 'oss', label: 'Aliyun OSS' },
+        ],
+      },
+      host: {
+        type: 'object',
+        label: 'Artifact Host',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Host-backend config, used when artifact.publisher is "host".',
+        showInDialog: false,
+        properties: {
+          uploadCommand: {
+            type: 'string',
+            label: 'Upload Command',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description:
+              'Command that uploads the artifact, run with execFile (no shell). {file} = local HTML path, {key} = remote object key. e.g. "aws s3 cp {file} s3://bucket/{key} --content-type text/html".',
+            showInDialog: false,
+          },
+          urlTemplate: {
+            type: 'string',
+            label: 'URL Template',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description:
+              'Shareable URL template; {key} is substituted. e.g. "https://bucket.example.com/{key}".',
+            showInDialog: false,
+          },
+          keyPrefix: {
+            type: 'string',
+            label: 'Key Prefix',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 'artifacts',
+            description:
+              'Remote key prefix; the object key is "{prefix}/{id}/index.html".',
+            showInDialog: false,
+          },
+        },
+      },
+      oss: {
+        type: 'object',
+        label: 'Artifact OSS',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Native Aliyun OSS backend, used when artifact.publisher is "oss". Credentials are read from OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET (or ALIBABA_CLOUD_*), never from settings.',
+        showInDialog: false,
+        properties: {
+          bucket: {
+            type: 'string',
+            label: 'OSS Bucket',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description: 'OSS bucket name.',
+            showInDialog: false,
+          },
+          endpoint: {
+            type: 'string',
+            label: 'OSS Endpoint',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description:
+              'OSS endpoint host, e.g. "oss-cn-hangzhou.aliyuncs.com".',
+            showInDialog: false,
+          },
+          keyPrefix: {
+            type: 'string',
+            label: 'Key Prefix',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 'artifacts',
+            description:
+              'Remote key prefix; the object key is "{prefix}/{id}/index.html".',
+            showInDialog: false,
+          },
+          acl: {
+            type: 'string',
+            label: 'Object ACL',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 'public-read',
+            description:
+              'Object ACL applied on upload. "public-read" (default) makes the link shareable.',
+            showInDialog: false,
+          },
+          publicBaseUrl: {
+            type: 'string',
+            label: 'Public Base URL',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description:
+              'Optional CDN / custom-domain base for the returned URL. Upload still goes through endpoint. e.g. "https://cdn.example.com".',
+            showInDialog: false,
+          },
+        },
       },
     },
   },
