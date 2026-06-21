@@ -34,6 +34,7 @@ vi.mock('node:fs/promises', () => ({
 import { createSoxRecorder } from './soxRecorder.js';
 
 class FakeChildProcess extends EventEmitter {
+  stderr = new EventEmitter();
   kill = vi.fn();
 }
 
@@ -107,6 +108,21 @@ describe('createSoxRecorder', () => {
       recursive: true,
       force: true,
     });
+  });
+
+  it('includes sox stderr when recording fails', async () => {
+    const child = new FakeChildProcess();
+    mocks.spawn.mockReturnValue(child);
+    mocks.mkdtemp.mockResolvedValue('/tmp/qwen-voice-abc');
+
+    const recorder = createSoxRecorder();
+    await startRecorder(recorder);
+    child.stderr.emit('data', Buffer.from('permission denied\n'));
+    child.emit('close', 2);
+
+    await expect(recorder.stop()).rejects.toThrow(
+      'Voice recorder failed with exit code 2: permission denied.',
+    );
   });
 
   it('explains how to fix a missing sox executable', async () => {

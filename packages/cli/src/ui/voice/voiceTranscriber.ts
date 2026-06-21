@@ -172,7 +172,9 @@ export async function assertVoiceBaseUrlNetworkAllowed(
   try {
     result = await (lookupHost ?? defaultLookupHost)(hostname);
   } catch {
-    return;
+    throw new Error(
+      `Voice model '${voiceConfig.model}': DNS lookup failed for ${hostname}. Cannot verify network safety.`,
+    );
   }
   const records = Array.isArray(result) ? result : [result];
   if (records.some((record) => isPrivateNetworkIp(record.address))) {

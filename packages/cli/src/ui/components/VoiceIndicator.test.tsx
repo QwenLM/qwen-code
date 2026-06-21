@@ -21,4 +21,12 @@ describe('<VoiceIndicator />', () => {
     expect(frame).toContain('partial\\u001b[8m hidden\\u001b[0m');
     expect(frame).not.toContain('\x1b[8m');
   });
+
+  it('renders the meter when audioLevel is NaN', () => {
+    const { lastFrame } = render(
+      <VoiceIndicator status="recording" audioLevel={Number.NaN} />,
+    );
+
+    expect(lastFrame()).toContain('░'.repeat(16));
+  });
 });

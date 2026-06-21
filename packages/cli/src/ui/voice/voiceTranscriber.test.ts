@@ -31,6 +31,10 @@ function createSettings(
   } as unknown as LoadedSettings;
 }
 
+async function lookupPublicHost(): Promise<{ address: string }> {
+  return { address: '8.8.8.8' };
+}
+
 describe('voiceTranscriber', () => {
   beforeEach(() => {
     vi.stubEnv('OPENAI_API_KEY', '');
@@ -419,6 +423,29 @@ describe('voiceTranscriber', () => {
     ).rejects.toThrow(/private-network address/);
   });
 
+  it('rejects voice model hosts when DNS safety lookup fails', async () => {
+    await expect(
+      transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Qwen ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://asr.example/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ]),
+          settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+          voiceModel: 'qwen3-asr-flash',
+          lookupHost: vi.fn().mockRejectedValue(new Error('NXDOMAIN')),
+          fetchFn: vi.fn(),
+        },
+      ),
+    ).rejects.toThrow(/DNS lookup failed for asr\.example/);
+  });
+
   it('allows localhost voice URLs for development', () => {
     const config = createConfig([
       {
@@ -489,6 +516,7 @@ describe('voiceTranscriber', () => {
         ]),
         settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
         voiceModel: 'qwen3-asr-flash',
+        lookupHost: lookupPublicHost,
         fetchFn,
       },
     );
@@ -533,6 +561,7 @@ describe('voiceTranscriber', () => {
         ]),
         settings: createSettings(),
         voiceModel: 'qwen3-asr-flash',
+        lookupHost: lookupPublicHost,
         fetchFn,
       },
     );
@@ -578,7 +607,13 @@ describe('voiceTranscriber', () => {
 
     await transcribeVoiceAudio(
       { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
-      { config, settings, voiceModel: 'qwen3-asr-flash', fetchFn },
+      {
+        config,
+        settings,
+        voiceModel: 'qwen3-asr-flash',
+        lookupHost: lookupPublicHost,
+        fetchFn,
+      },
     );
 
     const body = JSON.parse(fetchFn.mock.calls[0][1].body as string);
@@ -611,6 +646,7 @@ describe('voiceTranscriber', () => {
           ]),
           settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
           voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
           fetchFn,
         },
       ),
@@ -646,6 +682,7 @@ describe('voiceTranscriber', () => {
           ]),
           settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
           voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
           fetchFn,
         },
       );
@@ -683,6 +720,7 @@ describe('voiceTranscriber', () => {
           ]),
           settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
           voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
           fetchFn,
         },
       ),
@@ -724,6 +762,7 @@ describe('voiceTranscriber', () => {
           ]),
           settings,
           voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
           fetchFn,
         },
       ),
@@ -760,6 +799,7 @@ describe('voiceTranscriber', () => {
         config,
         settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
         voiceModel: 'qwen3-asr-flash',
+        lookupHost: lookupPublicHost,
         fetchFn,
       },
     );

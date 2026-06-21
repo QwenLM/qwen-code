@@ -39,8 +39,8 @@ constexpr size_t kMaxPcmSamples = kMaxPcmBytes / sizeof(int16_t);
 
 struct RecorderState {
   ma_device device;
-  bool deviceInitialized = false;
-  bool recording = false;
+  std::atomic<bool> deviceInitialized{false};
+  std::atomic<bool> recording{false};
   uint32_t sampleRate = 16000;
   uint32_t channels = 1;
   std::vector<int16_t> pcm;
@@ -58,13 +58,13 @@ struct RecorderState {
 RecorderState gRecorder;
 
 void StopRecorderDevice() {
-  if (!gRecorder.recording || !gRecorder.deviceInitialized) {
+  if (!gRecorder.recording.load() || !gRecorder.deviceInitialized.load()) {
     return;
   }
   ma_device_stop(&gRecorder.device);
   ma_device_uninit(&gRecorder.device);
-  gRecorder.recording = false;
-  gRecorder.deviceInitialized = false;
+  gRecorder.recording.store(false);
+  gRecorder.deviceInitialized.store(false);
 }
 
 void CleanupRecorder(void*) {
@@ -217,7 +217,7 @@ napi_value StartRecording(napi_env env, napi_callback_info info) {
   napi_value args[1];
   napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
-  if (gRecorder.recording) {
+  if (gRecorder.recording.load()) {
     Throw(env, "Native audio capture is already recording.");
     return nullptr;
   }
@@ -269,17 +269,17 @@ napi_value StartRecording(napi_env env, napi_callback_info info) {
     Throw(env, "Native audio capture failed to initialize the input device.");
     return nullptr;
   }
-  gRecorder.deviceInitialized = true;
+  gRecorder.deviceInitialized.store(true);
 
   result = ma_device_start(&gRecorder.device);
   if (result != MA_SUCCESS) {
     ma_device_uninit(&gRecorder.device);
-    gRecorder.deviceInitialized = false;
+    gRecorder.deviceInitialized.store(false);
     Throw(env, "Native audio capture failed to start the input device.");
     return nullptr;
   }
 
-  gRecorder.recording = true;
+  gRecorder.recording.store(true);
   napi_value undefined;
   napi_get_undefined(env, &undefined);
   return undefined;
@@ -287,7 +287,7 @@ napi_value StartRecording(napi_env env, napi_callback_info info) {
 
 napi_value StopRecording(napi_env env, napi_callback_info info) {
   (void)info;
-  if (!gRecorder.recording || !gRecorder.deviceInitialized) {
+  if (!gRecorder.recording.load() || !gRecorder.deviceInitialized.load()) {
     Throw(env, "Native audio capture is not recording.");
     return nullptr;
   }
@@ -319,7 +319,7 @@ napi_value StopRecording(napi_env env, napi_callback_info info) {
 napi_value IsRecording(napi_env env, napi_callback_info info) {
   (void)info;
   napi_value value;
-  napi_get_boolean(env, gRecorder.recording, &value);
+  napi_get_boolean(env, gRecorder.recording.load(), &value);
   return value;
 }
 

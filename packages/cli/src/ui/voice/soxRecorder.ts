@@ -26,6 +26,15 @@ function toSoxError(error: Error): Error {
   return error;
 }
 
+function formatSoxExitError(code: number | null, stderr: string): Error {
+  const detail = stderr.trim();
+  return new Error(
+    `Voice recorder failed with exit code ${code ?? 'unknown'}${
+      detail ? `: ${detail}` : ''
+    }.`,
+  );
+}
+
 class SoxRecorder implements VoiceRecorder {
   private child: ChildProcess | null = null;
   private tmpDir: string | null = null;
@@ -37,6 +46,7 @@ class SoxRecorder implements VoiceRecorder {
     code: number | null;
     signal: NodeJS.Signals | null;
   } | null = null;
+  private stderr = '';
   private closePromise: Promise<{
     code: number | null;
     signal: NodeJS.Signals | null;
@@ -55,6 +65,7 @@ class SoxRecorder implements VoiceRecorder {
     this.onAutoStop = null;
     this.closeResult = null;
     this.closePromise = null;
+    this.stderr = '';
   }
 
   async start(options: VoiceRecorderStartOptions = {}): Promise<void> {
@@ -74,6 +85,9 @@ class SoxRecorder implements VoiceRecorder {
       ...(options.silenceDetection ? SILENCE_EFFECT_ARGS : []),
     ]);
     const child = this.child;
+    child.stderr?.on('data', (chunk: Buffer) => {
+      this.stderr += chunk.toString();
+    });
     this.closePromise = new Promise((resolve) => {
       child.once('close', (code, signal) => {
         this.closeResult = { code, signal };
@@ -125,9 +139,7 @@ class SoxRecorder implements VoiceRecorder {
         closeResult.code !== 0 &&
         closeResult.signal !== 'SIGINT'
       ) {
-        throw new Error(
-          `Voice recorder failed with exit code ${closeResult.code ?? 'unknown'}.`,
-        );
+        throw formatSoxExitError(closeResult.code, this.stderr);
       }
 
       const data = await readFile(filePath);

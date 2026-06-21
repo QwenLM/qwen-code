@@ -22,6 +22,7 @@ const METER_WIDTH = 16;
 const LEVEL_GAIN = 12;
 
 function meter(level: number): string {
+  if (!Number.isFinite(level)) level = 0;
   const norm = Math.max(0, Math.min(1, level * LEVEL_GAIN));
   const filled = Math.round(norm * METER_WIDTH);
   return '█'.repeat(filled) + '░'.repeat(METER_WIDTH - filled);
