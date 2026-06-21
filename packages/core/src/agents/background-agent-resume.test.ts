@@ -1805,6 +1805,7 @@ describe('BackgroundAgentResumeService', () => {
     const agentId = 'agent-revive';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
     const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+    const sessionDir = path.dirname(metaPath);
 
     writeAgentMeta(metaPath, {
       agentId,
@@ -1840,6 +1841,8 @@ describe('BackgroundAgentResumeService', () => {
       ].join('\n') + '\n',
       'utf8',
     );
+    const oldSessionMtime = new Date('2026-04-20T00:00:00.000Z');
+    fs.utimesSync(sessionDir, oldSessionMtime, oldSessionMtime);
 
     // Real terminal lifecycle: run, then complete (sets notified=true).
     registry.register({
@@ -1890,6 +1893,9 @@ describe('BackgroundAgentResumeService', () => {
     });
     const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
     expect(meta.resumeCount).toBe(1);
+    expect(fs.statSync(sessionDir).mtime.getTime()).toBeGreaterThan(
+      oldSessionMtime.getTime(),
+    );
   });
 
   it('does not revive non-completed or transcript-less entries', async () => {

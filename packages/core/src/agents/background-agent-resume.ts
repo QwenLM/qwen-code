@@ -560,6 +560,15 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
+    try {
+      const now = new Date();
+      await fs.utimes(path.dirname(entry.metaPath), now, now);
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Revive could not refresh session directory mtime for "${agentId}": ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     this.restorePausedEntry(agentId);
     return this.resumeBackgroundAgent(agentId, initialMessage);
   }
