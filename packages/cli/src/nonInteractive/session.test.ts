@@ -519,7 +519,11 @@ describe('runNonInteractiveStreamJson', () => {
     const initRequest = createControlRequest('initialize');
     const continueRequest = createContinueRequest();
     runNonInteractiveMock.mockImplementationOnce(async (...args: unknown[]) => {
-      const options = args[4] as { adapter: StreamJsonOutputAdapter };
+      const options = args[4] as {
+        adapter: StreamJsonOutputAdapter;
+        onResultEmitted?: () => void;
+      };
+      options.onResultEmitted?.();
       options.adapter.emitResult({
         isError: true,
         errorMessage: 'raw continue failure',

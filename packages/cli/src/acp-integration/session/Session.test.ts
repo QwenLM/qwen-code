@@ -1297,6 +1297,16 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 
+    it('rejects while cron work is mutating history', async () => {
+      (session as unknown as { cronProcessing: boolean }).cronProcessing = true;
+      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+
+      await expect(session.continueTurn()).rejects.toMatchObject({
+        code: 409,
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('re-submits an orphaned trailing user prompt under the same turn id without recording a user message', async () => {
       setHistoryTail([{ role: 'user', parts: [{ text: 'do the thing' }] }]);
       const stripSpy = getStripSpy();
@@ -1310,16 +1320,41 @@ describe('Session', () => {
       expect(result.interruption).toBe('interrupted_prompt');
       expect(stripSpy).toHaveBeenCalledTimes(1);
       // turn counter is NOT incremented — a continuation is the same
-      // logical turn, so the prompt id reuses the current turn number.
+      // logical turn, with an attempt suffix so consecutive continuations
+      // still have distinct telemetry ids.
       expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
         'qwen3-code-plus',
         {
           message: [{ text: 'do the thing' }],
           config: { abortSignal: expect.any(AbortSignal) },
         },
-        'test-session-id########0',
+        'test-session-id########0.c1',
       );
       expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('uses distinct prompt ids for consecutive continuations of the same logical turn', async () => {
+      setHistoryTail([{ role: 'user', parts: [{ text: 'do the thing' }] }]);
+      getStripSpy().mockReturnValue([]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.continueTurn();
+      await session.continueTurn();
+
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        1,
+        'qwen3-code-plus',
+        expect.anything(),
+        'test-session-id########0.c1',
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        'qwen3-code-plus',
+        expect.anything(),
+        'test-session-id########0.c2',
+      );
     });
 
     it('restores an orphaned trailing user prompt when the continuation send is skipped', async () => {
@@ -1478,7 +1513,7 @@ describe('Session', () => {
           ],
           config: { abortSignal: expect.any(AbortSignal) },
         },
-        'test-session-id########0',
+        'test-session-id########0.c1',
       );
     });
 
@@ -1549,7 +1584,7 @@ describe('Session', () => {
           ],
           config: { abortSignal: expect.any(AbortSignal) },
         },
-        'test-session-id########0',
+        'test-session-id########0.c1',
       );
     });
 
@@ -1584,7 +1619,7 @@ describe('Session', () => {
           ],
           config: { abortSignal: expect.any(AbortSignal) },
         },
-        'test-session-id########0',
+        'test-session-id########0.c1',
       );
     });
 
@@ -1623,7 +1658,7 @@ describe('Session', () => {
           ],
           config: { abortSignal: expect.any(AbortSignal) },
         },
-        'test-session-id########0',
+        'test-session-id########0.c1',
       );
       expect(
         (session as unknown as { pendingWorktreeNotice: string | null })
@@ -1655,7 +1690,7 @@ describe('Session', () => {
           message: [persistedReminder, { text: 'resume me' }],
           config: { abortSignal: expect.any(AbortSignal) },
         },
-        'test-session-id########0',
+        'test-session-id########0.c1',
       );
     });
 
@@ -1749,6 +1784,41 @@ describe('Session', () => {
         releasePrompt();
         await Promise.allSettled([continuePromise, promptPromise]);
       }
+    });
+
+    it('re-detects the interrupted turn after draining background notification work', async () => {
+      type NotificationInternals = {
+        notificationAbortController: AbortController | null;
+        notificationCompletion: Promise<void> | null;
+      };
+      let releaseNotification!: () => void;
+      const notificationCompletion = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      const notificationAbortController = new AbortController();
+      const internals = session as unknown as NotificationInternals;
+      internals.notificationAbortController = notificationAbortController;
+      internals.notificationCompletion = notificationCompletion;
+      (
+        mockChat as unknown as { getHistoryTail: ReturnType<typeof vi.fn> }
+      ).getHistoryTail = vi
+        .fn()
+        .mockReturnValueOnce([{ role: 'user', parts: [{ text: 'stale' }] }])
+        .mockReturnValue([{ role: 'model', parts: [{ text: 'settled' }] }]);
+
+      const continuePromise = session.continueTurn();
+      await vi.waitFor(() => {
+        expect(notificationAbortController.signal.aborted).toBe(true);
+      });
+
+      releaseNotification();
+
+      await expect(continuePromise).resolves.toEqual({
+        stopReason: 'end_turn',
+        resumed: false,
+        interruption: 'none',
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 
     it('restarts queued notification work after a continuation failure', async () => {
@@ -6160,6 +6230,52 @@ describe('Session', () => {
           );
         });
 
+        it('uses hook state captured before the model response completes', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {},
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+            mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+            return createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'response' }] } }],
+                },
+              },
+            ]);
+          });
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(messageBus.request).toHaveBeenCalledWith(
+            expect.objectContaining({
+              eventName: 'Stop',
+            }),
+            expect.anything(),
+          );
+        });
+
         it('ends Stop hook continuation when the blocking cap is reached', async () => {
           const messageBus = {
             request: vi.fn().mockImplementation(async (request) => ({
@@ -9045,7 +9161,7 @@ describe('Session', () => {
             v: 1,
             sessionId: 'test-session-id',
             suggestion: 'Inspect the result?',
-            promptId: 'test-session-id########0',
+            promptId: 'test-session-id########0.c1',
           },
         );
       });

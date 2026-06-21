@@ -92,6 +92,20 @@ function controlSuccess(
   };
 }
 
+function controlError(
+  request: CLIControlRequest,
+  error: string,
+): CLIControlResponse {
+  return {
+    type: 'control_response',
+    response: {
+      subtype: 'error',
+      request_id: request.request_id,
+      error,
+    },
+  };
+}
+
 describe('Query', () => {
   it('sends continue_last_turn control request and returns the payload', async () => {
     const transport = new MockTransport();
@@ -119,6 +133,61 @@ describe('Query', () => {
     transport.pushMessage(controlSuccess(continueRequest, payload));
 
     await expect(continuePromise).resolves.toEqual(payload);
+    await query.close();
+  });
+
+  it('rejects continueLastTurn when the transport closes before the response', async () => {
+    const transport = new MockTransport();
+    const query = new Query(transport, {
+      timeout: { controlRequest: 1000 },
+    });
+
+    const initializeRequest = await transport.waitForWrite(0);
+    transport.pushMessage(controlSuccess(initializeRequest, null));
+    await query.initialized;
+
+    const continuePromise = query.continueLastTurn();
+    await transport.waitForWrite(1);
+    await transport.close();
+
+    await expect(continuePromise).rejects.toThrow('Query is closed');
+    await query.close();
+  });
+
+  it('rejects continueLastTurn when the CLI returns a control error', async () => {
+    const transport = new MockTransport();
+    const query = new Query(transport, {
+      timeout: { controlRequest: 1000 },
+    });
+
+    const initializeRequest = await transport.waitForWrite(0);
+    transport.pushMessage(controlSuccess(initializeRequest, null));
+    await query.initialized;
+
+    const continuePromise = query.continueLastTurn();
+    const continueRequest = await transport.waitForWrite(1);
+    transport.pushMessage(controlError(continueRequest, 'no turn to continue'));
+
+    await expect(continuePromise).rejects.toThrow('no turn to continue');
+    await query.close();
+  });
+
+  it('rejects continueLastTurn when the control request times out', async () => {
+    const transport = new MockTransport();
+    const query = new Query(transport, {
+      timeout: { controlRequest: 25 },
+    });
+
+    const initializeRequest = await transport.waitForWrite(0);
+    transport.pushMessage(controlSuccess(initializeRequest, null));
+    await query.initialized;
+
+    const continuePromise = query.continueLastTurn();
+    await transport.waitForWrite(1);
+
+    await expect(continuePromise).rejects.toThrow(
+      'Control request timeout: continue_last_turn',
+    );
     await query.close();
   });
 });

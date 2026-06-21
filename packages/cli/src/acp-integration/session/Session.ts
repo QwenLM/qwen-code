@@ -665,6 +665,7 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private continueSequence: number = 0;
   private readonly createdAt: number = Date.now();
   /**
    * Running cumulative usage for this session, snapshotted onto each todo/plan
@@ -1194,7 +1195,10 @@ export class Session implements SessionContext {
    * error here would propagate up through `prompt()` and break the
    * primary response path.
    */
-  #maybeEmitFollowupSuggestion(result: PromptResponse): void {
+  #maybeEmitFollowupSuggestion(
+    result: PromptResponse,
+    promptId = this.config.getSessionId() + '########' + String(this.turn),
+  ): void {
     if (result.stopReason !== 'end_turn') return;
     // Enabled by default — only an explicit `false` opts out. The schema
     // `default: true` isn't applied at runtime by `mergeSettings`, so an unset
@@ -1207,8 +1211,6 @@ export class Session implements SessionContext {
 
     const ac = new AbortController();
     this.followupAbort = ac;
-    const promptId =
-      this.config.getSessionId() + '########' + String(this.turn);
 
     void (async () => {
       try {
@@ -1324,10 +1326,8 @@ export class Session implements SessionContext {
         };
       }
 
-      const historyTail = this.#getCurrentChat().getHistoryTail(
-        TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-      );
-      const detection = detectTurnInterruption(historyTail);
+      let historyTail = this.#getInterruptionHistoryTail();
+      let detection = detectTurnInterruption(historyTail);
 
       if (detection.kind !== 'none') {
         // Background cron/notification turns mutate the same chat history;
@@ -1335,6 +1335,9 @@ export class Session implements SessionContext {
         await this.#abortAndDrainCronTurn();
         await this.#abortAndDrainNotificationTurn();
         drainedBackgroundTurns = true;
+
+        historyTail = this.#getInterruptionHistoryTail();
+        detection = detectTurnInterruption(historyTail);
 
         // Cancelled while draining background turns.
         if (pendingSend.signal.aborted) {
@@ -1358,9 +1361,6 @@ export class Session implements SessionContext {
           detection,
           historyTail.length,
         );
-        if (result.resumed) {
-          this.#maybeEmitFollowupSuggestion(result);
-        }
         return result;
       } finally {
         if (this.pendingPrompt === pendingSend) {
@@ -1408,7 +1408,13 @@ export class Session implements SessionContext {
         this.runtimeBaseDir,
         this.config.getWorkingDir(),
         async () => {
-          const promptId = this.config.getSessionId() + '########' + this.turn;
+          const continueSequence = ++this.continueSequence;
+          const promptId =
+            this.config.getSessionId() +
+            '########' +
+            this.turn +
+            '.c' +
+            continueSequence;
           return await withInteractionSpan(
             this.config,
             {
@@ -1477,6 +1483,8 @@ ${this.pendingWorktreeNotice}
                 this.pendingWorktreeNotice = null;
               }
 
+              const hooksEnabled = !this.config.getDisableAllHooks?.();
+              const messageBus = this.config.getMessageBus?.();
               let turnCount = 0;
               let continueSendStarted = false;
               // When we have orphaned entries to restore, `restoreStrippedPromptEntries`
@@ -1485,6 +1493,7 @@ ${this.pendingWorktreeNotice}
               // preservation of that message so a tool_result orphan isn't written
               // to history twice (once by preserve, once by restore).
               const ownsInitialUnsentMessage = strippedPromptEntries.length > 0;
+              let continueResult!: ContinueTurnResponse;
               const restoreStrippedPromptEntries = () => {
                 if (continueSendStarted || strippedPromptEntries.length === 0) {
                   return;
@@ -1513,8 +1522,14 @@ ${this.pendingWorktreeNotice}
                   ownsInitialUnsentMessage,
                 );
                 const result =
-                  earlyExit ?? (await this.#finishTurn(pendingSend, promptId));
-                return {
+                  earlyExit ??
+                  (await this.#finishTurn(
+                    pendingSend,
+                    promptId,
+                    hooksEnabled,
+                    messageBus,
+                  ));
+                continueResult = {
                   ...result,
                   resumed: true,
                   interruption: detection.kind,
@@ -1529,6 +1544,8 @@ ${this.pendingWorktreeNotice}
                   ),
                 );
               }
+              this.#maybeEmitFollowupSuggestion(continueResult, promptId);
+              return continueResult;
             },
             (result) =>
               result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
@@ -1759,7 +1776,13 @@ ${this.pendingWorktreeNotice}
                   isRetry && strippedRetryEntries.length > 0,
                 );
                 return (
-                  earlyExit ?? (await this.#finishTurn(pendingSend, promptId))
+                  earlyExit ??
+                  (await this.#finishTurn(
+                    pendingSend,
+                    promptId,
+                    hooksEnabled,
+                    messageBus,
+                  ))
                 );
               } finally {
                 logConversationFinishedEvent(
@@ -1957,6 +1980,8 @@ ${this.pendingWorktreeNotice}
   async #finishTurn(
     pendingSend: AbortController,
     promptId: string,
+    hooksEnabled: boolean,
+    messageBus: MessageBus | undefined,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     if (this.messageRewriter) {
       await this.messageRewriter.waitForPendingRewrites();
@@ -1965,8 +1990,8 @@ ${this.pendingWorktreeNotice}
     return this.#handleStopHookLoop(
       pendingSend,
       promptId,
-      !this.config.getDisableAllHooks?.(),
-      this.config.getMessageBus?.(),
+      hooksEnabled,
+      messageBus,
     );
   }
 
@@ -2242,6 +2267,14 @@ ${this.pendingWorktreeNotice}
 
   #getCurrentChat(): GeminiChat {
     return this.config.getGeminiClient()!.getChat();
+  }
+
+  #getInterruptionHistoryTail(): Content[] {
+    const chat = this.#getCurrentChat();
+    return (
+      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+      chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)
+    );
   }
 
   /**

@@ -330,6 +330,11 @@ export class Query implements AsyncIterable<SDKMessage> {
           }
         }
 
+        if (!this.closed) {
+          await this.close();
+          return;
+        }
+
         if (this.abortController.signal.aborted) {
           this.inputStream.error(new AbortError('Query aborted'));
         } else {
