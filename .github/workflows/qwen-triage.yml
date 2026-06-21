@@ -235,12 +235,26 @@ jobs:
          github.event.inputs.tmux_pr != '' &&
          needs.authorize.outputs.should_run == 'true')
       )
-    # One real-user test per PR at a time. Concurrent /tmux runs would share the
-    # same self-hosted runner workspace and git worktrees and clobber each other,
-    # so serialize them (cancel-in-progress: false lets the in-flight test finish
-    # rather than killing it mid-run).
+    # One real-user test per PR at a time. GitHub evaluates concurrency before
+    # the job `if`, but after `needs`, so keep non-runnable triggers out of the
+    # shared per-PR group. Concurrent authorized /tmux runs would share the same
+    # self-hosted runner workspace and git worktrees and clobber each other, so
+    # serialize them (cancel-in-progress: false lets the in-flight test finish).
     concurrency:
-      group: '${{ github.workflow }}-tmux-${{ github.event.issue.number || github.event.inputs.tmux_pr }}'
+      group: >-
+        ${{
+          (
+            ((github.event_name == 'issue_comment' &&
+              github.event.issue.pull_request &&
+              (github.event.comment.body == '@qwen-code /tmux' ||
+               startsWith(github.event.comment.body, '@qwen-code /tmux '))) ||
+             (github.event_name == 'workflow_dispatch' &&
+              github.event.inputs.tmux_pr != '')) &&
+            needs.authorize.outputs.should_run == 'true'
+          ) &&
+          format('{0}-tmux-{1}', github.workflow, github.event.issue.number || github.event.inputs.tmux_pr) ||
+          format('{0}-tmux-run-{1}', github.workflow, github.run_id)
+        }}
       cancel-in-progress: false
     timeout-minutes: 45
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
@@ -255,7 +269,8 @@ jobs:
       pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number || github.event.inputs.tmux_pr }}'
       # steps.run sets the verdict for an actual test; steps.pr sets 'n/a' when
       # the PR has no TUI surface. Both empty -> stayed silent (skip case).
-      verdict: '${{ steps.run.outputs.verdict || steps.pr.outputs.verdict }}'
+      verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
+      failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
     steps:
       - name: 'Install tmux runner tools'
         run: |-
@@ -351,6 +366,7 @@ jobs:
           fetch-depth: 1
 
       - name: 'Install and build PR app'
+        id: 'prepare'
         if: "steps.pr.outputs.decision == 'run'"
         env:
           GITHUB_TOKEN: ''
@@ -358,12 +374,44 @@ jobs:
         run: |-
           set -euo pipefail
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          mkdir -p "$RUNNER_TEMP/tmux-results"
           chown -R node:node "$GITHUB_WORKSPACE"
-          runuser -u node -- npm ci --prefer-offline --no-audit --progress=false
-          runuser -u node -- npm run build
+          prepare_log="$RUNNER_TEMP/tmux-results/prepare.log"
+
+          set +e
+          {
+            printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+            runuser -u node -- npm ci --prefer-offline --no-audit --progress=false
+            install_status=$?
+            if [ "$install_status" -ne 0 ]; then
+              printf '\n%s\n' "npm ci failed with exit code ${install_status}."
+            else
+              printf '\n%s\n' '$ npm run build'
+              runuser -u node -- npm run build
+              build_status=$?
+              if [ "$build_status" -ne 0 ]; then
+                printf '\n%s\n' "npm run build failed with exit code ${build_status}."
+              fi
+            fi
+          } > "$prepare_log" 2>&1
+          set -e
+
+          if [ "${install_status:-0}" -ne 0 ]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "failure_phase=install" >> "$GITHUB_OUTPUT"
+            echo "::error::npm ci failed; reporting a tmux fail verdict instead of an infrastructure failure."
+            exit 0
+          fi
+          if [ "${build_status:-0}" -ne 0 ]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "failure_phase=build" >> "$GITHUB_OUTPUT"
+            echo "::error::npm run build failed; reporting a tmux fail verdict instead of an infrastructure failure."
+            exit 0
+          fi
+          echo "Install/build completed before tmux testing." >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Run tmux real-user testing'
-        if: "steps.pr.outputs.decision == 'run'"
+        if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
         id: 'run'
         # NOTE: no GitHub token here — this step runs untrusted PR code. The
         # real model key is kept out of qwen's environment; qwen talks to a
@@ -702,6 +750,7 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ needs.tmux-testing.outputs.pr_number }}'
           VERDICT: '${{ needs.tmux-testing.outputs.verdict }}'
+          PREPARE_FAILURE_PHASE: '${{ needs.tmux-testing.outputs.failure_phase }}'
           TMUX_RESULT: '${{ needs.tmux-testing.result }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         # shellcheck disable=SC2016
@@ -751,6 +800,20 @@ jobs:
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
               printf '**tmux real-user testing: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
               printf 'The testing job did not complete (checkout, runner, or setup error) and produced no verdict. See the workflow run for details.\n\n'
+              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+            } > "$BODY_FILE"
+          elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
+            PREPARE_LOG="$(find tmux-results -name 'prepare.log' 2>/dev/null | head -1 || true)"
+            case "$PREPARE_FAILURE_PHASE" in
+              install) PREPARE_COMMAND='npm ci' ;;
+              build) PREPARE_COMMAND='npm run build' ;;
+              *) PREPARE_COMMAND="$PREPARE_FAILURE_PHASE" ;;
+            esac
+            {
+              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+              printf '**tmux real-user testing: fail** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The PR app could not be launched because `%s` failed before the tmux session started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
+              emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'
             } > "$BODY_FILE"
           else
