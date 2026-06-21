@@ -100,6 +100,7 @@ const createConfig = (
     getMcpServers: () => overrides.mcpServers ?? {},
     getToolRegistry: () => undefined,
     getPromptRegistry: () => undefined,
+    getResourceRegistry: () => undefined,
     isMcpServerDisabled: () => false,
     getExcludedMcpServers: () => [],
     setExcludedMcpServers: vi.fn(),

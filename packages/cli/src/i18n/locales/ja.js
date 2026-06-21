@@ -1105,6 +1105,7 @@ export default {
   'Tools:': 'ツール:',
   'Parameters:': 'パラメータ:',
   'Prompts:': 'プロンプト:',
+  'Resources:': 'リソース:',
   Blocked: 'ブロック',
   '💡 Tips:': '💡 ヒント:',
   Use: '使用',

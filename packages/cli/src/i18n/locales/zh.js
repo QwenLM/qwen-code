@@ -1626,6 +1626,7 @@ export default {
   'Tools:': '工具：',
   'Parameters:': '参数：',
   'Prompts:': '提示：',
+  'Resources:': '资源：',
   Blocked: '已阻止',
   '💡 Tips:': '💡 提示：',
   Use: '使用',
