@@ -576,14 +576,14 @@ jobs:
             echo "This issue was created automatically by the release workflow. Qwen Autofix will be dispatched unless this release failure is already being handled."
           } > "${body_file}"
 
+          issue_title="Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')"
           title_prefix="Release Failed for ${RELEASE_TAG}"
-          existing_issue_url=""
-          if [[ "${RELEASE_TAG}" != "N/A" ]]; then
-            existing_issue_url="$(gh issue list --repo "${GH_REPO}" --state open \
-              --limit 100 --json title,url \
-              | jq -r --arg title_prefix "${title_prefix}" 'map(select(.title | startswith($title_prefix + " on "))) | .[0].url // ""' \
-              || true)"
-          fi
+          issue_labels="type/bug,category/development,scope/ci-cd,scope/github-actions,priority/P1,status/ready-for-agent"
+          existing_issue_url="$(gh issue list --repo "${GH_REPO}" --state open \
+            --search '"Release Failed for" in:title' --limit 100 --json title,url \
+            | jq -r --arg title_prefix "${title_prefix}" 'map(select(.title | startswith($title_prefix + " on "))) | .[0].url // ""' \
+            || true)"
+          created_issue="false"
 
           if [[ -n "${existing_issue_url}" ]]; then
             issue_url="${existing_issue_url}"
@@ -591,14 +591,9 @@ jobs:
             gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}"
           else
             issue_url="$(gh issue create --repo "${GH_REPO}" \
-              --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
-              --body-file "${body_file}" \
-              --label "type/bug" \
-              --label "category/development" \
-              --label "scope/ci-cd" \
-              --label "scope/github-actions" \
-              --label "priority/P1" \
-              --label "status/ready-for-agent")"
+              --title "${issue_title}" \
+              --body-file "${body_file}")"
+            created_issue="true"
           fi
 
           issue_number="${issue_url##*/}"
@@ -606,13 +601,17 @@ jobs:
             echo "::error::Could not parse issue number from: ${issue_url}"
             exit 1
           fi
+          if [[ "${created_issue}" == "true" ]]; then
+            gh issue edit "${issue_number}" --repo "${GH_REPO}" --add-label "${issue_labels}" \
+              || echo "::warning::Failed to apply labels; continuing with dispatch."
+          fi
 
           echo "Created or updated issue ${issue_url} (#${issue_number}); dispatching autofix."
 
           has_in_progress="$(gh issue view "${issue_number}" --repo "${GH_REPO}" \
-            --json labels --jq 'any(.labels[].name; . == "autofix/in-progress")')"
+            --json labels --jq 'any(.labels[].name; . == "autofix/in-progress")' || echo 'false')"
           open_autofix_prs="$(gh pr list --repo "${GH_REPO}" --state open \
-            --head "autofix/issue-${issue_number}" --json number --jq 'length')"
+            --head "autofix/issue-${issue_number}" --json number --jq 'length' || echo '0')"
 
           if [[ "${has_in_progress}" == "true" || "${open_autofix_prs}" != "0" ]]; then
             echo "Autofix is already in progress for #${issue_number}; skipping duplicate dispatch."

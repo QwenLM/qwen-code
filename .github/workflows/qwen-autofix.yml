@@ -487,6 +487,14 @@ jobs:
               exit 1
             fi
             if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^\.github/workflows/.*\.ya?ml$'; then
+              actionlint_dir="${RUNNER_TEMP:-/tmp}/actionlint"
+              if ! command -v actionlint > /dev/null 2>&1; then
+                mkdir -p "${actionlint_dir}"
+                curl -sSLo "${actionlint_dir}/actionlint.tgz" \
+                  'https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz'
+                tar -xzf "${actionlint_dir}/actionlint.tgz" -C "${actionlint_dir}" actionlint
+              fi
+              export PATH="${actionlint_dir}:${PATH}"
               node scripts/lint.js --actionlint
             fi
             echo "ℹ️ No package-specific tests for automation/root-manifest-only changes."
@@ -980,6 +988,14 @@ jobs:
               exit 1
             fi
             if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^\.github/workflows/.*\.ya?ml$'; then
+              actionlint_dir="${RUNNER_TEMP:-/tmp}/actionlint"
+              if ! command -v actionlint > /dev/null 2>&1; then
+                mkdir -p "${actionlint_dir}"
+                curl -sSLo "${actionlint_dir}/actionlint.tgz" \
+                  'https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz'
+                tar -xzf "${actionlint_dir}/actionlint.tgz" -C "${actionlint_dir}" actionlint
+              fi
+              export PATH="${actionlint_dir}:${PATH}"
               node scripts/lint.js --actionlint
             fi
             echo "ℹ️ No package-specific tests for automation/root-manifest-only changes."
