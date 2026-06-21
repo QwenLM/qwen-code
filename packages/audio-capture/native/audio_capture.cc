@@ -258,7 +258,9 @@ napi_value StartRecording(napi_env env, napi_callback_info info) {
     gRecorder.silentFrames.store(0);
     gRecorder.level = 0.0;
     gRecorder.silenceDetected.store(false);
-    gRecorder.pcm.assign(kMaxPcmSamples, 0);
+    if (gRecorder.pcm.size() < kMaxPcmSamples) {
+      gRecorder.pcm.resize(kMaxPcmSamples);
+    }
     gRecorder.pcmSize = 0;
   }
 

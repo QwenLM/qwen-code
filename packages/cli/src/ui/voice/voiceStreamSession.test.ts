@@ -82,7 +82,7 @@ describe('voiceStreamSession', () => {
     );
   });
 
-  it('rejects committed partial transcript when the stream closes after finish', async () => {
+  it('salvages committed transcript when the stream closes after finish', async () => {
     const socket = new FakeSocket();
     const session = await startSession(socket);
 
@@ -100,8 +100,28 @@ describe('voiceStreamSession', () => {
     const transcriptPromise = session.finish();
     socket.emit('close');
 
-    await expect(transcriptPromise).rejects.toThrow(
-      'Voice stream connection closed unexpectedly.',
+    await expect(transcriptPromise).resolves.toBe('hello world');
+  });
+
+  it('rejects when task-finished arrives before task-started', async () => {
+    const socket = new FakeSocket();
+    const sessionPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.emit('open');
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-finished' } }),
+      false,
+    );
+
+    await expect(sessionPromise).rejects.toThrow(
+      'Voice stream finished before it started.',
     );
   });
 
