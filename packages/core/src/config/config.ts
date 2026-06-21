@@ -2588,10 +2588,17 @@ export class Config {
   private resolveFastModelSelector() {
     if (!this.fastModel) return undefined;
     try {
+      const rawSelector = resolveModelId(this.fastModel);
+      if (!rawSelector) return undefined;
+      if (rawSelector.authType) return rawSelector;
+
+      const currentAuthType = this.getContentGeneratorConfig()?.authType;
+      if (!currentAuthType) return undefined;
+
       return resolveModelId(this.fastModel, {
-        currentAuthType: this.getContentGeneratorConfig()?.authType,
+        currentAuthType,
         getAvailableModels: (authTypes) =>
-          this.getAllConfiguredModels(authTypes),
+          this.getAllConfiguredModels(authTypes ?? [currentAuthType]),
       });
     } catch {
       return undefined;
