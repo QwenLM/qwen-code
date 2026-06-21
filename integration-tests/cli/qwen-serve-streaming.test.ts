@@ -7,9 +7,10 @@
 /**
  * `qwen serve` daemon — streaming / multi-client / recovery integration.
  *
- * These tests need a working model credential because they fire real
- * prompts and observe the resulting SSE stream. They cover three flows
- * that unit tests can't fully exercise:
+ * These tests fire real daemon prompts and observe the resulting SSE stream,
+ * but the model side is backed by a local OpenAI-compatible fake server so
+ * the suite can run without API keys. They cover three flows that unit tests
+ * can't fully exercise:
  *
  *   1. Real `qwen --acp` child crash → daemon publishes `session_died`,
  *      removes the dead entry from the maps, and a subsequent
@@ -21,14 +22,20 @@
  *      `Last-Event-ID: N` resumes the stream from id N+1 via the bus's
  *      replay ring.
  *
- * Skip on CI / no-auth via `SKIP_LLM_TESTS=1`.
  */
 import { spawn, execSync, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
+import {
+  fakeToolCall,
+  startFakeOpenAIServer,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer `TEST_CLI_PATH`
@@ -41,25 +48,42 @@ const CLI_BIN =
 const TOKEN = 'streaming-integ-secret';
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
-// Skip when:
-//   - explicit `SKIP_LLM_TESTS=1` (CI envs without provider API keys), OR
-//   - Windows: this suite shells out to `pgrep` / `kill -KILL` to
-//     simulate child-process crashes for the SIGKILL → `session_died`
-//     test, and those binaries are POSIX-only. A Windows-equivalent
-//     (`taskkill`) would need different test scaffolding; deferred to
-//     a follow-up rather than smuggling shell-shape divergence into
-//     the existing assertions.
-const SKIP =
-  process.env['SKIP_LLM_TESTS'] === '1' || process.platform === 'win32';
+// Windows: this suite shells out to `pgrep` / `kill -KILL` to simulate
+// child-process crashes for the SIGKILL → `session_died` test, and those
+// binaries are POSIX-only. A Windows-equivalent (`taskkill`) would need
+// different test scaffolding.
+const SKIP = process.platform === 'win32';
 const describeLLM = SKIP ? describe.skip : describe;
 
 let daemon: ChildProcess;
 let port = 0;
 let base = '';
 let client: DaemonClient;
+let fakeServer: FakeOpenAIServer;
+let homeDir = '';
+let pendingWritePath = '';
 
 beforeAll(async () => {
   if (SKIP) return;
+  fakeServer = await startFakeOpenAIServer(({ body }) => {
+    const messages = JSON.stringify(body['messages'] ?? []);
+    const hasToolResult =
+      messages.includes('"role":"tool"') || messages.includes('"tool_call_id"');
+
+    if (pendingWritePath && messages.includes('fan-out') && !hasToolResult) {
+      return {
+        toolCalls: [
+          fakeToolCall('write_file', {
+            file_path: pendingWritePath,
+            content: 'fan-out',
+          }),
+        ],
+      };
+    }
+
+    return { content: 'fake response complete' };
+  });
+  homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-home-'));
   daemon = spawn(
     process.execPath,
     [
@@ -77,13 +101,23 @@ beforeAll(async () => {
       // the test runner's cwd (CI / IDE-launcher / direct vitest
       // invocations all differ) and every session create returns
       // 400 workspace_mismatch — the SSE / permission / Last-Event-ID
-      // tests below would all silently 404 once `SKIP_LLM_TESTS` is
-      // unset. Same fix the sibling routes test received earlier in
-      // this PR — missed in this file in the original §02 pass.
+      // tests below would all silently 404. Same fix the sibling routes test
+      // received earlier in this PR — missed in this file in the original §02
+      // pass.
       '--workspace',
       REPO_ROOT,
     ],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+      },
+    },
   );
   port = await new Promise<number>((resolve, reject) => {
     let buf = '';
@@ -115,9 +149,14 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  if (SKIP || !daemon || daemon.exitCode !== null) return;
-  daemon.kill('SIGTERM');
-  await new Promise((r) => daemon.once('exit', r));
+  if (!SKIP && daemon && daemon.exitCode === null) {
+    daemon.kill('SIGTERM');
+    await new Promise((r) => daemon.once('exit', r));
+  }
+  await fakeServer?.close();
+  if (homeDir) {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
 }, 15_000);
 
 /** Open an authenticated SSE stream and yield parsed frames. */
@@ -265,6 +304,7 @@ describeLLM('qwen serve — multi-client first-responder permission', () => {
     await new Promise((r) => setTimeout(r, 200));
 
     const tmp = `/tmp/qwen-serve-mc-${Date.now()}.txt`;
+    pendingWritePath = tmp;
     const promptTask = client.prompt(session.sessionId, {
       prompt: [
         {
@@ -345,6 +385,7 @@ describeLLM('qwen serve — multi-client first-responder permission', () => {
     } catch {
       /* file may not exist if the tool didn't run */
     }
+    pendingWritePath = '';
   }, 90_000);
 });
 
