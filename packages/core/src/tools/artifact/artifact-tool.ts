@@ -19,6 +19,7 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { makeRelative, shortenPath, unescapePath } from '../../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../../utils/errors.js';
 import { openBrowserSecurely } from '../../utils/secure-browser-launcher.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
   MAX_ARTIFACT_BYTES,
   byteLength,
@@ -54,6 +55,8 @@ Workflow:
 To update an artifact, call Artifact again with the SAME file path: it redeploys to the same URL. A different path creates a separate Artifact.
 
 Set QWEN_ARTIFACT_NO_AUTO_OPEN=1 to publish without launching a browser.`;
+
+const debugLogger = createDebugLogger('artifact');
 
 class ArtifactToolInvocation extends BaseToolInvocation<
   ArtifactToolParams,
@@ -177,8 +180,10 @@ class ArtifactToolInvocation extends BaseToolInvocation<
           allowFile: true,
           allowedFilePaths: filePath ? [filePath] : [],
         });
-      } catch {
-        // Ignored — the URL is still returned for manual opening.
+      } catch (err) {
+        debugLogger.warn(
+          `Failed to open browser for artifact "${title}": ${getErrorMessage(err)}`,
+        );
       }
     }
 

@@ -2746,7 +2746,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: 'local',
         description:
-          "Where artifacts are published: 'local' (a file:// page on disk, the default) or 'host' (upload via artifact.host.uploadCommand and return a shareable link).",
+          "Where artifacts are published: 'local' (a file:// page on disk, the default), 'host' (upload via artifact.host.uploadCommand and return a shareable link), or 'oss' (native Aliyun OSS upload).",
         showInDialog: false,
         options: [
           { value: 'local', label: 'Local (file://)' },
