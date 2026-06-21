@@ -493,12 +493,18 @@ export class BaseLlmClient {
       };
     }
 
-    const contentGenerator = await this.createContentGeneratorForModel(
+    const resolvedModel = this.resolveModelAcrossAuthTypes(
       model,
       selector,
       hint.baseUrl,
     );
-    const resolvedModel = this.resolveModelAcrossAuthTypes(
+    if (!resolvedModel && (hint.authType || hint.baseUrl)) {
+      throw new Error(
+        `Model "${model}" could not be resolved for the requested provider hint.`,
+      );
+    }
+
+    const contentGenerator = await this.createContentGeneratorForModel(
       model,
       selector,
       hint.baseUrl,

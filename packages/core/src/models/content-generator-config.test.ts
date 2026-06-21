@@ -51,6 +51,10 @@ describe('buildAgentContentGeneratorConfig', () => {
     extra_body: { custom: 'value' },
   };
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   describe('same-provider, bare model ID, no registry match', () => {
     it('should override the model but keep parent generation config', () => {
       const config = createMockConfig(parentConfig);
@@ -107,6 +111,25 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.apiKey).toBe('explicit-key');
       expect(result.baseUrl).toBe('https://explicit.example.com');
     });
+  });
+
+  it('does not inherit same-auth credentials when an explicit baseUrl targets another endpoint', () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const config = createMockConfig(parentConfig);
+
+    const result = buildAgentContentGeneratorConfig(config, 'vision-model', {
+      authType: 'openai',
+      baseUrl: 'https://other.example.com',
+    });
+
+    expect(result.model).toBe('vision-model');
+    expect(result.authType).toBe('openai');
+    expect(result.baseUrl).toBe('https://other.example.com');
+    expect(result.apiKey).toBeUndefined();
+    expect(result.apiKeyEnvKey).toBeUndefined();
+    expect(result.samplingParams).toBeUndefined();
+    expect(result.reasoning).toBeUndefined();
+    expect(result.extra_body).toBeUndefined();
   });
 
   describe('cross-provider with env var fallback', () => {

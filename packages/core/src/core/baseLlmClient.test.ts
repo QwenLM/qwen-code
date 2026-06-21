@@ -707,6 +707,20 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('throws instead of falling back when an explicit provider hint cannot be resolved', async () => {
+      getResolvedModel.mockReturnValue(undefined);
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await expect(
+        c.resolveForModel('missing-vision-model', {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://vision.example.com/v1',
+        }),
+      ).rejects.toThrow(/missing-vision-model/);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
     it('does not cache the unregistered-model fallback across runtime-view changes', async () => {
       // Unregistered selector: createContentGeneratorForModel falls back to
       // getCurrentContentGenerator(). The runtime view changes between calls

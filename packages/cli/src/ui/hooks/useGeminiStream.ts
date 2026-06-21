@@ -105,11 +105,32 @@ const debugLogger = createDebugLogger('GEMINI_STREAM');
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
+const VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT = 2048;
+const NOTICE_CONTROL_CHARS = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
 
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
   responseParts: Part[];
+}
+
+function formatVisionBridgeNoticeLabel(label: string): string {
+  return (
+    label
+      .replace(/\r\n?|[\u2028\u2029]/g, ' ')
+      .replace(NOTICE_CONTROL_CHARS, '')
+      .replace(/\s+/g, ' ')
+      .trim() || 'vision model'
+  );
+}
+
+function truncateVisionBridgeTranscript(transcript: string): string {
+  if (transcript.length <= VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT) {
+    return transcript;
+  }
+  return `${transcript
+    .slice(0, VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT)
+    .trimEnd()}\n[Transcript truncated]`;
 }
 
 /**
@@ -125,13 +146,15 @@ function formatVisionBridgeNotice(
   result: VisionBridgeResult,
   showTranscript: boolean,
 ): string {
-  const modelName = result.modelId ?? 'vision model';
+  const modelName = formatVisionBridgeNoticeLabel(
+    result.modelId ?? 'vision model',
+  );
   const target = result.modelEndpoint
-    ? `${modelName} (${result.modelEndpoint})`
+    ? `${modelName} (${formatVisionBridgeNoticeLabel(result.modelEndpoint)})`
     : modelName;
   if (result.status === 'failed') {
     const egress = result.egressOccurred
-      ? ` Your image and prompt were sent to ${target}.`
+      ? ` Your image and prompt/context were sent to ${target}.`
       : '';
     return `⚠ Vision bridge (${modelName}) failed: ${
       result.error ?? 'unknown error'
@@ -149,9 +172,9 @@ function formatVisionBridgeNotice(
   // that hiding the transcript never silently hides that data left the machine.
   // Name the endpoint too — cross-provider auto-select can route to a different
   // host than the primary model.
-  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt were sent to that model.`;
+  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   return showTranscript && result.transcript
-    ? `${header}\n${result.transcript}`
+    ? `${header}\n${truncateVisionBridgeTranscript(result.transcript)}`
     : header;
 }
 

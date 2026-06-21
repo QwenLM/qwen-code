@@ -466,6 +466,52 @@ describe('useGeminiStream', () => {
         }),
         expect.any(Number),
       );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining(
+            'Your image and prompt/context were sent',
+          ),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('caps very long bridge transcripts in the user-facing notice', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        transcript: `${'a'.repeat(5000)}TAIL_SHOULD_BE_TRUNCATED`,
+        imageCount: 1,
+        convertedCount: 1,
+        omittedCount: 0,
+        omittedInvalidCount: 0,
+        omittedCappedCount: 0,
+        modelId: 'vm',
+      });
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.not.stringContaining('TAIL_SHOULD_BE_TRUNCATED'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Transcript truncated'),
+        }),
+        expect.any(Number),
+      );
     });
 
     it('keeps the turn alive with text plus a note when the bridge fails', async () => {
@@ -502,7 +548,7 @@ describe('useGeminiStream', () => {
         expect.objectContaining({
           type: MessageType.ERROR,
           text: expect.stringContaining(
-            'Your image and prompt were sent to vm (vision.example.com).',
+            'Your image and prompt/context were sent to vm (vision.example.com).',
           ),
         }),
         expect.any(Number),

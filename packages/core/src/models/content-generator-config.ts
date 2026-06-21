@@ -31,6 +31,16 @@ export interface AuthOverrides {
   baseUrl?: string;
 }
 
+function isSameProviderTarget(
+  authOverrides: AuthOverrides,
+  parentConfig: ContentGeneratorConfig,
+  targetBaseUrl?: string,
+): boolean {
+  if (authOverrides.authType !== parentConfig.authType) return false;
+  const requestedBaseUrl = authOverrides.baseUrl ?? targetBaseUrl;
+  return !requestedBaseUrl || requestedBaseUrl === parentConfig.baseUrl;
+}
+
 /**
  * Build a ContentGeneratorConfig for a per-agent ContentGenerator.
  * Inherits operational settings (timeout, retries, proxy, sampling, etc.)
@@ -47,7 +57,6 @@ export function buildAgentContentGeneratorConfig(
   authOverrides: AuthOverrides,
 ): ContentGeneratorConfig {
   const parentConfig = base.getContentGeneratorConfig();
-  const sameProvider = authOverrides.authType === parentConfig.authType;
   const modelsConfig = base.getModelsConfig();
   const resolvedModel = modelId
     ? modelsConfig.getResolvedModel(
@@ -56,6 +65,11 @@ export function buildAgentContentGeneratorConfig(
         authOverrides.baseUrl,
       )
     : undefined;
+  const sameProvider = isSameProviderTarget(
+    authOverrides,
+    parentConfig,
+    resolvedModel?.baseUrl,
+  );
 
   const nextConfig: ContentGeneratorConfig = {
     ...parentConfig,
@@ -137,7 +151,11 @@ function applyResolvedModelConfig(
   parentConfig: ContentGeneratorConfig,
   authOverrides: AuthOverrides,
 ): void {
-  const sameProvider = authOverrides.authType === parentConfig.authType;
+  const sameProvider = isSameProviderTarget(
+    authOverrides,
+    parentConfig,
+    resolvedModel.baseUrl,
+  );
   targetConfig.model = resolvedModel.id;
   targetConfig.authType = resolvedModel.authType;
   targetConfig.baseUrl =

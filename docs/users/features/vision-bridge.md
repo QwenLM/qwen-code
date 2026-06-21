@@ -1,6 +1,6 @@
 # Vision Bridge
 
-Vision Bridge lets a **text-only** primary model work with images you paste or reference. When enabled, Qwen Code sends the image to a configured (or auto-selected) **multimodal** model, turns it into a text description, and passes that text to your text-only model — so you keep your preferred text model's reasoning while still being able to share screenshots, error dialogs, and diagrams.
+Vision Bridge lets a **text-only** primary model work with images you paste or reference. When enabled, Qwen Code sends the image and surrounding prompt/context to a configured (or auto-selected) **multimodal** model, turns it into a text description, and passes that text to your text-only model — so you keep your preferred text model's reasoning while still being able to share screenshots, error dialogs, and diagrams.
 
 It is **opt-in and disabled by default**. When off (or when your primary model already accepts images), nothing changes.
 
@@ -46,30 +46,30 @@ With just `enabled: true`, the bridge **auto-selects** an image-capable model fr
 }
 ```
 
-The pinned `model` must be an image-capable model that is resolvable in your configuration (i.e. registered under `modelProviders` so its endpoint and credentials can be resolved).
+The pinned `model` must be an image-capable model that is resolvable in your configuration (i.e. registered under `modelProviders` so its endpoint and credentials can be resolved). If the same model id exists under multiple providers, use `authType:modelId` (for example, `openai:qwen3-vl-plus`) to select the provider explicitly.
 
 ## Settings
 
-| Setting                       | Type    | Description                                                                                                                | Default |
-| ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `visionBridge.enabled`        | boolean | Convert images to text via a vision model when the primary model is text-only.                                             | `false` |
-| `visionBridge.model`          | string  | Vision model id used to transcribe/describe images. Leave empty to auto-select an image-capable registered model.          | `""`    |
-| `visionBridge.maxImages`      | number  | Maximum number of images converted per turn; extras are reported as omitted. Clamped to 0-16; use 0 to disable conversion. | `4`     |
-| `visionBridge.timeoutMs`      | number  | Timeout for the vision model call only (not the whole turn), in milliseconds. Clamped to 1000–120000.                      | `30000` |
-| `visionBridge.showTranscript` | boolean | Show the generated transcription so you can catch misreads.                                                                | `true`  |
+| Setting                       | Type    | Description                                                                                                                                                             | Default |
+| ----------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `visionBridge.enabled`        | boolean | Convert images to text via a vision model when the primary model is text-only.                                                                                          | `false` |
+| `visionBridge.model`          | string  | Vision model id used to transcribe/describe images. Leave empty to auto-select an image-capable registered model. Use `authType:modelId` to disambiguate duplicate ids. | `""`    |
+| `visionBridge.maxImages`      | number  | Maximum number of images converted per turn; extras are reported as omitted. Clamped to 0-16; use 0 to disable conversion.                                              | `4`     |
+| `visionBridge.timeoutMs`      | number  | Timeout for the vision model call only (not the whole turn), in milliseconds. Clamped to 1000–120000.                                                                   | `30000` |
+| `visionBridge.showTranscript` | boolean | Show the generated transcription so you can catch misreads.                                                                                                             | `true`  |
 
 ## What you'll see
 
 On success, a notice like:
 
 ```
-🔎 Converted 1 image(s) to text via qwen3-vl-plus. Your image and prompt were sent to that model.
+🔎 Converted 1 image(s) to text via qwen3-vl-plus. Your image and prompt/context were sent to that model.
 --- BEGIN image interpretation (UNTRUSTED; 1 image(s)) ---
 ...the description / transcription...
 --- END image interpretation ---
 ```
 
-The notice always discloses that your image and prompt were sent to the vision model, even if `showTranscript` is off.
+The notice always discloses that your image and prompt/context were sent to the vision model, even if `showTranscript` is off.
 
 ## Privacy and safety
 
