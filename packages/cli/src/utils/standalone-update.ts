@@ -216,6 +216,14 @@ function validateExtractedPaths(resolvedDest: string): void {
   }
 }
 
+export function isSafeTarEntryPath(entryPath: string): boolean {
+  if (entryPath.length === 0) return false;
+  if (path.posix.isAbsolute(entryPath) || path.win32.isAbsolute(entryPath)) {
+    return false;
+  }
+  return !entryPath.split(/[\\/]+/).includes('..');
+}
+
 async function extractArchive(
   archivePath: string,
   destDir: string,
@@ -250,7 +258,7 @@ async function extractArchive(
       cwd: destDir,
       preservePaths: false,
       filter: (p, entry) => {
-        if (p.startsWith('/') || p.includes('..')) return false;
+        if (!isSafeTarEntryPath(p)) return false;
         if (
           'type' in entry &&
           entry.type === 'SymbolicLink' &&
