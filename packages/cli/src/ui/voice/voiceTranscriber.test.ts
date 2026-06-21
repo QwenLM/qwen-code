@@ -465,6 +465,43 @@ describe('voiceTranscriber', () => {
     expect(userMsg.content[0].input_audio.data).toMatch(
       /^data:audio\/wav;base64,/,
     );
+    expect(userMsg.content[0].input_audio.format).toBe('wav');
+  });
+
+  it('derives input_audio format from the recorder mime type', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi
+        .fn()
+        .mockResolvedValue({ choices: [{ message: { content: 'hello' } }] }),
+    });
+
+    await transcribeVoiceAudio(
+      { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/webm;codecs=opus' },
+      {
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Custom ASR',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://asr.example/v1',
+          },
+        ]),
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+        fetchFn,
+      },
+    );
+
+    const [, init] = fetchFn.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    const userMsg = body.messages.find(
+      (m: { role: string }) => m.role === 'user',
+    );
+    expect(userMsg.content[0].input_audio.data).toMatch(
+      /^data:audio\/webm;codecs=opus;base64,/,
+    );
+    expect(userMsg.content[0].input_audio.format).toBe('webm');
   });
 
   it('sends asr_options.language and a keyterms context message', async () => {

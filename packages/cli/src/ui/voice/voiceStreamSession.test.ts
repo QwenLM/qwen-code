@@ -112,8 +112,13 @@ describe('voiceStreamSession', () => {
 
     socket.bufferedAmount = 1024 * 1024 + 1;
     session.pushAudio(new Uint8Array([1, 2, 3]));
+    session.pushAudio(new Uint8Array([4, 5, 6]));
 
     expect(socket.sent).toEqual([]);
+
+    socket.bufferedAmount = 0;
+    session.pushAudio(new Uint8Array([7]));
+    expect(socket.sent).toEqual([new Uint8Array([7])]);
   });
 
   it('rejects finish when the task never finishes', async () => {

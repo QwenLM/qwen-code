@@ -105,6 +105,7 @@ export function openVoiceStream(
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
     let terminalError: Error | null = null;
     let finishedTranscript: string | null = null;
+    let backpressureWarned = false;
 
     const clearFinishTimer = () => {
       if (finishTimer) {
@@ -207,7 +208,13 @@ export function openVoiceStream(
               pcm.length > 0 &&
               (ws.bufferedAmount ?? 0) <= MAX_BUFFERED_AUDIO_BYTES
             ) {
+              backpressureWarned = false;
               ws.send(pcm);
+            } else if (pcm.length > 0 && !backpressureWarned) {
+              backpressureWarned = true;
+              debugLogger.warn(
+                '[voice] dropping DashScope audio due to socket backpressure',
+              );
             }
           },
           finish: () => {

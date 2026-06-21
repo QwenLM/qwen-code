@@ -411,6 +411,10 @@ function sanitizeResponseDetails(raw: string, apiKey?: string): string {
   return redacted.length > 200 ? `${redacted.slice(0, 200)}...` : redacted;
 }
 
+function inputAudioFormat(mimeType: string): string {
+  return mimeType.split(';', 1)[0]?.replace(/^audio\//, '') || 'wav';
+}
+
 /**
  * Transcribe via the DashScope/Qwen-ASR OpenAI-compatible protocol: the audio
  * is sent as an `input_audio` chat message and the transcript comes back as the
@@ -441,7 +445,13 @@ async function transcribeViaQwenAsr(
   messages.push({
     role: 'user',
     content: [
-      { type: 'input_audio', input_audio: { data: dataUrl, format: 'wav' } },
+      {
+        type: 'input_audio',
+        input_audio: {
+          data: dataUrl,
+          format: inputAudioFormat(audio.mimeType),
+        },
+      },
     ],
   });
 
