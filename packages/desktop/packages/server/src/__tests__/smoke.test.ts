@@ -10,6 +10,7 @@
 
 import { describe, it, expect, afterEach } from 'bun:test'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import type { Subprocess } from 'bun'
 import WebSocket from 'ws'
 
@@ -94,6 +95,61 @@ async function spawnTestServer(extraEnv?: Record<string, string>): Promise<Spawn
   })
 }
 
+async function readStream(stream: ReadableStream<Uint8Array> | null): Promise<string> {
+  if (!stream) return ''
+
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let output = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    output += decoder.decode(value, { stream: true })
+  }
+
+  output += decoder.decode()
+  return output
+}
+
+async function runServerExpectingStartupFailure(extraEnv: Record<string, string>): Promise<{
+  exitCode: number | null
+  output: string
+}> {
+  const token = crypto.randomUUID() + crypto.randomUUID()
+  const proc = Bun.spawn(['bun', 'run', SERVER_ENTRY], {
+    env: {
+      ...process.env,
+      ...extraEnv,
+      CRAFT_SERVER_TOKEN: token,
+      CRAFT_RPC_HOST: '127.0.0.1',
+      CRAFT_SERVER_LOCK_FILE: join(tmpdir(), `qwen-code-server-test-${crypto.randomUUID()}.lock`),
+    },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const exitCode = await Promise.race([
+    proc.exited,
+    new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => {
+        proc.kill()
+        reject(new Error('Server did not exit after invalid startup config'))
+      }, STARTUP_TIMEOUT)
+    }),
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout)
+  })
+
+  const [stdout, stderr] = await Promise.all([
+    readStream(proc.stdout),
+    readStream(proc.stderr),
+  ])
+
+  return { exitCode, output: `${stdout}\n${stderr}` }
+}
+
 function connectWs(url: string, token: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url)
@@ -161,6 +217,29 @@ describe('headless server smoke test', () => {
 
     const exitCode = await proc.exited
     expect(exitCode).not.toBe(0)
+  }, TEST_TIMEOUT)
+
+  it('rejects partially parsed RPC ports at startup', async () => {
+    const result = await runServerExpectingStartupFailure({
+      CRAFT_RPC_PORT: '9100abc',
+      CRAFT_HEALTH_PORT: '0',
+    })
+
+    expect(result.exitCode).not.toBe(0)
+    expect(result.output).toContain('Invalid CRAFT_RPC_PORT')
+    expect(result.output).not.toContain('CRAFT_SERVER_URL=')
+  }, TEST_TIMEOUT)
+
+  it('rejects partially parsed health ports before starting', async () => {
+    const result = await runServerExpectingStartupFailure({
+      CRAFT_RPC_PORT: '0',
+      CRAFT_HEALTH_PORT: '3000abc',
+    })
+
+    expect(result.exitCode).not.toBe(0)
+    expect(result.output).toContain('Invalid CRAFT_HEALTH_PORT')
+    expect(result.output).not.toContain('Qwen Code server listening')
+    expect(result.output).not.toContain('CRAFT_SERVER_URL=')
   }, TEST_TIMEOUT)
 
   it('shuts down cleanly on SIGTERM', async () => {

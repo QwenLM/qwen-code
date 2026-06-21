@@ -19,7 +19,7 @@ import {
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
 } from './claude-converter.js';
-import { cloneFromGit } from './github.js';
+import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
 
@@ -1354,5 +1354,61 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
     );
 
     fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+});
+
+describe('convertClaudePluginPackage — string URL source', () => {
+  let extDir: string;
+
+  beforeEach(() => {
+    extDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-url-'));
+    vi.mocked(downloadFromGitHubRelease).mockReset();
+    vi.mocked(cloneFromGit).mockReset();
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(extDir)) {
+      fs.rmSync(extDir, { recursive: true, force: true });
+    }
+  });
+
+  const writeMarketplace = (source: string) => {
+    const mp = path.join(extDir, '.claude-plugin');
+    fs.mkdirSync(mp, { recursive: true });
+    fs.writeFileSync(
+      path.join(mp, 'marketplace.json'),
+      JSON.stringify({
+        name: 'm',
+        owner: { name: 'o', email: 'e' },
+        plugins: [{ name: 'p', version: '1.0.0', source }],
+      }),
+      'utf-8',
+    );
+  };
+
+  it('treats an uppercase HTTPS:// source as a URL download, not a local path', async () => {
+    // The scheme check was case-sensitive, so an uppercase URL fell through to
+    // local-path handling and failed with "Plugin source not found".
+    vi.mocked(downloadFromGitHubRelease).mockImplementation(
+      async (_meta, dir) => {
+        fs.mkdirSync(path.join(dir as string, '.claude-plugin'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(dir as string, '.claude-plugin', 'plugin.json'),
+          JSON.stringify({ name: 'p', version: '1.0.0' }),
+          'utf-8',
+        );
+        return { tagName: 'v1.0.0', type: 'github-release' };
+      },
+    );
+
+    writeMarketplace('HTTPS://github.com/owner/repo');
+
+    const result = await convertClaudePluginPackage(extDir, 'p');
+    expect(result.config.name).toBe('p');
+    expect(vi.mocked(downloadFromGitHubRelease)).toHaveBeenCalled();
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 });
