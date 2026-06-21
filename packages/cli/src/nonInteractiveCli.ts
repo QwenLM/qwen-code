@@ -1188,16 +1188,13 @@ export async function runNonInteractive(
         );
         isFirstTurn = false;
 
-        // Start assistant message for this turn
         adapter.startAssistantMessage();
-        const isSendStartEvent = (event: { type: GeminiEventType }) =>
-          event.type !== GeminiEventType.SessionTokenLimitExceeded;
 
         for await (const event of responseStream) {
-          if (isSendStartEvent(event)) {
-            continuationSendStarted = true;
-          } else {
+          if (event.type === GeminiEventType.SessionTokenLimitExceeded) {
             restoreStrippedContinuationEntries();
+          } else {
+            continuationSendStarted = true;
           }
           if (abortController.signal.aborted) {
             // Pair the startAssistantMessage() above so stream-json mode

@@ -12,7 +12,9 @@ import type { IControlContext } from '../ControlContext.js';
 import type { IPendingRequestRegistry } from './baseController.js';
 import { SystemController } from './systemController.js';
 
-function createContext(): IControlContext {
+function createContext(
+  overrides: Partial<IControlContext> = {},
+): IControlContext {
   const abortController = new AbortController();
 
   return {
@@ -38,6 +40,7 @@ function createContext(): IControlContext {
     sdkMcpServers: new Set<string>(),
     mcpClients: new Map(),
     inputClosed: false,
+    ...overrides,
   };
 }
 
@@ -202,6 +205,47 @@ describe('SystemController', () => {
       );
 
       expect(context.sdkCanUseToolTimeoutMs).toBeUndefined();
+    });
+  });
+
+  describe('continue_last_turn', () => {
+    it('delegates to the session callback and merges its payload', async () => {
+      const onContinueLastTurn = vi.fn().mockResolvedValue({
+        accepted: true,
+        interruption: 'interrupted_turn',
+      });
+      const controller = new SystemController(
+        createContext({ onContinueLastTurn }),
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'continue_last_turn' },
+        'continue-1',
+      );
+
+      expect(onContinueLastTurn).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({
+        subtype: 'continue_last_turn',
+        accepted: true,
+        interruption: 'interrupted_turn',
+      });
+    });
+
+    it('fails loudly when no session callback is registered', async () => {
+      const controller = new SystemController(
+        createContext(),
+        createRegistry(),
+        'SystemController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          { subtype: 'continue_last_turn' },
+          'continue-2',
+        ),
+      ).rejects.toThrow(/continue_last_turn is not available/);
     });
   });
 });

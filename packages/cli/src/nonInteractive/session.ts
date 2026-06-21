@@ -66,12 +66,7 @@ class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
-  /**
-   * Count of accepted continue_last_turn requests not yet executed.
-   * Drained ahead of user messages by processPendingWork so a continuation
-   * runs before any prompt that arrives after it.
-   */
-  private pendingContinueTurns: number = 0;
+  private pendingContinueTurn: boolean = false;
   private continueTurnInProgress: boolean = false;
   private abortController: AbortController;
   private config: Config;
@@ -500,11 +495,11 @@ class Session {
     if (detection.kind === 'none') {
       return { accepted: false, interruption: 'none' };
     }
-    if (this.pendingContinueTurns > 0 || this.continueTurnInProgress) {
+    if (this.pendingContinueTurn || this.continueTurnInProgress) {
       return { accepted: false, interruption: detection.kind };
     }
 
-    this.pendingContinueTurns += 1;
+    this.pendingContinueTurn = true;
     this.ensureProcessingStarted();
     return { accepted: true, interruption: detection.kind };
   }
@@ -590,15 +585,15 @@ class Session {
     }
 
     while (
-      (this.pendingContinueTurns > 0 ||
+      (this.pendingContinueTurn ||
         this.userMessageQueue.length > 0 ||
         this.monitorStartedQueue.length > 0 ||
         this.monitorQueue.length > 0) &&
       !this.isShuttingDown &&
       !this.abortController.signal.aborted
     ) {
-      if (this.pendingContinueTurns > 0) {
-        this.pendingContinueTurns -= 1;
+      if (this.pendingContinueTurn) {
+        this.pendingContinueTurn = false;
         try {
           await this.processContinueTurn();
         } catch (error) {
@@ -664,7 +659,7 @@ class Session {
     this.processingPromise = this.processPendingWork().finally(() => {
       this.processingPromise = null;
       if (
-        (this.pendingContinueTurns > 0 ||
+        (this.pendingContinueTurn ||
           this.userMessageQueue.length > 0 ||
           this.monitorStartedQueue.length > 0 ||
           this.monitorQueue.length > 0) &&

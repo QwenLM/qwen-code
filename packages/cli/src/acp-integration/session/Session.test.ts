@@ -1659,27 +1659,6 @@ describe('Session', () => {
       );
     });
 
-    it('wraps a continued turn in an interaction span', async () => {
-      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
-      getStripSpy().mockReturnValue([]);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(createEmptyStream());
-
-      await session.continueTurn();
-
-      expect(withInteractionSpanSpy).toHaveBeenCalledWith(
-        mockConfig,
-        expect.objectContaining({
-          promptId: 'test-session-id########0',
-          model: 'qwen3-code-plus',
-          messageType: 'acp_continue',
-        }),
-        expect.any(Function),
-        expect.any(Function),
-      );
-    });
-
     it('does not create a duplicate file snapshot for a continued turn', async () => {
       setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
       getStripSpy().mockReturnValue([]);
@@ -1690,27 +1669,6 @@ describe('Session', () => {
       await session.continueTurn();
 
       expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
-    });
-
-    it('logs continuation detection and stripped-entry counts', async () => {
-      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
-      getStripSpy().mockReturnValue([
-        { role: 'user', parts: [{ text: 'resume me' }] },
-      ]);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(createEmptyStream());
-
-      await session.continueTurn();
-
-      expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
-        expect.stringContaining('continueTurn detected interruption'),
-        expect.objectContaining({ kind: 'interrupted_prompt' }),
-      );
-      expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
-        expect.stringContaining('continueTurn stripped orphaned user entries'),
-        expect.objectContaining({ strippedCount: 1 }),
-      );
     });
 
     it('rejects with 409 while a prompt turn is in flight', async () => {

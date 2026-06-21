@@ -901,25 +901,8 @@ export class Query implements AsyncIterable<SDKMessage> {
   }
 
   /**
-   * Continue the most recent unfinished turn of the session without
-   * sending a new (synthetic) user message.
-   *
-   * Use after `resume`-ing a session whose last turn was cut off
-   * (process crash, stream interruption): the CLI classifies
-   * the interruption from chat history and re-drives the model from where
-   * it stopped — an orphaned prompt is re-submitted under the same logical
-   * turn, dangling tool calls are closed with synthesized error results.
-   * Nothing new is appended to the transcript.
-   *
-   * The continuation's output arrives as regular messages on this Query's
-   * async iterator. The returned payload only reports acceptance:
-   * `{ accepted: boolean, interruption: 'none' | 'interrupted_prompt' |
-   * 'interrupted_turn' }` — `accepted: false` means the last turn had
-   * already ended cleanly and nothing was scheduled.
-   *
-   * @returns The CLI's acceptance payload, or null on a malformed reply.
-   * @throws Error if the query is closed or the CLI rejects the request
-   *   (e.g. an older CLI without continue_last_turn support).
+   * Continue the most recent unfinished turn without appending a synthetic user
+   * message. Output arrives as regular messages on this Query's async iterator.
    */
   async continueLastTurn(): Promise<Record<string, unknown> | null> {
     return this.sendControlRequest(ControlRequestType.CONTINUE_LAST_TURN);

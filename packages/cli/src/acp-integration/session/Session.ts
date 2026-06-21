@@ -1341,7 +1341,7 @@ export class Session implements SessionContext {
           return {
             stopReason: 'cancelled',
             resumed: false,
-            interruption: 'none',
+            interruption: detection.kind,
           };
         }
 
