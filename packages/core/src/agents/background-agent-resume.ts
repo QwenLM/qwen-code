@@ -837,9 +837,10 @@ export class BackgroundAgentResumeService {
         prompt: recovery.initialPrompt ?? existing.prompt,
         recentActivities: [],
         pendingMessages,
-        suppressRegisterCallback: true,
       };
-      const entry = registry.register(registration);
+      const entry = registry.register(registration, {
+        suppressRegisterCallback: true,
+      });
       const lateContinuationMessages = operation.continuationMessages.slice(
         promptMessages.length,
       );
@@ -1117,24 +1118,31 @@ export class BackgroundAgentResumeService {
       stats: undefined,
       recentActivities: [],
       pendingMessages: [...(latest.pendingMessages ?? [])],
-      suppressRegisterCallback: options.suppressRegisterCallback,
     };
-    return registry.register(registration);
+    return registry.register(registration, {
+      suppressRegisterCallback: options.suppressRegisterCallback,
+    });
   }
 
   private restoreCompletedEntry(entry: AgentTask): AgentTask {
     const registry = this.config.getBackgroundTaskRegistry();
-    const restored = registry.register({
-      ...entry,
-      isBackgrounded: true,
-      status: 'completed',
-      pendingMessages: [...(entry.pendingMessages ?? [])],
-      recentActivities: [...(entry.recentActivities ?? [])],
-      pendingApprovals: [...(entry.pendingApprovals ?? [])],
-      suppressRegisterCallback: true,
-    });
-    restored.notified = entry.notified;
-    restored.outputOffset = entry.outputOffset;
+    const restored = registry.register(
+      {
+        ...entry,
+        isBackgrounded: true,
+        status: 'completed',
+        pendingMessages: [...(entry.pendingMessages ?? [])],
+        recentActivities: [...(entry.recentActivities ?? [])],
+        pendingApprovals: [...(entry.pendingApprovals ?? [])],
+      },
+      {
+        suppressRegisterCallback: true,
+        preserveNotificationState: true,
+      },
+    );
+    if (entry.metaPath) {
+      patchAgentMeta(entry.metaPath, { lastError: undefined });
+    }
     return restored;
   }
 

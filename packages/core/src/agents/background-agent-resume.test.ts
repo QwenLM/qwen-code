@@ -14,6 +14,7 @@ import { BackgroundAgentResumeService } from './background-agent-resume.js';
 import {
   getAgentJsonlPath,
   getAgentMetaPath,
+  readAgentMeta,
   writeAgentMeta,
 } from './agent-transcript.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
@@ -2093,6 +2094,21 @@ describe('BackgroundAgentResumeService', () => {
     const original = registry.get(agentId);
     expect(original?.notified).toBe(true);
 
+    const restoredStates: Array<{
+      status: string;
+      notified: boolean;
+      outputOffset: number;
+    }> = [];
+    registry.setStatusChangeCallback((entry) => {
+      if (entry?.agentId === agentId && entry.status === 'completed') {
+        restoredStates.push({
+          status: entry.status,
+          notified: entry.notified,
+          outputOffset: entry.outputOffset,
+        });
+      }
+    });
+
     const { service, subagentManager } = createService();
     subagentManager.createAgentHeadless.mockRejectedValue(
       new Error('setup failed'),
@@ -2106,6 +2122,12 @@ describe('BackgroundAgentResumeService', () => {
     expect(restored?.status).toBe('completed');
     expect(restored?.result).toBe('All done');
     expect(restored?.notified).toBe(true);
+    expect(restoredStates.at(-1)).toEqual({
+      status: 'completed',
+      notified: true,
+      outputOffset: original?.outputOffset,
+    });
+    expect(readAgentMeta(metaPath)?.lastError).toBeUndefined();
   });
 
   it('emits one start event and one terminal notification when a completed agent is revived', async () => {

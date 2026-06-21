@@ -296,9 +296,12 @@ export type BackgroundTaskEntry = AgentTask;
  * `outputFile` is required here because every agent run reserves a JSONL
  * transcript path at registration.
  */
-export type AgentTaskRegistration = TaskRegistration<AgentTask> & {
+export type AgentTaskRegistration = TaskRegistration<AgentTask>;
+
+export interface BackgroundTaskRegisterOptions {
   suppressRegisterCallback?: boolean;
-};
+  preserveNotificationState?: boolean;
+}
 
 export interface NotificationMeta {
   agentId: string;
@@ -398,7 +401,10 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  register(registration: AgentTaskRegistration): AgentTask {
+  register(
+    registration: AgentTaskRegistration,
+    options: BackgroundTaskRegisterOptions = {},
+  ): AgentTask {
     if (registration.isBackgrounded && registration.status === 'running') {
       const existing = this.agents.get(registration.agentId);
       const isReplacingRunning =
@@ -412,15 +418,15 @@ export class BackgroundTaskRegistry {
     // Returning the same reference lets callers (e.g. the resume service)
     // continue using their local variable post-register and lets external
     // consumers see updates the registry makes without an extra `get()`.
-    const suppressRegisterCallback =
-      registration.suppressRegisterCallback === true;
     const entry = registration as AgentTask;
-    delete (entry as AgentTask & { suppressRegisterCallback?: boolean })
-      .suppressRegisterCallback;
     entry.id = registration.agentId;
     entry.kind = 'agent';
-    entry.outputOffset = 0;
-    entry.notified = false;
+    entry.outputOffset = options.preserveNotificationState
+      ? ((registration as AgentTask).outputOffset ?? 0)
+      : 0;
+    entry.notified = options.preserveNotificationState
+      ? ((registration as AgentTask).notified ?? false)
+      : false;
     entry.pendingMessages = registration.pendingMessages ?? [];
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
@@ -434,7 +440,7 @@ export class BackgroundTaskRegistry {
     if (
       entry.isBackgrounded &&
       this.registerCallback &&
-      !suppressRegisterCallback
+      !options.suppressRegisterCallback
     ) {
       try {
         this.registerCallback(entry);
