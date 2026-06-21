@@ -839,6 +839,62 @@ export const useGeminiStream = (
     getPromptCount,
   ]);
 
+  const applyVisionBridgeIfNeeded = useCallback(
+    async (
+      parts: PartListUnion | null,
+      timestamp: number,
+      signal: AbortSignal,
+    ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
+      const effectiveInputModalities = config.getEffectiveInputModalities?.();
+      const visionBridgeModel = config.getDefaultVisionBridgeModel?.();
+      if (
+        visionBridgeModel === undefined ||
+        parts === null ||
+        !hasImageParts(parts) ||
+        effectiveInputModalities?.image === true
+      ) {
+        return { parts, shouldProceed: true };
+      }
+
+      debugLogger.debug('vision bridge: gate matched, running conversion');
+      const bridgeResult = await runVisionBridge({
+        config,
+        parts,
+        signal,
+      });
+      debugLogger.debug(
+        `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
+      );
+      // Always surface one notice: egress disclosure on success, reason on
+      // failure, and egress disclosure after cancellation if data was sent.
+      if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
+        addItem(
+          {
+            type:
+              bridgeResult.status === 'failed'
+                ? MessageType.ERROR
+                : MessageType.INFO,
+            text: formatVisionBridgeNotice(bridgeResult),
+          },
+          timestamp,
+        );
+      }
+      if (signal.aborted) {
+        return { parts: null, shouldProceed: false };
+      }
+      if (bridgeResult.applied && bridgeResult.parts != null) {
+        return { parts: bridgeResult.parts, shouldProceed: true };
+      }
+      if (bridgeResult.status === 'failed') {
+        // Defensive fallback for legacy/invalid failed results without
+        // transformed text. Current failures include a no-image note.
+        return { parts: null, shouldProceed: false };
+      }
+      return { parts, shouldProceed: true };
+    },
+    [addItem, config],
+  );
+
   const prepareQueryForGemini = useCallback(
     async (
       query: PartListUnion,
@@ -986,53 +1042,15 @@ export const useGeminiStream = (
           localQueryToSendToGemini = atCommandResult.processedQuery;
         }
 
-        // Vision bridge: convert images to text only when the primary model is
-        // known text-only and the resolved query actually carries image parts.
-        const effectiveInputModalities = config.getEffectiveInputModalities?.();
-        const visionBridgeModel = config.getDefaultVisionBridgeModel?.();
-        if (
-          visionBridgeModel !== undefined &&
-          localQueryToSendToGemini !== null &&
-          hasImageParts(localQueryToSendToGemini) &&
-          effectiveInputModalities?.image !== true
-        ) {
-          debugLogger.debug('vision bridge: gate matched, running conversion');
-          const bridgeResult = await runVisionBridge({
-            config,
-            parts: localQueryToSendToGemini,
-            signal: abortSignal,
-          });
-          debugLogger.debug(
-            `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
-          );
-          // Always surface one notice: egress disclosure on success, reason on
-          // failure, and egress disclosure after cancellation if data was sent.
-          if (
-            bridgeResult.status !== 'skipped' ||
-            bridgeResult.egressOccurred
-          ) {
-            addItem(
-              {
-                type:
-                  bridgeResult.status === 'failed'
-                    ? MessageType.ERROR
-                    : MessageType.INFO,
-                text: formatVisionBridgeNotice(bridgeResult),
-              },
-              userMessageTimestamp,
-            );
-          }
-          if (abortSignal.aborted) {
-            return { queryToSend: null, shouldProceed: false };
-          }
-          if (bridgeResult.applied && bridgeResult.parts != null) {
-            localQueryToSendToGemini = bridgeResult.parts;
-          } else if (bridgeResult.status === 'failed') {
-            // Defensive fallback for legacy/invalid failed results without
-            // transformed text. Current failures include a no-image note.
-            return { queryToSend: null, shouldProceed: false };
-          }
+        const bridgeResult = await applyVisionBridgeIfNeeded(
+          localQueryToSendToGemini,
+          userMessageTimestamp,
+          abortSignal,
+        );
+        if (!bridgeResult.shouldProceed) {
+          return { queryToSend: null, shouldProceed: false };
         }
+        localQueryToSendToGemini = bridgeResult.parts;
       } else {
         // It's a function response (PartListUnion that isn't a string)
         localQueryToSendToGemini = query;
@@ -1055,6 +1073,7 @@ export const useGeminiStream = (
       logger,
       shellModeActive,
       scheduleToolCalls,
+      applyVisionBridgeIfNeeded,
     ],
   );
 
@@ -2852,6 +2871,19 @@ export const useGeminiStream = (
               }
             }
 
+            const bridgeResult = await applyVisionBridgeIfNeeded(
+              resolvedMidTurnQuery,
+              midTurnTimestamp + index,
+              midTurnAbort.signal,
+            );
+            if (!bridgeResult.shouldProceed) {
+              if (midTurnAbort.signal.aborted) {
+                break;
+              }
+              continue;
+            }
+            resolvedMidTurnQuery = bridgeResult.parts ?? resolvedMidTurnQuery;
+
             const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
               resolvedMidTurnQuery,
               msg,
@@ -2902,6 +2934,7 @@ export const useGeminiStream = (
       addItem,
       dualOutput,
       onDebugMessage,
+      applyVisionBridgeIfNeeded,
     ],
   );
 

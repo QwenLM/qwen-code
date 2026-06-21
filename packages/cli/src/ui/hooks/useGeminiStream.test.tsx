@@ -1062,8 +1062,25 @@ describe('useGeminiStream', () => {
       },
     };
     const resolvedTextPart: Part = { text: 'inspect @/tmp/screenshot.png' };
+    const transcriptPart: Part = { text: '[mid-turn image transcript]' };
     const recordMidTurnUserMessage = vi.fn();
     const recordAtCommand = vi.fn();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [transcriptPart],
+      transcript: '[mid-turn image transcript]',
+      imageCount: 1,
+      convertedCount: 1,
+      omittedCount: 0,
+      omittedInvalidCount: 0,
+      omittedCappedCount: 0,
+      modelId: 'vm',
+    });
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
       recordAtCommand,
       recordMidTurnUserMessage,
@@ -1161,10 +1178,24 @@ describe('useGeminiStream', () => {
 
     const expectedMidTurnParts: Part[] = [
       {
-        text: `\n[User message received during tool execution]: ${resolvedTextPart.text}`,
+        text: `\n[User message received during tool execution]: ${transcriptPart.text}`,
       },
-      resolvedImagePart,
     ];
+    expect(mockRunVisionBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [resolvedTextPart, resolvedImagePart],
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('[mid-turn image transcript]'),
+      }),
+      expect.any(Number),
+    );
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('[mid-turn image transcript]');
+    expect(sent).not.toContain('inlineData');
     expect(resolveAtCommandQuerySpy).toHaveBeenCalledWith(
       expect.objectContaining({
         query: queuedPrompt,
