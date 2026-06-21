@@ -200,6 +200,58 @@ describe('FileMessageHandler', () => {
     expect(payload.data.requestId).toBe(7);
   });
 
+  it('openFile resolves relative paths against the workspace', async () => {
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+    ];
+    vscodeMock.workspace.openTextDocument.mockResolvedValue({
+      uri: vscode.Uri.file('/workspace/src/app.ts'),
+    });
+    vscodeMock.window.showTextDocument.mockResolvedValue({});
+
+    const handler = new FileMessageHandler(
+      {} as QwenAgentManager,
+      {} as ConversationStore,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'openFile',
+      data: { path: 'src/app.ts' },
+    });
+
+    expect(vscodeMock.workspace.openTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ fsPath: '/workspace/src/app.ts' }),
+    );
+  });
+
+  it('openFile keeps UNC paths absolute', async () => {
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+    ];
+    vscodeMock.workspace.openTextDocument.mockResolvedValue({
+      uri: vscode.Uri.file('\\\\server\\share\\app.ts'),
+    });
+    vscodeMock.window.showTextDocument.mockResolvedValue({});
+
+    const handler = new FileMessageHandler(
+      {} as QwenAgentManager,
+      {} as ConversationStore,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'openFile',
+      data: { path: '\\\\server\\share\\app.ts' },
+    });
+
+    expect(vscodeMock.workspace.openTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ fsPath: '\\\\server\\share\\app.ts' }),
+    );
+  });
+
   describe('createAndOpenTempFile viewColumn selection', () => {
     const chatViewType = 'mainThreadWebview-qwenCode.chat';
 
