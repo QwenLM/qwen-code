@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Text } from 'ink';
+import { Box, Static, Text } from 'ink';
 import { useEffect, useMemo, useState } from 'react';
 import type {
   ResumedSessionData,
@@ -150,16 +150,16 @@ export function SessionPreview(props: SessionPreviewProps) {
           </Text>
         </Box>
       ) : (
-        <Box flexDirection="column">
-          {items.map((item) => (
+        <Static items={items}>
+          {(item) => (
             <HistoryItemDisplay
               key={item.id}
               item={item}
               terminalWidth={boxWidth}
               isPending={false}
             />
-          ))}
-        </Box>
+          )}
+        </Static>
       )}
 
       {/* Footer */}
