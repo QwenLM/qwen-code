@@ -601,9 +601,11 @@ export class BaseLlmClient {
     );
 
     if (!resolvedModel) {
-      debugLogger.warn(
-        `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
-      );
+      const message = `Model "${model}" not found in registry across all authTypes.`;
+      if (throwOnCreateFailure) {
+        throw new Error(message);
+      }
+      debugLogger.warn(`${message} Falling back to main generator.`);
       // Do not cache the fallback: getCurrentContentGenerator() reads the
       // runtime view from AsyncLocalStorage, which can differ between calls
       // (e.g. inside a subagent vs. on the main session). Caching here would

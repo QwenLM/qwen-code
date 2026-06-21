@@ -1137,64 +1137,40 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file');
     });
 
-    it('keeps image inline when preserveUnsupportedImage is true even if bridge config is disabled', async () => {
+    it('still strips image for agent reads without the preserve flag', async () => {
       const fakePngData = Buffer.from('fake png data');
       actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
       mockMimeGetType.mockReturnValue('image/png');
 
-      const mockConfigBridgeDisabled = {
+      const mockConfigNoImage = {
         ...mockConfig,
         getContentGeneratorConfig: () => ({ modalities: {} }),
-        getVisionBridgeConfig: () => ({ enabled: false }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testImageFilePath,
-        mockConfigBridgeDisabled,
-        { preserveUnsupportedImage: true },
-      );
-      expect(typeof result.llmContent).toBe('object');
-      expect(
-        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
-          .mimeType,
-      ).toBe('image/png');
-    });
-
-    it('still strips image for agent reads (no preserve flag) even when the bridge is enabled', async () => {
-      const fakePngData = Buffer.from('fake png data');
-      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const mockConfigBridge = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-        getVisionBridgeConfig: () => ({ enabled: true }),
       } as unknown as Config;
 
       // No preserve flag (default false) — agent tool read / headless path.
       const result = await processSingleFileContent(
         testImageFilePath,
-        mockConfigBridge,
+        mockConfigNoImage,
       );
       expect(typeof result.llmContent).toBe('string');
       expect(result.llmContent).toContain('does not support image input');
     });
 
-    it('still strips audio when the vision bridge is enabled (bridge handles images only)', async () => {
+    it('still strips audio when preserveUnsupportedImage is true', async () => {
       const fakeAudio = Buffer.from('fake audio data');
       const testAudioPath = path.join(tempRootDir, 'clip.mp3');
       actualNodeFs.writeFileSync(testAudioPath, fakeAudio);
       mockMimeGetType.mockReturnValue('audio/mpeg');
 
-      const mockConfigBridge = {
+      const mockConfigNoAudio = {
         ...mockConfig,
         getContentGeneratorConfig: () => ({ modalities: {} }),
-        getVisionBridgeConfig: () => ({ enabled: true }),
       } as unknown as Config;
 
       const result = await processSingleFileContent(
         testAudioPath,
-        mockConfigBridge,
+        mockConfigNoAudio,
+        { preserveUnsupportedImage: true },
       );
       expect(typeof result.llmContent).toBe('string');
       expect(result.llmContent).toContain('does not support audio input');

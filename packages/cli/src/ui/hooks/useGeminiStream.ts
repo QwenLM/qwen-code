@@ -142,10 +142,7 @@ function truncateVisionBridgeTranscript(transcript: string): string {
  * @param result The structured result returned by the vision bridge.
  * @returns A multi-line notice string for the message history.
  */
-function formatVisionBridgeNotice(
-  result: VisionBridgeResult,
-  showTranscript: boolean,
-): string {
+function formatVisionBridgeNotice(result: VisionBridgeResult): string {
   const modelName = formatVisionBridgeNoticeLabel(
     result.modelId ?? 'vision model',
   );
@@ -161,6 +158,9 @@ function formatVisionBridgeNotice(
     }.${egress} The image was not interpreted.`;
   }
   if (result.status === 'skipped') {
+    if (result.egressOccurred) {
+      return `🔎 Vision bridge cancelled. Your image and prompt/context were sent to ${target}.`;
+    }
     return '🔎 Vision bridge skipped (no images to convert).';
   }
   const omittedReasons = formatOmittedReasons(
@@ -168,12 +168,11 @@ function formatVisionBridgeNotice(
     result.omittedCappedCount,
   );
   const omitted = omittedReasons ? ` (${omittedReasons})` : '';
-  // The egress disclosure is always shown; the transcript body is optional so
-  // that hiding the transcript never silently hides that data left the machine.
-  // Name the endpoint too — cross-provider auto-select can route to a different
+  // The egress disclosure is always shown. Name the endpoint too - cross-provider
+  // auto-select can route to a different
   // host than the primary model.
   const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
-  return showTranscript && result.transcript
+  return result.transcript
     ? `${header}\n${truncateVisionBridgeTranscript(result.transcript)}`
     : header;
 }
@@ -990,14 +989,13 @@ export const useGeminiStream = (
           localQueryToSendToGemini = atCommandResult.processedQuery;
         }
 
-        // Vision bridge: opt-in conversion of images to text when the primary
-        // model is text-only. No-op unless explicitly enabled in settings and
-        // the resolved query actually carries image parts.
-        const visionBridge = config.getVisionBridgeConfig?.();
+        // Vision bridge: convert images to text only when the primary model is
+        // known text-only and the resolved query actually carries image parts.
         const effectiveInputModalities = config.getEffectiveInputModalities?.();
+        const visionBridgeModel = config.getDefaultVisionBridgeModel?.();
         if (
-          visionBridge?.enabled &&
           effectiveInputModalities !== undefined &&
+          visionBridgeModel !== undefined &&
           localQueryToSendToGemini !== null &&
           hasImageParts(localQueryToSendToGemini) &&
           effectiveInputModalities.image !== true
@@ -1005,32 +1003,31 @@ export const useGeminiStream = (
           debugLogger.debug('vision bridge: gate matched, running conversion');
           const bridgeResult = await runVisionBridge({
             config,
-            settings: visionBridge,
             parts: localQueryToSendToGemini,
             signal: abortSignal,
           });
-          if (abortSignal.aborted) {
-            return { queryToSend: null, shouldProceed: false };
-          }
           debugLogger.debug(
             `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
           );
-          // Always surface one notice (egress disclosure on success, reason on
-          // failure); the transcript body is gated by showTranscript inside.
-          if (bridgeResult.status !== 'skipped') {
+          // Always surface one notice: egress disclosure on success, reason on
+          // failure, and egress disclosure after cancellation if data was sent.
+          if (
+            bridgeResult.status !== 'skipped' ||
+            bridgeResult.egressOccurred
+          ) {
             addItem(
               {
                 type:
                   bridgeResult.status === 'failed'
                     ? MessageType.ERROR
                     : MessageType.INFO,
-                text: formatVisionBridgeNotice(
-                  bridgeResult,
-                  visionBridge.showTranscript,
-                ),
+                text: formatVisionBridgeNotice(bridgeResult),
               },
               userMessageTimestamp,
             );
+          }
+          if (abortSignal.aborted) {
+            return { queryToSend: null, shouldProceed: false };
           }
           if (bridgeResult.applied && bridgeResult.parts != null) {
             localQueryToSendToGemini = bridgeResult.parts;

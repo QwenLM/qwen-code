@@ -349,13 +349,16 @@ export async function resolveAtCommandQuery({
   }
 
   try {
+    const effectiveInputModalities = config.getEffectiveInputModalities?.();
     const preserveUnsupportedImageForBridge =
-      config.getVisionBridgeConfig?.().enabled === true;
+      effectiveInputModalities !== undefined &&
+      effectiveInputModalities.image !== true &&
+      config.getDefaultVisionBridgeModel?.() !== undefined;
     const result = await readManyFiles(config, {
       paths: pathSpecsToRead,
       signal,
       // Interactive @-resolution: keep images inline for a text-only model so
-      // the vision bridge can transcribe them when the bridge is enabled.
+      // the vision bridge can transcribe them downstream.
       preserveUnsupportedImageForBridge,
     });
 

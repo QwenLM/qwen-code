@@ -6,7 +6,8 @@
 
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { Config } from '../../config/config.js';
-import { AuthType, type InputModalities } from '../../core/contentGenerator.js';
+import type { AuthType} from '../../core/contentGenerator.js';
+import { type InputModalities } from '../../core/contentGenerator.js';
 import { defaultModalities } from '../../core/modalityDefaults.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runSideQuery } from '../../utils/sideQuery.js';
@@ -17,7 +18,6 @@ import {
 } from './imagePartUtils.js';
 
 const debugLogger = createDebugLogger('VISION_BRIDGE');
-const AUTH_TYPE_PREFIXES = new Set<string>(Object.values(AuthType));
 const BRIDGE_MAX_OUTPUT_TOKENS = 2048;
 const STRUCTURAL_CONTROL_CHARS =
   /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
@@ -161,178 +161,8 @@ export function selectVisionBridgeModel(
   return toSelection(sortedCandidates[0]);
 }
 
-/**
- * User-configurable settings for the vision bridge. Parsed from the
- * `visionBridge` settings block and exposed via `Config.getVisionBridgeConfig`.
- */
-export interface VisionBridgeSettings {
-  /** Master switch. When false the bridge never runs (default). */
-  enabled: boolean;
-  /**
-   * Resolved id of the vision model used for conversion. When unset, the bridge
-   * auto-selects an image-capable model via `Config.getDefaultVisionBridgeModel`.
-   */
-  model?: string;
-  /** Maximum number of images converted per turn; the rest are reported. */
-  maxImages: number;
-  /** Timeout (ms) for the vision side call only, not the whole turn. */
-  timeoutMs: number;
-  /** Whether to surface the generated transcription to the user. */
-  showTranscript: boolean;
-}
-
-/** Default vision bridge settings: disabled, conservative bounds. */
-export const DEFAULT_VISION_BRIDGE_SETTINGS: VisionBridgeSettings = {
-  enabled: false,
-  model: undefined,
-  maxImages: 4,
-  timeoutMs: 30_000,
-  showTranscript: true,
-};
-
-/** Hard bounds applied to user-supplied settings to cap cost and avoid hangs. */
-const MAX_IMAGES_CEILING = 16;
-const MIN_TIMEOUT_MS = 1_000;
-const MAX_TIMEOUT_MS = 120_000;
-
-type VisionBridgeModelReference = string | VisionBridgeModelSelection;
-
-interface VisionBridgeModelResolution {
-  selection?: VisionBridgeModelSelection;
-  error?: string;
-}
-
-function parseExplicitModelRef(modelRef: string): {
-  modelId: string;
-  authType?: string;
-  error?: string;
-} {
-  const trimmed = modelRef.trim();
-  const colonIndex = trimmed.indexOf(':');
-  if (colonIndex === -1) {
-    return { modelId: trimmed };
-  }
-
-  const maybeAuthType = trimmed.slice(0, colonIndex).trim();
-  const modelId = trimmed.slice(colonIndex + 1).trim();
-  if (!AUTH_TYPE_PREFIXES.has(maybeAuthType)) {
-    return { modelId: trimmed };
-  }
-  if (!modelId) {
-    return {
-      modelId: trimmed,
-      error: 'Model selector must include a model ID after the authType',
-    };
-  }
-  return { modelId, authType: maybeAuthType };
-}
-
-function normalizeVisionBridgeModel(
-  model: VisionBridgeModelReference | undefined,
-): VisionBridgeModelSelection | undefined {
-  return typeof model === 'string' ? { id: model } : model;
-}
-
-function resolveExplicitVisionBridgeModel(
-  config: Config,
-  modelRef: string,
-): VisionBridgeModelResolution {
-  const parsed = parseExplicitModelRef(modelRef);
-  if (parsed.error) {
-    return {
-      error: `vision bridge model "${modelRef}" is invalid: ${parsed.error}`,
-    };
-  }
-
-  const { modelId, authType } = parsed;
-  const configuredModels = config.getAllConfiguredModels?.(
-    authType ? [authType as AuthType] : undefined,
-  );
-
-  if (!configuredModels) {
-    return {
-      selection: {
-        id: modelId,
-        ...(authType && { authType }),
-      },
-    };
-  }
-
-  const matches = configuredModels.filter(
-    (model) =>
-      model.id === modelId && (!authType || model.authType === authType),
-  );
-  const imageCapable = matches.find(isImageCapable);
-  if (!imageCapable) {
-    const reason =
-      matches.length > 0 ? 'is not image-capable' : 'is not registered';
-    return {
-      error:
-        `vision bridge model "${modelRef}" ${reason}; ` +
-        'register an image-capable model in modelProviders or leave visionBridge.model empty for auto-selection',
-    };
-  }
-
-  return { selection: toSelection(imageCapable) };
-}
-
-function resolveVisionBridgeModel(
-  config: Config,
-  settings: VisionBridgeSettings,
-): VisionBridgeModelResolution {
-  if (settings.model) {
-    return resolveExplicitVisionBridgeModel(config, settings.model);
-  }
-  return {
-    selection: normalizeVisionBridgeModel(
-      config.getDefaultVisionBridgeModel?.(),
-    ),
-  };
-}
-
-/** Clamp a possibly-invalid number into [lo, hi], falling back when not finite. */
-function clampInt(
-  value: unknown,
-  fallback: number,
-  lo: number,
-  hi: number,
-): number {
-  const n =
-    typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-  return Math.min(hi, Math.max(lo, Math.round(n)));
-}
-
-/**
- * Normalize raw (untrusted) settings from the config layer into a complete,
- * bounded {@link VisionBridgeSettings}. An empty model string means "not
- * configured"; numeric fields are clamped so a malformed value cannot make the
- * bridge call hang, fire immediately, or fan out to an unbounded image count.
- *
- * @param partial Raw settings as parsed from user configuration, if any.
- * @returns Fully-populated, validated settings safe to pass to the bridge.
- */
-export function resolveVisionBridgeSettings(
-  partial?: Partial<VisionBridgeSettings>,
-): VisionBridgeSettings {
-  const p = partial ?? {};
-  return {
-    enabled: p.enabled === true,
-    model: p.model || undefined,
-    maxImages: clampInt(
-      p.maxImages,
-      DEFAULT_VISION_BRIDGE_SETTINGS.maxImages,
-      0,
-      MAX_IMAGES_CEILING,
-    ),
-    timeoutMs: clampInt(
-      p.timeoutMs,
-      DEFAULT_VISION_BRIDGE_SETTINGS.timeoutMs,
-      MIN_TIMEOUT_MS,
-      MAX_TIMEOUT_MS,
-    ),
-    showTranscript: p.showTranscript !== false,
-  };
-}
+const VISION_BRIDGE_MAX_IMAGES = 4;
+const VISION_BRIDGE_TIMEOUT_MS = 30_000;
 
 /**
  * Outcome of a bridge attempt.
@@ -356,11 +186,11 @@ export interface VisionBridgeResult {
   imageCount: number;
   /** Images actually sent to the bridge model. */
   convertedCount: number;
-  /** Images dropped due to `maxImages` or validation failures. */
+  /** Images dropped due to the per-turn cap or validation failures. */
   omittedCount: number;
   /** Images dropped because they were unreadable or too large. */
   omittedInvalidCount: number;
-  /** Valid images dropped because they exceeded `maxImages`. */
+  /** Valid images dropped because they exceeded the per-turn cap. */
   omittedCappedCount: number;
   /** Resolved bridge model id, when a call was attempted. */
   modelId?: string;
@@ -523,25 +353,24 @@ function buildInterpretationBlock(
 
 /**
  * Run the vision bridge: convert inline image parts into a text description via
- * a configured vision model, and return image-free parts for the primary model.
+ * an auto-selected vision model, and return image-free parts for the primary
+ * model.
  *
- * This function is UI-agnostic and never mutates its input. Gating (enabled,
- * primary model is text-only) is the caller's responsibility; the service
- * still guards against a missing model.
+ * This function is UI-agnostic and never mutates its input. Gating (primary
+ * model is text-only) is the caller's responsibility; the service still guards
+ * against a missing model.
  *
  * @param params.config Active config (provides the side-query client).
- * @param params.settings Parsed vision bridge settings.
  * @param params.parts The resolved request parts (text + inline images).
  * @param params.signal Abort signal from the surrounding turn.
  * @returns A {@link VisionBridgeResult} describing the outcome.
  */
 export async function runVisionBridge(params: {
   config: Config;
-  settings: VisionBridgeSettings;
   parts: PartListUnion;
   signal: AbortSignal;
 }): Promise<VisionBridgeResult> {
-  const { config, settings, parts, signal } = params;
+  const { config, parts, signal } = params;
   const { imageParts, nonImageParts } = splitImageParts(parts);
 
   if (imageParts.length === 0) {
@@ -556,11 +385,11 @@ export async function runVisionBridge(params: {
     };
   }
 
-  // Keep only valid images, then cap to maxImages. Anything dropped is reported.
+  // Keep only valid images, then apply the per-turn cap. Anything dropped is reported.
   const validImages = imageParts.filter(
     (part) => validateImagePart(part) === null,
   );
-  const toConvert = validImages.slice(0, Math.max(0, settings.maxImages));
+  const toConvert = validImages.slice(0, VISION_BRIDGE_MAX_IMAGES);
   const omitted: OmittedBreakdown = {
     invalid: imageParts.length - validImages.length,
     capped: validImages.length - toConvert.length,
@@ -569,30 +398,20 @@ export async function runVisionBridge(params: {
   // Focus the description with the request's own text (non-image parts).
   const intent = collectText(nonImageParts);
 
-  // Use the explicitly configured bridge model, or auto-pick an image-capable
-  // model from the registered providers so the bridge works without hand
-  // configuration when a multimodal provider is already available.
-  const modelResolution = resolveVisionBridgeModel(config, settings);
-  if (modelResolution.error) {
-    debugLogger.warn(modelResolution.error);
-    return failure(
-      modelResolution.error,
-      nonImageParts,
-      imageParts.length,
-      omitted,
-    );
-  }
-  const modelSelection = modelResolution.selection;
+  // Auto-pick an image-capable model from the registered providers so the
+  // bridge works without hand configuration when a multimodal provider is
+  // already available.
+  const modelSelection = config.getDefaultVisionBridgeModel?.();
   const model = modelSelection?.id;
   debugLogger.debug(
-    `model=${model ?? '(none)'} (explicit=${!!settings.model}), images=${imageParts.length} convert=${toConvert.length} omitted=${omitted.total} invalid=${omitted.invalid} capped=${omitted.capped}`,
+    `model=${model ?? '(none)'}, images=${imageParts.length} convert=${toConvert.length} omitted=${omitted.total} invalid=${omitted.invalid} capped=${omitted.capped}`,
   );
   if (!model) {
     debugLogger.warn(
-      'no image-capable model is configured/auto-detectable; skipping conversion',
+      'no image-capable model is auto-detectable; skipping conversion',
     );
     return failure(
-      'no image-capable model is configured for the vision bridge',
+      'no image-capable model is available for the vision bridge',
       nonImageParts,
       imageParts.length,
       omitted,
@@ -600,17 +419,17 @@ export async function runVisionBridge(params: {
   }
 
   if (toConvert.length === 0) {
-    // Distinguish "all images were unreadable" from "the cap dropped them all"
-    // so the failure note is not misleading.
-    const reason =
-      omitted.invalid === imageParts.length
-        ? 'no usable image could be read'
-        : 'image conversion is disabled (maxImages is 0)';
-    return failure(reason, nonImageParts, imageParts.length, omitted, model);
+    return failure(
+      'no usable image could be read',
+      nonImageParts,
+      imageParts.length,
+      omitted,
+      model,
+    );
   }
 
   // The vision call gets its own timeout, linked to the turn's abort signal.
-  const timeoutSignal = AbortSignal.timeout(settings.timeoutMs);
+  const timeoutSignal = AbortSignal.timeout(VISION_BRIDGE_TIMEOUT_MS);
   const combinedSignal = AbortSignal.any([signal, timeoutSignal]);
   const requestContents: Content[] = [
     { role: 'user', parts: [...toConvert, { text: buildIntentPart(intent) }] },
@@ -618,7 +437,9 @@ export async function runVisionBridge(params: {
   const modelEndpoint = resolveEndpointHost(config, modelSelection);
 
   try {
-    debugLogger.debug(`calling ${model} (timeout ${settings.timeoutMs}ms)`);
+    debugLogger.debug(
+      `calling ${model} (timeout ${VISION_BRIDGE_TIMEOUT_MS}ms)`,
+    );
     const { text } = await runSideQuery(config, {
       contents: requestContents,
       abortSignal: combinedSignal,
@@ -681,11 +502,14 @@ export async function runVisionBridge(params: {
         omittedCount: omitted.total,
         omittedInvalidCount: omitted.invalid,
         omittedCappedCount: omitted.capped,
+        modelId: model,
+        modelEndpoint,
+        egressOccurred: true,
       };
     }
     const reason =
       combinedSignal.aborted && timeoutSignal.aborted
-        ? `timed out after ${settings.timeoutMs}ms`
+        ? `timed out after ${VISION_BRIDGE_TIMEOUT_MS}ms`
         : error instanceof Error
           ? error.message
           : String(error);
@@ -721,7 +545,7 @@ function resolveEndpointHost(
   try {
     return new URL(baseUrl).host;
   } catch {
-    return baseUrl;
+    return undefined;
   }
 }
 

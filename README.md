@@ -134,7 +134,7 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 | Daemon Mode — `qwen serve` (multi-client shared agent)             |     ✓     |      —      |
 | IM Channels (Telegram / DingTalk / WeChat / Feishu)                |     ✓     |      —      |
 
-Vision Bridge is available as an opt-in compatibility layer for text-only models that need to work with images. See [Vision Bridge](https://qwenlm.github.io/qwen-code-docs/en/users/features/vision-bridge/) and the [settings reference](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/) for configuration details.
+Vision Bridge automatically lets known text-only models work with images when an image-capable model is available. See [Vision Bridge](https://qwenlm.github.io/qwen-code-docs/en/users/features/vision-bridge/) for details.
 
 ## Ecosystem
 

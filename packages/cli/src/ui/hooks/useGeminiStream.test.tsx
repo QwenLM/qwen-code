@@ -417,16 +417,11 @@ describe('useGeminiStream', () => {
 
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
-    const enableBridge = (primaryAcceptsImages = false, enabled = true) => {
+    const enableBridge = (primaryAcceptsImages = false) => {
       Object.assign(mockConfig, {
-        getVisionBridgeConfig: () => ({
-          enabled,
-          showTranscript: true,
-          maxImages: 4,
-          timeoutMs: 30000,
-        }),
         getEffectiveInputModalities: () =>
           primaryAcceptsImages ? { image: true } : {},
+        getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
       });
       handleAtCommandSpy.mockResolvedValue({
         processedQuery: [{ text: 'describe' }, imagePart],
@@ -436,7 +431,7 @@ describe('useGeminiStream', () => {
       >);
     };
 
-    it('runs the bridge and replaces image parts with text (enabled + text-only)', async () => {
+    it('runs the bridge and replaces image parts with text for text-only models', async () => {
       enableBridge();
       mockRunVisionBridge.mockResolvedValue({
         applied: true,
@@ -555,7 +550,7 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('does not show a bridge failure notice after cancellation', async () => {
+    it('shows egress disclosure after cancellation if image data was already sent', async () => {
       enableBridge();
       mockRunVisionBridge.mockImplementation(({ signal }) => {
         Object.defineProperty(signal, 'aborted', {
@@ -564,14 +559,15 @@ describe('useGeminiStream', () => {
         });
         return Promise.resolve({
           applied: false,
-          status: 'failed',
+          status: 'skipped',
           imageCount: 1,
           convertedCount: 0,
           omittedCount: 0,
           omittedInvalidCount: 0,
           omittedCappedCount: 0,
           modelId: 'vm',
-          error: 'aborted',
+          modelEndpoint: 'vision.example.com',
+          egressOccurred: true,
         });
       });
 
@@ -581,10 +577,12 @@ describe('useGeminiStream', () => {
       });
 
       await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
-      expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: MessageType.ERROR,
-          text: expect.stringContaining('Vision bridge failed'),
+          type: MessageType.INFO,
+          text: expect.stringContaining(
+            'Your image and prompt/context were sent to vm (vision.example.com).',
+          ),
         }),
         expect.any(Number),
       );
@@ -621,14 +619,20 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('skips the bridge when disabled', async () => {
-      enableBridge(/* primaryAcceptsImages */ false, /* enabled */ false);
+    it('skips the bridge when no image-capable model is available', async () => {
+      enableBridge();
+      Object.assign(mockConfig, {
+        getDefaultVisionBridgeModel: () => undefined,
+      });
       const { result, mockSendMessageStream } = renderTestHook();
       await act(async () => {
         await result.current.submitQuery('@img.png describe');
       });
       await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
       expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
+        'inlineData',
+      );
     });
   });
 

@@ -482,37 +482,6 @@
       "type": "string",
       "default": ""
     },
-    "visionBridge": {
-      "description": "Opt-in compatibility layer for text-only primary models. When you send an image to a text-only model, a configured or auto-selected vision model transcribes/describes it to text that is then sent to the primary model. Disabled by default; the image and prompt/context are sent to that vision model.",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "description": "Convert images to text via a vision model when the primary model is text-only.",
-          "type": "boolean",
-          "default": false
-        },
-        "model": {
-          "description": "Model id used to transcribe/describe images. Must be an image-capable model resolvable in your configuration. Use authType:modelId to disambiguate duplicate ids.",
-          "type": "string",
-          "default": ""
-        },
-        "maxImages": {
-          "description": "Maximum number of images converted per turn (clamped to 0-16; use 0 to disable conversion).",
-          "type": "number",
-          "default": 4
-        },
-        "timeoutMs": {
-          "description": "Timeout for the vision model call, in milliseconds (clamped to 1000–120000).",
-          "type": "number",
-          "default": 30000
-        },
-        "showTranscript": {
-          "description": "Show the generated image transcription so you can catch misreads.",
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
     "model": {
       "description": "Settings related to the generative model.",
       "type": "object",

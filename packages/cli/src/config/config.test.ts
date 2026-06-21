@@ -2540,10 +2540,6 @@ describe('loadCliConfig with includeDirectories', () => {
       memory: {
         enableManagedAutoMemory: true,
       },
-      visionBridge: {
-        enabled: true,
-        model: 'qwen3-vl-plus',
-      },
       security: {
         allowedHttpHookUrls: ['https://hooks.example.com/*'],
       },
@@ -2570,7 +2566,6 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getManagedAutoMemoryEnabled()).toBe(false);
     expect(config.getManagedAutoDreamEnabled()).toBe(false);
     expect(config.getAutoSkillEnabled()).toBe(false);
-    expect(config.getVisionBridgeConfig().enabled).toBe(false);
     expect(config.getToolDiscoveryCommand()).toBeUndefined();
     expect(config.getToolCallCommand()).toBeUndefined();
     expect(config.getMcpServers()).toEqual({});

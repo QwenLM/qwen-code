@@ -153,19 +153,19 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
   });
 
-  it('does not preserve unsupported images when the vision bridge is disabled', async () => {
+  it('does not preserve unsupported images when primary modalities are unknown', async () => {
     const imagePath = path.join(testRootDir, 'image.png');
     await fsPromises.writeFile(imagePath, Buffer.from('fake png data'));
-    const textOnlyConfig = {
+    const unknownModelConfig = {
       ...mockConfig,
-      getModel: () => 'text-only-model',
+      getModel: () => 'custom-model',
       getContentGeneratorConfig: () => ({ modalities: {} }),
-      getVisionBridgeConfig: () => ({ enabled: false }),
+      getEffectiveInputModalities: () => undefined,
     } as unknown as Config;
 
     const result = await handleAtCommand({
       query: `@${imagePath}`,
-      config: textOnlyConfig,
+      config: unknownModelConfig,
       onDebugMessage: mockOnDebugMessage,
       messageId: 126,
       signal: abortController.signal,
@@ -181,14 +181,15 @@ describe('handleAtCommand', () => {
     );
   });
 
-  it('preserves unsupported images for the vision bridge when it is enabled', async () => {
+  it('preserves unsupported images for known text-only models by default', async () => {
     const imagePath = path.join(testRootDir, 'image.png');
     await fsPromises.writeFile(imagePath, Buffer.from('fake png data'));
     const textOnlyConfig = {
       ...mockConfig,
       getModel: () => 'text-only-model',
       getContentGeneratorConfig: () => ({ modalities: {} }),
-      getVisionBridgeConfig: () => ({ enabled: true }),
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
     } as unknown as Config;
 
     const result = await handleAtCommand({
@@ -205,6 +206,35 @@ describe('handleAtCommand', () => {
     expect(
       parts.some((part) => part.inlineData?.mimeType === 'image/png'),
     ).toBe(true);
+  });
+
+  it('does not preserve unsupported images when no vision model is available', async () => {
+    const imagePath = path.join(testRootDir, 'image.png');
+    await fsPromises.writeFile(imagePath, Buffer.from('fake png data'));
+    const textOnlyConfig = {
+      ...mockConfig,
+      getModel: () => 'text-only-model',
+      getContentGeneratorConfig: () => ({ modalities: {} }),
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => undefined,
+    } as unknown as Config;
+
+    const result = await handleAtCommand({
+      query: `@${imagePath}`,
+      config: textOnlyConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 128,
+      signal: abortController.signal,
+    });
+
+    const parts = result.processedQuery as Array<{
+      text?: string;
+      inlineData?: unknown;
+    }>;
+    expect(parts.some((part) => part.inlineData)).toBe(false);
+    expect(parts.map((part) => part.text ?? '').join('')).toContain(
+      'Unsupported image file',
+    );
   });
 
   it('should only allow actual temp directory paths outside the workspace', async () => {

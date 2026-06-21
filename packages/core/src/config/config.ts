@@ -24,14 +24,8 @@ import { detectDefaultModalities } from '../core/modalityDefaults.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import type {
-  VisionBridgeModelSelection,
-  VisionBridgeSettings,
-} from '../services/visionBridge/visionBridgeService.js';
-import {
-  resolveVisionBridgeSettings,
-  selectVisionBridgeModel,
-} from '../services/visionBridge/visionBridgeService.js';
+import type { VisionBridgeModelSelection } from '../services/visionBridge/visionBridgeService.js';
+import { selectVisionBridgeModel } from '../services/visionBridge/visionBridgeService.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
@@ -942,13 +936,6 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
-   * Opt-in vision bridge settings. When enabled, images sent to a text-only
-   * primary model are converted to text via a configured vision model.
-   * Corresponds to the `visionBridge` settings block. Partial — merged with
-   * {@link DEFAULT_VISION_BRIDGE_SETTINGS}.
-   */
-  visionBridge?: Partial<VisionBridgeSettings>;
-  /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
    * Users with old settings.json containing hooksConfig.enabled should migrate
@@ -1345,7 +1332,6 @@ export class Config {
   private readonly enableManagedAutoDream: boolean;
   private readonly enableAutoSkill: boolean;
   private fastModel?: string;
-  private readonly visionBridge: VisionBridgeSettings;
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
@@ -1598,9 +1584,6 @@ export class Config {
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.fastModel = params.fastModel || undefined;
-    // Normalize + clamp untrusted settings (empty model → undefined, numeric
-    // fields bounded) so a malformed value cannot hang or overrun the bridge.
-    this.visionBridge = resolveVisionBridgeSettings(params.visionBridge);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
@@ -2653,18 +2636,9 @@ export class Config {
   }
 
   /**
-   * Return the resolved vision bridge settings (merged with defaults).
-   * `model` is `undefined` when the bridge is not configured.
-   */
-  getVisionBridgeConfig(): VisionBridgeSettings {
-    return this.visionBridge;
-  }
-
-  /**
    * Pick an image-capable model from the registered models to use as the
-   * vision bridge model when the user has not configured one explicitly. This
-   * lets the bridge work out-of-the-box for users who already have a
-   * multimodal provider configured, instead of requiring a hand-set id.
+   * vision bridge model. This lets the bridge work out-of-the-box for users
+   * who already have a multimodal provider configured.
    *
    * Selection prefers a model on the same provider as the primary model (same
    * endpoint, then same auth type) before falling back to any image-capable
