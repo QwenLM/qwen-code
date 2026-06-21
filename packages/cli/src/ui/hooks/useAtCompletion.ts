@@ -9,6 +9,7 @@ import type { Config, FileSearch } from '@qwen-code/qwen-code-core';
 import { FileSearchFactory, escapePath } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
+import { matchMcpServerPrefix } from './mcpResourceRef.js';
 
 /**
  * `@server:uri` MCP resource completion. Returns suggestions when `pattern`
@@ -31,17 +32,13 @@ function getMcpResourceSuggestions(
   // (`ToolRegistry.readMcpResource`) is blocked there, so completing them
   // would both mislead and leak the existence of a server's resources.
   if (config.isTrustedFolder?.() === false) return null;
-  // Match the LONGEST configured server name that prefixes `<name>:` rather
-  // than splitting on the first ':' — a server name may contain a ':'.
-  // `Object.keys`, not `in`/prototype walking, so inherited keys
-  // (`__proto__`, `constructor`, …) are never treated as servers.
+  // Shared longest-prefix match (see `matchMcpServerPrefix`) so the
+  // completion path and the `@server:uri` injection path stay in lockstep.
   const mcpServers = config.getMcpServers?.() || {};
-  const serverName = Object.keys(mcpServers)
-    .filter((name) => pattern.startsWith(`${name}:`))
-    .sort((a, b) => b.length - a.length)[0];
-  if (!serverName) return null;
-
-  const partialUri = pattern.slice(serverName.length + 1);
+  const match = matchMcpServerPrefix(pattern, Object.keys(mcpServers));
+  if (!match) return null;
+  const serverName = match.serverName;
+  const partialUri = match.rest;
   const resources =
     config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
   const matches = resources

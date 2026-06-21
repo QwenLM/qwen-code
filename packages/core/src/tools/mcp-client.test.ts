@@ -929,6 +929,32 @@ describe('mcp-client', () => {
       expect(result).toEqual([]);
       expect(mockDebugLogger.error).toHaveBeenCalled();
     });
+
+    it('swallows the exact "Method not found" message even without a code', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockRejectedValue(new Error('Method not found')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('no-method', mockClient);
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('does NOT swallow an unrelated error that merely contains "method not found" (case-sensitive)', async () => {
+      // Regression guard for the message-substring narrowing: the old broad
+      // /method not found/i would have hidden this genuine failure.
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockRejectedValue(
+            new Error('Error in method not found handler: null pointer'),
+          ),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('weird', mockClient);
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.error).toHaveBeenCalled();
+    });
   });
 
   describe('discoverResources wrapper', () => {

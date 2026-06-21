@@ -22,6 +22,7 @@ import type {
   IndividualToolCallDisplay,
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
+import { matchMcpServerPrefix } from './mcpResourceRef.js';
 
 /**
  * Per-resource caps for `@server:uri` injection. Files are bounded by
@@ -143,34 +144,21 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
 
 /**
  * Detect an `@server:uri` MCP resource reference. Returns the parsed
- * `{ serverName, uri }` ONLY when the prefix before the first ':' matches a
- * configured MCP server name — this disambiguates resource refs from
- * filesystem paths that legitimately contain ':' (e.g. a Windows `C:\...`
- * path, or a URL pasted as a path). Anything not matching a known server
- * returns null and falls through to the existing filesystem handling
- * unchanged.
+ * `{ serverName, uri }` ONLY when `pathName` is prefixed by a configured MCP
+ * server name followed by ':' (longest-prefix match via
+ * `matchMcpServerPrefix`, so a server name containing ':' resolves). This
+ * disambiguates resource refs from filesystem paths that legitimately contain
+ * ':' (e.g. a Windows `C:\...` path, or a URL pasted as a path). Anything not
+ * matching a known server — or a `@server:` with an empty URI — returns null
+ * and falls through to the existing filesystem handling unchanged.
  */
 function parseMcpResourceRef(
   pathName: string,
   mcpServerNames: ReadonlySet<string>,
 ): { serverName: string; uri: string } | null {
-  // Match the LONGEST configured server name that prefixes `<name>:` rather
-  // than splitting on the first ':'. A server name may itself contain a ':'
-  // (a valid settings.json key, e.g. "my:server"), which a naive first-colon
-  // split would mangle into serverName="my".
-  let serverName: string | null = null;
-  for (const name of mcpServerNames) {
-    if (
-      pathName.startsWith(`${name}:`) &&
-      (serverName === null || name.length > serverName.length)
-    ) {
-      serverName = name;
-    }
-  }
-  if (serverName === null) return null;
-  const uri = pathName.slice(serverName.length + 1);
-  if (!uri) return null;
-  return { serverName, uri };
+  const match = matchMcpServerPrefix(pathName, mcpServerNames);
+  if (!match || !match.rest) return null;
+  return { serverName: match.serverName, uri: match.rest };
 }
 
 /**

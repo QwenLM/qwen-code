@@ -1506,9 +1506,11 @@ describe('handleAtCommand', () => {
       const readMcpResource = vi.fn().mockResolvedValue({
         contents: [{ uri: 'res://x', text: 'COLON BODY' }],
       });
+      // Both "my" and "my:server" are configured: the prefix is ambiguous,
+      // and longest-prefix disambiguation must pick "my:server".
       const config = {
         ...mockConfig,
-        getMcpServers: () => ({ 'my:server': {} }),
+        getMcpServers: () => ({ my: {}, 'my:server': {} }),
         getToolRegistry: () => ({ readMcpResource }),
       } as unknown as Config;
 

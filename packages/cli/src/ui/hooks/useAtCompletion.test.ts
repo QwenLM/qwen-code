@@ -647,5 +647,36 @@ describe('useAtCompletion', () => {
         'myserver:res://secret',
       );
     });
+
+    it('resolves a server name containing a colon (longest-prefix)', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      // Both "my" and "my:server" configured → longest-prefix picks "my:server".
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ my: {}, 'my:server': {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: (name: string) =>
+            name === 'my:server'
+              ? [{ uri: 'res://doc', name: 'd', serverName: 'my:server' }]
+              : [],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'my:server:res',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'my:server:res://doc',
+      ]);
+    });
   });
 });
