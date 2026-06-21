@@ -458,10 +458,6 @@ describe('voiceTranscriber', () => {
     ).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1');
   });
 
-  it('detects keyterm echoes in non-Latin scripts', () => {
-    expect(isKeytermEcho('提交分支架构测试', '提交 分支 架构 测试')).toBe(true);
-  });
-
   it('keeps terse speech that happens to use a few keyterms', () => {
     expect(
       isKeytermEcho(

@@ -1332,6 +1332,7 @@ export default {
   'Set the model for voice transcription': '设置语音转写模型',
   'Select Fast Model': '选择快速模型',
   'Select Voice Model': '选择语音模型',
+  'Voice Model': '语音模型',
   'Selected voice model is unavailable.': '所选语音模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
     "语音模型 '{{model}}' 被配置了多次。请先移除重复的模型 ID，再将其选为语音转写模型。",
@@ -1365,6 +1366,8 @@ export default {
     '语音听写不支持 {{platform}}。',
   'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
     '语音听写需要麦克风访问，但当前 WSL 会话不可用。请使用 WSLg/PulseAudio，或在带麦克风的宿主机上运行 Qwen Code。',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    '语音听写需要麦克风访问。macOS 会在你首次录音时弹出授权请求——请同意后重新开始。弹窗打开期间的首次录音可能为空。',
   'Voice: recording': '语音：录音中',
   'Voice: transcribing': '语音：转写中',
   'listening…': '聆听中…',

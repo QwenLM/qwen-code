@@ -279,6 +279,12 @@ export function openVoiceStream(
           }
         }
       } else if (event === 'task-finished') {
+        if (!started) {
+          // Out-of-order finish before task-started: the connect promise only
+          // resolves on task-started, so reject it instead of hanging forever.
+          fail(new Error('Voice stream finished before it started.'));
+          return;
+        }
         finishedTranscript = committed.trim();
         settled = true;
         clearConnectTimer();

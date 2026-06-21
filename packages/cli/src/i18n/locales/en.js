@@ -1420,6 +1420,7 @@ export default {
     'Set the model for voice transcription',
   'Select Fast Model': 'Select Fast Model',
   'Select Voice Model': 'Select Voice Model',
+  'Voice Model': 'Voice Model',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
@@ -1454,6 +1455,8 @@ export default {
     'Voice dictation is not supported on {{platform}}.',
   'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
     'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.',
   'Voice: recording': 'Voice: recording',
   'Voice: transcribing': 'Voice: transcribing',
   'listening…': 'listening…',

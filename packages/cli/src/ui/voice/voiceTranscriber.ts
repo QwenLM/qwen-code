@@ -21,7 +21,6 @@ import {
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
 const INFERENCE_TIMEOUT_MS = 60_000;
 const MIN_KEYTERM_ECHO_TOKENS = 8;
-const MIN_HAN_KEYTERM_ECHO_TOKENS = 4;
 
 export { resolveVoiceTransport };
 export type { VoiceTransport } from './voiceModel.js';
@@ -286,7 +285,7 @@ export function resolveVoiceStreamConfig(
   }
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
   const keytermsContext =
-    transport === 'qwen-asr-realtime' ? buildKeytermsContext(args) : undefined;
+    transport === 'qwen-asr-realtime' ? buildKeytermsContext() : undefined;
   return {
     transport,
     baseUrl: base.baseUrl,
@@ -326,11 +325,8 @@ function resolveLanguageCode(language: string | undefined): string | undefined {
   return /^[a-z]{2,3}$/.test(lower) ? lower : undefined;
 }
 
-function buildKeytermsContext(
-  args: ResolveVoiceTranscriptionConfigArgs,
-): string | undefined {
+function buildKeytermsContext(): string | undefined {
   try {
-    void args;
     const keyterms = buildVoiceKeyterms();
     return keyterms.length > 0 ? keyterms.join(' ') : undefined;
   } catch {
@@ -350,36 +346,6 @@ function tokenize(value: string): string[] {
     .filter(Boolean);
 }
 
-function compactLettersAndNumbers(value: string): string {
-  return value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-}
-
-function hasHan(value: string): boolean {
-  return /\p{Script=Han}/u.test(value);
-}
-
-function isUnsegmentedHanKeytermEcho(
-  transcript: string,
-  keyterms: string[],
-): boolean {
-  const transcriptText = compactLettersAndNumbers(transcript);
-  if (!hasHan(transcriptText)) {
-    return false;
-  }
-
-  const hanKeyterms = keyterms.filter(hasHan);
-  if (hanKeyterms.length < MIN_HAN_KEYTERM_ECHO_TOKENS) {
-    return false;
-  }
-
-  const matched = hanKeyterms.filter((term) => transcriptText.includes(term));
-  const matchedChars = matched.reduce((sum, term) => sum + term.length, 0);
-  return (
-    matched.length >= MIN_HAN_KEYTERM_ECHO_TOKENS &&
-    matchedChars / transcriptText.length >= 0.9
-  );
-}
-
 /**
  * On non-speech audio (silence/noise) Qwen-ASR can hallucinate the keyterm
  * context back as the transcript. Detect that — a multi-word result whose tokens
@@ -394,11 +360,10 @@ export function isKeytermEcho(
     return false;
   }
   const tokens = tokenize(transcript);
-  const keyterms = tokenize(keytermsContext);
-  const keyset = new Set(keyterms);
   if (tokens.length < 4) {
-    return isUnsegmentedHanKeytermEcho(transcript, keyterms);
+    return false;
   }
+  const keyset = new Set(tokenize(keytermsContext));
   const overlap = tokens.filter((t) => keyset.has(t)).length;
   return overlap >= MIN_KEYTERM_ECHO_TOKENS && overlap / tokens.length >= 0.9;
 }
@@ -545,7 +510,7 @@ export async function transcribeVoiceAudio(
   await assertVoiceBaseUrlNetworkAllowed(voiceConfig, args.lookupHost);
   const fetchFn = args.fetchFn ?? fetch;
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
-  const keytermsContext = buildKeytermsContext(args);
+  const keytermsContext = buildKeytermsContext();
 
   const transport = resolveVoiceTransport(voiceConfig.model);
   switch (transport) {

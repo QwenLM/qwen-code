@@ -319,7 +319,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     settings.merged.general?.voice?.mode === 'tap' ? 'tap' : 'hold';
   // handleSubmitAndClear is defined below; bridge with a ref so tap-mode voice
   // can submit the prompt once the transcript is inserted.
-  const voiceSubmitRef = useRef<() => void>(() => {});
+  const voiceSubmitRef = useRef<(text: string) => void>(() => {});
   const transcribeVoice = useCallback<VoiceTranscriber>(
     (audio, { voiceModel }) =>
       transcribeVoiceAudio(audio, { config, settings, voiceModel }),
@@ -412,7 +412,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     addItem: uiState.historyManager?.addItem,
     createRecorder: getVoiceRecorder,
     transcribe: transcribeVoice,
-    onSubmit: () => voiceSubmitRef.current(),
+    onSubmit: (text) => voiceSubmitRef.current(text),
     warmup: warmupVoice,
     streaming: voiceStreaming,
     openStream: voiceStreaming ? openVoiceStreamSession : undefined,
@@ -556,7 +556,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   );
 
   // Tap-mode voice dictation submits the prompt after the transcript lands.
-  voiceSubmitRef.current = () => handleSubmitAndClear(buffer.text);
+  voiceSubmitRef.current = (text) => handleSubmitAndClear(text);
 
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {

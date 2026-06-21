@@ -71,8 +71,12 @@ interface UseVoiceInputArgs {
   addItem?: (item: HistoryItemWithoutId, timestamp: number) => void;
   createRecorder: () => VoiceRecorder;
   transcribe: VoiceTranscriber;
-  /** Called after a tap-mode transcript is inserted, to submit the prompt. */
-  onSubmit?: () => void;
+  /**
+   * Called after a tap-mode transcript is inserted, to submit the prompt.
+   * Receives the resulting prompt text — buffer.insert dispatches async, so the
+   * submit handler must not read it back from buffer.text synchronously.
+   */
+  onSubmit?: (text: string) => void;
   /** Pre-load the recorder backend when voice turns on (avoids cold-start race). */
   warmup?: () => void | Promise<void>;
   /** Enable live streaming transcription (requires openStream + a drain-capable recorder). */
@@ -115,14 +119,19 @@ function waitForPreviousStop(stopPromise: Promise<void> | null): Promise<void> {
 function insertTranscript(
   buffer: Pick<TextBuffer, 'text' | 'insert'>,
   transcript: string,
-): boolean {
+): string | null {
   const text = transcript.trim();
   if (!text) {
-    return false;
+    return null;
   }
   const needsSpace = buffer.text.length > 0 && !/\s$/.test(buffer.text);
-  buffer.insert(needsSpace ? ` ${text}` : text);
-  return true;
+  const segment = needsSpace ? ` ${text}` : text;
+  // buffer.text is the pre-insert (rendered) value and buffer.insert dispatches
+  // async, so compute the resulting prompt text now for callers that submit
+  // immediately (tap mode) instead of reading the stale buffer.text back.
+  const resulting = buffer.text + segment;
+  buffer.insert(segment);
+  return resulting;
 }
 
 function isCancelKey(key: Key): boolean {
@@ -419,9 +428,16 @@ export function useVoiceInput({
           if (session) {
             // Push any remaining audio, tear down the device, then flush the
             // stream and await the final transcript.
-            const pcm = recorder.drain?.();
-            if (pcm && pcm.length > 0) session.pushAudio(pcm);
-            await stopRecorderQuietly(recorder);
+            try {
+              const pcm = recorder.drain?.();
+              if (pcm && pcm.length > 0) session.pushAudio(pcm);
+              await stopRecorderQuietly(recorder);
+            } catch (error) {
+              // drain()/pushAudio can throw (native crash); abort so the
+              // WebSocket isn't left open until the server idle-timeout.
+              session.abort();
+              throw error;
+            }
             return session.finish();
           }
           const audio = await recorder.stop();
@@ -432,8 +448,10 @@ export function useVoiceInput({
             return;
           }
           const inserted = insertTranscript(buffer, transcript);
-          if (submit && inserted) {
-            onSubmit?.();
+          if (submit && inserted !== null) {
+            // Pass the resulting prompt text explicitly — buffer.text hasn't
+            // re-rendered yet after the async insert.
+            onSubmit?.(inserted);
           }
         })
         .catch((error: unknown) => {
