@@ -541,6 +541,7 @@ jobs:
         )
       }}
     permissions:
+      actions: 'write'
       issues: 'write'
 
     steps:
@@ -551,8 +552,16 @@ jobs:
           RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
-          gh issue create --repo "${GH_REPO}" \
+          issue_url="$(gh issue create --repo "${GH_REPO}" \
             --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
             --body "The release workflow failed. See the full run for details: ${DETAILS_URL}" \
             --label "type/bug" \
-            --label "status/ready-for-agent"
+            --label "status/ready-for-agent")"
+          issue_number="${issue_url##*/}"
+
+          echo "Created ${issue_url}; dispatching autofix."
+          gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
+            -f phase=issue \
+            -f issue_number="${issue_number}" \
+            -f dry_run=false \
+            || echo "::warning::Autofix dispatch failed; scheduled autofix can still pick up issue #${issue_number}."
