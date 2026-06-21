@@ -304,7 +304,10 @@ jobs:
       ${{
         always() &&
         needs.prepare.result == 'success' &&
-        needs.audio_capture_prebuilds.result == 'success' &&
+        (
+          github.repository != 'QwenLM/qwen-code' ||
+          needs.audio_capture_prebuilds.result == 'success'
+        ) &&
         (
           github.event.inputs.force_skip_tests == 'true' ||
           (

@@ -49,4 +49,14 @@ describe('getVoiceUnavailableReason', () => {
       }),
     ).toBeUndefined();
   });
+
+  it('allows WSLg when the PulseAudio socket exists', () => {
+    expect(
+      getVoiceUnavailableReason({
+        platform: 'linux',
+        env: { WSL_DISTRO_NAME: 'Ubuntu' },
+        fileExists: (path) => path === '/mnt/wslg/PulseServer',
+      }),
+    ).toBeUndefined();
+  });
 });

@@ -16,6 +16,7 @@
     "!dist/**/*.test.*",
     "prebuilds",
     "native/audio_capture.cc",
+    "native/mac_permission.mm",
     "native/miniaudio.h",
     "binding.gyp"
   ],

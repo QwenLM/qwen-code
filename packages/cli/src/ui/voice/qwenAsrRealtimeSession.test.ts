@@ -208,6 +208,40 @@ describe('qwenAsrRealtimeSession', () => {
     expect(socket.readyState).toBe(3);
   });
 
+  it('resolves finish when the server already finished the session', async () => {
+    const socket = new FakeSocket();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    socket.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'server finished first',
+      }),
+      false,
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.finished', event_id: 'finished' }),
+      false,
+    );
+
+    await expect(session.finish()).resolves.toBe('server finished first');
+  });
+
   it('preserves transcription failures that arrive before finish', async () => {
     const socket = new FakeSocket();
     const sessionPromise = openQwenAsrRealtimeStream(

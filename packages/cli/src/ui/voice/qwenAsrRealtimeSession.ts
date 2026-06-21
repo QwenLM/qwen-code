@@ -68,6 +68,7 @@ export function openQwenAsrRealtimeStream(
     let finishReject: ((error: unknown) => void) | null = null;
     let finishTimer: ReturnType<typeof setTimeout> | null = null;
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
+    let finishedTranscript: string | null = null;
     let terminalError: Error | null = null;
     let failed = false;
 
@@ -176,6 +177,10 @@ export function openQwenAsrRealtimeStream(
             finish: () => {
               if (finishPromise) return finishPromise;
               finishPromise = new Promise<string>((res, rej) => {
+                if (finishedTranscript !== null) {
+                  res(finishedTranscript);
+                  return;
+                }
                 if (terminalError) {
                   rej(terminalError);
                   return;
@@ -222,7 +227,8 @@ export function openQwenAsrRealtimeStream(
         case 'session.finished':
           failed = true;
           clearFinishTimer();
-          finishResolve?.(committed.trim());
+          finishedTranscript = committed.trim();
+          finishResolve?.(finishedTranscript);
           finishResolve = null;
           finishReject = null;
           close();

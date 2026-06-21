@@ -50,9 +50,9 @@ const nativeRequire = createRequire(import.meta.url);
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function loadBinding(): NativeBinding {
-  // Throws on unsupported platforms before touching the native layer.
-  getPlatformBackendName();
   try {
+    // Throws on unsupported platforms before touching the native layer.
+    getPlatformBackendName();
     // node-gyp-build picks the matching prebuild from prebuilds/<platform>-<arch>,
     // falling back to a local build/Release compile — no compiler needed when a
     // prebuilt binary ships for the host.
