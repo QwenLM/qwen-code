@@ -662,7 +662,6 @@ jobs:
             "GH_TOKEN="
             "OPENAI_API_KEY=qwen-loopback-proxy"
             "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
-            "OPENAI_MODEL=$OPENAI_MODEL"
             "NO_PROXY=${NO_PROXY:-}"
             "no_proxy=${no_proxy:-}"
             "QWEN_CI_HTTPS_PROXY=${QWEN_CI_HTTPS_PROXY:-}"
@@ -672,6 +671,9 @@ jobs:
             "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
             "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
           )
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
+          fi
 
           set +e
           timeout --kill-after=10s 20m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
@@ -781,13 +783,19 @@ jobs:
           # backtick fence (breakable by a long enough ``` run) cannot guarantee.
           # Order matters: escape & first so the < / > entities aren't re-escaped.
           emit_block() {
-            local summary="$1" file="$2" max="$3" content
+            local summary="$1" file="$2" max="$3" content truncated=''
             [ -n "$file" ] && [ -f "$file" ] || return 0
-            content="$(head -c "$max" "$file")"
             if [ "$(wc -c < "$file")" -gt "$max" ]; then
-              content="${content}"$'\n\n...truncated -- full log in the run artifacts.'
+              truncated=$'\n\n...truncated -- full log in the run artifacts.'
             fi
-            content="$(printf '%s' "$content" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+            if ! content="$(
+              {
+                head -c "$max" "$file"
+                printf '%s' "$truncated"
+              } | tr -d '\000' | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+            )"; then
+              content='<em>Log could not be rendered; see run artifacts.</em>'
+            fi
             printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary"
             printf '%s\n' "$content"
             printf '</code></pre>\n\n</details>\n\n'
@@ -823,24 +831,22 @@ jobs:
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'
             } > "$BODY_FILE"
-          elif [ "$VERDICT" = "timeout" ] || [ "$VERDICT" = "infra-error" ]; then
-            REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
-            TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
-            {
-              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
-              printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT" "$RUN_URL"
-              printf 'The tmux test did not complete, so this is not a pass/fail result for the affected flow. See the workflow run and artifacts for details.\n\n'
-              emit_block 'E2E test report' "$REPORT" 20000
-              emit_block 'Full tmux transcript' "$TRANSCRIPT" 30000
-              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
-            } > "$BODY_FILE"
           else
             REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
             TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
+            VERDICT_LABEL="${VERDICT:-unknown}"
+            if [ "${VERDICT:-}" = "infra-error" ]; then
+              VERDICT_LABEL='infra-error (crash/OOM)'
+              DESCRIPTION='The tmux test did not complete because the qwen process failed or was killed. This is not a pass/fail result for the affected flow; check runner resources and PR code for crashes or memory leaks.'
+            elif [ "${VERDICT:-}" = "timeout" ]; then
+              DESCRIPTION='The tmux test did not complete before the time limit. This is not a pass/fail result for the affected flow; see the workflow run and artifacts for details.'
+            else
+              DESCRIPTION='Launched the changed app in a real tmux session and exercised the affected flow.'
+            fi
             {
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
-              printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT" "$RUN_URL"
-              printf 'Launched the changed app in a real tmux session and exercised the affected flow.\n\n'
+              printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT_LABEL" "$RUN_URL"
+              printf '%s\n\n' "$DESCRIPTION"
               emit_block 'E2E test report' "$REPORT" 20000
               emit_block 'Full tmux transcript' "$TRANSCRIPT" 30000
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'
