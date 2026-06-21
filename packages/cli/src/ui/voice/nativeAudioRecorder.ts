@@ -23,6 +23,7 @@ interface NativeAudioRecorderOptions {
 class NativeAudioRecorder implements VoiceRecorder {
   private backend: NativeAudioCaptureBackend | null = null;
   private silencePoll: ReturnType<typeof setInterval> | null = null;
+  private starting = false;
 
   constructor(
     private readonly loadBackend: () =>
@@ -62,30 +63,38 @@ class NativeAudioRecorder implements VoiceRecorder {
   }
 
   async start(options: VoiceRecorderStartOptions = {}): Promise<void> {
-    if (this.backend) {
+    if (this.backend || this.starting) {
       throw new Error('Native voice recorder is already recording.');
     }
-    const backend = await this.loadBackend();
-    const silenceDetection = options.silenceDetection === true;
-    backend.startRecording({
-      sampleRate: 16000,
-      channels: 1,
-      silenceDetection,
-    });
-    this.backend = backend;
+    this.starting = true;
+    let backend: NativeAudioCaptureBackend;
+    try {
+      backend = await this.loadBackend();
+      const silenceDetection = options.silenceDetection === true;
+      backend.startRecording({
+        sampleRate: 16000,
+        channels: 1,
+        silenceDetection,
+      });
+      this.backend = backend;
+      this.starting = false;
 
-    const { onAutoStop } = options;
-    if (silenceDetection && onAutoStop && backend.silenceDetected) {
-      this.silencePoll = setInterval(() => {
-        try {
-          if (this.backend?.silenceDetected?.()) {
+      const { onAutoStop } = options;
+      if (silenceDetection && onAutoStop && backend.silenceDetected) {
+        this.silencePoll = setInterval(() => {
+          try {
+            if (this.backend?.silenceDetected?.()) {
+              this.clearSilencePoll();
+              onAutoStop();
+            }
+          } catch {
             this.clearSilencePoll();
-            onAutoStop();
           }
-        } catch {
-          this.clearSilencePoll();
-        }
-      }, SILENCE_POLL_INTERVAL_MS);
+        }, SILENCE_POLL_INTERVAL_MS);
+      }
+    } catch (error) {
+      this.starting = false;
+      throw error;
     }
   }
 

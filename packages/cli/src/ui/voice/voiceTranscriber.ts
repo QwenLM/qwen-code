@@ -80,7 +80,11 @@ function isQwenBaseUrl(baseUrl: string): boolean {
     const hostname = new URL(baseUrl).hostname.toLowerCase();
     return (
       hostname === 'dashscope.aliyuncs.com' ||
-      hostname.endsWith('.dashscope.aliyuncs.com')
+      hostname === 'dashscope-intl.aliyuncs.com' ||
+      hostname === 'dashscope-us.aliyuncs.com' ||
+      hostname.endsWith('.dashscope.aliyuncs.com') ||
+      hostname.endsWith('.dashscope-intl.aliyuncs.com') ||
+      hostname.endsWith('.dashscope-us.aliyuncs.com')
     );
   } catch {
     return false;
@@ -102,6 +106,9 @@ function readApiKey(
   model: AvailableModel,
   baseUrl: string,
 ): string | undefined {
+  if (!model.envKey && !isQwenBaseUrl(baseUrl)) {
+    return undefined;
+  }
   const envKey = model.envKey ?? DEFAULT_OPENAI_API_KEY;
   const envValue = process.env[envKey];
   if (envValue && envValue.trim().length > 0) {

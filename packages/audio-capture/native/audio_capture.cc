@@ -33,7 +33,7 @@ namespace {
 // before the user speaks does not trigger a stop.
 constexpr double kSilenceThreshold = 0.03 * 32768.0;
 constexpr double kSilenceDurationSecs = 2.0;
-constexpr size_t kMaxPcmBytes = 10 * 1024 * 1024;
+constexpr size_t kMaxPcmBytes = 10 * 1024 * 1024 - 44;
 constexpr size_t kMaxPcmSamples = kMaxPcmBytes / sizeof(int16_t);
 
 struct RecorderState {
@@ -44,10 +44,9 @@ struct RecorderState {
   uint32_t channels = 1;
   std::vector<int16_t> pcm;
   std::mutex mutex;
-  // Touched only on the audio thread.
-  bool silenceDetectionEnabled = false;
-  bool speechStarted = false;
-  uint64_t silentFrames = 0;
+  std::atomic<bool> silenceDetectionEnabled{false};
+  std::atomic<bool> speechStarted{false};
+  std::atomic<uint64_t> silentFrames{0};
   // Recent input level (0..1), guarded by mutex — drives the waveform.
   double level = 0.0;
   // Read from the JS thread.
@@ -164,15 +163,19 @@ void DataCallback(
   }
   const double meanAbs = sampleCount > 0 ? sumAbs / sampleCount : 0.0;
 
-  if (state->silenceDetectionEnabled && !state->silenceDetected.load()) {
+  if (
+      state->silenceDetectionEnabled.load() &&
+      !state->silenceDetected.load()) {
     if (meanAbs >= kSilenceThreshold) {
-      state->speechStarted = true;
-      state->silentFrames = 0;
-    } else if (state->speechStarted) {
-      state->silentFrames += frameCount;
+      state->speechStarted.store(true);
+      state->silentFrames.store(0);
+    } else if (state->speechStarted.load()) {
+      const uint64_t silentFrames =
+          state->silentFrames.load() + frameCount;
+      state->silentFrames.store(silentFrames);
       const uint64_t needed =
           static_cast<uint64_t>(state->sampleRate * kSilenceDurationSecs);
-      if (state->silentFrames >= needed) {
+      if (silentFrames >= needed) {
         state->silenceDetected.store(true);
       }
     }
@@ -232,9 +235,9 @@ napi_value StartRecording(napi_env env, napi_callback_info info) {
     std::lock_guard<std::mutex> lock(gRecorder.mutex);
     gRecorder.sampleRate = sampleRate;
     gRecorder.channels = channels;
-    gRecorder.silenceDetectionEnabled = silenceDetection;
-    gRecorder.speechStarted = false;
-    gRecorder.silentFrames = 0;
+    gRecorder.silenceDetectionEnabled.store(silenceDetection);
+    gRecorder.speechStarted.store(false);
+    gRecorder.silentFrames.store(0);
     gRecorder.level = 0.0;
     gRecorder.silenceDetected.store(false);
     gRecorder.pcm.clear();

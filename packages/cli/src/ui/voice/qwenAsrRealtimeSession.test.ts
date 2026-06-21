@@ -212,4 +212,28 @@ describe('qwenAsrRealtimeSession', () => {
 
     await expect(session.finish()).rejects.toThrow('server failed');
   });
+
+  it('rejects finish when the realtime socket closed before finish', async () => {
+    const socket = new FakeSocket();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    socket.emit('close');
+
+    await expect(session.finish()).rejects.toThrow(
+      'Qwen ASR realtime connection closed unexpectedly.',
+    );
+  });
 });

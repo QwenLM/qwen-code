@@ -17,7 +17,7 @@ function delay(ms: number): Promise<void> {
 function isRetryable(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   if (
-    /\b(400|401|403)\b|unauthori[sz]ed|forbidden|model_not_supported/i.test(
+    /\b(400|401|403|404|410|422)\b|unauthori[sz]ed|forbidden|model_not_supported/i.test(
       message,
     )
   ) {

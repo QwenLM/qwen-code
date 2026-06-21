@@ -81,6 +81,29 @@ describe('voiceStreamSession', () => {
     );
   });
 
+  it('resolves finish when task-finished arrives before finish is called', async () => {
+    const socket = new FakeSocket();
+    const session = await startSession(socket);
+
+    socket.emit(
+      'message',
+      JSON.stringify({
+        header: { event: 'result-generated' },
+        payload: {
+          output: { sentence: { text: 'hello world', sentence_end: true } },
+        },
+      }),
+      false,
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-finished' } }),
+      false,
+    );
+
+    await expect(session.finish()).resolves.toBe('hello world');
+  });
+
   it('rejects finish when the task never finishes', async () => {
     vi.useFakeTimers();
     const socket = new FakeSocket();

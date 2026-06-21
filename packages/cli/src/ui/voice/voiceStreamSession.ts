@@ -36,7 +36,7 @@ export interface VoiceStreamSession {
   abort: () => void;
 }
 
-interface SocketLike {
+export interface SocketLike {
   readyState: number;
   OPEN: number;
   send: (data: string | Uint8Array) => void;
@@ -54,7 +54,7 @@ export interface VoiceStreamDeps {
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 
-function deriveWebSocketBase(baseUrl: string): string {
+export function deriveWebSocketBase(baseUrl: string): string {
   const url = new URL(baseUrl);
   const wsScheme = url.protocol === 'https:' ? 'wss:' : 'ws:';
   let prefix = url.pathname.replace(/\/+$/, '');
@@ -98,6 +98,7 @@ export function openVoiceStream(
     let finishTimer: ReturnType<typeof setTimeout> | null = null;
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
     let terminalError: Error | null = null;
+    let finishedTranscript: string | null = null;
 
     const clearFinishTimer = () => {
       if (finishTimer) {
@@ -197,6 +198,10 @@ export function openVoiceStream(
           finish: () => {
             if (finishPromise) return finishPromise;
             finishPromise = new Promise<string>((res, rej) => {
+              if (finishedTranscript !== null) {
+                res(finishedTranscript);
+                return;
+              }
               if (terminalError) {
                 rej(terminalError);
                 return;
@@ -251,6 +256,7 @@ export function openVoiceStream(
           }
         }
       } else if (event === 'task-finished') {
+        finishedTranscript = committed.trim();
         settled = true;
         clearConnectTimer();
         clearFinishTimer();
@@ -259,7 +265,7 @@ export function openVoiceStream(
         } catch {
           /* ignore */
         }
-        finishResolve?.(committed.trim());
+        finishResolve?.(finishedTranscript);
         finishResolve = null;
         finishReject = null;
       } else if (event === 'task-failed') {

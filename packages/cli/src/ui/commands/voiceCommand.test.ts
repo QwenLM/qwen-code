@@ -131,6 +131,35 @@ describe('voiceCommand', () => {
     });
   });
 
+  it('preserves tap mode when bare /voice re-enables voice dictation', async () => {
+    const setValue = vi.fn();
+    const context = createMockCommandContext({
+      services: {
+        settings: createSettings(
+          {
+            voiceModel: 'qwen3-asr-flash',
+            general: { voice: { enabled: false, mode: 'tap' } },
+          },
+          setValue,
+        ),
+      },
+    });
+
+    const result = await voiceCommand.action!(context, '');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'general.voice.mode',
+      'tap',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using qwen3-asr-flash.',
+    });
+  });
+
   it('disables voice dictation even when no voice model is selected', async () => {
     const setValue = vi.fn();
     const context = createMockCommandContext({

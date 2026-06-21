@@ -123,7 +123,12 @@ export const voiceCommand: SlashCommand = {
     }
 
     const scope = getVoiceScope(settings);
-    const mode: VoiceMode = command === 'tap' ? 'tap' : 'hold';
+    const mode: VoiceMode =
+      command === 'tap'
+        ? 'tap'
+        : command === 'hold'
+          ? 'hold'
+          : getVoiceMode(settings);
     settings.setValue(scope, 'general.voice.mode', mode);
     settings.setValue(scope, 'general.voice.enabled', true);
     return {

@@ -127,6 +127,7 @@ export function useVoiceInput({
   const statusRef = useRef<VoiceInputStatus>('idle');
   const recorderRef = useRef<VoiceRecorder | null>(null);
   const startPromiseRef = useRef<Promise<void> | null>(null);
+  const stopPromiseRef = useRef<Promise<void> | null>(null);
   const retryAfterErrorAtRef = useRef(0);
   const mountedRef = useRef(true);
   const cancelRecordingRef = useRef<() => void>(() => {});
@@ -191,71 +192,75 @@ export function useVoiceInput({
         setInterimText('');
         setAudioLevelState(0);
       }
-      const startPromise = Promise.resolve(
-        recorder.start({
-          silenceDetection,
-          onAutoStop: () => finalizeRef.current(true),
-        }),
-      ).then(async () => {
-        // Streaming: open the WS session and pump drained PCM into it while
-        // recording, surfacing partial transcripts live.
-        if (!isStreaming || recorderRef.current !== recorder) {
-          return;
-        }
-        if (recorder.supportsStreaming?.() === false) {
-          throw new Error(
-            'Streaming voice transcription requires native audio capture. Install/rebuild @qwen-code/audio-capture or switch voiceModel to qwen3-asr-flash for batch transcription.',
-          );
-        }
-        const streamPromise = openStream!({
-          onInterim: (text) => {
-            if (mountedRef.current) setInterimText(text);
-          },
-        });
-        streamSessionPromiseRef.current = streamPromise;
-        const session = await streamPromise;
-        if (recorderRef.current !== recorder) {
-          session.abort();
-          return;
-        }
-        streamSessionRef.current = session;
-        if (statusRef.current !== 'recording') {
-          return;
-        }
-        pumpTimerRef.current = setInterval(() => {
-          try {
-            const active = recorderRef.current;
-            if (!active) return;
-            const pcm = active.drain?.();
-            if (pcm && pcm.length > 0) session.pushAudio(pcm);
-            const level = active.audioLevel?.();
-            if (typeof level === 'number' && mountedRef.current) {
-              setAudioLevelState(level);
-            }
-          } catch (error) {
-            clearPump();
-            clearReleaseTimer();
-            const pendingStreamPromise = streamSessionRef.current
-              ? null
-              : streamSessionPromiseRef.current;
-            streamSessionRef.current?.abort();
-            streamSessionRef.current = null;
-            streamSessionPromiseRef.current = null;
-            void pendingStreamPromise
-              ?.then((pendingSession) => pendingSession.abort())
-              .catch(() => {});
-            const active = recorderRef.current;
-            recorderRef.current = null;
-            startPromiseRef.current = null;
-            void Promise.resolve()
-              .then(() => active?.stop())
-              .catch(() => undefined);
-            setVoiceStatus('idle');
-            resetStreamUi();
-            reportError(error);
+      const startPromise = (stopPromiseRef.current ?? Promise.resolve())
+        .then(() =>
+          Promise.resolve(
+            recorder.start({
+              silenceDetection,
+              onAutoStop: () => finalizeRef.current(true),
+            }),
+          ),
+        )
+        .then(async () => {
+          // Streaming: open the WS session and pump drained PCM into it while
+          // recording, surfacing partial transcripts live.
+          if (!isStreaming || recorderRef.current !== recorder) {
+            return;
           }
-        }, 100);
-      });
+          if (recorder.supportsStreaming?.() === false) {
+            throw new Error(
+              'Streaming voice transcription requires native audio capture. Install/rebuild @qwen-code/audio-capture or switch voiceModel to qwen3-asr-flash for batch transcription.',
+            );
+          }
+          const streamPromise = openStream!({
+            onInterim: (text) => {
+              if (mountedRef.current) setInterimText(text);
+            },
+          });
+          streamSessionPromiseRef.current = streamPromise;
+          const session = await streamPromise;
+          if (recorderRef.current !== recorder) {
+            session.abort();
+            return;
+          }
+          streamSessionRef.current = session;
+          if (statusRef.current !== 'recording') {
+            return;
+          }
+          pumpTimerRef.current = setInterval(() => {
+            try {
+              const active = recorderRef.current;
+              if (!active) return;
+              const pcm = active.drain?.();
+              if (pcm && pcm.length > 0) session.pushAudio(pcm);
+              const level = active.audioLevel?.();
+              if (typeof level === 'number' && mountedRef.current) {
+                setAudioLevelState(level);
+              }
+            } catch (error) {
+              clearPump();
+              clearReleaseTimer();
+              const pendingStreamPromise = streamSessionRef.current
+                ? null
+                : streamSessionPromiseRef.current;
+              streamSessionRef.current?.abort();
+              streamSessionRef.current = null;
+              streamSessionPromiseRef.current = null;
+              void pendingStreamPromise
+                ?.then((pendingSession) => pendingSession.abort())
+                .catch(() => {});
+              const active = recorderRef.current;
+              recorderRef.current = null;
+              startPromiseRef.current = null;
+              void Promise.resolve()
+                .then(() => active?.stop())
+                .catch(() => undefined);
+              setVoiceStatus('idle');
+              resetStreamUi();
+              reportError(error);
+            }
+          }, 100);
+        });
       startPromiseRef.current = startPromise;
       void startPromise.catch((error: unknown) => {
         if (
@@ -395,10 +400,18 @@ export function useVoiceInput({
     const startPromise = startPromiseRef.current ?? Promise.resolve();
     recorderRef.current = null;
     startPromiseRef.current = null;
-    void startPromise
-      .then(() => recorder.stop())
+    const stopPromise = startPromise
+      .then(async () => {
+        await recorder.stop();
+      })
       .catch(() => undefined)
       .finally(() => setVoiceStatus('idle'));
+    stopPromiseRef.current = stopPromise;
+    void stopPromise.finally(() => {
+      if (stopPromiseRef.current === stopPromise) {
+        stopPromiseRef.current = null;
+      }
+    });
   }, [clearPump, clearReleaseTimer, resetStreamUi, setVoiceStatus]);
   cancelRecordingRef.current = cancelRecording;
 

@@ -7,19 +7,12 @@
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import type {
+  SocketLike,
   VoiceStreamCallbacks,
   VoiceStreamConfig,
   VoiceStreamSession,
 } from './voiceStreamSession.js';
-import { deriveStreamUrl } from './voiceStreamSession.js';
-
-interface SocketLike {
-  readyState: number;
-  OPEN: number;
-  send: (data: string | Uint8Array) => void;
-  close: () => void;
-  on: (event: string, cb: (...args: unknown[]) => void) => void;
-}
+import { deriveWebSocketBase } from './voiceStreamSession.js';
 
 export interface QwenRealtimeDeps {
   createWebSocket?: (
@@ -32,8 +25,7 @@ const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 
 export function deriveQwenRealtimeUrl(baseUrl: string, model: string): string {
-  const inferenceUrl = deriveStreamUrl(baseUrl);
-  return `${inferenceUrl.replace(/\/inference$/, '/realtime')}?model=${encodeURIComponent(model)}`;
+  return `${deriveWebSocketBase(baseUrl)}/api-ws/v1/realtime?model=${encodeURIComponent(model)}`;
 }
 
 function appendTranscript(existing: string, next: string): string {
@@ -226,6 +218,7 @@ export function openQwenAsrRealtimeStream(
           );
           break;
         case 'session.finished':
+          failed = true;
           clearFinishTimer();
           finishResolve?.(committed.trim());
           finishResolve = null;
@@ -250,6 +243,7 @@ export function openQwenAsrRealtimeStream(
     ws.on('close', () => {
       clearConnectTimer();
       clearFinishTimer();
+      if (failed) return;
       if (!openSettled) {
         openSettled = true;
         reject(new Error('Qwen ASR realtime connection closed.'));
@@ -259,6 +253,10 @@ export function openQwenAsrRealtimeStream(
         finishReject(new Error('Qwen ASR realtime connection closed.'));
         finishResolve = null;
         finishReject = null;
+      } else {
+        terminalError ??= new Error(
+          'Qwen ASR realtime connection closed unexpectedly. Transcript may be incomplete.',
+        );
       }
     });
   });

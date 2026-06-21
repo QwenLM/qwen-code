@@ -226,6 +226,30 @@ describe('voiceTranscriber', () => {
     });
   });
 
+  it('falls back to the primary auth apiKey for DashScope intl and US hosts', () => {
+    for (const baseUrl of [
+      'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    ]) {
+      const config = createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Qwen ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+        },
+      ]);
+
+      expect(
+        resolveVoiceTranscriptionConfig({
+          config,
+          settings: createSettings({}, 'sk-from-settings'),
+          voiceModel: 'qwen3-asr-flash',
+        }).apiKey,
+      ).toBe('sk-from-settings');
+    }
+  });
+
   it('does not forward the primary auth apiKey to third-party voice hosts', () => {
     const config = createConfig([
       {
@@ -246,6 +270,38 @@ describe('voiceTranscriber', () => {
       model: 'qwen3-asr-flash',
       baseUrl: 'https://asr.example/v1',
     });
+  });
+
+  it('does not forward OPENAI_API_KEY to third-party voice hosts without envKey', () => {
+    const original = process.env['OPENAI_API_KEY'];
+    process.env['OPENAI_API_KEY'] = 'sk-openai';
+    try {
+      const config = createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Custom ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://asr.example/v1',
+        },
+      ]);
+
+      expect(
+        resolveVoiceTranscriptionConfig({
+          config,
+          settings: createSettings(),
+          voiceModel: 'qwen3-asr-flash',
+        }),
+      ).toEqual({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://asr.example/v1',
+      });
+    } finally {
+      if (original === undefined) {
+        delete process.env['OPENAI_API_KEY'];
+      } else {
+        process.env['OPENAI_API_KEY'] = original;
+      }
+    }
   });
 
   it('rejects invalid voice base URLs', () => {

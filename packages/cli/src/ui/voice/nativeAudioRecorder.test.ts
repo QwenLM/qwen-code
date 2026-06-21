@@ -85,4 +85,30 @@ describe('createNativeAudioRecorder', () => {
 
     expect(backend.startRecording).toHaveBeenCalledTimes(1);
   });
+
+  it('rejects concurrent starts while the backend is loading', async () => {
+    const backend = {
+      startRecording: vi.fn(),
+      stopRecording: vi.fn(() => new Uint8Array([1])),
+      isRecording: vi.fn(() => true),
+      microphoneAuthorizationStatus: vi.fn(() => 'unknown' as const),
+    };
+    type Backend = typeof backend;
+    let resolveBackend: (backend: Backend) => void = () => {};
+    const loadBackend = vi.fn(
+      () =>
+        new Promise<Backend>((resolve) => {
+          resolveBackend = resolve;
+        }),
+    );
+    const recorder = createNativeAudioRecorder({ loadBackend });
+
+    const firstStart = recorder.start();
+    await expect(recorder.start()).rejects.toThrow(/already recording/);
+    resolveBackend(backend);
+    await firstStart;
+
+    expect(loadBackend).toHaveBeenCalledTimes(1);
+    expect(backend.startRecording).toHaveBeenCalledTimes(1);
+  });
 });
