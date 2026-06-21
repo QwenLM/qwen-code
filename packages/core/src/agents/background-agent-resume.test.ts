@@ -2015,7 +2015,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
   });
 
-  it('emits exactly one new terminal notification when a completed agent is revived', async () => {
+  it('emits one start event and one terminal notification when a completed agent is revived', async () => {
     const sessionId = 'session-revive-notify';
     const agentId = 'agent-revive-notify';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -2065,6 +2065,10 @@ describe('BackgroundAgentResumeService', () => {
     registry.setNotificationCallback((_display, _model, meta) => {
       notifications.push(meta.status);
     });
+    const started: string[] = [];
+    registry.setRegisterCallback((entry) => {
+      started.push(entry.status);
+    });
 
     const subagent = {
       execute: vi.fn(async () => undefined),
@@ -2086,6 +2090,7 @@ describe('BackgroundAgentResumeService', () => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
     expect(notifications).toEqual(['completed']);
+    expect(started).toEqual(['running']);
   });
 
   it('does not revive when the background concurrency cap is full', async () => {

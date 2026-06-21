@@ -296,7 +296,9 @@ export type BackgroundTaskEntry = AgentTask;
  * `outputFile` is required here because every agent run reserves a JSONL
  * transcript path at registration.
  */
-export type AgentTaskRegistration = TaskRegistration<AgentTask>;
+export type AgentTaskRegistration = TaskRegistration<AgentTask> & {
+  suppressRegisterCallback?: boolean;
+};
 
 export interface NotificationMeta {
   agentId: string;
@@ -410,7 +412,11 @@ export class BackgroundTaskRegistry {
     // Returning the same reference lets callers (e.g. the resume service)
     // continue using their local variable post-register and lets external
     // consumers see updates the registry makes without an extra `get()`.
+    const suppressRegisterCallback =
+      registration.suppressRegisterCallback === true;
     const entry = registration as AgentTask;
+    delete (entry as AgentTask & { suppressRegisterCallback?: boolean })
+      .suppressRegisterCallback;
     entry.id = registration.agentId;
     entry.kind = 'agent';
     entry.outputOffset = 0;
@@ -425,7 +431,11 @@ export class BackgroundTaskRegistry {
     // register callback would emit a `task_started` SDK event without a
     // matching completion event, breaking the lifecycle contract for SDK
     // consumers.
-    if (entry.isBackgrounded && this.registerCallback) {
+    if (
+      entry.isBackgrounded &&
+      this.registerCallback &&
+      !suppressRegisterCallback
+    ) {
       try {
         this.registerCallback(entry);
       } catch (error) {

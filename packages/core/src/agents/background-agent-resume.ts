@@ -115,6 +115,7 @@ interface ResumeOperation {
 interface RestorePausedEntryOptions {
   error?: string;
   resumeBlockedReason?: string;
+  suppressRegisterCallback?: boolean;
 }
 
 function approvalModeToPermissionMode(mode?: string): PermissionMode {
@@ -491,8 +492,8 @@ export class BackgroundAgentResumeService {
    * Revive a *completed* background sub-agent so the model can keep iterating
    * on it via `send_message`. The resume engine only accepts `paused` entries,
    * so flip the finished entry back to a resumable `paused` state (this clears
-   * its result/stats and, via `register`, resets `notified` so the revived run
-   * emits its own terminal notification) and hand it to `resumeBackgroundAgent`.
+   * its result/stats and resets `notified` so the revived run emits its own
+   * terminal notification) and hand it to `resumeBackgroundAgent`.
    *
    * Returns `undefined` (and logs why) when the agent can't be revived: not an
    * in-registry, finished background agent with a persisted transcript, or the
@@ -569,7 +570,7 @@ export class BackgroundAgentResumeService {
           `${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    this.restorePausedEntry(agentId);
+    this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
     return this.resumeBackgroundAgent(agentId, initialMessage);
   }
 
@@ -608,6 +609,7 @@ export class BackgroundAgentResumeService {
         stats: undefined,
         recentActivities: [],
         pendingMessages: [...(existing.pendingMessages ?? [])],
+        suppressRegisterCallback: true,
       });
     } catch (error) {
       const errorMessage =
@@ -1088,6 +1090,7 @@ export class BackgroundAgentResumeService {
       stats: undefined,
       recentActivities: [],
       pendingMessages: [...(latest.pendingMessages ?? [])],
+      suppressRegisterCallback: options.suppressRegisterCallback,
     };
     return registry.register(registration);
   }
