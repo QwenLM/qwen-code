@@ -30,6 +30,11 @@ export interface CleanupOptions {
   excludeSessionIds?: ReadonlySet<string>;
 }
 
+export interface SubagentCleanupOptions extends CleanupOptions {
+  /** Project-scoped subagents root: `<projectDir>/subagents/`. */
+  subagentsRoot: string;
+}
+
 // cleanupPeriodDays = 0 means "minimum retention", not "delete everything
 // including the currently-active session". Clamp to 1 hour so an active
 // session that wrote a snapshot in the last few minutes is always safe.
@@ -45,11 +50,15 @@ export function getCutoffDate(cleanupPeriodDays: number): Date {
   return new Date(Date.now() - periodMs);
 }
 
-export async function cleanupOldFileHistoryBackups(
+// Shared session-dir sweeper: removes immediate child dirs of `root` whose
+// mtime is older than the cutoff, skipping excluded session ids. Both
+// file-history backups and subagent transcripts use the `<root>/<sessionId>/`
+// layout, so the same age-based sweep serves both.
+async function sweepOldSessionDirs(
+  root: string,
   opts: CleanupOptions,
 ): Promise<CleanupResult> {
   const result: CleanupResult = { removed: 0, errors: 0 };
-  const root = join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR);
   const excludes = opts.excludeSessionIds ?? new Set<string>();
 
   let entries;
@@ -87,6 +96,24 @@ export async function cleanupOldFileHistoryBackups(
   // Sweep empty root too; silent failure if not empty.
   await rmdir(root).catch(() => {});
   return result;
+}
+
+export async function cleanupOldFileHistoryBackups(
+  opts: CleanupOptions,
+): Promise<CleanupResult> {
+  return sweepOldSessionDirs(
+    join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR),
+    opts,
+  );
+}
+
+// Background subagent transcripts live per-project under
+// `<projectDir>/subagents/<sessionId>/` — same session-dir layout as
+// file-history, but the root is project-scoped (passed in by the caller).
+export async function cleanupOldSubagentTranscripts(
+  opts: SubagentCleanupOptions,
+): Promise<CleanupResult> {
+  return sweepOldSessionDirs(opts.subagentsRoot, opts);
 }
 
 function isENOENT(e: unknown): boolean {

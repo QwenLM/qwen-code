@@ -10,9 +10,14 @@ import {
   Storage,
   type Config,
   createDebugLogger,
+  getSubagentsRootDir,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { cleanupOldFileHistoryBackups, getCutoffDate } from './cleanup.js';
+import {
+  cleanupOldFileHistoryBackups,
+  cleanupOldSubagentTranscripts,
+  getCutoffDate,
+} from './cleanup.js';
 import { runThrottledOnce } from './throttledOnce.js';
 import { msSinceLastInteraction } from './lastInteractionAt.js';
 
@@ -33,6 +38,7 @@ const CATCHUP_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 const STARTUP_DELAY_CATCHUP_MS = 60 * 1000;
 
 const FILE_HISTORY_MARKER = '.file-history-cleanup';
+const SUBAGENT_MARKER = '.subagent-cleanup';
 
 let started = false;
 
@@ -156,6 +162,30 @@ async function runHousekeeping(
       );
     },
   );
+
+  // Subagent transcripts live per-project under <projectDir>/subagents/.
+  // Throttle per-project (marker in the project dir) so every project gets
+  // swept, not just whichever one is opened first each day. Guard the access:
+  // real Config always exposes storage; the optional chain keeps housekeeping
+  // best-effort if a caller doesn't.
+  const projectDir = config.storage?.getProjectDir?.();
+  if (projectDir) {
+    await runThrottledOnce(
+      {
+        name: 'subagent-cleanup',
+        markerPath: join(projectDir, SUBAGENT_MARKER),
+        lockPath: join(projectDir, SUBAGENT_MARKER + '.lock'),
+      },
+      async () => {
+        const r = await cleanupOldSubagentTranscripts({
+          cutoffDate: cutoff,
+          excludeSessionIds: new Set([currentSessionId]),
+          subagentsRoot: getSubagentsRootDir(projectDir),
+        });
+        debugLogger.debug(`subagents: removed=${r.removed} errors=${r.errors}`);
+      },
+    );
+  }
 }
 
 // Test-only exports — individual underscore-prefixed names matching the
@@ -169,3 +199,4 @@ export const _needsCatchUpForTesting = needsCatchUp;
 export const _runHousekeepingForTesting = runHousekeeping;
 export const _runPassForTesting = runPass;
 export const _FILE_HISTORY_MARKER_FOR_TESTING = FILE_HISTORY_MARKER;
+export const _SUBAGENT_MARKER_FOR_TESTING = SUBAGENT_MARKER;

@@ -8,7 +8,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { cleanupOldFileHistoryBackups, getCutoffDate } from './cleanup.js';
+import {
+  cleanupOldFileHistoryBackups,
+  cleanupOldSubagentTranscripts,
+  getCutoffDate,
+} from './cleanup.js';
 
 const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -191,4 +195,47 @@ describe('cleanupOldFileHistoryBackups', () => {
       }
     },
   );
+});
+
+describe('cleanupOldSubagentTranscripts', () => {
+  let projectDir: string;
+  let subagentsRoot: string;
+  let cutoff: Date;
+
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-subagent-cleanup-'),
+    );
+    subagentsRoot = path.join(projectDir, 'subagents');
+    cutoff = new Date(Date.now() - 30 * MS_PER_DAY);
+  });
+
+  afterEach(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  it('returns zero result when the subagents root does not exist', async () => {
+    const r = await cleanupOldSubagentTranscripts({
+      cutoffDate: cutoff,
+      subagentsRoot,
+    });
+    expect(r).toEqual({ removed: 0, errors: 0 });
+  });
+
+  it('removes session dirs older than cutoff, preserving recent and excluded ones', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    const recent = new Date(Date.now() - 1 * MS_PER_DAY);
+    mkSessionDir(subagentsRoot, 'current', old);
+    mkSessionDir(subagentsRoot, 'stale', old);
+    mkSessionDir(subagentsRoot, 'recent', recent);
+
+    const r = await cleanupOldSubagentTranscripts({
+      cutoffDate: cutoff,
+      excludeSessionIds: new Set(['current']),
+      subagentsRoot,
+    });
+
+    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(fs.readdirSync(subagentsRoot).sort()).toEqual(['current', 'recent']);
+  });
 });

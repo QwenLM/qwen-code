@@ -53,6 +53,11 @@ export function sanitizeFilenameComponent(value: string): string {
  * shell pool), migrate to `<projectDir>/tasks/<sessionId>/<kind>-<id>.jsonl`
  * so the namespace generalizes. Update `read-file.ts` auto-allow accordingly.
  */
+/** Root dir holding every session's subagent transcripts: `<projectDir>/subagents/`. */
+export function getSubagentsRootDir(projectDir: string): string {
+  return path.join(projectDir, 'subagents');
+}
+
 export function getSubagentSessionDir(
   projectDir: string,
   sessionId: string,
@@ -60,8 +65,7 @@ export function getSubagentSessionDir(
   // Sanitize sessionId defensively (UUIDs are safe; resumed/external IDs
   // could carry path-traversal bytes).
   return path.join(
-    projectDir,
-    'subagents',
+    getSubagentsRootDir(projectDir),
     sanitizeFilenameComponent(sessionId),
   );
 }
