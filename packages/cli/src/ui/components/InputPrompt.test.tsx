@@ -447,6 +447,30 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('lets the feedback dialog consume option keys before active voice input', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: true,
+      messageQueue: [],
+      pendingGeminiHistoryItems: [],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write('1');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('lets non-voice keys fall through while voice recording is active', async () => {
     const handleVoiceKeypress = vi.fn(() => false);
     mockedUseVoiceInput.mockReturnValue({

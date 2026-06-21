@@ -692,6 +692,19 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
+      // Handle feedback dialog keyboard interactions before global voice
+      // handling so modal UI gets first chance to consume the key.
+      if (uiState.isFeedbackDialogOpen) {
+        // If it's one of the feedback option keys (1-4), let FeedbackDialog handle it
+        if ((FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)) {
+          return true;
+        } else {
+          // For any other key, close feedback dialog temporarily and continue with normal processing
+          uiActions.temporaryCloseFeedbackDialog();
+          // Continue processing the key for normal input handling
+        }
+      }
+
       if (voiceInput.status !== 'idle') {
         return voiceInput.handleKeypress(key);
       }
@@ -847,18 +860,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (vimHandleInput && vimHandleInput(key)) {
         return true;
-      }
-
-      // Handle feedback dialog keyboard interactions when dialog is open
-      if (uiState.isFeedbackDialogOpen) {
-        // If it's one of the feedback option keys (1-4), let FeedbackDialog handle it
-        if ((FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)) {
-          return true;
-        } else {
-          // For any other key, close feedback dialog temporarily and continue with normal processing
-          uiActions.temporaryCloseFeedbackDialog();
-          // Continue processing the key for normal input handling
-        }
       }
 
       if (
