@@ -29,7 +29,10 @@ function getMcpResourceSuggestions(
   if (colon <= 0) return null;
   const serverName = pattern.slice(0, colon);
   const mcpServers = config.getMcpServers?.() || {};
-  if (!(serverName in mcpServers)) return null;
+  // `Object.hasOwn`, not `in`: `getMcpServers()` is a plain object, so `in`
+  // would match inherited keys (`__proto__`, `constructor`, `toString`, …)
+  // and treat `@__proto__:foo` as a resource ref for a non-existent server.
+  if (!Object.hasOwn(mcpServers, serverName)) return null;
 
   const partialUri = pattern.slice(colon + 1);
   const resources =

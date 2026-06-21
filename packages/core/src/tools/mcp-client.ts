@@ -985,6 +985,21 @@ export async function discoverTools(
 }
 
 /**
+ * True when an MCP request failed because the method is not implemented.
+ * JSON-RPC guarantees the numeric code (`-32601`); the human-readable
+ * message is server-supplied and may be localized or worded differently
+ * (e.g. "Method not implemented"), so we check the code first and only fall
+ * back to the conventional message substring.
+ */
+function isMethodNotFound(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === -32601) return true;
+  return (
+    error instanceof Error && /method not found/i.test(error.message ?? '')
+  );
+}
+
+/**
  * Pure prompt listing. Asks the MCP server for its prompts and returns
  * enriched `DiscoveredMCPPrompt[]` (with `serverName` + bound `invoke`)
  * WITHOUT registering them anywhere. pool uses this so a single
@@ -1024,10 +1039,7 @@ export async function listMcpPrompts(
   } catch (error) {
     // It's okay if this fails, not all servers will have prompts.
     // Don't log an error if the method is not found, which is a common case.
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
+    if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error discovering prompts from ${mcpServerName}: ${getErrorMessage(
           error,
@@ -1140,10 +1152,7 @@ export async function listMcpResources(
     // It's okay if this fails; not all servers expose resources. Don't log
     // when the method is simply absent (the common case for tool-only
     // servers).
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
+    if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error discovering resources from ${mcpServerName}: ${getErrorMessage(
           error,

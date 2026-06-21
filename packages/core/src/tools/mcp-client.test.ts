@@ -724,6 +724,33 @@ describe('mcp-client', () => {
       const result = await listMcpResources('flaky', mockClient);
       expect(result).toEqual([]);
     });
+
+    it('treats JSON-RPC code -32601 as method-absent even when the message differs (no error logged)', async () => {
+      // A spec-compliant server signals an unimplemented method by the
+      // numeric code; the message text is not guaranteed (it may be
+      // localized or worded "Method not implemented"). It must not be
+      // logged as an error.
+      const err = Object.assign(new Error('Método no implementado'), {
+        code: -32601,
+      });
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        request: vi.fn().mockRejectedValue(err),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('localized', mockClient);
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('logs genuinely unexpected errors (not method-absent)', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockRejectedValue(new Error('connection reset')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('broken', mockClient);
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.error).toHaveBeenCalled();
+    });
   });
 
   describe('discoverResources wrapper', () => {
