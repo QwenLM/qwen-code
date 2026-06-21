@@ -343,6 +343,23 @@ describe('SessionMcpView', () => {
     expect(resources.registerResource).toHaveBeenCalledTimes(2);
   });
 
+  it('applyResources([]) is a no-op (does NOT clear) — transient-failure guard', () => {
+    // An empty snapshot can mean "resources/list failed" (swallowed to []),
+    // not "no resources", so it must not wipe the session's resources.
+    const { tools, prompts, resources } = mkRegistries();
+    const view = new SessionMcpView(
+      tools,
+      prompts,
+      resources,
+      'sid',
+      'srv',
+      cfg,
+    );
+    view.applyResources([]);
+    expect(resources.removeResourcesByServer).not.toHaveBeenCalled();
+    expect(resources.registerResource).not.toHaveBeenCalled();
+  });
+
   it('applyResources does NOT apply the includeTools/excludeTools filter', () => {
     // A resource's identity is its URI, not a tool name; the tool-name
     // allow/deny filter must not drop resources. Here `includeTools` is

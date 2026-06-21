@@ -273,8 +273,22 @@ export class SessionMcpView {
    * by a tool-name allow/deny list is semantically meaningless and would
    * only ever drop a resource whose URI coincidentally equalled a filtered
    * tool name. The full set is fanned out to every session.
+   *
+   * An EMPTY snapshot is a no-op (does not clear): `discoverAndReturn` /
+   * `listMcpResources` swallow a transient `resources/list` failure to `[]`,
+   * so on a pool restart the snapshot may be empty because the list call
+   * failed, not because the server has no resources. Wiping the session's
+   * resources on every failed re-read would be silent data loss. This mirrors
+   * the `resources.length > 0` guard in the non-pool `McpClient.discover()`.
+   * (`applyTools` / `applyPrompts` keep their pre-existing clear-on-empty
+   * behavior — the transient-failure exposure there is out of scope for the
+   * resource feature this PR adds.) Trade-off: a server that legitimately
+   * drops to zero resources keeps the prior set until a non-empty snapshot.
    */
   applyResources(snapshot: readonly DiscoveredMCPResource[]): void {
+    if (snapshot.length === 0) {
+      return;
+    }
     this.sessionResourceRegistry.removeResourcesByServer(this.serverName);
     for (const resource of snapshot) {
       try {

@@ -716,6 +716,50 @@ describe('mcp-client', () => {
       );
     });
 
+    it('discover() does NOT clear resources when the list returns empty (transient-failure guard)', async () => {
+      // listMcpResources swallows a transient resources/list failure to [].
+      // With tools present (discovery still succeeds), an empty resource list
+      // must NOT wipe the registry.
+      const registerResource = vi.fn();
+      const removeResourcesByServer = vi.fn();
+      const cfg = {
+        getResourceRegistry: () => ({
+          registerResource,
+          removeResourcesByServer,
+        }),
+      } as unknown as Config;
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockResolvedValue({ resources: [], prompts: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      // A tool exists so discovery does not fail with "no prompts/tools/resources".
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [{ name: 't1' }] }),
+      } as unknown as GenAiLib.CallableTool);
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await client.discover(cfg);
+      expect(removeResourcesByServer).not.toHaveBeenCalled();
+      expect(registerResource).not.toHaveBeenCalled();
+    });
+
     it('discoverAndReturn connects a resource-only server (does not throw)', async () => {
       // The failed-discovery guard now counts resources: a server exposing
       // only resources (no tools/prompts) is a successful discovery.
