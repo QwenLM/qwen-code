@@ -102,6 +102,7 @@ export async function checkNextSpeaker(
       abortSignal,
       promptId,
       purpose: 'next-speaker',
+      skipOutputLanguagePreference: true,
     });
   } catch (error) {
     debugLogger.warn(

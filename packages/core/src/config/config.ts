@@ -36,6 +36,7 @@ import {
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
@@ -75,6 +76,7 @@ import type { InstructionLoadReason } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
@@ -89,6 +91,7 @@ import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
@@ -145,9 +148,11 @@ import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 } from './constants.js';
+import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
   clearRuntimeStatus,
   writeRuntimeStatus,
@@ -174,6 +179,8 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
+
+const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
 import {
   ModelsConfig,
@@ -357,15 +364,23 @@ export interface ChatCompressionSettings {
   screenshotTriggerThreshold?: number;
 }
 
+export { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
+
 /**
- * Settings for clearing stale context after idle periods.
+ * Settings for clearing stale or oversized tool-result context.
  * Threshold values of -1 mean "never clear" (disabled).
  */
+
 export interface ClearContextOnIdleSettings {
   /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
   toolResultsThresholdMinutes?: number;
   /** Number of most-recent tool results to preserve. Default 5. */
   toolResultsNumToKeep?: number;
+  /**
+   * Total compactable tool result output chars before clearing old results.
+   * Default 500000. Use -1 to disable.
+   */
+  toolResultsTotalCharsThreshold?: number;
 }
 
 export interface TelemetrySettings {
@@ -760,6 +775,7 @@ export interface ConfigParameters {
   approvalMode?: ApprovalMode;
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
+  showResponseTokensPerSecond?: boolean;
   telemetry?: TelemetrySettings;
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
@@ -808,10 +824,21 @@ export interface ConfigParameters {
   cronEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
+  /**
+   * P5 T7: suppress the one-time `Workflow` tool usage-warning banner.
+   * When `true`, the registry-side warning latch is bypassed and the
+   * banner is not prepended to the run's display payload. Defaults to
+   * `false`. The banner itself is per-session (registry-scoped), so
+   * even when unset it fires at most once per process.
+   */
+  skipWorkflowUsageWarning?: boolean;
   computerUseEnabled?: boolean;
+  computerUseMaxImageDimension?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
+  /** Locale code for resolving localizable extension fields (e.g., 'en', 'zh'). */
+  locale?: string;
   allowedMcpServers?: string[];
   excludedMcpServers?: string[];
   /**
@@ -950,6 +977,8 @@ export interface ConfigParameters {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+  /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
+  settingsWatcher?: { stopWatching(): void };
 }
 
 function normalizeConfigOutputFormat(
@@ -988,8 +1017,12 @@ function loadMemoryPressureConfig(): MemoryPressureConfig {
       config.criticalRatio,
     );
 
-    if (process.env['QWEN_MEMORY_ENABLE_GC'] === '1') {
-      config.enableExplicitGC = true;
+    const enableGC = process.env['QWEN_MEMORY_ENABLE_GC'];
+    if (
+      enableGC &&
+      ['0', 'false', 'off', 'no'].includes(enableGC.trim().toLowerCase())
+    ) {
+      config.enableExplicitGC = false;
     }
 
     validateMemoryPressureConfig(config);
@@ -1101,6 +1134,7 @@ export class Config {
    */
   private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
+  private resourceRegistry!: ResourceRegistry;
   private subagentManager!: SubagentManager;
   private memoryPressureConfig?: MemoryPressureConfig;
   private memoryPressureMonitor?: MemoryPressureMonitor;
@@ -1108,6 +1142,7 @@ export class Config {
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  private readonly workflowRunRegistry = new WorkflowRunRegistry();
   // Field initializer runs once on the parent Config; child Configs
   // built via Object.create(parent) intentionally do NOT pick this up
   // — see getFileReadCache() for the per-instance lazy initialization
@@ -1190,6 +1225,7 @@ export class Config {
   private planGateEntryCounter = 0;
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
+  private readonly showResponseTokensPerSecond: boolean;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
@@ -1236,7 +1272,9 @@ export class Config {
   private readonly cronEnabled: boolean = true;
   private readonly agentTeamEnabled: boolean = false;
   private workflowsEnabled = false;
+  private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
+  private readonly computerUseMaxImageDimension?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1304,6 +1342,7 @@ export class Config {
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -1371,6 +1410,8 @@ export class Config {
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.accessibility = params.accessibility ?? {};
+    this.showResponseTokensPerSecond =
+      params.showResponseTokensPerSecond ?? false;
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
@@ -1417,11 +1458,17 @@ export class Config {
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
+    const clearContextOnIdle = params.clearContextOnIdle;
+    const toolResultsThresholdMinutes =
+      clearContextOnIdle?.toolResultsThresholdMinutes ?? 60;
     this.clearContextOnIdle = {
-      toolResultsThresholdMinutes:
-        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
-      toolResultsNumToKeep:
-        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsThresholdMinutes,
+      toolResultsNumToKeep: clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsTotalCharsThreshold:
+        clearContextOnIdle?.toolResultsTotalCharsThreshold ??
+        ((clearContextOnIdle?.toolResultsThresholdMinutes ?? 0) < 0
+          ? -1
+          : DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD),
     };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
@@ -1429,7 +1476,9 @@ export class Config {
     this.cronEnabled = params.cronEnabled ?? true;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
+    this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -1468,6 +1517,8 @@ export class Config {
       terminalHeight: params.shellExecutionConfig?.terminalHeight ?? 24,
       showColor: params.shellExecutionConfig?.showColor ?? false,
       pager: params.shellExecutionConfig?.pager ?? 'cat',
+      maxBufferedOutputBytes:
+        params.shellExecutionConfig?.maxBufferedOutputBytes,
     };
     this.truncateToolOutputThreshold =
       params.truncateToolOutputThreshold ??
@@ -1525,6 +1576,7 @@ export class Config {
       workspaceDir: this.targetDir,
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
+      locale: params.locale,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
@@ -1539,6 +1591,7 @@ export class Config {
     this.projectHooks = params.projectHooks;
     // Legacy: fall back to merged hooks if new fields are not provided
     this.hooks = params.hooks;
+    this.settingsWatcher = params.settingsWatcher;
     this.memoryManager = new MemoryManager();
   }
 
@@ -1556,6 +1609,7 @@ export class Config {
     // Initialize centralized FileDiscoveryService
     this.getFileService();
     this.promptRegistry = new PromptRegistry();
+    this.resourceRegistry = new ResourceRegistry();
     this.extensionManager.setConfig(this);
     const explicitExtensionNames = this.getExplicitExtensionNames();
     if (!this.getBareMode()) {
@@ -1643,6 +1697,7 @@ export class Config {
                   (input['permission_mode'] as PermissionMode | undefined) ??
                     PermissionMode.Default,
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               }
@@ -1654,6 +1709,7 @@ export class Config {
                   (input['tool_use_id'] as string) || '',
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -1665,6 +1721,7 @@ export class Config {
                   input['is_interrupt'] as boolean | undefined,
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolBatch':
@@ -1703,6 +1760,7 @@ export class Config {
                   (input['reason'] as PermissionDeniedReason) ||
                     'classifier_blocked',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'SubagentStart':
@@ -2117,6 +2175,33 @@ export class Config {
     );
   }
 
+  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+    const contextWindowSize =
+      this.getContentGeneratorConfig()?.contextWindowSize ??
+      this.modelsConfig.getGenerationConfig().contextWindowSize ??
+      tokenLimit(this.getModel(), 'input');
+    if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
+      return undefined;
+    }
+
+    const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
+    const thresholdTokens = Math.floor(
+      contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
+    );
+    if (estimatedTokens <= thresholdTokens) {
+      return undefined;
+    }
+
+    return (
+      `Warning: Loaded QWEN.md/context instructions use about ` +
+      `${estimatedTokens.toLocaleString()} tokens, more than ` +
+      `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
+      `model's ${contextWindowSize.toLocaleString()} token context window. ` +
+      `Consider trimming long always-loaded context or moving details into ` +
+      `on-demand files.`
+    );
+  }
+
   private getMemoryDiscoveryDirectories(): string[] {
     if (!this.shouldLoadMemoryFromIncludeDirectories()) {
       return [];
@@ -2271,7 +2356,12 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    return this.warnings;
+    const memoryContextWarning = this.buildMemoryContextWarning(
+      this.getUserMemory(),
+    );
+    return memoryContextWarning
+      ? [...this.warnings, memoryContextWarning]
+      : this.warnings;
   }
 
   getDebugLogger(): DebugLogger {
@@ -2286,11 +2376,15 @@ export class Config {
     sessionData?: ResumedSessionData,
   ): string {
     // Finalize the outgoing session before switching.
+    const outgoingChatRecordingService = this.chatRecordingService;
     try {
-      this.chatRecordingService?.finalize();
+      outgoingChatRecordingService?.finalize();
     } catch {
       // Best-effort — don't block session switch
     }
+    void outgoingChatRecordingService?.flush().catch(() => {
+      // Best-effort — don't block session switch
+    });
 
     const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
@@ -2573,6 +2667,8 @@ export class Config {
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
+      this.contentGeneratorConfig.toolResultContentFormat =
+        config.toolResultContentFormat;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -2592,6 +2688,10 @@ export class Config {
       if ('splitToolMedia' in sources) {
         this.contentGeneratorConfigSources['splitToolMedia'] =
           sources['splitToolMedia'];
+      }
+      if ('toolResultContentFormat' in sources) {
+        this.contentGeneratorConfigSources['toolResultContentFormat'] =
+          sources['toolResultContentFormat'];
       }
       return;
     }
@@ -2888,6 +2988,10 @@ export class Config {
    */
   async shutdown(): Promise<void> {
     try {
+      // Stop the settings watcher regardless of initialization state —
+      // it is started before Config.initialize() and would leak otherwise.
+      this.settingsWatcher?.stopWatching();
+
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
         return;
@@ -2926,6 +3030,10 @@ export class Config {
 
   getPromptRegistry(): PromptRegistry {
     return this.promptRegistry;
+  }
+
+  getResourceRegistry(): ResourceRegistry {
+    return this.resourceRegistry;
   }
 
   getDebugMode(): boolean {
@@ -3161,7 +3269,25 @@ export class Config {
   }
 
   isMcpServerDisabled(serverName: string): boolean {
-    return this.excludedMcpServers?.includes(serverName) ?? false;
+    if (this.excludedMcpServers?.includes(serverName)) return true;
+    // Extension-bundled servers can be disabled individually via extension
+    // preferences. Only the extension that actually contributed the server is
+    // consulted, so a same-named server from another source (e.g. a shadowing
+    // user config) is never affected. The owner lookup mirrors the
+    // getMcpServers() merge (user/project config wins, then first active
+    // extension) without rebuilding the merged map — this predicate runs per
+    // server in discovery loops and on every resource read.
+    if (this.mcpServers?.[serverName]) return false;
+    for (const extension of this.getActiveExtensions()) {
+      if (extension.config.mcpServers?.[serverName]) {
+        return (
+          this.extensionManager
+            ?.getDisabledMcpServers(extension.config.name)
+            .includes(serverName) ?? false
+        );
+      }
+    }
+    return false;
   }
 
   /**
@@ -3693,6 +3819,10 @@ export class Config {
     return this.accessibility;
   }
 
+  getShowResponseTokensPerSecond(): boolean {
+    return this.showResponseTokensPerSecond;
+  }
+
   getTelemetryEnabled(): boolean {
     return this.telemetrySettings.enabled ?? false;
   }
@@ -3791,7 +3921,7 @@ export class Config {
 
   getCronScheduler(): CronScheduler {
     if (!this.cronScheduler) {
-      this.cronScheduler = new CronScheduler();
+      this.cronScheduler = new CronScheduler(this.getProjectRoot());
     }
     return this.cronScheduler;
   }
@@ -3819,8 +3949,30 @@ export class Config {
     this.workflowsEnabled = enabled;
   }
 
+  /**
+   * P5 T7: read the `skipWorkflowUsageWarning` setting. When `true`, the
+   * `Workflow` tool suppresses the one-time banner that announces the
+   * `QWEN_CODE_MAX_TOKENS_PER_WORKFLOW` env knob. The registry-side
+   * `shouldShowUsageWarning()` latch is still session-scoped, so even
+   * when this returns `false` the banner fires at most once per
+   * process.
+   */
+  getSkipWorkflowUsageWarning(): boolean {
+    return this.skipWorkflowUsageWarning;
+  }
+
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
+  }
+
+  /**
+   * Configured screenshot longest-edge cap for Computer Use, or `undefined`
+   * to leave cua-driver's built-in default (1568) in place. Resolved together
+   * with the `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION` env override at the point
+   * the driver connects (see `resolveMaxImageDimension`).
+   */
+  getComputerUseMaxImageDimension(): number | undefined {
+    return this.computerUseMaxImageDimension;
   }
 
   /**
@@ -3887,15 +4039,20 @@ export class Config {
 
   getFileHistoryService(): FileHistoryService {
     if (!this.fileHistoryService) {
-      this.fileHistoryService = new FileHistoryService(
+      const service = new FileHistoryService(
         this.sessionId,
         this.fileCheckpointingEnabled,
         this.cwd,
+        (snapshot) => {
+          if (this.fileHistoryService !== service) return;
+          this.getChatRecordingService()?.recordFileHistorySnapshot(snapshot);
+        },
       );
+      this.fileHistoryService = service;
       const snapshots = this.sessionData?.fileHistorySnapshots;
-      if (snapshots?.length && this.fileHistoryService.isEnabled()) {
-        this.fileHistoryService.restoreFromSnapshots(snapshots);
-        void this.fileHistoryService.validateRestoredSnapshots().catch((e) => {
+      if (snapshots?.length && service.isEnabled()) {
+        service.restoreFromSnapshots(snapshots);
+        void service.validateRestoredSnapshots().catch((e) => {
           this.debugLogger.error(
             `FileHistory: validateRestoredSnapshots failed: ${e}`,
           );
@@ -4271,6 +4428,9 @@ export class Config {
         config.terminalHeight ?? this.shellExecutionConfig.terminalHeight,
       showColor: config.showColor ?? this.shellExecutionConfig.showColor,
       pager: config.pager ?? this.shellExecutionConfig.pager,
+      maxBufferedOutputBytes:
+        config.maxBufferedOutputBytes ??
+        this.shellExecutionConfig.maxBufferedOutputBytes,
     };
   }
   getScreenReader(): boolean {
@@ -4414,6 +4574,10 @@ export class Config {
 
   getBackgroundShellRegistry(): BackgroundShellRegistry {
     return this.backgroundShellRegistry;
+  }
+
+  getWorkflowRunRegistry(): WorkflowRunRegistry {
+    return this.workflowRunRegistry;
   }
 
   /**
@@ -4797,6 +4961,12 @@ export class Config {
       await registerLazy(ToolNames.CRON_DELETE, async () => {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
+      });
+      // Reuses the cron scheduler's session-only one-shot path, so it is
+      // gated on the same flag as the cron tools.
+      await registerLazy(ToolNames.LOOP_WAKEUP, async () => {
+        const { LoopWakeupTool } = await import('../tools/loop-wakeup.js');
+        return new LoopWakeupTool(this);
       });
     }
 

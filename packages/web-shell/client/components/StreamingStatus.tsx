@@ -5,13 +5,14 @@ import {
 } from '../constants/loadingPhrases';
 import { useStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
-import { useStreamingOutputTokens } from '../hooks/useStreamingOutputTokens';
+import { useStreamingLoadingMetrics } from '../hooks/useStreamingLoadingMetrics';
 import { formatTokenCount } from '../utils/formatTokenCount';
 import styles from './StreamingStatus.module.css';
 
 export function StreamingStatus() {
   const streamingState = useStreamingState();
-  const outputTokens = useStreamingOutputTokens();
+  const { estimatedOutputTokens, isReceivingContent } =
+    useStreamingLoadingMetrics();
   const { language, t } = useI18n();
   const [elapsed, setElapsed] = useState(0);
   const startTime = useRef(Date.now());
@@ -21,14 +22,21 @@ export function StreamingStatus() {
     return phrases[0] ?? '';
   });
 
+  const isActive = streamingState !== 'idle';
+
   useEffect(() => {
+    if (!isActive) {
+      setElapsed(0);
+      return;
+    }
+
     startTime.current = Date.now();
     setElapsed(0);
     const interval = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
     }, 1000);
     return () => clearInterval(interval);
-  }, [streamingState]);
+  }, [isActive]);
 
   useEffect(() => {
     const phrases = getLoadingPhrases(language);
@@ -59,10 +67,11 @@ export function StreamingStatus() {
 
   const dots = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   const spinnerChar = dots[dotFrame % dots.length];
-  const arrow = streamingState === 'responding' ? '↓' : '↑';
+  const arrow = isReceivingContent ? '↓' : '↑';
+  const timeStr = elapsed < 60 ? `${elapsed}s` : formatDuration(elapsed * 1000);
   const tokenStr =
-    outputTokens > 0
-      ? ` · ${arrow} ${t('stream.tokens', { count: formatTokenCount(outputTokens) })}`
+    estimatedOutputTokens > 0
+      ? ` · ${arrow} ${t('stream.tokens', { count: formatTokenCount(estimatedOutputTokens) })}`
       : '';
 
   return (
@@ -70,8 +79,27 @@ export function StreamingStatus() {
       <span className={styles.spinner}>{spinnerChar}</span>
       {loadingPhrase && <span className={styles.label}>{loadingPhrase}</span>}
       <span className={styles.meta}>
-        ({elapsed}s{tokenStr} · {t('stream.cancel')})
+        ({timeStr}
+        {tokenStr} · {t('stream.cancel')})
       </span>
     </div>
   );
+}
+
+function formatDuration(milliseconds: number): string {
+  if (milliseconds <= 0) return '0s';
+
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (seconds > 0) parts.push(`${seconds}s`);
+
+  return parts.length > 0 ? parts.join(' ') : '0s';
 }

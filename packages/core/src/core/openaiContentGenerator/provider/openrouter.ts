@@ -13,8 +13,16 @@ export class OpenRouterOpenAICompatibleProvider extends DefaultOpenAICompatibleP
   static isOpenRouterProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
-    const baseURL = contentGeneratorConfig.baseUrl || '';
-    return baseURL.includes('openrouter.ai');
+    const baseURL = contentGeneratorConfig.baseUrl ?? '';
+    if (!baseURL) return false;
+    try {
+      const hostname = new URL(baseURL).hostname.toLowerCase();
+      return (
+        hostname === 'openrouter.ai' || hostname.endsWith('.openrouter.ai')
+      );
+    } catch {
+      return false;
+    }
   }
 
   override buildHeaders(): Record<string, string | undefined> {

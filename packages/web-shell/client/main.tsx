@@ -12,6 +12,7 @@ import {
   removeDaemonTokenFromUrl,
 } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
+import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
@@ -21,23 +22,28 @@ removeDaemonTokenFromUrl();
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
-type StandaloneTheme = 'dark' | 'light';
 
-function getThemeFromUrl(): StandaloneTheme | undefined {
-  const theme = new URLSearchParams(window.location.search).get('theme');
-  return theme === 'dark' || theme === 'light' ? theme : undefined;
+function parseTheme(value: string | null): WebShellTheme | undefined {
+  if (value === WebShellThemeId.Dark || value === WebShellThemeId.Light) {
+    return value;
+  }
+  return undefined;
 }
 
-function readStoredTheme(): StandaloneTheme | undefined {
+function getThemeFromUrl(): WebShellTheme | undefined {
+  const theme = new URLSearchParams(window.location.search).get('theme');
+  return parseTheme(theme);
+}
+
+function readStoredTheme(): WebShellTheme | undefined {
   try {
-    const raw = window.localStorage.getItem(THEME_STORAGE_KEY);
-    return raw === 'dark' || raw === 'light' ? raw : undefined;
+    return parseTheme(window.localStorage.getItem(THEME_STORAGE_KEY));
   } catch {
     return undefined;
   }
 }
 
-function storeTheme(theme: StandaloneTheme): void {
+function storeTheme(theme: WebShellTheme): void {
   try {
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   } catch {
@@ -45,8 +51,8 @@ function storeTheme(theme: StandaloneTheme): void {
   }
 }
 
-function getInitialTheme(): StandaloneTheme {
-  return getThemeFromUrl() ?? readStoredTheme() ?? 'dark';
+function getInitialTheme(): WebShellTheme {
+  return getThemeFromUrl() ?? readStoredTheme() ?? WebShellThemeId.Dark;
 }
 
 function readStoredLanguage(): WebShellLanguage | undefined {
@@ -84,13 +90,13 @@ function getSessionIdFromUrl(): string | undefined {
 }
 
 function StandaloneApp() {
-  const [theme, setTheme] = useState<StandaloneTheme>(() => getInitialTheme());
+  const [theme, setTheme] = useState<WebShellTheme>(() => getInitialTheme());
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
     getInitialLanguage(),
   );
   const initialSessionId = useMemo(() => getSessionIdFromUrl(), []);
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
-  const handleThemeChange = useCallback((nextTheme: StandaloneTheme) => {
+  const handleThemeChange = useCallback((nextTheme: WebShellTheme) => {
     setTheme(nextTheme);
     storeTheme(nextTheme);
   }, []);

@@ -414,6 +414,9 @@ export class ToolRegistry {
     // Remove prompts
     this.config.getPromptRegistry().removePromptsByServer(serverName);
 
+    // Remove resources
+    this.config.getResourceRegistry().removeResourcesByServer(serverName);
+
     // Disconnect the MCP client
     await this.mcpClientManager.disconnectServer(serverName);
   }
@@ -429,6 +432,9 @@ export class ToolRegistry {
 
     // Remove prompts
     this.config.getPromptRegistry().removePromptsByServer(serverName);
+
+    // Remove resources
+    this.config.getResourceRegistry().removeResourcesByServer(serverName);
 
     try {
       // Disconnect the MCP client
@@ -476,6 +482,7 @@ export class ToolRegistry {
     this.removeDiscoveredTools();
 
     this.config.getPromptRegistry().clear();
+    this.config.getResourceRegistry().clear();
 
     await this.discoverAndRegisterToolsFromCommand();
 
@@ -493,6 +500,7 @@ export class ToolRegistry {
     this.removeDiscoveredTools();
 
     this.config.getPromptRegistry().clear();
+    this.config.getResourceRegistry().clear();
 
     // discover tools using MCP servers, if configured
     await this.mcpClientManager.discoverAllMcpTools(this.config);
@@ -523,6 +531,7 @@ export class ToolRegistry {
     }
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
+    this.config.getResourceRegistry().removeResourcesByServer(serverName);
 
     await this.mcpClientManager.discoverMcpToolsForServer(
       serverName,

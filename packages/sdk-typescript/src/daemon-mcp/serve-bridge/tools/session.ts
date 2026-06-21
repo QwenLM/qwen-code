@@ -38,7 +38,10 @@ export function sessionTools(state: BridgeState): any[] {
           sessionScope: args.session_scope,
         });
         // Stop old SSE only after new session is confirmed
-        if (state.defaultSessionId && state.defaultSessionId !== session.sessionId) {
+        if (
+          state.defaultSessionId &&
+          state.defaultSessionId !== session.sessionId
+        ) {
           stopEventStream(state, state.defaultSessionId);
         }
         state.defaultSessionId = session.sessionId;
@@ -60,7 +63,10 @@ export function sessionTools(state: BridgeState): any[] {
           workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
         });
         // Stop old SSE only after load is confirmed
-        if (state.defaultSessionId && state.defaultSessionId !== result.sessionId) {
+        if (
+          state.defaultSessionId &&
+          state.defaultSessionId !== result.sessionId
+        ) {
           stopEventStream(state, state.defaultSessionId);
         }
         state.defaultSessionId = result.sessionId;
@@ -81,7 +87,10 @@ export function sessionTools(state: BridgeState): any[] {
           workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
         });
         // Stop old SSE only after resume is confirmed
-        if (state.defaultSessionId && state.defaultSessionId !== result.sessionId) {
+        if (
+          state.defaultSessionId &&
+          state.defaultSessionId !== result.sessionId
+        ) {
           stopEventStream(state, state.defaultSessionId);
         }
         state.defaultSessionId = result.sessionId;

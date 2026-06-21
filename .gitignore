@@ -25,7 +25,6 @@ package-lock.json
 .cursor
 .qoder
 .claude
-CLAUDE.md
 .codex
 
 # Qwen Code Configs
@@ -108,3 +107,4 @@ tmp/
 # code graph skills
 .venv
 .codegraph
+.qwen/computer-use/installed.json

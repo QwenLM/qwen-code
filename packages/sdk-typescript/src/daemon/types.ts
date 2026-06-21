@@ -20,6 +20,10 @@ export interface DaemonProtocolVersions {
   supported: string[];
 }
 
+export interface DaemonCapabilitiesLimits {
+  maxPendingPromptsPerSession?: number | null;
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
@@ -39,7 +43,19 @@ export interface DaemonCapabilities {
    * `session_events`). Never gate UI off `mode`.
    */
   features: string[];
+  /**
+   * Numeric daemon limits. `null` means the daemon advertises the limit as
+   * disabled; absence means an older daemon did not advertise it.
+   */
+  limits?: DaemonCapabilitiesLimits;
   modelServices: string[];
+  /**
+   * Transport protocols the daemon advertises. Clients use this to
+   * negotiate the preferred transport (e.g. `['rest-sse', 'acp-ws',
+   * 'acp-http']`). Optional because older v=1 daemons predate
+   * transport negotiation — absence implies `['rest-sse']` only.
+   */
+  transports?: readonly string[];
   /**
    * Absolute canonical workspace path this daemon is bound to
    * (1 daemon = 1 workspace). Clients use this to
@@ -170,8 +186,8 @@ export interface BranchSessionRequest {
 }
 
 export interface DaemonBranchedSession extends DaemonRestoredSession {
-  title: string;
-  forkedFrom: { sessionId: string; title: string };
+  displayName: string;
+  forkedFrom: { sessionId: string; displayName: string };
 }
 
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */
@@ -180,7 +196,6 @@ export interface DaemonSessionSummary {
   workspaceCwd: string;
   createdAt?: string;
   updatedAt?: string;
-  title?: string;
   displayName?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
@@ -1097,6 +1112,16 @@ export interface DaemonSessionBtwResult {
   answer: string | null;
 }
 
+/**
+ * Result body of `POST /session/:id/mid-turn-message`. `accepted` is `true`
+ * when the message was queued for the running turn (the ACP child drains it
+ * between tool batches); `false` when the session was idle, in which case the
+ * caller should send the message as a normal next-turn prompt instead.
+ */
+export interface DaemonMidTurnMessageResult {
+  accepted: boolean;
+}
+
 export interface DaemonShellCommandResult {
   exitCode: number | null;
   output: string;
@@ -1660,10 +1685,31 @@ export interface DaemonExtensionCapabilities {
   hasSettings: boolean;
 }
 
+export type DaemonExtensionUpdateState =
+  | 'checking for updates'
+  | 'updated, needs restart'
+  | 'updating'
+  | 'updated'
+  | 'update available'
+  | 'up to date'
+  | 'error'
+  | 'not updatable'
+  | 'unknown';
+
+export interface DaemonExtensionDetails {
+  mcpServers: string[];
+  commands: string[];
+  skills: string[];
+  agents: string[];
+  contextFiles: string[];
+  settings: string[];
+}
+
 export interface DaemonExtensionEntry {
   kind: 'extension';
   id: string;
   name: string;
+  displayName?: string;
   version: string;
   isActive: boolean;
   path: string;
@@ -1672,7 +1718,9 @@ export interface DaemonExtensionEntry {
   originSource?: DaemonExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  updateState?: DaemonExtensionUpdateState;
   capabilities: DaemonExtensionCapabilities;
+  details?: DaemonExtensionDetails;
 }
 
 export interface DaemonWorkspaceExtensionsStatus {
@@ -1681,4 +1729,34 @@ export interface DaemonWorkspaceExtensionsStatus {
   initialized: boolean;
   extensions: DaemonExtensionEntry[];
   errors?: DaemonStatusCell[];
+}
+
+export interface ExtensionInstallRequest {
+  source: string;
+  ref?: string;
+  autoUpdate?: boolean;
+  allowPreRelease?: boolean;
+  registry?: string;
+  consent?: boolean;
+}
+
+export interface ExtensionInstallResponse {
+  accepted: true;
+}
+
+export type ExtensionMutationResponse = ExtensionInstallResponse;
+
+export type ExtensionScope = 'user' | 'workspace';
+
+export interface ExtensionScopeRequest {
+  scope: ExtensionScope;
+}
+
+export interface ExtensionUpdateCheckResponse {
+  states: Record<string, DaemonExtensionUpdateState>;
+}
+
+export interface ExtensionRefreshResponse {
+  refreshed: number;
+  failed: number;
 }

@@ -7,6 +7,7 @@
 export {
   DaemonClient,
   DaemonHttpError,
+  DaemonPendingPromptLimitError,
   isDaemonTurnError,
   isNonBlockingAccepted,
   matchTurnEvent,
@@ -18,6 +19,28 @@ export {
   type RestoreSessionRequest,
   type SubscribeOptions,
 } from './DaemonClient.js';
+// Transport abstraction layer
+export { DaemonTransportClosedError } from './DaemonTransport.js';
+export type {
+  DaemonTransport,
+  DaemonTransportFetchOptions,
+  DaemonTransportSubscribeOptions,
+  DaemonTransportType,
+} from './DaemonTransport.js';
+export type { RestSseTransport } from './RestSseTransport.js';
+// negotiateTransport + ACP transport classes live in their own files to
+// break the static import chain from this barrel, keeping the browser
+// bundle under budget.  Monorepo consumers import from source paths:
+//   import { negotiateTransport } from '../../sdk-typescript/src/daemon/negotiateTransport.js';
+//   import { AcpWsTransport }     from '../../sdk-typescript/src/daemon/AcpWsTransport.js';
+//   import { AcpHttpTransport }   from '../../sdk-typescript/src/daemon/AcpHttpTransport.js';
+//   import { AutoReconnectTransport } from '../../sdk-typescript/src/daemon/AutoReconnectTransport.js';
+// Deep package exports are intentionally omitted: the SDK barrel does not
+// re-export these classes, and the package's `files` field ships only
+// `dist/` which does not include per-module entry points for them.
+export type { NegotiateTransportOptions } from './negotiateTransport.js';
+export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
+export type { TransportFactory } from './AutoReconnectTransport.js';
 export {
   DaemonAuthFlow,
   DEVICE_FLOW_EXPIRY_GRACE_MS,
@@ -33,6 +56,7 @@ export {
 export {
   asKnownDaemonEvent,
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
+  MID_TURN_MESSAGE_INJECTED_EVENT,
   createDaemonAuthState,
   createDaemonSessionViewState,
   isDaemonEventType,
@@ -223,6 +247,8 @@ export type {
   DaemonSessionEvent,
   DaemonSessionMetadataUpdatedData,
   DaemonSessionMetadataUpdatedEvent,
+  DaemonMidTurnMessageInjectedData,
+  DaemonMidTurnMessageInjectedEvent,
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
@@ -277,6 +303,7 @@ export type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -386,8 +413,17 @@ export type {
   DaemonExtensionInstallType,
   DaemonExtensionOriginSource,
   DaemonExtensionCapabilities,
+  DaemonExtensionDetails,
   DaemonExtensionEntry,
+  DaemonExtensionUpdateState,
   DaemonWorkspaceExtensionsStatus,
+  ExtensionInstallRequest,
+  ExtensionInstallResponse,
+  ExtensionMutationResponse,
+  ExtensionRefreshResponse,
+  ExtensionScope,
+  ExtensionScopeRequest,
+  ExtensionUpdateCheckResponse,
   HeartbeatResult,
   MCPServerConfigShape,
   PermissionOutcome,

@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 const DEFAULT_STORAGE_KEY = 'qwen-web-shell-history';
 const MAX_HISTORY = 100;
@@ -34,31 +34,54 @@ export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
   const indexRef = useRef<number>(-1);
   const draftRef = useRef<string>('');
   const searchIndexRef = useRef<number>(-1);
-
-  const push = useCallback((text: string) => {
+  // Drives the enabled/disabled state of the history nav buttons. canUp: an
+  // older entry exists to recall; canDown: currently browsing history (a newer
+  // entry or the saved draft to return to).
+  const [nav, setNav] = useState(() => ({
+    canUp: historyRef.current.length > 0,
+    canDown: false,
+  }));
+  const syncNav = useCallback(() => {
     const h = historyRef.current;
-    if (h[h.length - 1] === text) return;
-    h.push(text);
-    if (h.length > MAX_HISTORY) h.shift();
-    saveHistory(storageKeyRef.current, h);
-    indexRef.current = -1;
+    const i = indexRef.current;
+    setNav({
+      canUp: h.length > 0 && (i === -1 || i > 0),
+      canDown: i !== -1,
+    });
   }, []);
 
-  const navigateUp = useCallback((currentText: string): string | null => {
-    const h = historyRef.current;
-    if (h.length === 0) return null;
+  const push = useCallback(
+    (text: string) => {
+      const h = historyRef.current;
+      if (h[h.length - 1] === text) return;
+      h.push(text);
+      if (h.length > MAX_HISTORY) h.shift();
+      saveHistory(storageKeyRef.current, h);
+      indexRef.current = -1;
+      syncNav();
+    },
+    [syncNav],
+  );
 
-    if (indexRef.current === -1) {
-      draftRef.current = currentText;
-      indexRef.current = h.length - 1;
-    } else if (indexRef.current > 0) {
-      indexRef.current--;
-    } else {
-      return null;
-    }
+  const navigateUp = useCallback(
+    (currentText: string): string | null => {
+      const h = historyRef.current;
+      if (h.length === 0) return null;
 
-    return h[indexRef.current];
-  }, []);
+      if (indexRef.current === -1) {
+        draftRef.current = currentText;
+        indexRef.current = h.length - 1;
+      } else if (indexRef.current > 0) {
+        indexRef.current--;
+      } else {
+        return null;
+      }
+
+      syncNav();
+      return h[indexRef.current];
+    },
+    [syncNav],
+  );
 
   const navigateDown = useCallback((): string | null => {
     const h = historyRef.current;
@@ -66,19 +89,22 @@ export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
 
     if (indexRef.current < h.length - 1) {
       indexRef.current++;
+      syncNav();
       return h[indexRef.current];
     } else {
       indexRef.current = -1;
+      syncNav();
       return draftRef.current;
     }
-  }, []);
+  }, [syncNav]);
 
   const isNavigating = useCallback(() => indexRef.current !== -1, []);
 
   const reset = useCallback(() => {
     indexRef.current = -1;
     searchIndexRef.current = -1;
-  }, []);
+    syncNav();
+  }, [syncNav]);
 
   const searchReverse = useCallback((query: string): string | null => {
     const h = historyRef.current;
@@ -138,5 +164,6 @@ export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
     getReverseMatches,
     getLastEntry,
     resetSearch,
+    nav,
   };
 }

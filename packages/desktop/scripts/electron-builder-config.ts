@@ -53,11 +53,18 @@ linux.icon = BRAND.assets.linuxIcon;
 linux.artifactName = artifactName;
 
 if (BRAND.updates) {
-  config.publish = {
-    provider: BRAND.updates.provider,
-    owner: BRAND.updates.owner,
-    repo: BRAND.updates.repo,
-  };
+  if (BRAND.updates.provider === 'github') {
+    config.publish = {
+      provider: BRAND.updates.provider,
+      owner: BRAND.updates.owner,
+      repo: BRAND.updates.repo,
+    };
+  } else {
+    config.publish = {
+      provider: BRAND.updates.provider,
+      url: BRAND.updates.url,
+    };
+  }
 } else {
   delete config.publish;
 }

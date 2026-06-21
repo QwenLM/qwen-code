@@ -285,8 +285,13 @@ export function convertGeminiToolParametersToOpenAI(
         key === 'maxItems'
       ) {
         // Ensure length constraints are integers, not strings
-        if (typeof value === 'string' && !isNaN(Number(value))) {
-          result[key] = parseInt(value, 10);
+        const numberValue = typeof value === 'string' ? Number(value) : NaN;
+        if (
+          typeof value === 'string' &&
+          value.trim() !== '' &&
+          Number.isInteger(numberValue)
+        ) {
+          result[key] = numberValue;
         } else {
           result[key] = value;
         }
@@ -545,6 +550,11 @@ function processContent(
   const reasoningParts: string[] = [];
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
   let toolCallIndex = 0;
+  const emittedFunctionCallIds = new Set<string>();
+  const emittedFunctionResponseIds = new Set<string>();
+  // New history is normalized before reaching this converter. These local
+  // guards only keep already-corrupted or programmatic duplicate parts from
+  // leaking duplicate IDs into OpenAI payloads.
   // When `splitToolMedia` is enabled, media stripped from tool messages is
   // accumulated here and emitted as a single follow-up user message after
   // ALL tool messages in this group have been pushed. OpenAI Chat
@@ -576,8 +586,19 @@ function processContent(
     }
 
     if ('functionCall' in part && part.functionCall && role === 'assistant') {
+      const callId = part.functionCall.id;
+      if (callId) {
+        if (emittedFunctionCallIds.has(callId)) {
+          debugLogger.debug(
+            `Dropping duplicate functionCall id=${callId} while converting content`,
+          );
+          continue;
+        }
+        emittedFunctionCallIds.add(callId);
+      }
+
       toolCalls.push({
-        id: part.functionCall.id || `call_${toolCallIndex}`,
+        id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
         function: {
           name: part.functionCall.name || '',
@@ -588,6 +609,14 @@ function processContent(
     }
 
     if (part.functionResponse && role === 'user') {
+      const responseId = part.functionResponse.id;
+      if (responseId) {
+        if (emittedFunctionResponseIds.has(responseId)) {
+          continue;
+        }
+        emittedFunctionResponseIds.add(responseId);
+      }
+
       // Create tool message for the function response (with embedded media)
       const toolMessage = createToolMessage(
         part.functionResponse,
@@ -631,6 +660,20 @@ function processContent(
             toolMessage.content =
               textOnly || '[media attached in following user message]';
             accumulatedSplitMedia.push(...mediaParts);
+          }
+        }
+        if (
+          requestContext.toolResultContentFormat === 'string' &&
+          Array.isArray(toolMessage.content)
+        ) {
+          const toolContent = toolMessage.content as OpenAIContentPart[];
+          if (
+            toolContent.every(
+              (cp): cp is OpenAI.Chat.ChatCompletionContentPartText =>
+                cp?.type === 'text',
+            )
+          ) {
+            toolMessage.content = toolContent.map((cp) => cp.text).join('\n');
           }
         }
         messages.push(toolMessage);
@@ -1139,9 +1182,11 @@ export function convertOpenAIResponseToGemini(
     let finalCompletionTokens = completionTokens;
 
     if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output
+      // Estimate: assume 70% input, 30% output. Derive completion from the
+      // remainder so the two halves always add back up to totalTokens rather
+      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
       finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = Math.round(totalTokens * 0.3);
+      finalCompletionTokens = totalTokens - finalPromptTokens;
     }
 
     response.usageMetadata = {
@@ -1336,9 +1381,11 @@ export function convertOpenAIChunkToGemini(
     let finalCompletionTokens = completionTokens;
 
     if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output
+      // Estimate: assume 70% input, 30% output. Derive completion from the
+      // remainder so the two halves always add back up to totalTokens rather
+      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
       finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = Math.round(totalTokens * 0.3);
+      finalCompletionTokens = totalTokens - finalPromptTokens;
     }
 
     response.usageMetadata = {
@@ -1436,19 +1483,33 @@ function cleanOrphanedToolCalls(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const cleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  const adjacentToolResponseIdsByAssistant = new Map<number, Set<string>>();
+  const validToolCallsByAssistant = new Map<
+    number,
+    OpenAI.Chat.ChatCompletionMessageToolCall[]
+  >();
   const validToolResponseIndexesByAssistant = new Map<number, number[]>();
   const splitMediaIndexesByAssistant = new Map<number, number[]>();
   const emittedWithAssistant = new Set<number>();
+  const survivingToolCallIds = new Set<string>();
 
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (hasToolCalls(message)) {
-      const toolCallIds = new Set(
-        message.tool_calls
-          .map((toolCall) => toolCall.id)
-          .filter((id): id is string => Boolean(id)),
-      );
+      const candidateToolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] =
+        [];
+      const candidateToolCallIds = new Set<string>();
+      for (const toolCall of message.tool_calls) {
+        const id = toolCall.id;
+        if (!id || survivingToolCallIds.has(id)) {
+          continue;
+        }
+        if (candidateToolCallIds.has(id)) {
+          continue;
+        }
+        candidateToolCallIds.add(id);
+        candidateToolCalls.push(toolCall);
+      }
+
       const adjacentToolResponseIds = new Set<string>();
       const toolResponseIndexes: number[] = [];
       const splitMediaIndexes: number[] = [];
@@ -1466,7 +1527,10 @@ function cleanOrphanedToolCalls(
             continue;
           }
 
-          if (toolCallIds.has(nextMessage.tool_call_id)) {
+          if (
+            candidateToolCallIds.has(nextMessage.tool_call_id) &&
+            !adjacentToolResponseIds.has(nextMessage.tool_call_id)
+          ) {
             adjacentToolResponseIds.add(nextMessage.tool_call_id);
             toolResponseIndexes.push(nextIndex);
             lastToolResponseMatchesAssistant = true;
@@ -1493,7 +1557,13 @@ function cleanOrphanedToolCalls(
         break;
       }
 
-      adjacentToolResponseIdsByAssistant.set(index, adjacentToolResponseIds);
+      const validToolCalls = candidateToolCalls.filter((toolCall) =>
+        adjacentToolResponseIds.has(toolCall.id),
+      );
+      for (const toolCall of validToolCalls) {
+        survivingToolCallIds.add(toolCall.id);
+      }
+      validToolCallsByAssistant.set(index, validToolCalls);
       validToolResponseIndexesByAssistant.set(index, toolResponseIndexes);
       splitMediaIndexesByAssistant.set(index, splitMediaIndexes);
     }
@@ -1509,11 +1579,7 @@ function cleanOrphanedToolCalls(
       const reasoningContent = (
         message as ExtendedChatCompletionAssistantMessageParam
       ).reasoning_content;
-      const adjacentToolResponseIds =
-        adjacentToolResponseIdsByAssistant.get(index) ?? new Set<string>();
-      const validToolCalls = message.tool_calls.filter(
-        (toolCall) => toolCall.id && adjacentToolResponseIds.has(toolCall.id),
-      );
+      const validToolCalls = validToolCallsByAssistant.get(index) ?? [];
 
       if (validToolCalls.length > 0) {
         const cleanedMessage = { ...message };

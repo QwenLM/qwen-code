@@ -55,6 +55,10 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
     },
     { name: 'output', description: '设置 LLM 输出语言' },
   ],
+  extensions: [
+    { name: 'manage', description: '管理扩展' },
+    { name: 'install', description: '安装扩展' },
+  ],
 };
 
 const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
@@ -82,6 +86,10 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
       ],
     },
     { name: 'output', description: 'Set LLM output language' },
+  ],
+  extensions: [
+    { name: 'manage', description: 'Manage installed extensions' },
+    { name: 'install', description: 'Install an extension from a source' },
   ],
 };
 
@@ -360,6 +368,9 @@ export function slashCompletionSource(
               }
             : {}),
           detail: n.description || undefined,
+          ...(isSkillList && n.description
+            ? { info: `/${n.name}\n\n${n.description}` }
+            : {}),
           apply: `${command} `,
         };
       });
@@ -391,9 +402,14 @@ export function slashCompletionSource(
       .sort((a, b) => compareSlashCommands(a, b, lp, categoryOrder));
     const options = filteredCommands.map((c): Completion => {
       const command = `/${c.name}`;
+      const category = getCommandDisplayCategory(c);
+      const showCommandInfo = category === 'custom' || category === 'skill';
       return {
         label: command,
         detail: c.description || undefined,
+        ...(showCommandInfo && c.description
+          ? { info: `${command}\n\n${c.description}` }
+          : {}),
         apply: `${command} `,
         section: getCommandSection(c, translate, categoryOrder),
       };

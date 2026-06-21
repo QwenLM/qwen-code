@@ -12,6 +12,7 @@ import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
@@ -104,6 +105,7 @@ const virtualIsStaticItem = (item: HistoryItem) => item.id > 0;
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const uiActions = useUIActions();
   const { compactMode, compactInline } = useCompactMode();
   const {
     pendingHistoryItems,
@@ -113,6 +115,12 @@ export const MainContent = () => {
     availableTerminalHeight,
     historyRemountKey,
   } = uiState;
+
+  // Filter out items whose display is suppressed (e.g. /history collapse).
+  const visibleHistory = useMemo(
+    () => uiState.history.filter((item) => !item.display?.suppressOnRestore),
+    [uiState.history],
+  );
 
   // Set of callIds whose label is absorbed by a compact-mode tool_group header.
   // Computed from RAW history (not merged) — force-expand status depends only
@@ -141,7 +149,7 @@ export const MainContent = () => {
     if (!compactMode || !uiState.useTerminalBuffer || compactInline)
       return EMPTY_ABSORBED_CALL_IDS;
     const absorbed = new Set<string>();
-    for (const item of uiState.history) {
+    for (const item of visibleHistory) {
       if (item.type !== 'tool_group') continue;
       if (
         isForceExpandGroup(
@@ -170,7 +178,7 @@ export const MainContent = () => {
   }, [
     compactMode,
     compactInline,
-    uiState.history,
+    visibleHistory,
     uiState.embeddedShellFocused,
     uiState.activePtyId,
     uiState.useTerminalBuffer,
@@ -191,22 +199,22 @@ export const MainContent = () => {
   const prevMergedHistoryRef = useRef<HistoryItem[] | null>(null);
   const mergedHistory = useMemo(() => {
     if (!compactMode) {
-      prevMergedHistoryRef.current = uiState.history;
-      return uiState.history;
+      prevMergedHistoryRef.current = visibleHistory;
+      return visibleHistory;
     }
     // <Static> is append-only: merging reduces item count, which <Static>
     // can't handle without clearTerminal + remount (the flash we're fixing).
     if (!uiState.useTerminalBuffer) {
-      prevMergedHistoryRef.current = uiState.history;
-      return uiState.history;
+      prevMergedHistoryRef.current = visibleHistory;
+      return visibleHistory;
     }
     // compactInline: user opted into per-group display without cross-group merging.
     if (compactInline) {
-      prevMergedHistoryRef.current = uiState.history;
-      return uiState.history;
+      prevMergedHistoryRef.current = visibleHistory;
+      return visibleHistory;
     }
     const next = mergeCompactToolGroups(
-      uiState.history,
+      visibleHistory,
       uiState.embeddedShellFocused,
       uiState.activePtyId,
       absorbedCallIds,
@@ -227,7 +235,7 @@ export const MainContent = () => {
   }, [
     compactMode,
     compactInline,
-    uiState.history,
+    visibleHistory,
     uiState.useTerminalBuffer,
     uiState.embeddedShellFocused,
     uiState.activePtyId,
@@ -240,7 +248,7 @@ export const MainContent = () => {
   // multiple groups are merged, the first group's summary wins (see below).
   const summaryByCallId = useMemo(() => {
     const map = new Map<string, string>();
-    for (const item of uiState.history) {
+    for (const item of visibleHistory) {
       if (item.type === 'tool_use_summary') {
         for (const callId of item.precedingToolUseIds) {
           // First summary wins — earlier summaries represent the opening
@@ -252,7 +260,7 @@ export const MainContent = () => {
       }
     }
     return map;
-  }, [uiState.history]);
+  }, [visibleHistory]);
 
   const isSummaryAbsorbed = useCallback(
     (item: HistoryItem | HistoryItemWithoutId): boolean => {
@@ -285,6 +293,35 @@ export const MainContent = () => {
     },
     [summaryByCallId, uiState.useTerminalBuffer, compactInline],
   );
+
+  // Ink's <Static> is append-only: once an item is rendered to the terminal
+  // buffer, it cannot be replaced. In compact mode, when a new tool_group is
+  // merged into a previous one, the merged result has FEWER items than the
+  // raw history. Static would not re-render the older items even though their
+  // content changed, so we explicitly call refreshStatic() to clear the
+  // terminal and re-render the merged view.
+  //
+  // Detection: if history length grew but mergedHistory length did NOT grow
+  // proportionally (i.e., a merge consolidated items), trigger a refresh.
+  const prevHistoryLengthRef = useRef(visibleHistory.length);
+  const prevMergedLengthRef = useRef(mergedHistory.length);
+  useEffect(() => {
+    if (!compactMode) {
+      prevHistoryLengthRef.current = visibleHistory.length;
+      prevMergedLengthRef.current = mergedHistory.length;
+      return;
+    }
+    const prevHLen = prevHistoryLengthRef.current;
+    const currHLen = visibleHistory.length;
+    const prevMLen = prevMergedLengthRef.current;
+    const currMLen = mergedHistory.length;
+    // History grew, but merged length stayed same or shrank → a merge happened.
+    if (currHLen > prevHLen && currMLen <= prevMLen) {
+      uiActions.refreshStatic();
+    }
+    prevHistoryLengthRef.current = currHLen;
+    prevMergedLengthRef.current = currMLen;
+  }, [compactMode, visibleHistory, mergedHistory, uiActions]);
 
   // Virtual viewport path short-circuits below before any of the
   // <Static>-only machinery is needed. The offsets / progressive-replay

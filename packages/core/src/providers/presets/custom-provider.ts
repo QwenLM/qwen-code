@@ -106,14 +106,13 @@ export const customProvider: ProviderConfig = {
   models: undefined,
   modelNamePrefix: '',
   showAdvancedConfig: true,
-  // Without this, applyModelProvidersPatch falls back to id+baseUrl identity
-  // matching, so reinstalling a custom provider under a different baseUrl
-  // leaves the old model entries behind — they accumulate over time.
-  // Every key we mint via generateCustomEnvKey starts with the well-known
-  // prefix, so a prefix match cleanly identifies "ours" without false
-  // positives against preset entries.
+  // Detect existing custom entries by our env-key namespace for UI/ACP flows,
+  // but merge installs by id+baseUrl so /auth can add another custom model
+  // without deleting models from other endpoints or different models on the
+  // same endpoint.
   ownsModel: (model) =>
     typeof model.envKey === 'string' &&
     model.envKey.startsWith(CUSTOM_API_KEY_ENV_PREFIX),
+  mergeModelsByIdentity: true,
   uiGroup: 'custom',
 };

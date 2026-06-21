@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { stripExportMeta, createWorkflowSandbox } from './workflow-sandbox.js';
+import {
+  stripExportMeta,
+  extractAndStripMeta,
+  createWorkflowSandbox,
+} from './workflow-sandbox.js';
 
 describe('stripExportMeta', () => {
   it('returns input unchanged when no export meta present', () => {
@@ -136,6 +140,248 @@ return x;`;
   });
 });
 
+describe('extractAndStripMeta', () => {
+  // P4: extracts the `export const meta = {...}` declaration into a typed
+  // object AND strips it from the script source (delegates to the same
+  // brace-walker stripExportMeta uses). `meta: null` when the script has no
+  // declaration; throws when the declaration is present but malformed.
+  it('returns meta: null and unchanged source when no meta declaration', () => {
+    const src = `phase("plan")\nreturn 1`;
+    const { stripped, meta } = extractAndStripMeta(src);
+    expect(stripped).toBe(src);
+    expect(meta).toBeNull();
+  });
+
+  it('extracts the required name + description fields', () => {
+    const src = `export const meta = { name: 'demo', description: 'a demo workflow' }\nreturn 1`;
+    const { stripped, meta } = extractAndStripMeta(src);
+    expect(stripped.trim()).toBe('return 1');
+    expect(meta).toEqual({ name: 'demo', description: 'a demo workflow' });
+  });
+
+  it('extracts optional whenToUse + phases array', () => {
+    const src = `export const meta = {
+      name: 'multi',
+      description: 'multi-phase',
+      whenToUse: 'when the user needs a multi-phase report',
+      phases: [
+        { title: 'collect' },
+        { title: 'analyse', detail: 'aggregate findings', model: 'qwen3-coder-plus' },
+      ],
+    }
+    return 1;`;
+    const { meta } = extractAndStripMeta(src);
+    expect(meta).toEqual({
+      name: 'multi',
+      description: 'multi-phase',
+      whenToUse: 'when the user needs a multi-phase report',
+      phases: [
+        { title: 'collect' },
+        {
+          title: 'analyse',
+          detail: 'aggregate findings',
+          model: 'qwen3-coder-plus',
+        },
+      ],
+    });
+  });
+
+  it('throws upstream-verbatim error when name is missing', () => {
+    const src = `export const meta = { description: 'no name' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /^meta\.name must be a non-empty string$/,
+    );
+  });
+
+  it('throws upstream-verbatim error when description is missing', () => {
+    const src = `export const meta = { name: 'x' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /^meta\.description must be a non-empty string$/,
+    );
+  });
+
+  it('throws when name is empty string', () => {
+    const src = `export const meta = { name: '', description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /^meta\.name must be a non-empty string$/,
+    );
+  });
+
+  it('throws when phases is not an array', () => {
+    const src = `export const meta = { name: 'n', description: 'd', phases: 'oops' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(/phases must be an array/);
+  });
+
+  it('throws when a phase is missing its title', () => {
+    const src = `export const meta = { name: 'n', description: 'd', phases: [{ detail: 'no title here' }] }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /phases\[\]\.title must be a non-empty string/,
+    );
+  });
+
+  // Security regression: the meta-eval vm context has no globals at all
+  // (Object.create(null) prototype), so the model cannot reach host
+  // primitives during meta evaluation — even ones that the script-side
+  // sandbox normally provides (args, agent, phase, log, parallel,
+  // pipeline). Referencing any of them throws ReferenceError. Two
+  // shapes pinned: a truly unknown identifier (R7 dedup — was a
+  // duplicate of the bridge-global case below) and explicit `args`
+  // bridge-global access.
+  it('rejects meta that references an unknown identifier', () => {
+    const src = `export const meta = { name: totallyUnknown, description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+  });
+
+  // Security regression: the meta-eval context's globalThis is null-
+  // prototyped, so the model has no bridge to host primitives like
+  // `process`, `require`, or the workflow-sandbox bridge globals
+  // (`args` / `agent` / `phase` / `log` / etc.). The vm realm still
+  // exposes its OWN intrinsics (`Object`, `Math`, `Date`, …) which is
+  // fine — meta extraction is one-shot at tool-invocation time, not
+  // replayed on resume, so it can be non-deterministic without breaking
+  // the resume contract that the script body honors.
+  it('meta source cannot reference a workflow-sandbox bridge global (args)', () => {
+    const src = `export const meta = { name: args.x, description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+  });
+
+  it('meta source cannot reach the host process / require / fs', () => {
+    const src1 = `export const meta = { name: process.version, description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src1)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+    const src2 = `export const meta = { name: 'x', description: require('fs').readFileSync('/etc/passwd', 'utf8') }\nreturn 1`;
+    expect(() => extractAndStripMeta(src2)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+  });
+
+  it('unbalanced braces still throw the stripExportMeta error', () => {
+    const src = `export const meta = { name: 'x'`;
+    expect(() => extractAndStripMeta(src)).toThrow(/unbalanced/i);
+  });
+
+  // P4a adversarial review (HIGH × 3 lenses): the docstring at
+  // workflow-sandbox.ts:283-294 promises the returned meta is HOST-realm —
+  // a per-field copy that defends against T1/T8/T14-style vm-realm escape
+  // via `outcome.meta.constructor.constructor('return process')()`. Verify
+  // the contract: returned meta + its nested phases array + each phase
+  // entry must all sit on the host-realm prototype chain so
+  // `.constructor` reaches host `Object` / `Array`, not a vm-realm peer.
+  // Without this, a regression that returns the vm-eval'd value directly
+  // would silently pass every structural `toEqual` check in the suite.
+  it('returned meta + phases array + phase entries are all host-realm objects', () => {
+    const src = `export const meta = {
+      name: 'realm',
+      description: 'realm-identity check',
+      whenToUse: 'tests',
+      phases: [
+        { title: 'a' },
+        { title: 'b', detail: 'has detail', model: 'qwen3' },
+      ],
+    }
+    return 1`;
+    const { meta } = extractAndStripMeta(src);
+    expect(meta).not.toBeNull();
+    expect(Object.getPrototypeOf(meta as object)).toBe(Object.prototype);
+    const phases = (meta as { phases: object[] }).phases;
+    expect(Object.getPrototypeOf(phases)).toBe(Array.prototype);
+    for (const p of phases) {
+      expect(Object.getPrototypeOf(p)).toBe(Object.prototype);
+    }
+  });
+
+  // P4a Round 3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
+  // value in the meta literal previously crashed the host process. The
+  // synchronous `runInContext` returns normally with a dangling rejection
+  // scheduled for the next tick; validateMeta passes (the field isn't on
+  // the contract surface so it's silently dropped); the workflow even
+  // returns its result; THEN the unhandled rejection terminates the
+  // process under Node's default `--unhandled-rejections=throw`. The fix
+  // is to walk the eval result, neutralise any thenables with a `.catch`
+  // so they no longer trigger the unhandled-rejection handler, and throw
+  // an explicit error so the bad meta is rejected up front.
+  it('throws when meta value is a Promise (dynamic import) — no unhandled rejection crash', () => {
+    const src = `export const meta = { name: 'x', description: 'd', extra: import('node:fs') }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+  });
+
+  it('throws when meta value is a Promise nested inside a phases entry', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'd',
+      phases: [{ title: 't', extra: import('node:fs') }],
+    }
+    return 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+  });
+
+  // P4 Round 7 (wenshao): `phase('X'); phase('X')` previously yielded
+  // `outcome.phases = ['X','X']` (sandbox unconditional push) while the
+  // registry's onPhaseStarted deduped to `entry.phases = ['X']`. The
+  // two arrays diverged on the same run — terminal display vs live UI
+  // showed different phase lists. Fix at the sandbox layer so the
+  // sandbox is the single source of truth; the docstring on safePhase
+  // / phase() can then promise dedup without lying.
+  it('consecutive identical phase titles dedup at the sandbox layer', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await sandbox.run(
+      `phase('X'); phase('X'); phase('Y'); phase('X'); return 1`,
+    );
+    expect(sandbox.getPhases()).toEqual(['X', 'Y', 'X']);
+  });
+
+  // P4 Round 4 (wenshao): the R3 thenable walker recursed without a
+  // seen-guard. A meta literal that builds a cyclic object via spread
+  // (no getters, no Promises, no exotic constructs — just self-reference)
+  // overflows the call stack. The walker's RangeError propagates OUT of
+  // extractAndStripMeta because the try/catch only wraps the vm-eval, so
+  // the run failure surfaces as `Maximum call stack size exceeded` rather
+  // than the meta-validation error this guard exists to produce. A
+  // WeakSet bounds the recursion against cycles AND against future
+  // shapes where the same node is reached through multiple keys.
+  it('rejects a cyclic meta value built via spread without stack-overflowing', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'y',
+      ...(function () { const a = {}; a.self = a; return a; })(),
+    }
+    return 1`;
+    // The cyclic field should be silently ignored by validateMeta (it's
+    // not a contract field), so the run succeeds with just the required
+    // fields surviving — but only if the walker terminates first.
+    const { meta } = extractAndStripMeta(src);
+    expect(meta).toEqual({ name: 'x', description: 'y' });
+  });
+
+  it('rejects a cyclic meta value reached through nested arrays/objects', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'y',
+      // Cycle reached through phases[0].back → ref back to outer container.
+      ...(function () {
+        const outer = { items: [] };
+        outer.items.push({ ref: outer });
+        return outer;
+      })(),
+    }
+    return 1`;
+    const { meta } = extractAndStripMeta(src);
+    expect(meta).toEqual({ name: 'x', description: 'y' });
+  });
+});
+
 describe('createWorkflowSandbox', () => {
   it('exposes args verbatim', async () => {
     const sandbox = createWorkflowSandbox({
@@ -175,6 +421,43 @@ describe('createWorkflowSandbox', () => {
     const result = await sandbox.run(`return 1 + 2`);
     expect(result).toBe(3);
   });
+
+  // P4: meta declaration in the script is extracted before the body runs
+  // and exposed via getMeta(). The script body sees the stripped source.
+  it('getMeta() returns null when no export const meta declaration', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await sandbox.run(`return 42`);
+    expect(sandbox.getMeta()).toBeNull();
+  });
+
+  it('getMeta() returns the parsed meta when present', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(
+      `export const meta = { name: 'unit', description: 'unit-test workflow', phases: [{ title: 'one' }] }\nreturn 'done'`,
+    );
+    expect(result).toBe('done');
+    expect(sandbox.getMeta()).toEqual({
+      name: 'unit',
+      description: 'unit-test workflow',
+      phases: [{ title: 'one' }],
+    });
+  });
+
+  it('getMeta() failure on malformed meta propagates as the run rejection', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`export const meta = { name: 'x' }\nreturn 1`),
+    ).rejects.toThrow(/^meta\.description must be a non-empty string$/);
+  });
 });
 
 // Security PoC tests — verify that every known realm-escape vector returns
@@ -205,6 +488,12 @@ describe('createWorkflowSandbox security', () => {
   // closures threw host-realm Error objects. The vm-realm wrapper now
   // converts every rejection into `new Error(msg)` inside the vm context,
   // so `e.constructor` stays in the vm realm.
+  //
+  // PR #4947+ note: the schema/model/agentType/isolation opts that used to
+  // throw at sandbox level in P1 are wired through to the dispatch in P3.
+  // The still-thrown path used here is an INVALID isolation value, which
+  // the sandbox refuses with "unknown isolation mode" before reaching
+  // dispatch — the throw point this test cares about for the T1 regression.
   it('thrown Error from agent() options validation cannot reach host process', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
@@ -212,7 +501,7 @@ describe('createWorkflowSandbox security', () => {
     });
     const result = await sandbox.run(`
       try {
-        await agent("x", { schema: { type: "object" } });
+        await agent("x", { isolation: "not-a-real-mode" });
         return 'no-throw';
       } catch (e) {
         try {
@@ -365,17 +654,29 @@ describe('createWorkflowSandbox security', () => {
     );
   }, 35_000); // wall clock for the test itself
 
-  // UP-C1: agent({schema}) must throw a clear error, not silently drop the opt.
-  it('agent() rejects unsupported schema opt with a clear error', async () => {
+  // P3 (PR #5xxx): schema / model / agentType / isolation are passed through
+  // to the dispatch in P3. The sandbox no longer rejects them — the dispatch
+  // is responsible for surfacing "agent type not found", "isolation:'remote'
+  // is not available in this build", and the StructuredOutput contract.
+  // Sandbox-level rejection only remains for invalid isolation modes (not
+  // 'worktree' / 'remote'), which is covered by the security regression
+  // test above.
+  it('agent({schema}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      dispatch: async () => 'ignored',
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return { ok: true, echoed: prompt };
+      },
     });
-    await expect(
-      sandbox.run(`
-        return agent("hi", { schema: { type: "object" } });
-      `),
-    ).rejects.toThrow(/schema.*P3/);
+    const result = await sandbox.run(
+      `return await agent("hi", { schema: { type: "object", properties: { ok: { type: "boolean" } } } });`,
+    );
+    expect(seen).toHaveLength(1);
+    expect((seen[0].opts as { schema?: unknown }).schema).toBeDefined();
+    // Result is the revived object payload.
+    expect(result).toEqual({ ok: true, echoed: 'hi' });
   });
 
   // UP-C1: agent({phase}) is honored — pushed to the phases array.
@@ -1001,36 +1302,112 @@ describe('createWorkflowSandbox security', () => {
     ).toThrow(/max nesting depth/);
   });
 
-  // FIX-C7 (TST-2-I1): each of the four unsupported-opts throw branches must
-  // have its own test. A refactor that deletes any branch passes the others.
-  it('agent() rejects isolation opt with clear error', async () => {
+  // P3 (PR #5xxx): agentType / model / isolation are passed through to the
+  // dispatch — the sandbox no longer rejects them. Unknown isolation modes
+  // (anything other than 'worktree' / 'remote') still throw at sandbox level
+  // because those values cannot be meaningful to any dispatch.
+  it('agent() rejects unknown isolation mode with clear error', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     await expect(
-      sandbox.run(`return agent("hi", { isolation: "worktree" });`),
-    ).rejects.toThrow(/isolation.*not supported in P1/);
+      sandbox.run(`return agent("hi", { isolation: "not-a-real-mode" });`),
+    ).rejects.toThrow(/unknown isolation mode/);
   });
 
-  it('agent() rejects model opt with clear error', async () => {
+  it('agent({isolation:"worktree"}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      dispatch: async () => 'ignored',
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
     });
-    await expect(
-      sandbox.run(`return agent("hi", { model: "gpt-4" });`),
-    ).rejects.toThrow(/model.*not supported in P1/);
+    const result = await sandbox.run(
+      `return await agent("x", { isolation: "worktree" });`,
+    );
+    expect(result).toBe('done');
+    expect((seen[0].opts as { isolation?: unknown }).isolation).toBe(
+      'worktree',
+    );
   });
 
-  it('agent() rejects agentType opt with clear error', async () => {
+  it('agent({isolation:"remote"}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      dispatch: async () => 'ignored',
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
     });
-    await expect(
-      sandbox.run(`return agent("hi", { agentType: "Explore" });`),
-    ).rejects.toThrow(/agentType.*not supported in P1/);
+    await sandbox.run(`return await agent("x", { isolation: "remote" });`);
+    expect((seen[0].opts as { isolation?: unknown }).isolation).toBe('remote');
+  });
+
+  it('agent({model}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    await sandbox.run(`return await agent("x", { model: "qwen3-max" });`);
+    expect((seen[0].opts as { model?: unknown }).model).toBe('qwen3-max');
+  });
+
+  it('agent({agentType}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    await sandbox.run(`return await agent("x", { agentType: "Explore" });`);
+    expect((seen[0].opts as { agentType?: unknown }).agentType).toBe('Explore');
+  });
+
+  // SECURITY (P3 widening): when dispatch returns a host-realm object (the
+  // structured payload in schema mode), the agent() wrapper revives per-call
+  // so the constructor chain stays in the vm realm. The same T1/T8/T14
+  // vector closed for parallel/pipeline's array result must be closed here.
+  it('agent() object return cannot reach host process via constructor chain', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => ({ ok: true, leak: 'attempt' }),
+    });
+    const result = await sandbox.run(`
+      const out = await agent("x", { schema: { type: "object" } });
+      try {
+        const v = out.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
+  });
+
+  // EAD-1 sibling for agent(): a non-JSON-serializable host return value
+  // becomes null at the script boundary instead of throwing the wrapper.
+  it('agent() object return that cannot serialize collapses to null', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => {
+        const a: { self?: unknown } = {};
+        a.self = a;
+        return a as unknown as object;
+      },
+    });
+    const result = await sandbox.run(
+      `return await agent("x", { schema: { type: "object" } });`,
+    );
+    expect(result).toBeNull();
   });
 
   // FIX-C7 (TST-2-I3): the dedup branch in agent({phase}) — consecutive

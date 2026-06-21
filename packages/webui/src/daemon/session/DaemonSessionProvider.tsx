@@ -18,7 +18,6 @@ import {
 } from 'react';
 import {
   DaemonClient,
-  DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
   DaemonHttpError,
   DaemonSessionClient,
   createDaemonTranscriptStore,
@@ -31,7 +30,7 @@ import {
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
-import { createDaemonSessionActions } from './actions.js';
+import { createDaemonSessionActions, getPromptSettledKey } from './actions.js';
 import {
   detachDaemonClient,
   getStableClientId,
@@ -40,8 +39,9 @@ import {
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
-  getReplayTokenCount,
   getSessionDisplayName,
+  getReplayTokenUsage,
+  getTokenCountFromUsage,
   mapProviderStatus,
   mapSupportedCommands,
   updateConnectionFromDaemonEvent,
@@ -62,6 +62,10 @@ import {
   parseSidechannelFollowupSuggestion,
   publishSidechannelFollowupSuggestion,
 } from '../followupSidechannel.js';
+import {
+  parseSidechannelMidTurnInjected,
+  publishSidechannelMidTurnInjected,
+} from '../midTurnInjectedSidechannel.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -73,6 +77,7 @@ import type {
   DaemonSessionProviderProps,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
+  SettledPrompt,
 } from './types.js';
 
 export type {
@@ -137,6 +142,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   toolsVersion: 0,
   settingsVersion: 0,
   mcpVersion: 0,
+  extensionsVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -149,8 +155,8 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
  * and risking transcript wipes if reconnect later attaches a different
  * session and hits the sessionId-change `store.reset()` branch.
  *
- * 404/410 (session-not-found) keep the reconnect-then-recreate behavior —
- * those are recoverable by creating a fresh session.
+ * 404/410 (session-not-found) normally keep the reconnect-then-recreate
+ * behavior, unless the caller opts into leaving missing sessions disconnected.
  */
 const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 
@@ -167,6 +173,7 @@ export function DaemonSessionProvider({
   includeRawEvent = false,
   autoConnect = true,
   autoReconnect = true,
+  missingSessionBehavior = 'create',
   reconnectDelayMs = 1_000,
   maxReconnectDelayMs = 10_000,
   heartbeatIntervalMs = 30_000,
@@ -194,6 +201,7 @@ export function DaemonSessionProvider({
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
+  const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
   const pendingSessionLoadRef = useRef<PendingSessionLoad | undefined>(
     undefined,
   );
@@ -308,6 +316,7 @@ export function DaemonSessionProvider({
           // Only populated when this attempt (re)loads the session: a reused
           // session object carries the snapshot from its original load, whose
           // usage may be older than the in-memory count.
+          let replayTokenUsage: DaemonConnectionState['tokenUsage'];
           let replayTokenCount: number | undefined;
           if (!session) {
             setConnection((current) => ({
@@ -425,10 +434,12 @@ export function DaemonSessionProvider({
             shouldInjectReplaySnapshot =
               nextSession.replaySnapshot.compactedReplay.length > 0 ||
               nextSession.replaySnapshot.liveJournal.length > 0;
-            replayTokenCount = getReplayTokenCount([
+            const replayEvents = [
               ...nextSession.replaySnapshot.compactedReplay,
               ...nextSession.replaySnapshot.liveJournal,
-            ]);
+            ];
+            replayTokenUsage = getReplayTokenUsage(replayEvents);
+            replayTokenCount = getTokenCountFromUsage(replayTokenUsage);
             session = nextSession;
             reconnectSessionId = session.sessionId;
             shouldCreateFreshSession = false;
@@ -474,6 +485,11 @@ export function DaemonSessionProvider({
           setConnection((current) => ({
             status: 'connected',
             sessionId: activeSession.sessionId,
+            // Surface the bound client id so consumers can recognize their own
+            // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+            ...(activeSession.clientId
+              ? { clientId: activeSession.clientId }
+              : {}),
             workspaceCwd: activeSession.workspaceCwd,
             commands,
             skills,
@@ -485,6 +501,15 @@ export function DaemonSessionProvider({
               (current.sessionId === activeSession.sessionId
                 ? current.displayName
                 : undefined),
+            tokenUsage:
+              // Keep token usage in sync with tokenCount: replay usage
+              // supersedes in-memory state, same-session reconnect keeps it,
+              // and a different session without replay usage starts empty.
+              replayTokenUsage !== undefined
+                ? replayTokenUsage
+                : current.sessionId === activeSession.sessionId
+                  ? current.tokenUsage
+                  : undefined,
             tokenCount:
               // A freshly loaded snapshot covers everything up to the SSE
               // resume point, so its usage supersedes the in-memory count;
@@ -603,6 +628,7 @@ export function DaemonSessionProvider({
             for (const replayEvent of replayEvents) {
               settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
+                settledPromptsRef.current,
                 activeSession.sessionId,
                 replayEvent,
                 store,
@@ -610,6 +636,20 @@ export function DaemonSessionProvider({
                 passiveAssistantDoneTimerRef,
                 { requireBoundPromptId: true },
               );
+            }
+            // If replay has a user message but no terminal signal
+            // (turn_complete/turn_error/prompt_cancelled), the turn was
+            // likely still in progress — seed promptStatus so the loading
+            // indicator shows immediately instead of flickering.
+            const hasTurnTerminalEvent = replayEvents.some(
+              (e) =>
+                e.type === 'turn_complete' ||
+                e.type === 'turn_error' ||
+                e.type === 'prompt_cancelled',
+            );
+            const hasReplayUserMessage = replayEvents.some(isUserMessageEvent);
+            if (hasReplayUserMessage && !hasTurnTerminalEvent) {
+              setPromptStatus((s) => (s === 'idle' ? 'waiting' : s));
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
@@ -636,6 +676,13 @@ export function DaemonSessionProvider({
                 parseSidechannelFollowupSuggestion(event);
               if (followupSuggestion) {
                 publishSidechannelFollowupSuggestion(followupSuggestion);
+                continue;
+              }
+              const midTurnInjected = parseSidechannelMidTurnInjected(event);
+              if (midTurnInjected) {
+                // Transient UX signal — consumers drop these from their pending
+                // queue. Not a transcript item, so skip normalization.
+                publishSidechannelMidTurnInjected(midTurnInjected);
                 continue;
               }
               const normalizedUiEvents = normalizeAndFilterEvent(
@@ -710,6 +757,7 @@ export function DaemonSessionProvider({
                   for (const replayEvent of replaySourceEvents) {
                     settleActivePromptFromTurnEvent(
                       activePromptsRef.current,
+                      settledPromptsRef.current,
                       activeSession.sessionId,
                       replayEvent,
                       store,
@@ -730,6 +778,7 @@ export function DaemonSessionProvider({
               }
               const activePromptSettled = settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
+                settledPromptsRef.current,
                 activeSession.sessionId,
                 event,
                 store,
@@ -884,6 +933,10 @@ export function DaemonSessionProvider({
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
+          const shouldDisconnectMissingSession =
+            isTerminal &&
+            !isAuthFailure &&
+            missingSessionBehavior === 'disconnect';
           if (failedSessionId && (isAuthFailure || isTerminal)) {
             const active = activePromptsRef.current.get(failedSessionId);
             active?.controller.abort();
@@ -909,6 +962,15 @@ export function DaemonSessionProvider({
             sessionRef.current = undefined;
             if (isAuthFailure) {
               setConnection({ status: 'error', error: message });
+              return;
+            }
+            if (shouldDisconnectMissingSession) {
+              setConnection((current) => ({
+                ...current,
+                status: 'disconnected',
+                sessionId: undefined,
+                error: message,
+              }));
               return;
             }
             reconnectSessionId = undefined;
@@ -998,6 +1060,7 @@ export function DaemonSessionProvider({
   }, [
     autoConnect,
     autoReconnect,
+    missingSessionBehavior,
     resolvedBaseUrl,
     resolvedToken,
     workspaceCwd,
@@ -1066,6 +1129,7 @@ export function DaemonSessionProvider({
         store,
         sessionRef,
         activePromptsRef,
+        settledPromptsRef,
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
@@ -1101,6 +1165,7 @@ export function DaemonSessionProvider({
 
 function settleActivePromptFromTurnEvent(
   activePrompts: Map<string, ActivePrompt>,
+  settledPrompts: Map<string, SettledPrompt>,
   sessionId: string,
   event: DaemonEvent,
   store: DaemonTranscriptStore,
@@ -1133,10 +1198,10 @@ function settleActivePromptFromTurnEvent(
       activePrompts.delete(sessionId);
       active.resolve(result);
     } else {
-      activePrompts.set(sessionId, {
-        ...active,
-        promptId,
-        pendingResult: result,
+      activePrompts.delete(sessionId);
+      settledPrompts.set(getPromptSettledKey(sessionId, promptId), {
+        status: 'resolved',
+        result,
       });
     }
   } catch (error) {
@@ -1146,10 +1211,10 @@ function settleActivePromptFromTurnEvent(
       activePrompts.delete(sessionId);
       active.reject(error);
     } else {
-      activePrompts.set(sessionId, {
-        ...active,
-        promptId,
-        pendingError: error,
+      activePrompts.delete(sessionId);
+      settledPrompts.set(getPromptSettledKey(sessionId, promptId), {
+        status: 'rejected',
+        error,
       });
     }
   }
@@ -1158,6 +1223,15 @@ function settleActivePromptFromTurnEvent(
 
 function isPromptLifecycleTurnEvent(event: DaemonEvent): boolean {
   return event.type === 'turn_complete';
+}
+
+function isUserMessageEvent(event: DaemonEvent): boolean {
+  if (event.type !== 'session_update') return false;
+  const data = event.data as
+    | { update?: { sessionUpdate?: unknown } }
+    | null
+    | undefined;
+  return data?.update?.sessionUpdate === 'user_message_chunk';
 }
 
 function normalizeAndFilterEvent(
@@ -1315,6 +1389,7 @@ export function useDaemonActiveTodoList() {
 export function useDaemonStreamingState() {
   const blocks = useDaemonTranscriptBlocks();
   const promptStatus = useDaemonPromptStatus();
+
   return useMemo(
     () => selectDaemonStreamingState(blocks, promptStatus),
     [blocks, promptStatus],
@@ -1399,6 +1474,11 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   }
   const meta = update['_meta'];
   if (!isRecord(meta)) return null;
+  const status = normalizeGoalStatus(meta['goalStatus']);
+  if (status) {
+    return createGoalStatusUiEvent(event, status);
+  }
+
   const terminal = normalizeGoalTerminal(meta['goalTerminal']);
   if (terminal) {
     return createGoalStatusUiEvent(event, terminal);
@@ -1428,7 +1508,37 @@ function createGoalStatusUiEvent(
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
-    text: DAEMON_GOAL_STATUS_SENTINEL_PREFIX + JSON.stringify(status),
+    text: '',
+    source: 'goal',
+    data: status,
+  };
+}
+
+function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const kind = getString(value, 'kind');
+  if (
+    kind !== 'set' &&
+    kind !== 'cleared' &&
+    kind !== 'achieved' &&
+    kind !== 'failed' &&
+    kind !== 'aborted'
+  ) {
+    return null;
+  }
+  const condition = getString(value, 'condition');
+  if (!condition) return null;
+  const iterations = getNumber(value, 'iterations');
+  const durationMs = getNumber(value, 'durationMs');
+  const setAt = getNumber(value, 'setAt');
+  const lastReason = getString(value, 'lastReason');
+  return {
+    kind,
+    condition,
+    ...(iterations !== undefined ? { iterations } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(setAt !== undefined ? { setAt } : {}),
+    ...(lastReason ? { lastReason } : {}),
   };
 }
 
@@ -1469,7 +1579,7 @@ function getNumber(
 }
 
 function bumpWorkspaceEventSignals(
-  events: ReadonlyArray<{ type: string }>,
+  events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
 ): void {
   let memory = 0;
@@ -1477,6 +1587,10 @@ function bumpWorkspaceEventSignals(
   let tools = 0;
   let settings = 0;
   let mcp = 0;
+  let extensions = 0;
+  let lastExtensionChange:
+    | DaemonWorkspaceEventSignals['lastExtensionChange']
+    | undefined;
   let init = 0;
   let auth = 0;
 
@@ -1500,6 +1614,18 @@ function bumpWorkspaceEventSignals(
       case 'workspace.mcp.server_restart_refused':
         mcp += 1;
         break;
+      case 'workspace.extensions.changed':
+        extensions += 1;
+        lastExtensionChange = {
+          ...(event.status ? { status: event.status } : {}),
+          ...(event.source ? { source: event.source } : {}),
+          ...(event.name ? { name: event.name } : {}),
+          ...(event.version ? { version: event.version } : {}),
+          ...(event.error ? { error: event.error } : {}),
+          refreshed: event.refreshed,
+          failed: event.failed,
+        };
+        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -1515,7 +1641,8 @@ function bumpWorkspaceEventSignals(
     }
   }
 
-  if (memory + agents + tools + settings + mcp + init + auth === 0) return;
+  if (memory + agents + tools + settings + mcp + extensions + init + auth === 0)
+    return;
 
   setSignals((current) => ({
     memoryVersion: current.memoryVersion + memory,
@@ -1523,6 +1650,8 @@ function bumpWorkspaceEventSignals(
     toolsVersion: current.toolsVersion + tools,
     settingsVersion: current.settingsVersion + settings,
     mcpVersion: current.mcpVersion + mcp,
+    extensionsVersion: current.extensionsVersion + extensions,
+    ...(lastExtensionChange ? { lastExtensionChange } : {}),
     initVersion: current.initVersion + init,
     authVersion: current.authVersion + auth,
   }));

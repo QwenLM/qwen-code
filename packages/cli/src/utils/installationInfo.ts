@@ -6,7 +6,6 @@
 
 import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 
@@ -57,7 +56,7 @@ export function getInstallationInfo(
     if (
       isGit &&
       normalizedProjectRoot &&
-      realPath.startsWith(normalizedProjectRoot) &&
+      isSamePathOrInside(realPath, normalizedProjectRoot) &&
       !realPath.includes('/node_modules/')
     ) {
       return {
@@ -159,7 +158,7 @@ export function getInstallationInfo(
     // Check for local install
     if (
       normalizedProjectRoot &&
-      realPath.startsWith(`${normalizedProjectRoot}/node_modules`)
+      isSamePathOrInside(realPath, `${normalizedProjectRoot}/node_modules`)
     ) {
       let pm = PackageManager.NPM;
       if (fs.existsSync(path.join(projectRoot, 'yarn.lock'))) {
@@ -177,7 +176,8 @@ export function getInstallationInfo(
       };
     }
 
-    // Check if the package directory is writable to determine whether npm update requires sudo
+    // Check if the npm global package directory is writable to determine
+    // whether `npm install -g` would require sudo.
     const npmPackageDir = path.dirname(path.dirname(realPath));
     let npmPrefixWritable = false;
     try {
@@ -187,32 +187,18 @@ export function getInstallationInfo(
       // Not writable (e.g., /usr/local/lib/node_modules owned by root)
     }
 
-    if (!npmPrefixWritable && isAutoUpdateEnabled) {
-      // npm prefix requires sudo — fall back to standalone update path
-      // which installs to ~/.local/lib/qwen-code/ (user-writable)
-      const installRoot = process.env['HOME'] || os.homedir();
-      if (!installRoot || installRoot === '/') {
-        // Cannot determine a safe user-writable location; skip migration
-        return {
-          packageManager: PackageManager.NPM,
-          isGlobal: true,
-          updateMessage:
-            'Update requires sudo. Run: sudo npm install -g @qwen-code/qwen-code@latest',
-        };
-      }
-      const fallbackStandaloneDir = path.join(
-        installRoot,
-        '.local',
-        'lib',
-        'qwen-code',
-      );
+    if (!npmPrefixWritable) {
+      // The npm global prefix requires sudo. Do NOT silently migrate to the
+      // standalone installer here: that swaps in a bundled Node runtime which
+      // can be incompatible with the host (e.g. an older glibc), breaking users
+      // who were updating fine via npm. Keep npm installs on npm and ask the
+      // user to update with sudo instead. No updateCommand is returned so the
+      // auto-updater does not attempt an unattended sudo.
       return {
         packageManager: PackageManager.NPM,
         isGlobal: true,
-        isStandalone: true,
-        standaloneDir: fallbackStandaloneDir,
         updateMessage:
-          'npm install requires sudo. Migrating to standalone installer for automatic updates.',
+          'Update requires sudo. Please run: sudo npm install -g @qwen-code/qwen-code@latest',
       };
     }
 
@@ -229,6 +215,22 @@ export function getInstallationInfo(
     debugLogger.error('Failed to detect installation info:', error);
     return { packageManager: PackageManager.UNKNOWN, isGlobal: false };
   }
+}
+
+function stripTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '') || '/';
+}
+
+function isSamePathOrInside(candidate: string, parent: string): boolean {
+  const normalizedCandidate = stripTrailingSlashes(candidate);
+  const normalizedParent = stripTrailingSlashes(parent);
+  if (normalizedParent === '/') {
+    return normalizedCandidate === '/' || normalizedCandidate.startsWith('/');
+  }
+  return (
+    normalizedCandidate === normalizedParent ||
+    normalizedCandidate.startsWith(`${normalizedParent}/`)
+  );
 }
 
 function getStandaloneInstallInfo(

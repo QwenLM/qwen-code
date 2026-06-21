@@ -48,6 +48,19 @@ describe('EnterPlanModeTool', () => {
       expect(tool.kind).toBe('think');
     });
 
+    it('should require user opt-in in the tool description', () => {
+      expect(tool.description).toContain(
+        'only after the user explicitly asks to switch into plan mode',
+      );
+      expect(tool.description).toContain(
+        'If plan mode seems helpful but the user has not asked for it, ask first',
+      );
+      expect(tool.description).not.toContain(
+        'before doing uncertain or complex work',
+      );
+      expect(tool.description).not.toContain('if complexity rises');
+    });
+
     it('should not defer (always visible)', () => {
       expect(tool.shouldDefer).toBe(false);
     });

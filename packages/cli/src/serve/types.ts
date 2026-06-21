@@ -54,6 +54,11 @@ export interface ServeOptions {
    */
   maxSessions?: number;
   /**
+   * Per-session cap on accepted prompts that have not settled yet.
+   * Defaults to 5. `0` or `Infinity` disables the cap.
+   */
+  maxPendingPromptsPerSession?: number;
+  /**
    * Listener-level TCP connection cap (`server.maxConnections`).
    * Defaults to 256 — bounds the raw socket count regardless of
    * session count, so a slow / phantom SSE client can't pin the
@@ -118,6 +123,12 @@ export interface ServeOptions {
    */
   enableSessionShell?: boolean;
   /**
+   * Serve the built Web Shell SPA at the daemon root (default true). Set
+   * false (the CLI's `--no-web`) for an API-only daemon. No effect when the
+   * Web Shell assets aren't present in the build.
+   */
+  serveWebShell?: boolean;
+  /**
    * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
    * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
@@ -173,6 +184,12 @@ export interface ServeOptions {
   sessionReapIntervalMs?: number;
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
+  /**
+   * Wall-clock timeout in ms for a single human permission /
+   * ask_user_question response in daemon (ACP) mode. 0 = disabled
+   * (wait forever). Default: 300000 (5 min).
+   */
+  permissionResponseTimeoutMs?: number;
   /**
    * Enable per-tier HTTP rate limiting. Off by default. When enabled,
    * requests exceeding per-tier limits receive 429 + Retry-After.
@@ -233,6 +250,14 @@ export interface CapabilitiesEnvelope {
    */
   workspaceCwd?: string;
   /**
+   * Transport families this daemon supports. Always includes `'rest'`;
+   * future builds may add `'acp-http'` and/or `'acp-ws'`. SDK clients
+   * use `negotiateTransport()` to auto-select the best available.
+   * Additive — older daemons omit this field; SDK consumers should
+   * treat absence as `['rest']`.
+   */
+  transports?: string[];
+  /**
    * Daemon-policy namespace. Active values for
    * cross-cutting daemon coordination policies that don't fit on a
    * per-feature flag. Today only `permission` is populated (active
@@ -248,6 +273,13 @@ export interface CapabilitiesEnvelope {
      * which one is currently in effect.
      */
     permission?: PermissionPolicy;
+  };
+  /**
+   * Active daemon resource limits. Additive to v=1; older daemons may omit it.
+   * `null` means the operator explicitly disabled that cap.
+   */
+  limits?: {
+    maxPendingPromptsPerSession?: number | null;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.

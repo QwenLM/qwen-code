@@ -98,14 +98,18 @@ export function workspaceReadTools(state: BridgeState): any[] {
       'workspace_skills',
       'List available skills in the workspace.',
       {},
-      handler(async () => formatJsonResult(await state.client.workspaceSkills())),
+      handler(async () =>
+        formatJsonResult(await state.client.workspaceSkills()),
+      ),
     ),
 
     tool(
       'workspace_providers',
       'Get model provider status including current provider and available models.',
       {},
-      handler(async () => formatJsonResult(await state.client.workspaceProviders())),
+      handler(async () =>
+        formatJsonResult(await state.client.workspaceProviders()),
+      ),
     ),
 
     tool(
@@ -119,7 +123,9 @@ export function workspaceReadTools(state: BridgeState): any[] {
       'workspace_preflight',
       'Run readiness checks. Daemon-level cells always populated; ACP-level cells show not_started when idle.',
       {},
-      handler(async () => formatJsonResult(await state.client.workspacePreflight())),
+      handler(async () =>
+        formatJsonResult(await state.client.workspacePreflight()),
+      ),
     ),
   ];
 }

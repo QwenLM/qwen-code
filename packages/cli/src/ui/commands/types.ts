@@ -53,6 +53,8 @@ export interface CommandContext {
   };
   // UI state and history management
   ui: {
+    /** The current history items. */
+    history: HistoryItem[];
     /** Adds a new item to the history display. */
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
@@ -86,6 +88,8 @@ export interface CommandContext {
      * @param history The array of history items to load.
      */
     loadHistory: UseHistoryManagerReturn['loadHistory'];
+    /** Refreshes the static history display in Ink. */
+    refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;

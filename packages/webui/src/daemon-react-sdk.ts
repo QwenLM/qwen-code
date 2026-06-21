@@ -117,6 +117,9 @@ export { useDaemonWorkspaceActions as useWorkspaceActions } from './daemon/index
 /** Like `useWorkspace()` but returns null when outside a WorkspaceProvider. */
 export { useOptionalDaemonWorkspace as useOptionalWorkspace } from './daemon/index.js';
 
+/** Workspace-level event signals (memory/agents/tools/settings/mcp/extensions version counters). */
+export { useDaemonWorkspaceEventSignals as useWorkspaceEventSignals } from './daemon/index.js';
+
 // ── Transcript Hooks (low-level) ──────────────────────────────────
 
 /** Raw transcript blocks from the SSE stream. For custom message conversion. */
@@ -134,10 +137,16 @@ export { useDaemonPromptStatus as usePromptStatus } from './daemon/session/index
 /** Server-pushed prompt follow-up suggestions for daemon-backed UIs. */
 export { useDaemonFollowupSuggestion } from './daemon/index.js';
 
+/** Notifies when the daemon drains browser-queued messages into the running turn. */
+export { useDaemonMidTurnInjected } from './daemon/index.js';
+
 // ── Constants ─────────────────────────────────────────────────────
 
 /** Ordered list of approval modes for cycling: `['auto', 'suggest', 'ask']`. */
 export { DAEMON_APPROVAL_MODES } from './daemon/index.js';
+
+/** Canonical Agent (sub-agent) tool name + predicate for permission UIs. */
+export { AGENT_TOOL_NAME, isAgentTool } from './constants/toolNames.js';
 
 // ── Types: Connection & Session ───────────────────────────────────
 
@@ -146,6 +155,8 @@ export type {
   DaemonConnectionState,
   /** Connection lifecycle: `'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'`. */
   DaemonConnectionStatus,
+  /** Latest main-conversation token usage reported by the daemon. */
+  DaemonTokenUsage,
   /** Model descriptor: id, display label, context window size. */
   DaemonModelInfo,
   /** Classified notice category for host-owned UI routing. */

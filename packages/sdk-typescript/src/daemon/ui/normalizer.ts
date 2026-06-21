@@ -15,6 +15,7 @@ import type {
   DaemonUiEvent,
   DaemonUiPermissionOption,
   DaemonUiToolProvenance,
+  DaemonTurnUsage,
   NormalizeDaemonEventOptions,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
@@ -266,6 +267,9 @@ export function normalizeDaemonEvent(
     case 'mcp_server_restart_refused':
       return normalizeMcpServerRestartRefused(event, base);
 
+    case 'extensions_changed':
+      return normalizeExtensionsChanged(event, base);
+
     // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
       return normalizeAuthDeviceFlowStarted(event, base);
@@ -471,16 +475,29 @@ function normalizeSessionUpdate(
     }
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
-      if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
-      return [
-        {
+      const events: DaemonUiEvent[] = [];
+      if (text) {
+        events.push({
           ...base,
           type: 'assistant.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
-        },
-      ];
+        });
+      }
+      // A turn's per-round token usage rides on an otherwise-empty
+      // `agent_message_chunk` (`_meta.usage`, text blank), so this frame is the
+      // only carrier — emit it even when there is no assistant text to show.
+      const usage = extractAssistantUsage(update);
+      if (usage) {
+        events.push({
+          ...base,
+          type: 'assistant.usage' as const,
+          usage,
+          ...(parentToolCallId ? { parentToolCallId } : {}),
+        });
+      }
+      return events;
     }
     case 'agent_thought_chunk': {
       const text = getTextContent(update['content']);
@@ -551,6 +568,31 @@ function extractParentToolCallId(
 ): string | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   return meta ? getString(meta, 'parentToolCallId') : undefined;
+}
+
+/**
+ * Read the token usage the daemon stamps on `agent_message_chunk._meta.usage`.
+ * Returns undefined when no usage is present (older agents, non-usage chunks) so
+ * the caller emits no `assistant.usage` event; a present-but-partial frame keeps
+ * whichever side it has and zero-fills the other.
+ */
+function extractAssistantUsage(
+  update: Record<string, unknown>,
+): DaemonTurnUsage | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const usage = meta && isRecord(meta['usage']) ? meta['usage'] : undefined;
+  if (!usage) return undefined;
+  const inputTokens = numberField(usage, 'inputTokens');
+  const outputTokens = numberField(usage, 'outputTokens');
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  // Cached-read tokens are a subset already counted in inputTokens; carried so
+  // renderers can break out the cache hit, not added to the total again.
+  const cachedTokens = numberField(usage, 'cachedReadTokens');
+  return {
+    inputTokens: inputTokens ?? 0,
+    outputTokens: outputTokens ?? 0,
+    ...(cachedTokens !== undefined ? { cachedTokens } : {}),
+  };
 }
 
 function normalizeToolUpdate(
@@ -654,13 +696,18 @@ function normalizePlanUpdate(
     base.eventId !== undefined
       ? `${DAEMON_PLAN_TOOL_CALL_ID}-${base.eventId}`
       : DAEMON_PLAN_TOOL_CALL_ID;
+  // Carry the cumulative-usage snapshot the agent stamps on each plan update
+  // (PlanEmitter) through to rawOutput, so the web-shell can diff consecutive
+  // todo snapshots into per-task token/time detail.
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const stats = meta && isRecord(meta['stats']) ? meta['stats'] : undefined;
   return {
     ...base,
     type: 'tool.update',
     toolCallId: planCallId,
     title: 'Updated Plan',
     status: 'completed',
-    toolName: 'TodoWrite',
+    toolName: 'todo_write',
     toolKind: 'updated_plan',
     content: [
       {
@@ -668,7 +715,7 @@ function normalizePlanUpdate(
         content: { type: 'text', text: contentText },
       },
     ],
-    rawOutput: { entries },
+    rawOutput: stats ? { entries, stats } : { entries },
   };
 }
 
@@ -1204,6 +1251,46 @@ function normalizeMcpServerRestartRefused(
       type: 'workspace.mcp.server_restart_refused',
       serverName,
       reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+    },
+  ];
+}
+
+function normalizeExtensionsChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const refreshed = numberField(event.data, 'refreshed');
+  const failed = numberField(event.data, 'failed');
+  const status = getString(event.data, 'status');
+  const source = getString(event.data, 'source');
+  const name = getString(event.data, 'name');
+  const version = getString(event.data, 'version');
+  const error = getString(event.data, 'error');
+  if (refreshed === undefined || failed === undefined) {
+    return fallbackDebug(event, base, 'malformed extensions_changed payload');
+  }
+  if (
+    status !== undefined &&
+    status !== 'installed' &&
+    status !== 'enabled' &&
+    status !== 'disabled' &&
+    status !== 'updated' &&
+    status !== 'uninstalled' &&
+    status !== 'failed'
+  ) {
+    return fallbackDebug(event, base, 'malformed extensions_changed payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.extensions.changed',
+      refreshed,
+      failed,
+      ...(status ? { status } : {}),
+      ...(source ? { source } : {}),
+      ...(name ? { name } : {}),
+      ...(version ? { version } : {}),
+      ...(error ? { error } : {}),
     },
   ];
 }

@@ -35,6 +35,7 @@ import {
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { theme } from '../../semantic-colors.js';
+import { isLiveAgentPanelVisibleEntry } from '../background-view/liveAgentPanelVisibility.js';
 
 // ─── Status Indicators ──────────────────────────────────────
 
@@ -70,9 +71,8 @@ export const AgentTabBar: React.FC = () => {
   const { entries: bgEntries } = useBackgroundTaskViewState();
   const { setLivePanelFocused } = useBackgroundTaskViewActions();
   const { embeddedShellFocused } = useUIState();
-  // Gate panel focus on the panel's own render condition (`kind === 'agent'`),
-  // not `bgEntries.length` (which also counts shell/monitor/dream tasks).
-  const hasBgAgentRoster = bgEntries.some((e) => e.kind === 'agent');
+  const hasVisibleBgAgentRoster = () =>
+    bgEntries.some((e) => isLiveAgentPanelVisibleEntry(e, Date.now()));
 
   useKeypress(
     (key) => {
@@ -88,7 +88,7 @@ export const AgentTabBar: React.FC = () => {
         // On Main, ascend to the live agent panel above the tab bar. On agent
         // tabs the panel isn't rendered, so ↑ just returns to the composer
         // (keeping AgentComposer's ↓/↑ round-trip symmetric).
-        if (activeView === 'main' && hasBgAgentRoster) {
+        if (activeView === 'main' && hasVisibleBgAgentRoster()) {
           setLivePanelFocused(true);
         }
       } else if (key.name === 'down' || (key.ctrl && key.name === 'n')) {

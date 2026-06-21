@@ -16,6 +16,9 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       return sanitizeTerminalText(event.text).replace(/\r?\n/g, '\r\n');
     case 'assistant.done':
       return '';
+    case 'assistant.usage':
+      // Metadata only (token counts); no transcript line to render.
+      return '';
     case 'thought.text.delta':
       return terminalLine('thought', event.text, '2');
     case 'tool.update':
@@ -140,6 +143,34 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         'mcp',
         `${event.serverName} restart refused: ${event.reason}`,
         '33',
+      );
+    case 'workspace.extensions.changed':
+      if (event.status === 'failed') {
+        return terminalLine(
+          'ext',
+          `extension action failed${
+            event.name
+              ? ` ${event.name}`
+              : event.source
+                ? ` ${event.source}`
+                : ''
+          }: ${event.error ?? 'unknown error'}`,
+          '31',
+        );
+      }
+      if (event.status === 'installed') {
+        return terminalLine(
+          'ext',
+          `installed ${event.name ?? event.source ?? 'extension'}${
+            event.version ? ` v${event.version}` : ''
+          } (${event.refreshed} refreshed, ${event.failed} failed)`,
+          '36',
+        );
+      }
+      return terminalLine(
+        'ext',
+        `extensions refreshed (${event.refreshed} ok, ${event.failed} failed)`,
+        '36',
       );
     case 'auth.device_flow.started':
       return terminalLine(

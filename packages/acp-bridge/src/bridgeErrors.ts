@@ -124,6 +124,30 @@ export class SessionLimitExceededError extends Error {
 }
 
 /**
+ * Thrown by `sendPrompt` when a session already has too many accepted
+ * prompts waiting or running. The REST route maps this to 503 with
+ * `Retry-After`; SDK clients can retry after observing a turn completion.
+ * The TypeScript SDK maps the same `prompt_queue_full` wire condition to
+ * `DaemonPendingPromptLimitError`.
+ */
+export class PromptQueueFullError extends Error {
+  readonly limit: number;
+  readonly pendingCount: number;
+  readonly sessionId: string;
+
+  constructor(limit: number, pendingCount: number, sessionId: string) {
+    super(
+      `Prompt queue full for session "${sessionId}" ` +
+        `(${pendingCount}/${limit} pending)`,
+    );
+    this.name = 'PromptQueueFullError';
+    this.limit = limit;
+    this.pendingCount = pendingCount;
+    this.sessionId = sessionId;
+  }
+}
+
+/**
  * Thrown by `spawnOrAttach` when the requested `workspaceCwd` doesn't
  * canonicalize to the daemon's bound workspace. Every
  * bridge instance is bound to exactly one workspace; cross-workspace

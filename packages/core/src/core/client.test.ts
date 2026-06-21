@@ -32,7 +32,7 @@ import {
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { type GeminiChat } from './geminiChat.js';
+import { GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import {
@@ -49,6 +49,7 @@ import {
   Turn,
   type ServerGeminiStreamEvent,
 } from './turn.js';
+import { LoopType } from '../telemetry/types.js';
 
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
@@ -73,6 +74,7 @@ import {
   clearActiveGoal,
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
+import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -270,6 +272,8 @@ vi.mock('../telemetry/loggers.js', () => ({
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
   logApiRequest: vi.fn(),
+  logLoopDetected: vi.fn(),
+  logLoopDetectionDisabled: vi.fn(),
 }));
 
 const { mockClientDebugLogger } = vi.hoisted(() => ({
@@ -367,6 +371,12 @@ describe('Gemini Client (client.ts)', () => {
   let mockConfig: Config;
   let client: GeminiClient;
   let mockGenerateContentFn: Mock;
+  let mockFileHistoryService: {
+    makeSnapshot: ReturnType<typeof vi.fn>;
+    getSnapshots: ReturnType<typeof vi.fn>;
+    restoreFromSnapshots: ReturnType<typeof vi.fn>;
+    rewind: ReturnType<typeof vi.fn>;
+  };
   let mockMemoryManager: {
     scheduleExtract: ReturnType<typeof vi.fn>;
     scheduleDream: ReturnType<typeof vi.fn>;
@@ -406,6 +416,12 @@ describe('Gemini Client (client.ts)', () => {
     mockGenerateContentFn = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '{"key": "value"}' }] } }],
     });
+    mockFileHistoryService = {
+      makeSnapshot: vi.fn().mockResolvedValue(undefined),
+      getSnapshots: vi.fn().mockReturnValue([]),
+      restoreFromSnapshots: vi.fn(),
+      rewind: vi.fn(),
+    };
 
     // Disable 429 simulation for tests
     setSimulate429(false);
@@ -491,6 +507,7 @@ describe('Gemini Client (client.ts)', () => {
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
+      getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
@@ -579,6 +596,47 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
+    });
+
+    it('seeds resumed chat with previous response output token count', async () => {
+      const seedResumeTokenCountsSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'seedResumeTokenCounts',
+      );
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              uuid: 'assistant-1',
+              parentUuid: null,
+              sessionId: 'resumed-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'assistant',
+              cwd: '/test/project',
+              version: '1.0.0',
+              message: { role: 'model', parts: [{ text: 'done' }] },
+              usageMetadata: {
+                promptTokenCount: 200,
+                candidatesTokenCount: 60,
+                thoughtsTokenCount: 20,
+                totalTokenCount: 280,
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80);
     });
 
     it('seeds recently completed tools from resumed history', async () => {
@@ -1893,16 +1951,19 @@ describe('Gemini Client (client.ts)', () => {
   function mockFileReadCacheStub(): {
     clear: ReturnType<typeof vi.fn>;
     markReadEvictedFromHistory: ReturnType<typeof vi.fn>;
+    invalidateByPath: ReturnType<typeof vi.fn>;
   } {
     const clear = vi.fn();
     // Default: every disarm matches an entry (true). Tests that need
     // the inode-miss fallback override the return value per-call.
     const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+    const invalidateByPath = vi.fn();
     vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
       clear,
       markReadEvictedFromHistory,
+      invalidateByPath,
     } as unknown as ReturnType<Config['getFileReadCache']>);
-    return { clear, markReadEvictedFromHistory };
+    return { clear, markReadEvictedFromHistory, invalidateByPath };
   }
 
   describe('thinking block idle cleanup and latch', () => {
@@ -1983,7 +2044,10 @@ describe('Gemini Client (client.ts)', () => {
     // Real on-disk files so client.ts's `fsPromises.stat(filePath)` (used
     // to resolve a blanked path to its inode) succeeds. `node:fs` is
     // mocked in this suite but `node:fs/promises` is not.
-    async function makeReadFileResponses(count: number): Promise<{
+    async function makeReadFileResponses(
+      count: number,
+      outputLength?: number,
+    ): Promise<{
       history: Content[];
       paths: string[];
     }> {
@@ -2013,7 +2077,12 @@ describe('Gemini Client (client.ts)', () => {
               functionResponse: {
                 id: callId,
                 name: 'read_file',
-                response: { output: `content of ${i}` },
+                response: {
+                  output:
+                    outputLength === undefined
+                      ? `content of ${i}`
+                      : String(i).repeat(outputLength),
+                },
               },
             },
           ],
@@ -2126,6 +2195,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(setHistory).toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('[TIME-BASED MC]'),
+      );
       expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThan(
         Date.now() - 60_000,
       );
@@ -2363,12 +2435,13 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
-    it('falls back to a blanket clear when an evicted path cannot be stat’d (Codex P2)', async () => {
+    it('invalidates only the path when an evicted path cannot be stat’d', async () => {
       // Path is recovered (id linkage present) so it lands in
       // evictedReadPaths, but the file does not exist on disk, so the
-      // client's stat fails. Leaving the entry armed would risk a
-      // dangling placeholder, so it must fall back to the safe wipe.
-      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      // client's stat fails. The fallback should still target only the
+      // recovered path.
+      const { clear, markReadEvictedFromHistory, invalidateByPath } =
+        mockFileReadCacheStub();
 
       const history: Content[] = [];
       for (let i = 0; i < 6; i++) {
@@ -2417,15 +2490,19 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(clear).toHaveBeenCalled();
+      expect(invalidateByPath).toHaveBeenCalledWith(
+        join(mcTmpDir, 'ghost-0.ts'),
+      );
+      expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
-    it('falls back to a blanket clear on a MIXED batch — one path on disk, one a ghost (mimo F9)', async () => {
+    it('keeps a mixed batch targeted when one path is on disk and one is a ghost', async () => {
       // Most realistic production case: several files evicted, most on
-      // disk, one deleted since. A single unresolvable path must still
-      // force the safe blanket wipe rather than a partial disarm.
-      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      // disk, one deleted since. A single unresolvable path should not
+      // force unrelated cache entries to be wiped.
+      const { clear, markReadEvictedFromHistory, invalidateByPath } =
+        mockFileReadCacheStub();
 
       // keepRecent = 5 in this suite, so 7 results blank the 2 oldest:
       // index 0 (real, stats OK) and index 1 (ghost, stat fails).
@@ -2484,19 +2561,18 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      // The ghost path makes the batch not-fully-disarmed → safe wipe.
-      expect(clear).toHaveBeenCalled();
-      // The on-disk path was still attempted before the batch was
-      // deemed unresolvable.
-      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(invalidateByPath).toHaveBeenCalledWith(ghostPath);
+      expect(clear).not.toHaveBeenCalled();
     });
 
-    it('falls back to a blanket clear when an evicted path stats to a different inode (Codex P2)', async () => {
+    it('invalidates only the path when an evicted path stats to a different inode', async () => {
       // Path stats fine, but resolves to an inode the cache never
       // recorded (file replaced / symlink retargeted since the read),
       // so markReadEvictedFromHistory finds no entry and returns false.
-      // A stale entry could stay armed, so fall back to the safe wipe.
-      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      // The path fallback should remove only the matching resident entry.
+      const { clear, markReadEvictedFromHistory, invalidateByPath } =
+        mockFileReadCacheStub();
       markReadEvictedFromHistory.mockReturnValue(false);
 
       const { history } = await makeReadFileResponses(6);
@@ -2517,9 +2593,9 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      // It attempted the surgical disarm, found no entry, then wiped.
       expect(markReadEvictedFromHistory).toHaveBeenCalled();
-      expect(clear).toHaveBeenCalled();
+      expect(invalidateByPath).toHaveBeenCalledWith(join(mcTmpDir, '0.ts'));
+      expect(clear).not.toHaveBeenCalled();
     });
 
     it('does not touch the cache when the idle gap is below the threshold', async () => {
@@ -2574,7 +2650,7 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalled();
     });
 
-    it('does not run microcompaction on SendMessageType.ToolResult', async () => {
+    it('does not run idle microcompaction on SendMessageType.ToolResult', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       const { history } = await makeReadFileResponses(6);
       const setHistory = vi.fn();
@@ -2595,10 +2671,104 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      // Microcompaction did NOT run
+      // Idle gap alone does not trigger compaction on ToolResult turns.
       expect(setHistory).not.toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('runs size-only microcompaction on SendMessageType.ToolResult with pending content counted', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(4, 120_000);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+      client['lastApiCompletionTimestamp'] = Date.now();
+
+      const stream = client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              id: 'pending-shell',
+              name: 'run_shell_command',
+              response: { output: 'Y'.repeat(50_000) },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'prompt-toolresult-size-budget',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      const compacted = setHistory.mock.calls[0]![0] as Content[];
+      expect(
+        compacted[1]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe('[Old tool result content cleared]');
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '[TOOL-RESULT MC] tool result chars 530000 > 500000',
+        ),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('history now 360000 (+50000 pending)'),
+      );
+    });
+
+    it('logs size overages when protected results leave nothing to clear', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(2, 400_000);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 2,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+      client['lastApiCompletionTimestamp'] = Date.now();
+      mockClientDebugLogger.info.mockClear();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-size-overage-all-protected',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '[TOOL-RESULT MC] tool result chars 800000 > 500000',
+        ),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('cleared 0 tool result(s)'),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('history now 800000'),
+      );
     });
 
     it('runs microcompaction on SendMessageType.Cron', async () => {
@@ -2784,9 +2954,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
-    it('performs surgical disarm and falls back to clear() on inode miss', async () => {
-      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+    it('uses targeted path fallback when fast compression sees an inode miss', async () => {
+      const { clear, markReadEvictedFromHistory, invalidateByPath } =
+        mockFileReadCacheStub();
       markReadEvictedFromHistory.mockReturnValueOnce(false); // inode mismatch
+      const evictedPath = join(mcTmpDir, 'test-file.ts');
       const compressFast = vi.fn().mockReturnValue({
         info: {
           originalTokenCount: 1000,
@@ -2795,7 +2967,7 @@ describe('Gemini Client (client.ts)', () => {
         },
         microcompactMeta: {
           unresolvedEvictedReads: 0,
-          evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          evictedReadPaths: [evictedPath],
           toolsCleared: 2,
           mediaCleared: 0,
           tokensSaved: 700,
@@ -2805,7 +2977,7 @@ describe('Gemini Client (client.ts)', () => {
           thresholdMinutes: 60,
         },
       });
-      await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
+      await writeFile(evictedPath, 'test content');
       client['chat'] = {
         compressFast,
       } as unknown as GeminiChat;
@@ -2815,7 +2987,8 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
-      expect(clear).toHaveBeenCalledOnce();
+      expect(invalidateByPath).toHaveBeenCalledWith(evictedPath);
+      expect(clear).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -4096,7 +4269,7 @@ hello
 
       // Force LoopDetector to trip on the first event.
       const loopDetector = client['loopDetector'];
-      vi.spyOn(loopDetector, 'addAndCheck').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops').mockReturnValue(true);
       vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(null);
 
       mockTurnRunFn.mockReturnValue(
@@ -4119,6 +4292,82 @@ hello
       expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
         true,
       );
+      expect(abortHandlerInvoked).toBe(true);
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
+    it('should halt via the always-on turn cap before the skipLoopDetection gate', async () => {
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // The always-on cap trips on the first event — it runs before (and
+      // independently of) the gated detectors.
+      const loopDetector = client['loopDetector'];
+      const alwaysOnSpy = vi
+        .spyOn(loopDetector, 'checkAlwaysOnSafeties')
+        .mockReturnValue(true);
+      const deterministicSpy = vi.spyOn(
+        loopDetector,
+        'addAndCheckDeterministicToolCallLoop',
+      );
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      // `run` is invoked as `turn.run(...)`, so `this` is the live Turn —
+      // populate pendingToolCalls the way the real Turn.run does as it streams
+      // ToolCallRequest chunks, so the halt's clear runs against a non-empty
+      // array (not a trivially-empty one).
+      mockTurnRunFn.mockImplementation(async function* (this: {
+        pendingToolCalls: unknown[];
+      }) {
+        this.pendingToolCalls.push(
+          { name: 'read_file', args: { path: 'a.ts' } },
+          { name: 'read_file', args: { path: 'b.ts' } },
+        );
+        yield { type: 'content', value: 'looping' };
+      });
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger the cap' }],
+        new AbortController().signal,
+        'prompt-id-cap',
+        { type: SendMessageType.UserQuery },
+      );
+      const events = [];
+      let result = await stream.next();
+      while (!result.done) {
+        events.push(result.value);
+        result = await stream.next();
+      }
+      const returnedTurn = result.value as
+        | { pendingToolCalls: unknown[] }
+        | undefined;
+
+      // Always-on cap fires and short-circuits before the gated detectors run.
+      expect(alwaysOnSpy).toHaveBeenCalled();
+      expect(deterministicSpy).not.toHaveBeenCalled();
+      const loopEvent = events.find(
+        (e) => e.type === GeminiEventType.LoopDetected,
+      );
+      expect(loopEvent?.value?.loopType).toBe(LoopType.TURN_TOOL_CALL_CAP);
+      // The two pending calls collected before the cap tripped are dropped, so
+      // the halt doesn't spawn a continuation that re-trips the cap and
+      // double-prints the message.
+      expect(returnedTurn?.pendingToolCalls).toHaveLength(0);
+      // The mid-stream memory prefetch is cancelled.
       expect(abortHandlerInvoked).toBe(true);
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
@@ -6019,7 +6268,9 @@ Other open files:
 
       // Replace loop detector with spies
       const ldMock = {
-        addAndCheck: vi.fn().mockReturnValue(false),
+        checkAlwaysOnSafeties: vi.fn().mockReturnValue(false),
+        addAndCheckDeterministicToolCallLoop: vi.fn().mockReturnValue(false),
+        addAndCheckHeuristicLoops: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       };
       // @ts-expect-error override private for testing
@@ -6047,8 +6298,90 @@ Other open files:
         // consume stream
       }
 
-      // Assert - loop detection methods should not be called when skipLoopDetection is true
-      expect(ldMock.addAndCheck).not.toHaveBeenCalled();
+      // Assert - always-on safeties still run, but opt-in detectors don't
+      expect(ldMock.checkAlwaysOnSafeties).toHaveBeenCalled();
+      expect(
+        ldMock.addAndCheckDeterministicToolCallLoop,
+      ).not.toHaveBeenCalled();
+      expect(ldMock.addAndCheckHeuristicLoops).not.toHaveBeenCalled();
+    });
+
+    it('does not hard-stop identical tool calls when skipLoopDetection is true', async () => {
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          for (let i = 0; i < 5; i++) {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: `repeat-${i}`,
+                name: 'run_shell_command',
+                args: { command: 'echo repeated' },
+              },
+            };
+          }
+        })(),
+      );
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'repeat a tool' }],
+          new AbortController().signal,
+          'prompt-id-skip-loop-identical',
+        ),
+      );
+
+      // skipLoopDetection defaults to true, so even repeated identical calls
+      // must not be halted — the documented escape hatch stays effective.
+      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
+        false,
+      );
+    });
+
+    it('hard-stops identical tool calls when loop detection is enabled', async () => {
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(false);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          for (let i = 0; i < 5; i++) {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: `repeat-${i}`,
+                name: 'run_shell_command',
+                args: { command: 'echo repeated' },
+              },
+            };
+          }
+        })(),
+      );
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'repeat a tool' }],
+          new AbortController().signal,
+          'prompt-id-loop-identical',
+        ),
+      );
+
+      expect(events.at(-1)).toEqual({
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
+      });
+      expect(events).toHaveLength(5);
     });
 
     describe('retry sendMessageType', () => {
@@ -6635,6 +6968,103 @@ Other open files:
         expect(recordAttributionSnapshot).not.toHaveBeenCalled();
       });
     });
+
+    describe('file history snapshot persistence', () => {
+      let recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
+      const latestSnapshot: FileHistorySnapshot = {
+        promptId: 'prompt-uq',
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {
+          'a.txt': {
+            backupFileName: 'backup-a',
+            version: 1,
+            backupTime: new Date('2026-06-13T00:00:01.000Z'),
+          },
+        },
+      };
+
+      beforeEach(() => {
+        recordFileHistorySnapshot = vi.fn();
+        mockFileHistoryService.makeSnapshot.mockResolvedValue(undefined);
+        mockFileHistoryService.getSnapshots.mockReturnValue([latestSnapshot]);
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot,
+          recordUserMessage: vi.fn(),
+          recordCronPrompt: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+      });
+
+      async function collectStream(
+        messageType: SendMessageType,
+        promptId = 'prompt-uq',
+      ): Promise<ServerGeminiStreamEvent[]> {
+        const stream = client.sendMessageStream(
+          [{ text: 'user' }],
+          new AbortController().signal,
+          promptId,
+          { type: messageType },
+        );
+        const chunks: ServerGeminiStreamEvent[] = [];
+        for await (const chunk of stream) {
+          chunks.push(chunk);
+        }
+        return chunks;
+      }
+
+      it('calls makeSnapshot for UserQuery turns', async () => {
+        await collectStream(SendMessageType.UserQuery, 'prompt-file-history');
+
+        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
+          'prompt-file-history',
+        );
+      });
+
+      it('records the latest snapshot after a UserQuery snapshot', async () => {
+        await collectStream(SendMessageType.UserQuery);
+
+        expect(recordFileHistorySnapshot).toHaveBeenCalledWith(latestSnapshot);
+      });
+
+      it('does not call makeSnapshot for ToolResult and Retry turns', async () => {
+        await collectStream(SendMessageType.ToolResult, 'prompt-tool-result');
+        await collectStream(SendMessageType.Retry, 'prompt-retry');
+
+        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+      });
+
+      it('swallows makeSnapshot rejection and still yields content', async () => {
+        mockFileHistoryService.makeSnapshot.mockRejectedValueOnce(
+          new Error('snapshot failed'),
+        );
+
+        const chunks = await collectStream(SendMessageType.UserQuery);
+
+        expect(chunks).toContainEqual({
+          type: GeminiEventType.Content,
+          value: 'ok',
+        });
+      });
+
+      it('swallows recordFileHistorySnapshot errors and still yields content', async () => {
+        recordFileHistorySnapshot.mockImplementationOnce(() => {
+          throw new Error('record failed');
+        });
+
+        const chunks = await collectStream(SendMessageType.UserQuery);
+
+        expect(chunks).toContainEqual({
+          type: GeminiEventType.Content,
+          value: 'ok',
+        });
+      });
+    });
   });
 
   describe('generateContent', () => {
@@ -6661,6 +7091,25 @@ Other open files:
           contents,
         }),
         'test-session-id',
+      );
+    });
+
+    it('forwards configured retryErrorCodes to retryWithBackoff', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        retryErrorCodes: [4999],
+      } as unknown as ContentGeneratorConfig);
+
+      await client.generateContent(
+        [{ role: 'user', parts: [{ text: 'hi' }] }],
+        {},
+        new AbortController().signal,
+        client['config'].getModel(),
+      );
+
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({ extraRetryErrorCodes: [4999] }),
       );
     });
 
@@ -7664,4 +8113,123 @@ Other open files:
     });
     /* eslint-enable @typescript-eslint/no-explicit-any */
   });
+
+  describe('#5147 shutdown gate', () => {
+    /**
+     * C1: requestShutdown() makes runManagedAutoMemoryBackgroundTasks a
+     * no-op. We drive the private method directly: before shutdown it
+     * schedules extract + dream; after shutdown it schedules neither.
+     */
+    it('skips background memory tasks after shutdown is requested', () => {
+      const scheduleExtractSpy = vi.fn().mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
+      });
+      const scheduleDreamSpy = vi
+        .fn()
+        .mockResolvedValue({ status: 'skipped', skippedReason: 'locked' });
+
+      const mgr = {
+        scheduleExtract: scheduleExtractSpy,
+        scheduleDream: scheduleDreamSpy,
+        recall: vi.fn(),
+        scheduleSkillReview: vi
+          .fn()
+          .mockReturnValue({ status: 'skipped', skippedReason: 'disabled' }),
+      };
+
+      const client = new GeminiClient(makeMockConfigForShutdown(mgr));
+      // Avoid needing a real chat — the method calls getHistoryShallow().
+      (
+        client as unknown as { getHistoryShallow: () => unknown[] }
+      ).getHistoryShallow = () => [];
+
+      const runBgTasks = (
+        client as unknown as {
+          runManagedAutoMemoryBackgroundTasks: (t: SendMessageType) => void;
+        }
+      ).runManagedAutoMemoryBackgroundTasks.bind(client);
+
+      // Before shutdown: a completed UserQuery turn schedules extract + dream.
+      runBgTasks(SendMessageType.UserQuery);
+      expect(scheduleExtractSpy).toHaveBeenCalledTimes(1);
+      expect(scheduleDreamSpy).toHaveBeenCalledTimes(1);
+
+      scheduleExtractSpy.mockClear();
+      scheduleDreamSpy.mockClear();
+
+      // After shutdown: the gate short-circuits before any scheduling.
+      client.requestShutdown();
+      runBgTasks(SendMessageType.UserQuery);
+      expect(scheduleExtractSpy).not.toHaveBeenCalled();
+      expect(scheduleDreamSpy).not.toHaveBeenCalled();
+    });
+
+    /**
+     * C2: requestShutdown() is idempotent — calling it multiple times
+     * should not throw or have side effects.
+     */
+    it('is idempotent when called multiple times', () => {
+      const mgr = {
+        scheduleExtract: vi.fn(),
+        scheduleDream: vi.fn(),
+        recall: vi.fn(),
+        scheduleSkillReview: vi
+          .fn()
+          .mockReturnValue({ status: 'skipped', skippedReason: 'disabled' }),
+      };
+      const cfg = makeMockConfigForShutdown(mgr);
+      const client = new GeminiClient(cfg);
+
+      // Should not throw on first call
+      expect(() => client.requestShutdown()).not.toThrow();
+      // Should not throw on second call
+      expect(() => client.requestShutdown()).not.toThrow();
+      // Should not throw on third call
+      expect(() => client.requestShutdown()).not.toThrow();
+    });
+  });
 });
+
+function makeMockConfigForShutdown(
+  mgr: Record<string, ReturnType<typeof vi.fn>>,
+): Config {
+  return {
+    isBareMode: vi.fn().mockReturnValue(false),
+    getGeminiClient: vi.fn().mockReturnValue(undefined),
+    getProjectRoot: vi.fn().mockReturnValue('/project'),
+    getSessionId: vi.fn().mockReturnValue('session-1'),
+    getMemoryManager: vi.fn().mockReturnValue(mgr),
+    getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+    getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
+    getAutoSkillEnabled: vi.fn().mockReturnValue(false),
+    getModel: vi.fn().mockReturnValue('test-model'),
+    getBaseLlmClient: vi.fn().mockReturnValue({
+      generateContent: vi.fn(),
+    }),
+    getContentGenerator: vi.fn().mockReturnValue({
+      generateContent: vi.fn(),
+    }),
+    getToolRegistry: vi.fn().mockReturnValue({
+      getDeclarations: vi.fn().mockReturnValue([]),
+      getTools: vi.fn().mockReturnValue([]),
+    }),
+    getPromptRegistry: vi.fn().mockReturnValue({
+      getDeclarations: vi.fn().mockReturnValue([]),
+    }),
+    getFileReadCache: vi.fn().mockReturnValue({
+      clear: vi.fn(),
+    }),
+    getExtensionLoader: vi.fn().mockReturnValue(undefined),
+    getWorkspaceContext: vi.fn().mockReturnValue(undefined),
+    getDebugMode: vi.fn().mockReturnValue(false),
+    getApprovalMode: vi.fn().mockReturnValue('default'),
+    logEvent: vi.fn(),
+    getTelemetryService: vi.fn().mockReturnValue(undefined),
+    getHookSystem: vi.fn().mockReturnValue(undefined),
+    getMaxSessionTurns: vi.fn().mockReturnValue(100),
+    getChatRecordingService: vi.fn().mockReturnValue(undefined),
+    isInteractive: vi.fn().mockReturnValue(false),
+    getStdinReader: vi.fn().mockReturnValue(undefined),
+  } as unknown as Config;
+}

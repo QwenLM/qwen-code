@@ -19,6 +19,12 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
+// Wire constants shared with the child-side caller (`Session.ts`) and, for the
+// SSE event type, the SDK validator + browser consumer — single sources of truth
+// so a rename can't silently break the protocol.
+import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
+import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
+import type { MidTurnQueueEntry } from './bridgeTypes.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
@@ -200,6 +206,13 @@ export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
   pendingPermissionIds: Set<string>;
+  /**
+   * Mid-turn user messages queued by the browser, drained here when the ACP
+   * child calls the `craft/drainMidTurnQueue` ext-method. Owned by the full
+   * `SessionEntry` in `bridge.ts`; surfaced on this narrowed view so
+   * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
+   */
+  midTurnMessageQueue: MidTurnQueueEntry[];
   activePromptOriginatorClientId?: string;
   /**
    * True while the bridge drives a model roundtrip; the
@@ -431,10 +444,27 @@ export class BridgeClient implements Client {
       }
       params = a2ui.sanitizedParams;
     }
+    // History replay re-emits each persisted record carrying its ORIGINAL
+    // wall-clock time as an epoch-ms `timestamp` nested in `update._meta` (set
+    // by the message/tool emitters). Lift it to the envelope-level
+    // `serverTimestamp` so `EventBus.publish` preserves it instead of stamping
+    // publish-time `Date.now()` — otherwise a resumed session renders every
+    // historical message at the resume moment instead of when it was sent.
+    // Live updates without such a timestamp pass no envelope `_meta` and keep
+    // the EventBus `Date.now()` fallback unchanged.
+    const updateMeta = (params.update as { _meta?: Record<string, unknown> })
+      ._meta;
+    const originalTs =
+      updateMeta?.['serverTimestamp'] ?? updateMeta?.['timestamp'];
+    const serverTimestamp =
+      typeof originalTs === 'number' && Number.isFinite(originalTs)
+        ? originalTs
+        : undefined;
     events.publish({
       type: 'session_update',
       data: params,
       ...originator,
+      ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
     });
   }
 
@@ -489,6 +519,73 @@ export class BridgeClient implements Client {
    * call and exits on settle (success or failure).
    */
   private readonly inFlightRestoreIds = new Set<string>();
+
+  /**
+   * Handle child->bridge ACP `extMethod` requests (calls that expect a
+   * response, unlike `extNotification`). The only method served today is
+   * `craft/drainMidTurnQueue`: the ACP child calls it between tool batches to
+   * pull any messages the browser queued mid-turn. We splice the per-session
+   * queue, return them to the child as the response, and — when non-empty —
+   * publish a `mid_turn_message_injected` SSE frame so the browser can move
+   * those messages out of its pending queue (a dedupe signal, not a transcript
+   * render). Unknown methods reject with ACP `methodNotFound` (-32601), matching
+   * the SDK's
+   * default for an unimplemented client surface; the child's drain caller
+   * treats that as "drain unsupported" and stops asking.
+   */
+  async extMethod(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
+      throw RequestError.methodNotFound(method);
+    }
+    const sessionId =
+      typeof params['sessionId'] === 'string'
+        ? (params['sessionId'] as string)
+        : undefined;
+    // The drain always carries a sessionId; without one we can't route it on a
+    // multi-session channel (and `resolveEntry(undefined)` would throw there),
+    // so answer with an empty drain rather than poisoning the turn.
+    if (!sessionId) return { messages: [] };
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return { messages: [] };
+    const drained = entry.midTurnMessageQueue.splice(0);
+    const messages = drained.map((item) => item.text);
+    if (drained.length > 0) {
+      // `publish()` never throws — it returns `undefined` on a closed bus (see
+      // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
+      // around publish()"). Capture the result instead. A dropped frame is
+      // teardown-only: the child still gets the spliced messages below, but the
+      // browser won't receive the echo and would resend them next turn — so log
+      // it.
+      //
+      // Publish ONE frame per originator client. The frame is broadcast to every
+      // SSE subscriber on the session, so it carries `originatorClientId` for
+      // clients to filter on — a peer that didn't queue the message must not
+      // dedupe its own coincidentally-equal entry. A mixed-originator batch (two
+      // clients pushing in the same window) is rare but still routed correctly.
+      const byOriginator = new Map<string | undefined, string[]>();
+      for (const item of drained) {
+        const group = byOriginator.get(item.originatorClientId);
+        if (group) group.push(item.text);
+        else byOriginator.set(item.originatorClientId, [item.text]);
+      }
+      for (const [originatorClientId, texts] of byOriginator) {
+        const published = entry.events.publish({
+          type: MID_TURN_MESSAGE_INJECTED_EVENT,
+          data: { sessionId: entry.sessionId, messages: texts },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+        writeStderrLine(
+          published
+            ? `[mid-turn] session=${entry.sessionId} drained=${texts.length}${originatorClientId ? ` originator=${originatorClientId}` : ''} injected into running turn`
+            : `[mid-turn] session=${entry.sessionId} drained=${texts.length} echo frame dropped (bus closed); browser may resend next turn`,
+        );
+      }
+    }
+    return { messages };
+  }
 
   /**
    * Handle child->bridge ACP `extNotification` calls. Six methods are

@@ -54,6 +54,37 @@ describe('PlanEmitter', () => {
       });
     });
 
+    it('omits _meta.stats when the context has no cumulative usage', async () => {
+      await emitter.emitPlan([{ id: '1', content: 'Task', status: 'pending' }]);
+
+      const update = sendUpdateSpy.mock.calls[0][0];
+      expect(update['_meta']).toBeUndefined();
+    });
+
+    it('stamps a copy of the cumulative usage on _meta.stats when present', async () => {
+      const cumulativeUsage = {
+        promptTokens: 100,
+        cachedTokens: 10,
+        candidateTokens: 20,
+        apiTimeMs: 500,
+      };
+      const ctx: SessionContext = {
+        sessionId: 'test-session-id',
+        config: {} as Config,
+        sendUpdate: sendUpdateSpy,
+        cumulativeUsage,
+      };
+      await new PlanEmitter(ctx).emitPlan([
+        { id: '1', content: 'Task', status: 'completed' },
+      ]);
+
+      const update = sendUpdateSpy.mock.calls[0][0];
+      expect(update['_meta']).toEqual({ stats: { ...cumulativeUsage } });
+      // Snapshot is a copy: later accumulation must not mutate what was sent.
+      cumulativeUsage.promptTokens = 999;
+      expect(update['_meta'].stats.promptTokens).toBe(100);
+    });
+
     it('should set default priority to medium for all entries', async () => {
       const todos: TodoItem[] = [
         { id: '1', content: 'Task', status: 'pending' },

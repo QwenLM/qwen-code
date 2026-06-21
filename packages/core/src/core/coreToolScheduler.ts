@@ -19,6 +19,7 @@ import type {
   ChatRecordingService,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
   generateToolUseId,
   firePreToolUseHook,
@@ -37,8 +38,6 @@ import {
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
 } from '../utils/truncation.js';
-
-const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
@@ -67,6 +66,7 @@ import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
+import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   isAlreadyTruncated,
   persistAndTruncateToolResult,
@@ -133,13 +133,34 @@ import {
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 
+const debugLogger = createDebugLogger('TOOL_SCHEDULER');
+
+function dedupeRequestsByCallId(
+  requests: ToolCallRequestInfo[],
+): ToolCallRequestInfo[] {
+  const seenCallIds = new Set<string>();
+  const deduped: ToolCallRequestInfo[] = [];
+  for (const request of requests) {
+    if (request.callId) {
+      if (seenCallIds.has(request.callId)) {
+        debugLogger.debug(
+          `dedupeRequestsByCallId: dropping duplicate callId=${request.callId} name=${request.name}`,
+        );
+        continue;
+      }
+      seenCallIds.add(request.callId);
+    }
+    deduped.push(request);
+  }
+  return deduped;
+}
+
 // Gap between the persistence gate and per-tool truncation thresholds.
 // Tools that self-truncate to ~25K add headers bringing output to ~25.4K;
 // the headroom ensures the gate only fires for genuinely un-truncated output
 // and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
 const GATE_EXEMPT_TOOLS = new Set(['read_file']);
-
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
   if (typeof c === 'string') return c;
@@ -262,6 +283,7 @@ async function safelyFirePostToolUseFailureHook(
   errorMessage: string,
   isInterrupt: boolean,
   permissionMode?: string,
+  tool_call_id?: string,
 ): ReturnType<typeof firePostToolUseFailureHook> {
   try {
     return await firePostToolUseFailureHook(
@@ -272,6 +294,8 @@ async function safelyFirePostToolUseFailureHook(
       errorMessage,
       isInterrupt,
       permissionMode,
+      undefined,
+      tool_call_id,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -829,6 +853,11 @@ function toPostToolBatchToolCall(
     tool_name: call.request.name,
     tool_input: call.request.args,
     tool_use_id: call.request.callId,
+    tool_call_id: call.request.callId,
+    // Note: tool_use_id here is also populated from call.request.callId, so
+    // tool_call_id duplicates the same value under a different name. The
+    // semantics of tool_use_id are inconsistent across hook events (synthetic
+    // in Pre/Post/Failure, API ID in PostToolBatch).
     status: call.status,
     tool_response: serializeToolResponse(call.response),
   };
@@ -1086,6 +1115,15 @@ export class CoreToolScheduler {
     return this.config.getMemoryPressureMonitor?.();
   }
 
+  private compactResultDisplayForInteractiveHistory<
+    T extends ToolResultDisplay | undefined,
+  >(resultDisplay: T): T {
+    return typeof this.config.isInteractive === 'function' &&
+      this.config.isInteractive()
+      ? compactToolResultDisplayForHistory(resultDisplay)
+      : resultDisplay;
+  }
+
   private setStatusInternal(
     targetCallId: string,
     status: 'success',
@@ -1235,7 +1273,8 @@ export class CoreToolScheduler {
                   },
                 },
               ],
-              resultDisplay,
+              resultDisplay:
+                this.compactResultDisplayForInteractiveHistory(resultDisplay),
               error: undefined,
               errorType: undefined,
               contentLength: errorMessage.length,
@@ -1664,7 +1703,9 @@ export class CoreToolScheduler {
           'Cannot schedule new tool calls while other tool calls are actively running (executing or awaiting approval).',
         );
       }
-      const requestsToProcess = Array.isArray(request) ? request : [request];
+      const requestsToProcess = dedupeRequestsByCallId(
+        Array.isArray(request) ? request : [request],
+      );
 
       // Prune validation retry state per-tool, not wholesale. Keys are
       // "<toolName>:<errorMessage>"; retain counters only for tools actually
@@ -2017,6 +2058,7 @@ export class CoreToolScheduler {
                     reqInfo.callId,
                     getAutoModePermissionDeniedReason(decision),
                     signal,
+                    reqInfo.callId,
                   );
               } catch (hookError) {
                 debugLogger.warn(
@@ -2838,11 +2880,10 @@ export class CoreToolScheduler {
     calls: ScheduledToolCall[],
     signal: AbortSignal,
   ): Promise<void> {
-    const parsed = parseInt(
-      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+    const maxConcurrency = parsePositiveIntegerEnv(
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
       10,
     );
-    const maxConcurrency = Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
     const executing = new Set<Promise<void>>();
 
     for (const call of calls) {
@@ -2978,6 +3019,8 @@ export class CoreToolScheduler {
             toolInput,
             toolUseId,
             permissionMode,
+            undefined, // signal
+            callId, // Original API call ID (e.g., call_xxx)
           ),
         (r) =>
           r.hookError
@@ -3029,12 +3072,14 @@ export class CoreToolScheduler {
 
     const liveOutputCallback = scheduledCall.tool.canUpdateOutput
       ? (outputChunk: ToolResultDisplay) => {
+          const compactOutput =
+            this.compactResultDisplayForInteractiveHistory(outputChunk);
           if (this.outputUpdateHandler) {
             this.outputUpdateHandler(callId, outputChunk);
           }
           this.toolCalls = this.toolCalls.map((tc) =>
             tc.request.callId === callId && tc.status === 'executing'
-              ? { ...tc, liveOutput: outputChunk }
+              ? { ...tc, liveOutput: compactOutput }
               : tc,
           );
           this.notifyToolCallsUpdate();
@@ -3138,6 +3183,7 @@ export class CoreToolScheduler {
                 cancelMessage,
                 true,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3187,6 +3233,8 @@ export class CoreToolScheduler {
                 toolResponse,
                 toolUseId,
                 permissionMode,
+                undefined, // signal
+                callId, // Original API call ID (e.g., call_xxx)
               ),
             (r) =>
               r.hookError
@@ -3478,7 +3526,9 @@ export class CoreToolScheduler {
         const successResponse: ToolCallResponseInfo = {
           callId,
           responseParts: response,
-          resultDisplay: toolResult.returnDisplay,
+          resultDisplay: this.compactResultDisplayForInteractiveHistory(
+            toolResult.returnDisplay,
+          ),
           error: undefined,
           errorType: undefined,
           contentLength,
@@ -3519,6 +3569,7 @@ export class CoreToolScheduler {
                 toolResult.error!.message,
                 false,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3604,6 +3655,7 @@ export class CoreToolScheduler {
                 cancelMessage,
                 true,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -3642,6 +3694,7 @@ export class CoreToolScheduler {
                 errorMessage,
                 false,
                 this.config.getApprovalMode(),
+                callId,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -4051,6 +4104,7 @@ export class CoreToolScheduler {
                   pendingTool.request.callId,
                   getAutoModePermissionDeniedReason(decision),
                   signal,
+                  pendingTool.request.callId,
                 );
             } catch (hookError) {
               debugLogger.warn(

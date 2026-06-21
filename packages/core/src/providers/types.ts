@@ -97,6 +97,14 @@ export interface ProviderConfig {
   ownsModel?: (model: ProviderModelConfig) => boolean;
 
   /**
+   * Install-time merge behavior. When true, installs replace only incoming
+   * model identities (id + baseUrl) instead of every model matched by
+   * ownsModel. Useful for user-defined providers where multiple endpoints and
+   * model IDs can coexist under one provider config.
+   */
+  mergeModelsByIdentity?: boolean;
+
+  /**
    * UI grouping hint — used by AuthDialog to organize providers into sections.
    * Providers with the same `uiGroup` appear together under a shared heading.
    */
@@ -156,6 +164,7 @@ export interface ProviderInstallPlan {
   };
   modelSelection?: {
     modelId: string;
+    baseUrl?: string;
   };
   modelProviders?: ProviderModelProvidersPatch[];
   providerState?: ProviderInstallState;

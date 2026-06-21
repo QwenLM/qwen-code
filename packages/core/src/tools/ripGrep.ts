@@ -9,7 +9,11 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
-import { resolveAndValidatePath, unescapePath } from '../utils/paths.js';
+import {
+  resolveAndValidatePath,
+  resolvePath,
+  unescapePath,
+} from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
@@ -149,7 +153,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       return 'allow'; // Default workspace directory
     }
     const workspaceContext = this.config.getWorkspaceContext();
-    const resolvedPath = path.resolve(
+    const resolvedPath = resolvePath(
       this.config.getTargetDir(),
       this.params.path,
     );
@@ -446,7 +450,11 @@ class GrepToolInvocation extends BaseToolInvocation<
     // Pass all search paths to ripgrep (it supports multiple paths natively)
     rgArgs.push(...paths);
 
-    const result = await runRipgrep(rgArgs, options.signal);
+    const result = await runRipgrep(
+      rgArgs,
+      options.signal,
+      this.config.getUseBuiltinRipgrep(),
+    );
     if (result.error && !result.stdout) {
       throw result.error;
     }
@@ -520,9 +528,10 @@ export class RipGrepTool extends BaseDeclarativeTool<
               'File or directory to search in (rg PATH). Defaults to current working directory.',
           },
           limit: {
-            type: 'number',
+            type: 'integer',
+            minimum: 1,
             description:
-              'Limit output to first N lines/entries. Optional - shows all matches if not specified.',
+              'Limit output to first N lines/entries. Must be a positive integer. Optional - shows all matches if not specified.',
           },
         },
         required: ['pattern'],
@@ -545,6 +554,13 @@ export class RipGrepTool extends BaseDeclarativeTool<
     );
     if (errors) {
       return errors;
+    }
+
+    if (
+      params.limit !== undefined &&
+      (!Number.isInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'limit must be a positive integer';
     }
 
     // Validate pattern is a valid regex

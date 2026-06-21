@@ -10,7 +10,7 @@ import {
   type AgentParams,
   resolveSubagentApprovalMode,
 } from './agent.js';
-import type { PartListUnion } from '@google/genai';
+import type { Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
@@ -224,7 +224,7 @@ describe('AgentTool', () => {
     it('should initialize with correct name and properties', () => {
       expect(agentTool.name).toBe('agent');
       expect(agentTool.displayName).toBe('Agent');
-      expect(agentTool.kind).toBe('other');
+      expect(agentTool.kind).toBe('agent');
     });
 
     it('should load available subagents during initialization', () => {
@@ -338,6 +338,59 @@ describe('AgentTool', () => {
       ]);
     });
 
+    it('does not advertise "fork" in the enum, even when interactive', async () => {
+      // `fork` is intentionally omitted from the enum so the model is not
+      // steered to fork result-bearing work; it stays valid via validation.
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+      const interactiveTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = interactiveTool.schema;
+      const properties = schema.parametersJsonSchema as {
+        properties: {
+          subagent_type: {
+            enum?: string[];
+          };
+        };
+      };
+      expect(properties.properties.subagent_type.enum).toEqual([
+        'file-search',
+        'code-review',
+      ]);
+      expect(properties.properties.subagent_type.enum).not.toContain('fork');
+    });
+
+    it('does not expose teammate name when teams are disabled', () => {
+      const schema = agentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          name?: unknown;
+        };
+      };
+
+      expect(parameters.properties.name).toBeUndefined();
+    });
+
+    it('exposes teammate name when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = teamAgentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          name?: {
+            description?: string;
+          };
+        };
+      };
+
+      expect(parameters.properties.name?.description).toContain('active team');
+    });
+
     it('should generate schema without enum when no subagents available', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 
@@ -425,15 +478,34 @@ describe('AgentTool', () => {
       ).toMatch(/isolation/i);
     });
 
-    it('rejects isolation without subagent_type (fork is not isolatable)', () => {
-      const { subagent_type: _ignored, ...forkParams } = validParams;
+    it('rejects isolation without an explicit subagent_type', () => {
+      const { subagent_type: _ignored, ...noTypeParams } = validParams;
       void _ignored;
       expect(
         agentTool.validateToolParams({
-          ...forkParams,
+          ...noTypeParams,
           isolation: 'worktree',
         }),
       ).toMatch(/subagent_type/i);
+    });
+
+    it('accepts subagent_type "fork" without consulting the registry', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects isolation combined with subagent_type "fork"', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          isolation: 'worktree',
+        }),
+      ).toMatch(/fork/i);
     });
   });
 
@@ -519,8 +591,10 @@ describe('AgentTool', () => {
   });
 
   describe('team routing', () => {
-    it('rejects `name` when no team is active', async () => {
+    it('falls back to one-shot when `name` is supplied without a team', async () => {
       vi.mocked(config.getTeamManager).mockReturnValue(null);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+
       const invocation = agentTool.build({
         description: 'Spawn helper',
         prompt: 'Do work',
@@ -528,11 +602,11 @@ describe('AgentTool', () => {
         name: 'helper',
       });
       const result = await invocation.execute(new AbortController().signal);
-      expect(result.error).toBeDefined();
-      expect(result.llmContent).toContain('no active team');
-      expect(result.llmContent).toContain('"helper"');
-      // Subagent must NOT have been spawned as a one-shot fallback.
-      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+
+      expect(result.llmContent).not.toContain('no active team');
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
     });
   });
 
@@ -1084,7 +1158,7 @@ describe('AgentTool', () => {
     });
   });
 
-  describe('Fork dispatch (subagent_type omitted)', () => {
+  describe('Fork dispatch (subagent_type: "fork")', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
 
@@ -1154,6 +1228,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'some task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
 
       const invocation = (
@@ -1165,6 +1240,36 @@ describe('AgentTool', () => {
         'general-purpose',
       );
       expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('omitting subagent_type uses general-purpose, not fork', async () => {
+      // Restored contract: omission resolves to the awaitable general-purpose
+      // subagent (inline result), never a fork — even in interactive mode.
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const params: AgentParams = {
+        description: 'some task',
+        prompt: 'do the thing',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
     });
 
     it('falls back to general-purpose when non-interactive', async () => {
@@ -1187,6 +1292,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
 
       const invocation = (
@@ -1205,6 +1311,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
 
       const invocation = (
@@ -1281,6 +1388,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -1293,7 +1401,7 @@ describe('AgentTool', () => {
       expect(stopSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('routes owned monitor notifications and cleanup for implicit forks', async () => {
+    it('routes owned monitor notifications and cleanup for forks', async () => {
       let releaseExecute: (() => void) | undefined;
       vi.mocked(mockAgent.execute).mockImplementation(
         () =>
@@ -1314,6 +1422,7 @@ describe('AgentTool', () => {
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
+        subagent_type: 'fork',
       };
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -1963,6 +2072,97 @@ describe('AgentTool', () => {
 
       return capturedInvocation;
     }
+
+    it('preserves subagent tool protocol payloads in non-interactive mode', async () => {
+      vi.mocked(config.isInteractive).mockReturnValue(false);
+      const responseParts: Part[] = [{ text: 'raw protocol result' }];
+      const snapshots: AgentResultDisplay[] = [];
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          args: { path: '/test.ts' },
+          description: 'Reading test.ts',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          success: true,
+          responseParts,
+          timestamp: Date.now(),
+        } satisfies AgentToolResultEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        snapshots.push(output as AgentResultDisplay);
+      });
+
+      const resultSnapshot = snapshots.find((snapshot) =>
+        snapshot.toolCalls?.some(
+          (toolCall) =>
+            toolCall.callId === 'call-read-1' && toolCall.status === 'success',
+        ),
+      );
+      const toolCall = resultSnapshot?.toolCalls?.find(
+        (entry) => entry.callId === 'call-read-1',
+      );
+      expect(toolCall?.args).toEqual({ path: '/test.ts' });
+      expect(toolCall?.responseParts).toBe(responseParts);
+    });
+
+    it('omits subagent protocol payloads from interactive display state', async () => {
+      vi.mocked(config.isInteractive).mockReturnValue(true);
+      const responseParts: Part[] = [{ text: 'raw protocol result' }];
+      const snapshots: AgentResultDisplay[] = [];
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          args: { path: '/test.ts' },
+          description: 'Reading test.ts',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          success: true,
+          responseParts,
+          resultDisplay: 'Rendered result',
+          timestamp: Date.now(),
+        } satisfies AgentToolResultEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        snapshots.push(output as AgentResultDisplay);
+      });
+
+      const resultSnapshot = snapshots.find((snapshot) =>
+        snapshot.toolCalls?.some(
+          (toolCall) =>
+            toolCall.callId === 'call-read-1' && toolCall.status === 'success',
+        ),
+      );
+      const toolCall = resultSnapshot?.toolCalls?.find(
+        (entry) => entry.callId === 'call-read-1',
+      );
+      expect(toolCall?.description).toBe('Reading test.ts');
+      expect(toolCall?.resultDisplay).toBe('Rendered result');
+      expect(toolCall).not.toHaveProperty('args');
+      expect(toolCall).not.toHaveProperty('responseParts');
+    });
 
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
       // Track whether pendingConfirmation was set then cleared, using
@@ -2997,6 +3197,7 @@ describe('AgentTool', () => {
       const forkParams: AgentParams = {
         description: 'Fork task',
         prompt: 'Investigate issue',
+        subagent_type: 'fork',
         run_in_background: true,
       };
       const generationConfig = {

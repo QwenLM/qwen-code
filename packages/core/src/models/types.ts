@@ -40,6 +40,7 @@ export type ModelGenerationConfig = Pick<
   | 'contextWindowSize'
   | 'modalities'
   | 'splitToolMedia'
+  | 'toolResultContentFormat'
 >;
 
 /**

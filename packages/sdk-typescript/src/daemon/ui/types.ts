@@ -21,6 +21,7 @@ export type DaemonUiEventType =
   | 'user.shell.command'
   | 'assistant.text.delta'
   | 'assistant.done'
+  | 'assistant.usage'
   | 'thought.text.delta'
   | 'tool.update'
   | 'shell.output'
@@ -51,6 +52,7 @@ export type DaemonUiEventType =
   | 'workspace.mcp.child_refused'
   | 'workspace.mcp.server_restarted'
   | 'workspace.mcp.server_restart_refused'
+  | 'workspace.extensions.changed'
   // Auth flow events (Wave 4 OAuth)
   | 'auth.device_flow.started'
   | 'auth.device_flow.throttled'
@@ -102,6 +104,35 @@ export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
 export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
   type: 'assistant.done';
   reason?: string;
+}
+
+/**
+ * Token usage the agent reports for one model round, carried on the daemon's
+ * `agent_message_chunk._meta.usage`. A turn issues one of these per model call,
+ * so a turn's total is the sum of its rounds. Sub-agent (delegated) usage is
+ * included in the spawning turn because it is part of that turn's real cost.
+ */
+export interface DaemonTurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /**
+   * Cached-read tokens for the round — a subset of `inputTokens` (already
+   * counted in it, not additive). Absent when the round reported none.
+   */
+  cachedTokens?: number;
+}
+
+/**
+ * Per-round token usage. Emitted from `agent_message_chunk` frames that carry
+ * `_meta.usage` (their text is empty, so they surface no assistant text). The
+ * reducer folds the counts onto the round's active assistant block; renderers
+ * sum a turn's blocks for a per-turn total.
+ */
+export interface DaemonUiAssistantUsageEvent extends DaemonUiEventBase {
+  type: 'assistant.usage';
+  usage: DaemonTurnUsage;
+  /** Set when the usage belongs to a sub-agent round; folded into the parent turn total. */
+  parentToolCallId?: string;
 }
 
 /**
@@ -211,6 +242,8 @@ export interface DaemonUiModelChangedEvent extends DaemonUiEventBase {
 export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   type: 'status' | 'debug';
   text: string;
+  source?: string;
+  data?: unknown;
 }
 
 export interface DaemonUiErrorEvent extends DaemonUiEventBase {
@@ -399,6 +432,23 @@ export interface DaemonUiMcpServerRestartRefusedEvent
   reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
 }
 
+export interface DaemonUiExtensionsChangedEvent extends DaemonUiEventBase {
+  type: 'workspace.extensions.changed';
+  refreshed: number;
+  failed: number;
+  status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  source?: string;
+  name?: string;
+  version?: string;
+  error?: string;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Auth device-flow events (Wave 4 OAuth, RFC 8628)
  * ──────────────────────────────────────────────────────────────────────── */
@@ -452,6 +502,7 @@ export type DaemonUiEvent =
   | DaemonUiUserImageEvent
   | DaemonUiUserShellCommandEvent
   | DaemonUiAssistantDoneEvent
+  | DaemonUiAssistantUsageEvent
   | DaemonUiToolUpdateEvent
   | DaemonUiShellOutputEvent
   | DaemonUiUserShellOutputEvent
@@ -480,6 +531,7 @@ export type DaemonUiEvent =
   | DaemonUiMcpChildRefusedEvent
   | DaemonUiMcpServerRestartedEvent
   | DaemonUiMcpServerRestartRefusedEvent
+  | DaemonUiExtensionsChangedEvent
   // Auth device-flow events
   | DaemonUiAuthDeviceFlowEvent;
 
@@ -674,6 +726,13 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
   parentToolCallId?: string;
+  /**
+   * Token usage folded onto this assistant block by the reducer from the
+   * round's `assistant.usage` event(s). Summed across a turn's assistant blocks
+   * for a per-turn total. Assistant blocks only; absent until a usage frame
+   * lands (and on sessions whose agent predates usage stamping).
+   */
+  usage?: DaemonTurnUsage;
 }
 
 export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
@@ -744,7 +803,8 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   code?: string;
   promptId?: string;
-  source?: 'turn_error';
+  source?: string;
+  data?: unknown;
 }
 
 export interface DaemonPromptCancelledTranscriptBlock

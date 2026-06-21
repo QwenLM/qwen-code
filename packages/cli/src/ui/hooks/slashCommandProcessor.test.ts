@@ -28,6 +28,8 @@ import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
   makeFakeConfig,
+  MCPServerStatus,
+  updateMCPServerStatus,
 } from '@qwen-code/qwen-code-core';
 
 const { logSlashCommand, debugLoggerMock } = vi.hoisted(() => ({
@@ -151,6 +153,7 @@ describe('useSlashCommandProcessor', () => {
     handleResume: vi.fn(),
     handleBranch: vi.fn().mockResolvedValue(undefined),
     openDeleteDialog: vi.fn(),
+    openDiffDialog: vi.fn(),
     quit: mockSetQuittingMessages,
     setDebugMessage: vi.fn(),
     dispatchExtensionStateUpdate: vi.fn(),
@@ -161,7 +164,6 @@ describe('useSlashCommandProcessor', () => {
     openMcpDialog: vi.fn(),
     openHooksDialog: vi.fn(),
     openRewindSelector: vi.fn(),
-    openDiffDialog: vi.fn(),
   });
 
   beforeEach(() => {
@@ -199,6 +201,7 @@ describe('useSlashCommandProcessor', () => {
       useSlashCommandProcessor(
         mockConfig,
         settings,
+        [], // mock history array
         mockAddItem,
         mockClearItems,
         mockLoadHistory,
@@ -220,11 +223,55 @@ describe('useSlashCommandProcessor', () => {
   };
 
   describe('Initialization and Command Loading', () => {
-    it('should initialize CommandService with all required loaders', () => {
-      setupProcessorHook();
+    it('should initialize CommandService with all required loaders', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
       expect(BuiltinCommandLoader).toHaveBeenCalledWith(mockConfig);
       expect(FileCommandLoader).toHaveBeenCalledWith(mockConfig);
       expect(McpPromptLoader).toHaveBeenCalledWith(mockConfig);
+    });
+
+    it('rebuilds commands when an MCP server connects (surfaces MCP prompts in /)', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+      const before = vi.mocked(McpPromptLoader).mock.calls.length;
+
+      // A server reaching CONNECTED fires the real status listener the hook
+      // registered; after the debounce it rebuilds the command tree so a
+      // progressively-discovered MCP prompt appears as a /<prompt> command.
+      // Use a fresh server name so the global status registry actually
+      // transitions (undefined -> CONNECTED).
+      act(() => {
+        updateMCPServerStatus('srv-reload-test', MCPServerStatus.CONNECTED);
+      });
+
+      await waitFor(
+        () => {
+          expect(vi.mocked(McpPromptLoader).mock.calls.length).toBeGreaterThan(
+            before,
+          );
+        },
+        { timeout: 2000 },
+      );
+    });
+
+    it('ignores non-connected MCP status changes (no rebuild)', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+      const before = vi.mocked(McpPromptLoader).mock.calls.length;
+
+      act(() => {
+        updateMCPServerStatus('srv-noreload-test', MCPServerStatus.CONNECTING);
+      });
+      // Wait past the 250ms debounce window: CONNECTING must not reload.
+      await new Promise((r) => setTimeout(r, 400));
+      expect(vi.mocked(McpPromptLoader).mock.calls.length).toBe(before);
     });
 
     it('should call loadCommands and populate state after mounting', async () => {
@@ -518,19 +565,175 @@ describe('useSlashCommandProcessor', () => {
       expect(mockOpenModelDialog).toHaveBeenCalled();
     });
 
-    it('should handle "dialog: memory" action', async () => {
-      const command = createTestCommand({
+    it('awaits direct resume session switching before returning handled', async () => {
+      const actions = createMockActions();
+      let resolveResume: (() => void) | undefined;
+      actions.handleResume = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveResume = resolve;
+          }),
+      );
+
+      const resumeCommand = createTestCommand({
+        name: 'resume-direct',
+        action: vi.fn().mockResolvedValue({
+          type: 'dialog',
+          dialog: 'resume',
+          sessionId: 'session-123',
+        }),
+      });
+      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze([resumeCommand]));
+
+      const { result } = renderHook(() =>
+        useSlashCommandProcessor(
+          mockConfig,
+          mockSettings,
+          [],
+          mockAddItem,
+          mockClearItems,
+          mockLoadHistory,
+          vi.fn(),
+          vi.fn(),
+          false,
+          vi.fn(),
+          { current: true },
+          vi.fn(),
+          actions,
+          new Map(),
+          true,
+          null,
+          mockUpdateItem,
+        ),
+      );
+
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let settled = false;
+      const promise = result.current
+        .handleSlashCommand('/resume-direct')
+        .then(() => {
+          settled = true;
+        });
+
+      await waitFor(() => {
+        expect(actions.handleResume).toHaveBeenCalledWith('session-123');
+      });
+      expect(settled).toBe(false);
+
+      resolveResume?.();
+      await act(async () => {
+        await promise;
+      });
+      expect(settled).toBe(true);
+    });
+
+    it('shows info feedback for collapse-on-resume command', async () => {
+      const historyCmd = createTestCommand({
+        name: 'history',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content:
+            'History will be collapsed by default for future resumed sessions.',
+        }),
+      });
+      const result = setupProcessorHook([historyCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/history collapse-on-resume');
+      });
+
+      // Should have 2 calls: user message + info feedback
+      expect(mockAddItem).toHaveBeenCalledTimes(2);
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        1,
+        {
+          type: MessageType.USER,
+          text: '/history collapse-on-resume',
+          sentToModel: false,
+        },
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        2,
+        {
+          type: MessageType.INFO,
+          text: 'History will be collapsed by default for future resumed sessions.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('expand-now command updates history without info feedback', async () => {
+      const historyCmd = createTestCommand({
+        name: 'history',
+        subCommands: [
+          {
+            name: 'expand-now',
+            description: 'Expand collapsed history',
+            kind: CommandKind.BUILT_IN,
+            action: vi.fn().mockResolvedValue(undefined),
+          },
+        ],
+      });
+      const result = setupProcessorHook([historyCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/history expand-now');
+      });
+
+      // User message added, no info feedback (action returns void)
+      expect(mockAddItem).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.USER,
+          text: '/history expand-now',
+          sentToModel: false,
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('opens memory dialog when command returns dialog:memory', async () => {
+      const actions = createMockActions();
+      const memoryCommand = createTestCommand({
         name: 'memorycmd',
         action: vi.fn().mockResolvedValue({ type: 'dialog', dialog: 'memory' }),
       });
-      const result = setupProcessorHook([command]);
+      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze([memoryCommand]));
+
+      const { result } = renderHook(() =>
+        useSlashCommandProcessor(
+          mockConfig,
+          mockSettings,
+          [],
+          mockAddItem,
+          mockClearItems,
+          mockLoadHistory,
+          vi.fn(),
+          vi.fn(),
+          false,
+          vi.fn(),
+          { current: true },
+          vi.fn(),
+          actions,
+          new Map(),
+          true,
+          null,
+          mockUpdateItem,
+        ),
+      );
+
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       await act(async () => {
         await result.current.handleSlashCommand('/memorycmd');
       });
 
-      expect(mockOpenMemoryDialog).toHaveBeenCalled();
+      expect(actions.openMemoryDialog).toHaveBeenCalled();
     });
 
     it('should pass interactive execution mode to command actions', async () => {
@@ -1430,6 +1633,7 @@ describe('useSlashCommandProcessor', () => {
         useSlashCommandProcessor(
           mockConfig,
           mockSettings,
+          [], // mock history array
           mockAddItem,
           mockClearItems,
           mockLoadHistory,
@@ -1481,6 +1685,7 @@ describe('useSlashCommandProcessor', () => {
           useSlashCommandProcessor(
             mockConfig,
             mockSettings,
+            [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,
@@ -1547,6 +1752,7 @@ describe('useSlashCommandProcessor', () => {
           useSlashCommandProcessor(
             mockConfig,
             mockSettings,
+            [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,
@@ -1617,6 +1823,7 @@ describe('useSlashCommandProcessor', () => {
             return useSlashCommandProcessor(
               mockConfig,
               mockSettings,
+              [], // mock history array
               mockAddItem,
               mockClearItems,
               mockLoadHistory,
@@ -1676,6 +1883,7 @@ describe('useSlashCommandProcessor', () => {
           useSlashCommandProcessor(
             mockConfig,
             mockSettings,
+            [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,

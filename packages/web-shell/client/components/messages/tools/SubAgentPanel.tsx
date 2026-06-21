@@ -8,11 +8,13 @@ import {
 } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { useWebShellCustomization } from '../../../customization';
+import { useI18n } from '../../../i18n';
 // Circular import with ToolGroup (agents render tool rows; agent tool
 // rows render SubAgentPanel). Safe only while both modules dereference
 // each other's exports at render time — never in top-level code.
 import { ToolLine } from '../ToolGroup';
 import { Markdown } from '../Markdown';
+import { formatTimestamp } from '../../MessageTimestamp';
 import {
   formatDurationMs,
   formatElapsed,
@@ -24,6 +26,7 @@ import {
   formatTokenCount,
   getAgentType,
   getAgentDescription,
+  localizeToolDisplayName,
 } from '../toolFormatting';
 import chromeStyles from './ToolChrome.module.css';
 import styles from './SubAgentPanel.module.css';
@@ -70,20 +73,52 @@ function isTaskExecution(raw: unknown): raw is TaskExecution {
   );
 }
 
+/**
+ * Reveals a single sub-tool's wall-clock start time on hover in its top-right
+ * corner, mirroring how the main transcript surfaces each message's time —
+ * but via a scoped class pair (not MessageTimestamp) so the nested tooltip
+ * stays independent of the enclosing message's own time tooltip.
+ */
+function SubToolTime({
+  timestamp,
+  children,
+}: {
+  timestamp?: number;
+  children: ReactNode;
+}) {
+  if (timestamp === undefined) return <>{children}</>;
+  return (
+    <div className={styles.toolTimeRow}>
+      {children}
+      <span className={styles.toolTimeTip} aria-hidden="true">
+        {formatTimestamp(timestamp)}
+      </span>
+    </div>
+  );
+}
+
 const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
-  if (tool.subTools || tool.subContent) return <SubAgentPanel tool={tool} />;
   // Same row as the main transcript: one-line summary, expandable to
   // the full output / diff / file content where the tool has any.
-  return <ToolLine tool={tool} />;
+  const body =
+    tool.subTools || tool.subContent ? (
+      <SubAgentPanel tool={tool} />
+    ) : (
+      <ToolLine tool={tool} />
+    );
+  return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
+  const { t } = useI18n();
   const desc = tc.description || '';
   return (
     <div className={chromeStyles.line}>
       <div className={chromeStyles.lineMain}>
         <StatusIcon status={tc.status} />
-        <span className={chromeStyles.lineName}>{tc.name}</span>
+        <span className={chromeStyles.lineName}>
+          {localizeToolDisplayName(tc.name, t)}
+        </span>
         {desc && (
           <span className={chromeStyles.lineArg}>{truncateText(desc, 70)}</span>
         )}
@@ -129,6 +164,7 @@ type SubAgentTab = 'result' | 'tools';
  */
 function SubAgentStream({ text }: { text: string }) {
   const { compactThinking } = useWebShellCustomization();
+  const { t } = useI18n();
   const [streamExpanded, setStreamExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const streamRef = useRef<HTMLPreElement>(null);
@@ -169,7 +205,7 @@ function SubAgentStream({ text }: { text: string }) {
           className={styles.expandToggle}
           onClick={() => setStreamExpanded((v) => !v)}
           aria-expanded={streamExpanded}
-          aria-label="Toggle agent stream details"
+          aria-label={t('subagent.toggleStream')}
         >
           {streamExpanded ? '▲' : '▼'}
         </button>
@@ -189,7 +225,7 @@ function SubAgentResult({ content }: { content: string }) {
   const { compactThinking } = useWebShellCustomization();
   return (
     <div className={compactThinking ? styles.scrollWindow : undefined}>
-      <Markdown content={content} />
+      <Markdown content={content} source="assistant" />
     </div>
   );
 }

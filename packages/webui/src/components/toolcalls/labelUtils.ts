@@ -59,7 +59,7 @@ export const getToolDisplayLabel = ({
     case 'update_todos':
     case 'updated_plan':
     case 'updatedplan':
-      return 'TodoWrite';
+      return 'TodoList';
     case 'web_fetch':
     case 'webfetch':
     case 'fetch':

@@ -210,14 +210,25 @@
           "default": false
         },
         "showStatusInTitle": {
-          "description": "Show Qwen Code status and thoughts in the terminal window title",
+          "description": "Show Qwen Code session name and status in the terminal window title",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "hideTips": {
           "description": "Hide helpful tips in the UI",
           "type": "boolean",
           "default": false
+        },
+        "history": {
+          "description": "History display settings.",
+          "type": "object",
+          "properties": {
+            "collapseOnResume": {
+              "description": "Whether to collapse history by default when resuming a session.",
+              "type": "boolean",
+              "default": false
+            }
+          }
         },
         "showLineNumbers": {
           "description": "Show line numbers in the code output.",
@@ -244,6 +255,11 @@
             "type": "string"
           }
         },
+        "showResponseTokensPerSecond": {
+          "description": "Show a live tokens/sec estimate next to the response token counter while the model is streaming. Takes effect in the next session.",
+          "type": "boolean",
+          "default": false
+        },
         "enableWelcomeBack": {
           "description": "Show welcome back dialog when returning to a project with conversation history. Choosing \"Start new chat session\" suppresses the dialog for that project until the project summary changes.",
           "type": "boolean",
@@ -255,9 +271,9 @@
           "default": true
         },
         "enableFollowupSuggestions": {
-          "description": "Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.",
+          "description": "Show context-aware follow-up suggestions after task completion. Press Tab, Right Arrow, or Enter to accept into the input buffer.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "enableCacheSharing": {
           "description": "Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).",
@@ -474,6 +490,10 @@
           "description": "The model to use for conversations.",
           "type": "string"
         },
+        "baseUrl": {
+          "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
+          "type": "string"
+        },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
           "type": "number",
@@ -502,6 +522,11 @@
           "description": "Skip the next speaker check.",
           "type": "boolean",
           "default": true
+        },
+        "skipWorkflowUsageWarning": {
+          "description": "Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.",
+          "type": "boolean",
+          "default": false
         },
         "skipLoopDetection": {
           "description": "Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.",
@@ -544,6 +569,14 @@
               "type": "boolean",
               "default": true
             },
+            "toolResultContentFormat": {
+              "description": "Controls how text-only tool results are serialized in OpenAI-compatible requests. Use \"parts\" for the default content-part array shape. Use \"string\" only for legacy OpenAI-compatible runtimes whose tool templates ignore text content parts (for example older GLM-5.1 vLLM/SGLang templates; QwenLM/qwen-code#3361). Tool-returned media is still handled by splitToolMedia. Options: parts, string",
+              "enum": [
+                "parts",
+                "string"
+              ],
+              "default": "parts"
+            },
             "schemaCompliance": {
               "description": "The compliance mode for tool schemas sent to the model. Use \"openapi_30\" for strict OpenAPI 3.0 compatibility (e.g., for Gemini). Options: auto, openapi_30",
               "enum": [
@@ -570,13 +603,25 @@
       "type": "object",
       "properties": {
         "fileName": {
-          "description": "The name of the context file.",
-          "type": "object",
-          "additionalProperties": true
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "The name of the context file or files."
         },
         "importFormat": {
-          "description": "The format to use when importing memory.",
-          "type": "string"
+          "description": "The format to use when importing memory. Options: tree, flat",
+          "enum": [
+            "tree",
+            "flat"
+          ]
         },
         "includeDirectories": {
           "description": "Additional directories to include in the workspace context. Missing directories will be skipped with a warning.",
@@ -591,7 +636,7 @@
           "default": false
         },
         "clearContextOnIdle": {
-          "description": "Settings for clearing stale context after idle periods. Use -1 to disable a threshold.",
+          "description": "Settings for clearing stale or oversized tool result context. Use -1 to disable a threshold.",
           "type": "object",
           "properties": {
             "toolResultsThresholdMinutes": {
@@ -603,6 +648,11 @@
               "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
               "type": "number",
               "default": 5
+            },
+            "toolResultsTotalCharsThreshold": {
+              "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
+              "type": "number",
+              "default": 500000
             }
           }
         },
@@ -791,9 +841,15 @@
       "type": "object",
       "properties": {
         "sandbox": {
-          "description": "Sandbox execution environment (can be a boolean or a path string).",
-          "type": "object",
-          "additionalProperties": true
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Sandbox execution environment (can be a boolean or a path string)."
         },
         "sandboxImage": {
           "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
@@ -909,13 +965,18 @@
           "default": 200000
         },
         "computerUse": {
-          "description": "Cross-platform desktop automation via the upstream open-computer-use MCP server. Tools: list_apps, get_app_state, click, type_text, scroll, drag, press_key, perform_secondary_action, set_value. On first invocation, the upstream binary is fetched via npx and the user is walked through macOS Accessibility / Screen Recording permissions if needed.",
+          "description": "Cross-platform desktop automation via the cua-driver native driver (trycua/cua). On first invocation a pinned, signed + notarized binary (~20MB) is downloaded into ~/.qwen/computer-use/ and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Exposes cua-driver's full tool surface (click, type_text, scroll, drag, press_key, get_window_state, page, launch_app, and more).",
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "When enabled (default), the 9 computer_use__* tools are registered as deferred built-ins.",
+              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.",
               "type": "boolean",
               "default": true
+            },
+            "maxImageDimension": {
+              "description": "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
+              "type": "number",
+              "default": -1
             }
           }
         }
@@ -1027,8 +1088,11 @@
           "default": false
         },
         "dnsResolutionOrder": {
-          "description": "The DNS resolution order.",
-          "type": "string"
+          "description": "The DNS resolution order. Options: ipv4first, verbatim",
+          "enum": [
+            "ipv4first",
+            "verbatim"
+          ]
         },
         "excludedEnvVars": {
           "description": "Environment variables to exclude from project context.",

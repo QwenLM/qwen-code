@@ -2,7 +2,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 2px 2ch;
+  padding: 2px 12px;
   font-size: 13px;
   color: var(--text-dimmed);
   flex-shrink: 0;
@@ -27,10 +27,7 @@
      instead of the two touching. font: inherit so the -2ch resolves against
      the same font as the bar's 2ch padding; the 2px padding is hit area, free
      since we're out of flow. */
-  position: absolute;
   left: calc(-2ch - 6px);
-  top: 50%;
-  transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -93,6 +90,24 @@
 .modeHint {
   color: var(--text-dimmed);
   font-size: 12px;
+}
+
+.shortcutsButton {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-dimmed);
+  cursor: pointer;
+}
+
+.shortcutsButton:hover,
+.shortcutsButton:focus-visible {
+  color: var(--text-primary);
 }
 
 .modelButton {
@@ -181,4 +196,12 @@
 
 .taskPill:disabled {
   cursor: default;
+}
+
+@media (max-width: 700px) {
+  .settingsButton,
+  .modelButton,
+  .modeHint {
+    display: none;
+  }
 }

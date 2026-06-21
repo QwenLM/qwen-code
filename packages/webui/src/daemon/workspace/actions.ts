@@ -119,6 +119,14 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async loadExtensionsStatus() {
+      const client = requireClient(getClient, 'Load extensions failed');
+      return withActionTimeout(
+        client.workspaceExtensions(),
+        'Load extensions timed out',
+      );
+    },
+
     async loadToolsStatus() {
       const client = requireClient(getClient, 'Load tools failed');
       return withActionTimeout(client.workspaceTools(), 'Load tools timed out');
@@ -213,6 +221,13 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    // TODO(transport-parity): globWorkspace, stat, and listDirectory
+    // bypass the DaemonClient transport layer by calling global fetch()
+    // directly. This means ACP transports (WS, HTTP+JSON-RPC) never
+    // see these requests. DaemonClient exposes client.glob(),
+    // client.fileStat(), and client.dirList() that go through the
+    // transport — migrate to those once the route table covers
+    // /glob, /stat, /list (see acpRouteTable.ts).
     async globWorkspace(pattern, opts) {
       requireClient(getClient, 'Glob workspace failed');
       const url = createDaemonRequestUrl(baseUrl, '/glob');
@@ -335,6 +350,62 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.updateWorkspaceAgent(agentType, req, scope ? { scope } : {}),
         'Update agent timed out',
+      );
+    },
+
+    async installExtension(params, clientId) {
+      const client = requireClient(getClient, 'Install extension failed');
+      return withActionTimeout(
+        client.installExtension(params, clientId),
+        'Install extension timed out',
+      );
+    },
+
+    async checkExtensionUpdates(clientId) {
+      const client = requireClient(getClient, 'Check extension updates failed');
+      return withActionTimeout(
+        client.checkExtensionUpdates(clientId),
+        'Check extension updates timed out',
+      );
+    },
+
+    async refreshExtensions(clientId) {
+      const client = requireClient(getClient, 'Refresh extensions failed');
+      return withActionTimeout(
+        client.refreshExtensions(clientId),
+        'Refresh extensions timed out',
+      );
+    },
+
+    async enableExtension(name, params, clientId) {
+      const client = requireClient(getClient, 'Enable extension failed');
+      return withActionTimeout(
+        client.enableExtension(name, params, clientId),
+        'Enable extension timed out',
+      );
+    },
+
+    async disableExtension(name, params, clientId) {
+      const client = requireClient(getClient, 'Disable extension failed');
+      return withActionTimeout(
+        client.disableExtension(name, params, clientId),
+        'Disable extension timed out',
+      );
+    },
+
+    async updateExtension(name, clientId) {
+      const client = requireClient(getClient, 'Update extension failed');
+      return withActionTimeout(
+        client.updateExtension(name, clientId),
+        'Update extension timed out',
+      );
+    },
+
+    async uninstallExtension(name, clientId) {
+      const client = requireClient(getClient, 'Uninstall extension failed');
+      return withActionTimeout(
+        client.uninstallExtension(name, clientId),
+        'Uninstall extension timed out',
       );
     },
 
