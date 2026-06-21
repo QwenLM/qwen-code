@@ -113,6 +113,8 @@ function isLoopbackHost(hostname: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
+// Blocks IP-literal private networks only. Hostname DNS resolution and
+// rebinding protection require an async lookup or socket-level remoteAddress check.
 function isPrivateNetworkIp(hostname: string): boolean {
   const host = normalizeHostname(hostname);
   if (isLoopbackHost(host)) {
