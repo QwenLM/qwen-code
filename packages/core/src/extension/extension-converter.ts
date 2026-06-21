@@ -17,13 +17,23 @@ import {
 } from './claude-converter.js';
 import type { ExtensionOriginSource } from '../config/config.js';
 
+export const SUPPORTED_EXTENSION_MANIFESTS = [
+  EXTENSIONS_CONFIG_FILENAME,
+  'gemini-extension.json',
+  '.claude-plugin/marketplace.json',
+  '.claude-plugin/plugin.json',
+] as const;
+
 export async function convertGeminiOrClaudeExtension(
   extensionDir: string,
   pluginName?: string,
 ): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
   let newExtensionDir = extensionDir;
   let originSource: ExtensionOriginSource = 'QwenCode';
-  const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
+  const configFilePath = path.join(
+    extensionDir,
+    SUPPORTED_EXTENSION_MANIFESTS[0],
+  );
   if (fs.existsSync(configFilePath)) {
     newExtensionDir = extensionDir;
   } else if (isGeminiExtensionConfig(extensionDir)) {
@@ -36,7 +46,7 @@ export async function convertGeminiOrClaudeExtension(
     ).convertedDir;
     originSource = 'Claude';
   } else if (
-    fs.existsSync(path.join(extensionDir, '.claude-plugin', 'plugin.json'))
+    fs.existsSync(path.join(extensionDir, SUPPORTED_EXTENSION_MANIFESTS[3]))
   ) {
     newExtensionDir = (await convertClaudePluginStandalone(extensionDir))
       .convertedDir;

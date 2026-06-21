@@ -1031,6 +1031,7 @@ export class ExtensionManager {
     let newExtensionConfig: ExtensionConfig | null = null;
     let localSourcePath: string | undefined;
     let tempDir: string | undefined;
+    let convertedSourcePath: string | undefined;
 
     try {
       if (!this.isWorkspaceTrusted) {
@@ -1113,12 +1114,16 @@ export class ExtensionManager {
       }
 
       try {
+        const sourceBeforeConversion = localSourcePath;
         const { extensionDir, originSource } =
           await convertGeminiOrClaudeExtension(
-            localSourcePath,
+            sourceBeforeConversion,
             installMetadata.pluginName,
           );
 
+        if (extensionDir !== sourceBeforeConversion) {
+          convertedSourcePath = extensionDir;
+        }
         localSourcePath = extensionDir;
         installMetadata.originSource = originSource;
 
@@ -1302,8 +1307,16 @@ export class ExtensionManager {
         if (tempDir) {
           await fs.promises.rm(tempDir, { recursive: true, force: true });
         }
+        if (convertedSourcePath && convertedSourcePath !== tempDir) {
+          await fs.promises.rm(convertedSourcePath, {
+            recursive: true,
+            force: true,
+          });
+        }
         if (
+          localSourcePath &&
           localSourcePath !== tempDir &&
+          localSourcePath !== convertedSourcePath &&
           installMetadata.type !== 'link' &&
           installMetadata.type !== 'local'
         ) {
@@ -1327,6 +1340,12 @@ export class ExtensionManager {
       }
       if (tempDir) {
         await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+      if (convertedSourcePath && convertedSourcePath !== tempDir) {
+        await fs.promises.rm(convertedSourcePath, {
+          recursive: true,
+          force: true,
+        });
       }
       const config = newExtensionConfig ?? previousExtensionConfig;
       const extensionId = config

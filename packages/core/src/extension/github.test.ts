@@ -1140,6 +1140,39 @@ describe('git extension helpers', () => {
       );
     });
 
+    it('should reject redirects without a location and clear the timeout', async () => {
+      vi.useFakeTimers();
+      const response = createResponse(undefined, 302);
+      const resumeSpy = vi.spyOn(response, 'resume');
+      mockHttpsGet.mockImplementationOnce(((
+        _url: string | URL | https.RequestOptions,
+        _options:
+          | https.RequestOptions
+          | ((res: IncomingMessage) => void)
+          | undefined,
+        callback?: (res: IncomingMessage) => void,
+      ) => {
+        callResponseCallback(_options, callback, response);
+        return createRequestMock();
+      }) as typeof https.get);
+
+      try {
+        await expect(
+          downloadFromArchiveUrl(
+            {
+              source: 'https://example.com/extension.zip',
+              type: 'archive-url',
+            },
+            tempDir,
+          ),
+        ).rejects.toThrow('Redirect response missing location header');
+        expect(resumeSpy).toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should reject when an archive URL response stream errors', async () => {
       mockHttpsGet.mockImplementationOnce(((
         _url: string | URL | https.RequestOptions,
@@ -1260,6 +1293,71 @@ describe('git extension helpers', () => {
         fs.readFile(path.join(tempDir, 'README.md'), 'utf-8'),
       ).resolves.toBe('readme');
       await expect(fs.stat(archivePath)).resolves.toBeDefined();
+    });
+
+    it('should not flatten when the archive root already has a manifest', async () => {
+      const archivePath = path.join(tempDir, 'root-and-wrapper.zip');
+      const archive = await createZipBuffer(tempDir, [
+        {
+          name: EXTENSIONS_CONFIG_FILENAME,
+          content: JSON.stringify({
+            name: 'root-extension',
+            version: '1.0.0',
+          }),
+        },
+        {
+          name: `wrapped/${EXTENSIONS_CONFIG_FILENAME}`,
+          content: JSON.stringify({
+            name: 'wrapped-extension',
+            version: '1.0.0',
+          }),
+        },
+      ]);
+      await fs.writeFile(archivePath, archive);
+
+      await extractArchiveFile(archivePath, tempDir);
+
+      await expect(
+        fs.readFile(path.join(tempDir, EXTENSIONS_CONFIG_FILENAME), 'utf-8'),
+      ).resolves.toContain('root-extension');
+      await expect(
+        fs.readFile(
+          path.join(tempDir, 'wrapped', EXTENSIONS_CONFIG_FILENAME),
+          'utf-8',
+        ),
+      ).resolves.toContain('wrapped-extension');
+    });
+
+    it('should reject flattening when wrapper contents collide with root files', async () => {
+      const archivePath = path.join(tempDir, 'colliding-wrapper.zip');
+      const archiveBuildDir = path.join(tempDir, 'collision-build');
+      await fs.mkdir(archiveBuildDir);
+      const archive = await createZipBuffer(archiveBuildDir, [
+        {
+          name: `wrapped/${EXTENSIONS_CONFIG_FILENAME}`,
+          content: JSON.stringify({
+            name: 'wrapped-extension',
+            version: '1.0.0',
+          }),
+        },
+        { name: 'wrapped/README.md', content: 'wrapped readme' },
+        { name: 'README.md', content: 'root readme' },
+      ]);
+      await fs.rm(archiveBuildDir, { recursive: true, force: true });
+      await fs.writeFile(archivePath, archive);
+
+      await expect(extractArchiveFile(archivePath, tempDir)).rejects.toThrow(
+        'Extension archive cannot be flattened because "README.md" exists at both the archive root and inside "wrapped".',
+      );
+      await expect(
+        fs.readFile(path.join(tempDir, 'README.md'), 'utf-8'),
+      ).resolves.toBe('root readme');
+      await expect(
+        fs.readFile(
+          path.join(tempDir, 'wrapped', EXTENSIONS_CONFIG_FILENAME),
+          'utf-8',
+        ),
+      ).resolves.toContain('wrapped-extension');
     });
 
     it('should not flatten archives with multiple top-level entries', async () => {
@@ -1508,7 +1606,7 @@ describe('git extension helpers', () => {
     });
 
     it.skipIf(process.platform === 'win32')(
-      'should skip symlink entries in tar archives',
+      'should reject symlink entries in tar archives',
       async () => {
         const archivePath = path.join(tempDir, 'symlink.tar.gz');
         const extractionDest = path.join(tempDir, 'extracted');
@@ -1528,7 +1626,9 @@ describe('git extension helpers', () => {
           ['escape-link'],
         );
 
-        await extractFile(archivePath, extractionDest);
+        await expect(extractFile(archivePath, extractionDest)).rejects.toThrow(
+          'Tar archive contains unsupported link entry: escape-link',
+        );
 
         await expect(
           fs.lstat(path.join(extractionDest, 'escape-link')),

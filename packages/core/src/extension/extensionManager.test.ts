@@ -12,6 +12,7 @@ import {
   INSTALL_METADATA_FILENAME,
   EXTENSIONS_CONFIG_FILENAME,
 } from './variables.js';
+import { ExtensionStorage } from './storage.js';
 import { QWEN_DIR } from '../config/storage.js';
 import {
   ExtensionManager,
@@ -195,6 +196,58 @@ describe('extension tests', () => {
         source: archivePath,
         type: 'local',
       });
+    });
+
+    it('should clean up converted temp dir for local archive installs', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'gemini-extension.zip');
+      fs.writeFileSync(archivePath, 'not used by mocked extractor');
+      const tempDirs: string[] = [];
+      vi.spyOn(ExtensionStorage, 'createTmpDir').mockImplementation(
+        async () => {
+          const tempDir = fs.mkdtempSync(
+            path.join(tempHomeDir, 'tracked-extension-'),
+          );
+          tempDirs.push(tempDir);
+          return tempDir;
+        },
+      );
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, 'gemini-extension.json'),
+            JSON.stringify({
+              name: 'gemini-archive-extension',
+              version: '1.0.0',
+            }),
+          );
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          source: archivePath,
+          type: 'local',
+        },
+        async () => {},
+      );
+
+      expect(extension.name).toBe('gemini-archive-extension');
+      expect(tempDirs).toHaveLength(2);
+      expect(fs.existsSync(tempDirs[0])).toBe(false);
+      expect(fs.existsSync(tempDirs[1])).toBe(false);
+      expect(
+        fs.existsSync(
+          path.join(
+            userExtensionsDir,
+            'gemini-archive-extension',
+            EXTENSIONS_CONFIG_FILENAME,
+          ),
+        ),
+      ).toBe(true);
     });
 
     it('should install an extension from an archive URL', async () => {

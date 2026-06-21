@@ -10,7 +10,6 @@ import * as os from 'node:os';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 import * as tar from 'tar';
 import extract from 'extract-zip';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -23,7 +22,10 @@ import {
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { checkNpmUpdate } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
-import { convertGeminiOrClaudeExtension } from './extension-converter.js';
+import {
+  convertGeminiOrClaudeExtension,
+  SUPPORTED_EXTENSION_MANIFESTS,
+} from './extension-converter.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 const SUPPORTED_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'] as const;
@@ -603,7 +605,8 @@ async function downloadFile(
           res.statusCode === 308
         ) {
           if (!res.headers.location) {
-            reject(new Error('Redirect response missing location header'));
+            res.resume();
+            fail(new Error('Redirect response missing location header'));
             return;
           }
           res.resume();
@@ -650,8 +653,14 @@ async function downloadFile(
             );
           }
         });
-        res.on('error', fail);
-        file.on('error', fail);
+        res.on('error', (error) => {
+          file.destroy();
+          fail(error);
+        });
+        file.on('error', (error) => {
+          res.destroy();
+          fail(error);
+        });
         res.pipe(file);
         file.on('finish', () => file.close(finish));
       })
@@ -671,12 +680,10 @@ async function downloadFile(
 
 export async function extractFile(file: string, dest: string): Promise<void> {
   if (file.endsWith('.tar.gz')) {
+    await assertTarArchiveHasNoLinks(file);
     await tar.x({
       file,
       cwd: dest,
-      filter: (_path, entry) =>
-        !('type' in entry) ||
-        (entry.type !== 'SymbolicLink' && entry.type !== 'Link'),
     });
   } else if (file.endsWith('.zip')) {
     await extract(file, {
@@ -691,6 +698,26 @@ export async function extractFile(file: string, dest: string): Promise<void> {
     });
   } else {
     throw new Error(`Unsupported file extension for extraction: ${file}`);
+  }
+}
+
+async function assertTarArchiveHasNoLinks(file: string): Promise<void> {
+  let unsupportedLinkPath: string | undefined;
+  await tar.t({
+    file,
+    onReadEntry: (entry) => {
+      if (
+        !unsupportedLinkPath &&
+        (entry.type === 'SymbolicLink' || entry.type === 'Link')
+      ) {
+        unsupportedLinkPath = entry.path;
+      }
+    },
+  });
+  if (unsupportedLinkPath) {
+    throw new Error(
+      `Tar archive contains unsupported link entry: ${unsupportedLinkPath}`,
+    );
   }
 }
 
@@ -712,6 +739,9 @@ async function flattenSingleExtensionDirectory(
       withFileTypes: true,
     })
   ).filter((entry) => entry.name !== archiveNameToIgnore);
+  if (hasSupportedExtensionSourceManifest(destination)) {
+    return;
+  }
   if (entries.length > 2) {
     return;
   }
@@ -728,12 +758,28 @@ async function flattenSingleExtensionDirectory(
 
   const extractedDirFiles = await fs.promises.readdir(rootPath);
   for (const file of extractedDirFiles) {
-    await fs.promises.rename(
-      path.join(rootPath, file),
-      path.join(destination, file),
-    );
+    const destinationPath = path.join(destination, file);
+    if (fs.existsSync(destinationPath)) {
+      throw new Error(
+        `Extension archive cannot be flattened because "${file}" exists at both the archive root and inside "${lonelyDir.name}".`,
+      );
+    }
+  }
+  for (const file of extractedDirFiles) {
+    const destinationPath = path.join(destination, file);
+    await fs.promises.rename(path.join(rootPath, file), destinationPath);
   }
   await fs.promises.rmdir(rootPath);
+}
+
+function getSupportedManifestList(): string {
+  return SUPPORTED_EXTENSION_MANIFESTS.join(', ');
+}
+
+function hasSupportedExtensionSourceManifest(rootPath: string): boolean {
+  return SUPPORTED_EXTENSION_MANIFESTS.some((manifestPath) =>
+    fs.existsSync(path.join(rootPath, manifestPath)),
+  );
 }
 
 function assertExtractedArchiveContainsExtensionSource(
@@ -745,8 +791,8 @@ function assertExtractedArchiveContainsExtensionSource(
 
   throw new Error(
     'Extension archive is missing a supported extension manifest. ' +
-      `Expected ${EXTENSIONS_CONFIG_FILENAME}, gemini-extension.json, ` +
-      '.claude-plugin/marketplace.json, or .claude-plugin/plugin.json at the archive root, or inside a single top-level extension directory.',
+      `Expected one of: ${getSupportedManifestList()} at the archive root, ` +
+      'or inside a single top-level extension directory.',
   );
 }
 
@@ -760,13 +806,4 @@ function getContainedArchiveName(
     return path.basename(resolvedArchivePath);
   }
   return undefined;
-}
-
-function hasSupportedExtensionSourceManifest(rootPath: string): boolean {
-  return (
-    fs.existsSync(path.join(rootPath, EXTENSIONS_CONFIG_FILENAME)) ||
-    fs.existsSync(path.join(rootPath, 'gemini-extension.json')) ||
-    fs.existsSync(path.join(rootPath, '.claude-plugin/marketplace.json')) ||
-    fs.existsSync(path.join(rootPath, '.claude-plugin/plugin.json'))
-  );
 }
