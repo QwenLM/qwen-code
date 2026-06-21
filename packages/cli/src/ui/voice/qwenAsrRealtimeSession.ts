@@ -283,6 +283,14 @@ export function openQwenAsrRealtimeStream(
         return;
       }
       if (finishReject) {
+        const salvage = committed.trim();
+        if (salvage) {
+          finishedTranscript = salvage;
+          finishResolve?.(salvage);
+          finishResolve = null;
+          finishReject = null;
+          return;
+        }
         finishReject(
           new Error(
             'Qwen ASR realtime connection closed unexpectedly. Transcript may be incomplete.',
