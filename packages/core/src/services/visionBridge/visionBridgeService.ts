@@ -29,6 +29,7 @@ export interface VisionModelCandidate {
   authType?: string;
   baseUrl?: string;
   modalities?: InputModalities;
+  isVision?: boolean;
 }
 
 /** Exact model/provider selected for a vision bridge call. */
@@ -106,7 +107,10 @@ function findPrimaryModel(
 }
 
 function isImageCapable(model: VisionModelCandidate): boolean {
-  return (model.modalities ?? defaultModalities(model.id)).image === true;
+  return (
+    model.isVision === true ||
+    (model.modalities ?? defaultModalities(model.id)).image === true
+  );
 }
 
 /**
@@ -117,8 +121,9 @@ function isImageCapable(model: VisionModelCandidate): boolean {
  * precise), then same auth type, then the first image-capable model. The
  * primary (text-only) model itself is never selected.
  *
- * A model's image capability uses its explicit modalities when present, falling
- * back to name-based detection — matching the request pipeline's precedence.
+ * A model's image capability uses the registry vision flag, explicit modalities
+ * when present, or name-based detection — matching the request pipeline's
+ * precedence.
  *
  * @param primaryModelId The current primary model id, or undefined.
  * @param models The registered/available models to choose from.
@@ -471,7 +476,7 @@ function sanitizeForFence(text: string): string {
       const defanged = line.replace(FENCE_MARKER_PATTERN, (marker) =>
         marker.replaceAll('---', '- - -'),
       );
-      return /^[ \t]*(?:-{3,}|note to the assistant:)/i.test(defanged)
+      return /^\s*(?:-{3,}|note to the assistant:)/i.test(defanged)
         ? `· ${defanged.trimStart()}`
         : defanged;
     })

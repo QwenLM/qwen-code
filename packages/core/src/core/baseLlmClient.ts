@@ -461,12 +461,15 @@ export class BaseLlmClient {
    * authType so quota detection and provider-specific retry logic line up.
    *
    * Falls back to the main generator when the target model is not registered
-   * or generator creation fails (e.g. tests without full auth setup).
+   * or generator creation fails (e.g. tests without full auth setup). Explicit
+   * provider hints fail loudly instead of silently substituting the main
+   * generator.
    */
   async resolveForModel(
     model: string,
     hint: { authType?: AuthType; baseUrl?: string } = {},
   ): Promise<ResolvedGeneratorForModel> {
+    const hasExplicitProviderHint = Boolean(hint.authType || hint.baseUrl);
     const parsedSelector = this.resolveModelSelector(model);
     const selector = hint.authType
       ? {
@@ -498,7 +501,7 @@ export class BaseLlmClient {
       selector,
       hint.baseUrl,
     );
-    if (!resolvedModel && (hint.authType || hint.baseUrl)) {
+    if (!resolvedModel && hasExplicitProviderHint) {
       throw new Error(
         `Model "${model}" could not be resolved for the requested provider hint.`,
       );
@@ -508,6 +511,7 @@ export class BaseLlmClient {
       model,
       selector,
       hint.baseUrl,
+      hasExplicitProviderHint,
     );
     const retryAuthType =
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
@@ -580,6 +584,7 @@ export class BaseLlmClient {
     model: string,
     selector: ResolvedModelId | undefined,
     baseUrl?: string,
+    throwOnCreateFailure = false,
   ): Promise<ContentGenerator> {
     const cacheKey = JSON.stringify({
       authType: selector?.authType,
@@ -623,11 +628,14 @@ export class BaseLlmClient {
 
         return await createContentGenerator(targetConfig, this.config);
       } catch (err: unknown) {
+        this.perModelGeneratorCache.delete(cacheKey);
+        if (throwOnCreateFailure) {
+          throw err;
+        }
         debugLogger.warn(
           `Failed to create content generator for model "${model}", falling back to main generator.`,
           err instanceof Error ? err.message : String(err),
         );
-        this.perModelGeneratorCache.delete(cacheKey);
         return this.getCurrentContentGenerator();
       }
     })();

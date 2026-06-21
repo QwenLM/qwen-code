@@ -721,6 +721,27 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('throws instead of falling back when explicit provider generator creation fails', async () => {
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+        baseUrl: 'https://api.anthropic.com',
+      });
+      mockCreateContentGenerator.mockRejectedValue(
+        new Error('SDK init failed'),
+      );
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await expect(
+        c.resolveForModel(fastModel, {
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+        }),
+      ).rejects.toThrow(/SDK init failed/);
+      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
     it('does not cache the unregistered-model fallback across runtime-view changes', async () => {
       // Unregistered selector: createContentGeneratorForModel falls back to
       // getCurrentContentGenerator(). The runtime view changes between calls
