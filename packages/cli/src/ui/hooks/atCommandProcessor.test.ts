@@ -1239,4 +1239,109 @@ describe('handleAtCommand', () => {
       expect(result.toolDisplays![0].resultDisplay).toContain('10MB');
     });
   });
+
+  describe('MCP resource references (@server:uri)', () => {
+    const makeResourceConfig = (
+      readMcpResource: (
+        serverName: string,
+        uri: string,
+        options?: { signal?: AbortSignal },
+      ) => Promise<unknown>,
+    ): Config =>
+      ({
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getToolRegistry: () => ({ readMcpResource }),
+      }) as unknown as Config;
+
+    it('reads an @server:uri MCP resource and injects its text content', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://doc', text: 'RESOURCE BODY' }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: 'summarize @myserver:res://doc please',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 600,
+        signal: abortController.signal,
+      });
+
+      expect(readMcpResource).toHaveBeenCalledWith('myserver', 'res://doc', {
+        signal: abortController.signal,
+      });
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<{ text?: string }>;
+      // The @server:uri reference is preserved verbatim in the prompt text.
+      expect(parts[0].text).toContain('@myserver:res://doc');
+      // The resource body is injected as a content part.
+      expect(JSON.stringify(result.processedQuery)).toContain('RESOURCE BODY');
+      expect(result.toolDisplays).toHaveLength(1);
+      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+      expect(result.filesRead).toContain('myserver:res://doc');
+    });
+
+    it('does NOT treat @prefix:uri as a resource when prefix is not a configured server', async () => {
+      const readMcpResource = vi.fn();
+      const config = makeResourceConfig(readMcpResource);
+
+      await handleAtCommand({
+        query: 'see @other:thing',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 601,
+        signal: abortController.signal,
+      });
+
+      // 'other' is not a configured server → falls through to filesystem
+      // handling; the resource read path must not fire.
+      expect(readMcpResource).not.toHaveBeenCalled();
+    });
+
+    it('surfaces an error tool-card but still proceeds when a resource read fails', async () => {
+      const readMcpResource = vi
+        .fn()
+        .mockRejectedValue(new Error('resource boom'));
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: 'check @myserver:res://x',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 602,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.toolDisplays).toHaveLength(1);
+      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Error);
+      expect(result.toolDisplays![0].resultDisplay).toContain('resource boom');
+    });
+
+    it('injects blob resource content as inlineData', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://img', mimeType: 'image/png', blob: 'AAAA' }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://img',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 603,
+        signal: abortController.signal,
+      });
+
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const inline = parts.find((p) => 'inlineData' in p) as
+        | { inlineData: { mimeType: string; data: string } }
+        | undefined;
+      expect(inline).toBeDefined();
+      expect(inline!.inlineData).toMatchObject({
+        mimeType: 'image/png',
+        data: 'AAAA',
+      });
+    });
+  });
 });

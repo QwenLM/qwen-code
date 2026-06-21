@@ -12,6 +12,7 @@ import {
   MCPServerStatus,
   removeMCPStatusChangeListener,
   type DiscoveredMCPPrompt,
+  type DiscoveredMCPResource,
   type McpClient,
   updateMCPServerStatus,
 } from './mcp-client.js';
@@ -101,6 +102,8 @@ export interface PooledConnection {
   readonly toolsSnapshot: readonly DiscoveredMCPTool[];
   /** Current canonical prompt snapshot. Re-issued on `promptsChanged`. */
   readonly promptsSnapshot: readonly DiscoveredMCPPrompt[];
+  /** Current canonical resource snapshot. Re-issued on `resourcesChanged`. */
+  readonly resourcesSnapshot: readonly DiscoveredMCPResource[];
   on(event: 'event', listener: (e: PoolEvent) => void): this;
   off(event: 'event', listener: (e: PoolEvent) => void): this;
   /** Release this session's reference; pool starts drain when refs=0. */
@@ -157,6 +160,7 @@ export class PoolEntry {
   private subscriberHandles = new Map<string, PooledConnectionImpl>();
   toolsSnapshot: DiscoveredMCPTool[] = [];
   promptsSnapshot: DiscoveredMCPPrompt[] = [];
+  resourcesSnapshot: DiscoveredMCPResource[] = [];
   private drainTimer?: NodeJS.Timeout;
   private maxIdleTimer?: NodeJS.Timeout;
   private firstIdleAt?: number;
@@ -528,6 +532,7 @@ export class PoolEntry {
   markActive(
     initialTools: DiscoveredMCPTool[],
     initialPrompts: DiscoveredMCPPrompt[],
+    initialResources: DiscoveredMCPResource[] = [],
   ): void {
     // never resurrect a
     // torn-down entry. `forceShutdown` may run concurrently with the
@@ -538,6 +543,7 @@ export class PoolEntry {
     if (this.state === 'closed' || this.state === 'failed') return;
     this.toolsSnapshot = initialTools;
     this.promptsSnapshot = initialPrompts;
+    this.resourcesSnapshot = initialResources;
     this.state = 'active';
     this.localStatus = MCPServerStatus.CONNECTED;
     this.updateGlobalStatus();
@@ -585,6 +591,7 @@ export class PoolEntry {
       try {
         view.applyTools(this.toolsSnapshot);
         view.applyPrompts(this.promptsSnapshot);
+        view.applyResources(this.resourcesSnapshot);
       } catch (err) {
         if (!hadRef) {
           this.refs.delete(sessionId);
@@ -943,6 +950,7 @@ export class PoolEntry {
     let snap: {
       tools: DiscoveredMCPTool[];
       prompts: DiscoveredMCPPrompt[];
+      resources: DiscoveredMCPResource[];
     };
     try {
       // bound the
@@ -1076,19 +1084,21 @@ export class PoolEntry {
     }
     this.toolsSnapshot = snap.tools;
     this.promptsSnapshot = snap.prompts;
+    this.resourcesSnapshot = snap.resources;
     // subscribers don't
     // listen on the entry's EventEmitter, so emitting toolsChanged /
     // promptsChanged alone leaves session ToolRegistry instances
     // holding stale pre-restart registrations. Latent until commit 5
     // landed the restart HTTP route — now it's a correctness bug.
     // Iterate `this.subscribers` directly and re-apply the fresh
-    // snapshots so each session's registry gets the new tools/prompts
-    // (SessionMcpView.applyTools handles the
+    // snapshots so each session's registry gets the new tools/prompts/
+    // resources (SessionMcpView.applyTools handles the
     // remove-old-then-register-new contract internally).
     for (const [sid, view] of this.subscribers) {
       try {
         view.applyTools(this.toolsSnapshot);
         view.applyPrompts(this.promptsSnapshot);
+        view.applyResources(this.resourcesSnapshot);
       } catch (err) {
         debugLogger.error(
           `Restart fan-out to view ${sid}/${this.serverName} failed: ${String(
@@ -1115,6 +1125,12 @@ export class PoolEntry {
       kind: 'promptsChanged',
       serverName: this.serverName,
       snapshot: this.promptsSnapshot,
+      generation: this._generation,
+    });
+    this.emit({
+      kind: 'resourcesChanged',
+      serverName: this.serverName,
+      snapshot: this.resourcesSnapshot,
       generation: this._generation,
     });
     // the
@@ -1230,6 +1246,9 @@ class PooledConnectionImpl implements PooledConnection {
   }
   get promptsSnapshot(): readonly DiscoveredMCPPrompt[] {
     return this.entry.promptsSnapshot;
+  }
+  get resourcesSnapshot(): readonly DiscoveredMCPResource[] {
+    return this.entry.resourcesSnapshot;
   }
 
   on(event: 'event', listener: (e: PoolEvent) => void): this {

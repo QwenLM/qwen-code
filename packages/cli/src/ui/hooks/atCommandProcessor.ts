@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { PartListUnion } from '@google/genai';
+import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
@@ -132,10 +132,32 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
 }
 
 /**
+ * Detect an `@server:uri` MCP resource reference. Returns the parsed
+ * `{ serverName, uri }` ONLY when the prefix before the first ':' matches a
+ * configured MCP server name — this disambiguates resource refs from
+ * filesystem paths that legitimately contain ':' (e.g. a Windows `C:\...`
+ * path, or a URL pasted as a path). Anything not matching a known server
+ * returns null and falls through to the existing filesystem handling
+ * unchanged.
+ */
+function parseMcpResourceRef(
+  pathName: string,
+  mcpServerNames: ReadonlySet<string>,
+): { serverName: string; uri: string } | null {
+  const colon = pathName.indexOf(':');
+  if (colon <= 0) return null;
+  const serverName = pathName.slice(0, colon);
+  const uri = pathName.slice(colon + 1);
+  if (!uri || !mcpServerNames.has(serverName)) return null;
+  return { serverName, uri };
+}
+
+/**
  * Processes user input potentially containing one or more '@<path>' commands.
  * If found, it attempts to read the specified files/directories using the
- * 'read_many_files' tool. The user query is modified to include resolved paths,
- * and the content of the files is appended in a structured block.
+ * 'read_many_files' tool, and any `@server:uri` MCP resource references via
+ * the MCP server. The user query is modified to include resolved paths, and
+ * the content of the files/resources is appended in a structured block.
  *
  * @returns An object indicating whether the main hook should proceed with an
  *          LLM call and the processed query parts (including file content).
@@ -170,6 +192,16 @@ export async function resolveAtCommandQuery({
     both: [],
   };
 
+  // MCP resource references (`@server:uri`) collected during the loop and
+  // read after it. Keyed by the configured MCP server names so a path that
+  // merely contains ':' is never mistaken for a resource.
+  const mcpServerNames = new Set(Object.keys(config.getMcpServers() || {}));
+  const mcpResourceRefs: Array<{
+    originalAtPath: string;
+    serverName: string;
+    uri: string;
+  }> = [];
+
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
 
@@ -181,6 +213,18 @@ export async function resolveAtCommandQuery({
     }
 
     const pathName = originalAtPath.substring(1);
+
+    // MCP resource reference (`@server:uri`): detected BEFORE filesystem
+    // resolution so a resource URI containing ':' / '//' isn't mistaken for
+    // a path. Only matches when `server` is a configured MCP server; all
+    // other `@...` tokens fall through to the filesystem logic untouched.
+    const resourceRef = parseMcpResourceRef(pathName, mcpServerNames);
+    if (resourceRef) {
+      mcpResourceRefs.push({ originalAtPath, ...resourceRef });
+      // Keep `@server:uri` verbatim in the text sent to the model.
+      atPathToResolvedSpecMap.set(originalAtPath, pathName);
+      continue;
+    }
 
     // Check if path should be ignored based on filtering options
     const workspaceContext = config.getWorkspaceContext();
@@ -331,8 +375,63 @@ export async function resolveAtCommandQuery({
     onDebugMessage(message);
   }
 
-  // Fallback for lone "@" or completely invalid @-commands resulting in empty initialQueryText
-  if (pathSpecsToRead.length === 0) {
+  // Read any MCP resource references collected above. Each is read
+  // individually via the tool registry (gated on folder trust). A failure
+  // surfaces as an error tool-card but does NOT abort the turn — the model
+  // still sees the rest of the query.
+  const resourceParts: Part[] = [];
+  const resourceDisplays: IndividualToolCallDisplay[] = [];
+  const resourceLabels: string[] = [];
+  for (let i = 0; i < mcpResourceRefs.length; i++) {
+    const ref = mcpResourceRefs[i];
+    const label = `${ref.serverName}:${ref.uri}`;
+    try {
+      const result = await config
+        .getToolRegistry()
+        .readMcpResource(ref.serverName, ref.uri, { signal });
+      for (const content of result.contents ?? []) {
+        if ('text' in content && typeof content.text === 'string') {
+          resourceParts.push({ text: content.text });
+        } else if ('blob' in content && typeof content.blob === 'string') {
+          resourceParts.push({
+            inlineData: {
+              mimeType:
+                typeof content.mimeType === 'string'
+                  ? content.mimeType
+                  : 'application/octet-stream',
+              data: content.blob,
+            },
+          });
+        }
+      }
+      resourceLabels.push(label);
+      resourceDisplays.push({
+        callId: `client-mcp-resource-${userMessageTimestamp}-${i}`,
+        name: 'Read MCP Resource',
+        description: `Read resource ${label}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      });
+    } catch (error) {
+      onDebugMessage(
+        `Failed to read MCP resource ${label}: ${getErrorMessage(error)}`,
+      );
+      resourceDisplays.push({
+        callId: `client-mcp-resource-${userMessageTimestamp}-${i}`,
+        name: 'Read MCP Resource',
+        description: `Read resource ${label}`,
+        status: ToolCallStatus.Error,
+        resultDisplay: `Failed to read resource ${label}: ${getErrorMessage(error)}`,
+        confirmationDetails: undefined,
+      });
+    }
+  }
+
+  // Fallback for lone "@" or completely invalid @-commands resulting in empty
+  // initialQueryText — only when there is nothing to read at all (no valid
+  // file paths AND no resource references).
+  if (pathSpecsToRead.length === 0 && mcpResourceRefs.length === 0) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
       // If the only thing was a lone @, pass original query (which might have spaces)
@@ -348,19 +447,23 @@ export async function resolveAtCommandQuery({
     };
   }
 
-  try {
-    const result = await readManyFiles(config, {
-      paths: pathSpecsToRead,
-      signal,
-    });
+  // Read files (if any). A hard read error aborts the turn, as before — but
+  // any resource tool-cards already gathered are still surfaced.
+  const fileParts: Part[] = [];
+  let fileDisplays: IndividualToolCallDisplay[] = [];
+  if (pathSpecsToRead.length > 0) {
+    try {
+      const result = await readManyFiles(config, {
+        paths: pathSpecsToRead,
+        signal,
+      });
 
-    const parts = Array.isArray(result.contentParts)
-      ? result.contentParts
-      : [result.contentParts];
+      const parts = Array.isArray(result.contentParts)
+        ? result.contentParts
+        : [result.contentParts];
 
-    // Create individual tool call displays for each file read
-    const toolCallDisplays: IndividualToolCallDisplay[] = result.files.map(
-      (file, index) => ({
+      // Create individual tool call displays for each file read
+      fileDisplays = result.files.map((file, index) => ({
         callId: `client-read-${userMessageTimestamp}-${index}`,
         name: file.isDirectory ? 'Read Directory' : 'Read File',
         description: file.isDirectory
@@ -371,64 +474,60 @@ export async function resolveAtCommandQuery({
           ? `Failed to read ${path.basename(file.filePath)}: ${file.error}`
           : undefined,
         confirmationDetails: undefined,
-      }),
-    );
+      }));
 
-    const processedQueryParts: PartListUnion = [{ text: initialQueryText }];
-
-    if (parts.length > 0 && !result.error) {
-      // readManyFiles now returns properly formatted parts with headers and prefixes
-      for (const part of parts) {
-        if (typeof part === 'string') {
-          processedQueryParts.push({ text: part });
-        } else {
-          // part is a Part object (text, inlineData, or fileData)
-          processedQueryParts.push(part);
+      if (parts.length > 0 && !result.error) {
+        // readManyFiles now returns properly formatted parts with headers and prefixes
+        for (const part of parts) {
+          fileParts.push(typeof part === 'string' ? { text: part } : part);
         }
+      } else {
+        onDebugMessage('readManyFiles returned no content or empty content.');
       }
-    } else {
-      onDebugMessage('readManyFiles returned no content or empty content.');
+    } catch (error: unknown) {
+      const errorToolCallDisplay: IndividualToolCallDisplay = {
+        callId: `client-read-${userMessageTimestamp}`,
+        name: 'Read File(s)',
+        description: 'Error attempting to read files',
+        status: ToolCallStatus.Error,
+        resultDisplay: `Error reading files (${contentLabelsForDisplay.join(', ')}): ${getErrorMessage(error)}`,
+        confirmationDetails: undefined,
+      };
+      const errorMessage =
+        typeof errorToolCallDisplay.resultDisplay === 'string'
+          ? errorToolCallDisplay.resultDisplay
+          : undefined;
+      return {
+        processedQuery: null,
+        shouldProceed: false,
+        toolDisplays: [...resourceDisplays, errorToolCallDisplay],
+        filesRead: contentLabelsForDisplay,
+        recording: {
+          filesRead: contentLabelsForDisplay,
+          status: 'error',
+          message: errorMessage,
+        },
+      };
     }
-
-    const processedResult: HandleAtCommandResult = {
-      processedQuery: processedQueryParts,
-      shouldProceed: true,
-      toolDisplays: toolCallDisplays,
-      filesRead: contentLabelsForDisplay,
-    };
-
-    return {
-      ...processedResult,
-      recording: {
-        filesRead: contentLabelsForDisplay,
-        status: 'success',
-      },
-    };
-  } catch (error: unknown) {
-    const errorToolCallDisplay: IndividualToolCallDisplay = {
-      callId: `client-read-${userMessageTimestamp}`,
-      name: 'Read File(s)',
-      description: 'Error attempting to read files',
-      status: ToolCallStatus.Error,
-      resultDisplay: `Error reading files (${contentLabelsForDisplay.join(', ')}): ${getErrorMessage(error)}`,
-      confirmationDetails: undefined,
-    };
-    const errorMessage =
-      typeof errorToolCallDisplay.resultDisplay === 'string'
-        ? errorToolCallDisplay.resultDisplay
-        : undefined;
-    return {
-      processedQuery: null,
-      shouldProceed: false,
-      toolDisplays: [errorToolCallDisplay],
-      filesRead: contentLabelsForDisplay,
-      recording: {
-        filesRead: contentLabelsForDisplay,
-        status: 'error',
-        message: errorMessage,
-      },
-    };
   }
+
+  const processedQueryParts: PartListUnion = [
+    { text: initialQueryText },
+    ...fileParts,
+    ...resourceParts,
+  ];
+  const allLabels = [...contentLabelsForDisplay, ...resourceLabels];
+
+  return {
+    processedQuery: processedQueryParts,
+    shouldProceed: true,
+    toolDisplays: [...fileDisplays, ...resourceDisplays],
+    filesRead: allLabels,
+    recording: {
+      filesRead: allLabels,
+      status: 'success',
+    },
+  };
 }
 
 export async function handleAtCommand(

@@ -521,4 +521,66 @@ describe('useAtCompletion', () => {
       ]);
     });
   });
+
+  describe('MCP resource completion', () => {
+    it('suggests resource URIs for @server: when the server is configured', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: (name: string) =>
+            name === 'myserver'
+              ? [
+                  { uri: 'res://alpha', name: 'a', serverName: 'myserver' },
+                  { uri: 'res://beta', name: 'b', serverName: 'myserver' },
+                ]
+              : [],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'myserver:res://a',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      // Only 'res://alpha' prefix-matches 'res://a'.
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'myserver:res://alpha',
+      ]);
+    });
+
+    it('falls through to filesystem search when the prefix is not a configured server', async () => {
+      testRootDir = await createTmpDir({ 'notes.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({ getResourcesByServer: () => [] }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'notes',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      // 'notes' has no ':' → not a resource pattern → filesystem search.
+      expect(result.current.suggestions.map((s) => s.value)).toContain(
+        'notes.txt',
+      );
+    });
+  });
 });

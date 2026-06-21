@@ -18,17 +18,20 @@ import {
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
+import type { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   addMCPStatusChangeListener,
   createStreamableHttpCompatibilityFetch,
   createTransport,
   discoverPrompts,
+  discoverResources,
   getAllMCPServerStatuses,
   getMCPServerStatus,
   hasNetworkTransport,
   isEnabled,
   listMcpPrompts,
+  listMcpResources,
   MCPServerStatus,
   McpClient,
   populateMcpServerCommand,
@@ -58,6 +61,19 @@ vi.mock('../mcp/oauth-token-storage.js');
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: vi.fn(() => mockDebugLogger),
 }));
+
+/**
+ * Minimal Config stub for the non-pool `discover()` path, which now reads
+ * `cliConfig.getResourceRegistry()` to register discovered resources. The
+ * returned registry just needs to accept `registerResource` without
+ * throwing — these tests assert on the constructor-injected tool/prompt
+ * registries, not the resource one.
+ */
+function cfgWithResources(): Config {
+  return {
+    getResourceRegistry: () => ({ registerResource: vi.fn() }),
+  } as unknown as Config;
+}
 
 describe('mcp-client', () => {
   beforeEach(() => {
@@ -109,7 +125,7 @@ describe('mcp-client', () => {
         false,
       );
       await client.connect();
-      await client.discover({} as Config);
+      await client.discover(cfgWithResources());
       expect(mockedMcpToTool).toHaveBeenCalledOnce();
     });
 
@@ -201,7 +217,7 @@ describe('mcp-client', () => {
         false,
       );
       await client.connect();
-      await client.discover({} as Config);
+      await client.discover(cfgWithResources());
       expect(mockedToolRegistry.registerTool).toHaveBeenCalledTimes(2);
     });
 
@@ -237,8 +253,8 @@ describe('mcp-client', () => {
         false,
       );
       await client.connect();
-      await expect(client.discover({} as Config)).rejects.toThrow(
-        'No prompts or tools found on the server.',
+      await expect(client.discover(cfgWithResources())).rejects.toThrow(
+        'No prompts, tools, or resources found on the server.',
       );
     });
 
@@ -288,7 +304,7 @@ describe('mcp-client', () => {
       // discover failure we're about to assert against.
       expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
 
-      await expect(client.discover({} as Config)).rejects.toThrow();
+      await expect(client.discover(cfgWithResources())).rejects.toThrow();
 
       expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
@@ -339,7 +355,7 @@ describe('mcp-client', () => {
       );
       await client.connect();
 
-      const snapshot = await client.discoverAndReturn({} as Config);
+      const snapshot = await client.discoverAndReturn(cfgWithResources());
 
       expect(snapshot.tools).toHaveLength(1);
       expect(snapshot.tools[0].serverToolName).toBe('pure-tool');
@@ -408,7 +424,7 @@ describe('mcp-client', () => {
       // `discoverAndReturn(cliConfig)` (no opts) applies filters,
       // matching the legacy `discover()` semantics expected by
       // non-pool consumers.
-      const snapshot = await client.discoverAndReturn({} as Config, {
+      const snapshot = await client.discoverAndReturn(cfgWithResources(), {
         applyConfigFilters: false,
       });
 
@@ -479,7 +495,7 @@ describe('mcp-client', () => {
       await client.connect();
 
       // No opts → default applyConfigFilters=true → filters applied.
-      const snapshot = await client.discoverAndReturn({} as Config);
+      const snapshot = await client.discoverAndReturn(cfgWithResources());
 
       // `excludeTools: ['filtered_out']` excludes the second tool;
       // `includeTools: ['allowed']` keeps the first.
@@ -533,9 +549,9 @@ describe('mcp-client', () => {
         false,
       );
       await client.connect();
-      await expect(client.discoverAndReturn({} as Config)).rejects.toThrow(
-        'No prompts or tools found on the server.',
-      );
+      await expect(
+        client.discoverAndReturn(cfgWithResources()),
+      ).rejects.toThrow('No prompts, tools, or resources found on the server.');
       // Status flipped to DISCONNECTED (same as discover() path).
       expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
       // Registries strictly untouched even on throw — pure method invariant.
@@ -554,9 +570,9 @@ describe('mcp-client', () => {
       );
       // Status starts DISCONNECTED; discoverAndReturn must reject without
       // hitting the network.
-      await expect(client.discoverAndReturn({} as Config)).rejects.toThrow(
-        'Client is not connected.',
-      );
+      await expect(
+        client.discoverAndReturn(cfgWithResources()),
+      ).rejects.toThrow('Client is not connected.');
     });
 
     it('discover() delegates to discoverAndReturn and registers both tools and prompts', async () => {
@@ -603,7 +619,7 @@ describe('mcp-client', () => {
         false,
       );
       await client.connect();
-      await client.discover({} as Config);
+      await client.discover(cfgWithResources());
       expect(toolRegistry.registerTool).toHaveBeenCalledTimes(1);
       expect(promptRegistry.registerPrompt).toHaveBeenCalledTimes(2);
     });
@@ -629,14 +645,32 @@ describe('mcp-client', () => {
       expect(result[1].name).toBe('farewell');
     });
 
-    it('returns [] when server has no prompts capability', async () => {
+    it('attempts prompts/list even when the prompts capability is undeclared (lenient)', async () => {
+      // Regression guard: pre-fix this returned [] WITHOUT a request when
+      // `capabilities.prompts` was absent, hiding prompts from servers that
+      // under-declare the capability. We now always attempt the call.
       const mockClient = {
         getServerCapabilities: vi.fn().mockReturnValue({}),
-        request: vi.fn(),
+        request: vi
+          .fn()
+          .mockRejectedValue(new Error('MCP error -32601: Method not found')),
       } as unknown as ClientLib.Client;
       const result = await listMcpPrompts('no-prompts', mockClient);
       expect(result).toEqual([]);
-      expect(vi.mocked(mockClient.request)).not.toHaveBeenCalled();
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists prompts from a server that omits the prompts capability but still answers', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        request: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'greet' }],
+        }),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('under-declared', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('greet');
+      expect(result[0].serverName).toBe('under-declared');
     });
 
     it('returns [] on protocol error (server up but list call rejects)', async () => {
@@ -646,6 +680,72 @@ describe('mcp-client', () => {
       } as unknown as ClientLib.Client;
       const result = await listMcpPrompts('flaky', mockClient);
       expect(result).toEqual([]);
+    });
+  });
+
+  describe('listMcpResources', () => {
+    it('returns enriched DiscoveredMCPResource[] with serverName', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockResolvedValue({
+          resources: [
+            { uri: 'file:///a.txt', name: 'a' },
+            { uri: 'file:///b.txt', name: 'b', mimeType: 'text/plain' },
+          ],
+        }),
+      } as unknown as ClientLib.Client;
+
+      const result = await listMcpResources('my-server', mockClient);
+      expect(result).toHaveLength(2);
+      expect(result[0].serverName).toBe('my-server');
+      expect(result[0].uri).toBe('file:///a.txt');
+      expect(result[1].mimeType).toBe('text/plain');
+      // Resources carry no bound invoke (unlike prompts).
+      expect((result[0] as Record<string, unknown>)['invoke']).toBeUndefined();
+    });
+
+    it('attempts resources/list even when the resources capability is undeclared (lenient)', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        request: vi
+          .fn()
+          .mockRejectedValue(new Error('MCP error -32601: Method not found')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('no-resources', mockClient);
+      expect(result).toEqual([]);
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns [] on protocol error (server up but list call rejects)', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockRejectedValue(new Error('boom')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('flaky', mockClient);
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('discoverResources wrapper', () => {
+    it('registers discovered resources into the supplied ResourceRegistry', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockResolvedValue({
+          resources: [{ uri: 'file:///x.txt', name: 'x' }],
+        }),
+      } as unknown as ClientLib.Client;
+      const resourceRegistry = {
+        registerResource: vi.fn(),
+      } as unknown as ResourceRegistry;
+      const out = await discoverResources(
+        'wrapper-server',
+        mockClient,
+        resourceRegistry,
+      );
+      expect(resourceRegistry.registerResource).toHaveBeenCalledTimes(1);
+      expect(out).toHaveLength(1);
+      expect(out[0].uri).toBe('file:///x.txt');
+      expect(out[0].serverName).toBe('wrapper-server');
     });
   });
 

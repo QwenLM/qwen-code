@@ -10,6 +10,42 @@ import { FileSearchFactory, escapePath } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 
+/**
+ * `@server:uri` MCP resource completion. Returns suggestions when `pattern`
+ * is of the form `<server>:<partial>` and `<server>` is a configured MCP
+ * server (so a plain file path containing ':' is never hijacked); returns
+ * `null` otherwise to let the caller fall through to filesystem search.
+ *
+ * Matching prefers a URI prefix match, then a looser substring match. The
+ * resource list comes from the post-discovery `ResourceRegistry`, so an
+ * empty result before discovery completes simply shows no suggestions.
+ */
+function getMcpResourceSuggestions(
+  config: Config | undefined,
+  pattern: string,
+): Suggestion[] | null {
+  if (!config) return null;
+  const colon = pattern.indexOf(':');
+  if (colon <= 0) return null;
+  const serverName = pattern.slice(0, colon);
+  const mcpServers = config.getMcpServers?.() || {};
+  if (!(serverName in mcpServers)) return null;
+
+  const partialUri = pattern.slice(colon + 1);
+  const resources =
+    config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
+  const matches = resources.filter(
+    (r) =>
+      r.uri.startsWith(partialUri) ||
+      (partialUri.length > 0 && r.uri.includes(partialUri)),
+  );
+  return matches.slice(0, MAX_SUGGESTIONS_TO_SHOW * 3).map((r) => ({
+    label: `${serverName}:${r.uri}`,
+    value: `${serverName}:${r.uri}`,
+    isDirectory: false,
+  }));
+}
+
 export enum AtCompletionStatus {
   IDLE = 'idle',
   INITIALIZING = 'initializing',
@@ -201,7 +237,26 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
     };
 
     const search = async () => {
-      if (!fileSearch.current || state.pattern === null) {
+      if (state.pattern === null) {
+        return;
+      }
+
+      // `@server:uri` MCP resource completion short-circuits filesystem
+      // search. Synchronous (in-memory registry), so no abort/slow-timer
+      // machinery is needed.
+      const resourceSuggestions = getMcpResourceSuggestions(
+        config,
+        state.pattern,
+      );
+      if (resourceSuggestions !== null) {
+        if (slowSearchTimer.current) {
+          clearTimeout(slowSearchTimer.current);
+        }
+        dispatch({ type: 'SEARCH_SUCCESS', payload: resourceSuggestions });
+        return;
+      }
+
+      if (!fileSearch.current) {
         return;
       }
 
