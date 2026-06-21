@@ -251,6 +251,17 @@ export function useVoiceInput({
     ],
   );
 
+  const updateAudioLevel = useCallback(
+    (recorder: VoiceRecorder, sessionId: number) => {
+      if (!isCurrentSession(recorder, sessionId)) return;
+      const level = recorder.audioLevel?.();
+      if (typeof level === 'number' && mountedRef.current) {
+        setAudioLevelState(level);
+      }
+    },
+    [isCurrentSession],
+  );
+
   const startRecording = useCallback(
     (silenceDetection: boolean) => {
       const recorder = createRecorder();
@@ -271,9 +282,18 @@ export function useVoiceInput({
           ),
         )
         .then(async () => {
+          if (!isStreaming) {
+            if (statusRef.current !== 'recording') {
+              return;
+            }
+            pumpTimerRef.current = setInterval(() => {
+              updateAudioLevel(recorder, sessionId);
+            }, 100);
+            return;
+          }
           // Streaming: open the WS session and pump drained PCM into it while
           // recording, surfacing partial transcripts live.
-          if (!isStreaming || !isCurrentSession(recorder, sessionId)) {
+          if (!isCurrentSession(recorder, sessionId)) {
             return;
           }
           if (recorder.supportsStreaming?.() === false) {
@@ -307,10 +327,7 @@ export function useVoiceInput({
               if (!active) return;
               const pcm = active.drain?.();
               if (pcm && pcm.length > 0) session.pushAudio(pcm);
-              const level = active.audioLevel?.();
-              if (typeof level === 'number' && mountedRef.current) {
-                setAudioLevelState(level);
-              }
+              updateAudioLevel(active, sessionId);
             } catch (error) {
               clearPump();
               clearReleaseTimer();
@@ -372,6 +389,7 @@ export function useVoiceInput({
       resetStreamUi,
       setVoiceStatus,
       stopRecorderQuietly,
+      updateAudioLevel,
     ],
   );
 

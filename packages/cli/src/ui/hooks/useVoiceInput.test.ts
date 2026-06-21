@@ -184,6 +184,45 @@ describe('useVoiceInput', () => {
     expect(result.current.status).toBe('recording');
   });
 
+  it('updates audio level while recording with a batch model', async () => {
+    vi.useFakeTimers();
+    try {
+      buffer = createBuffer();
+      const recorder = {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn().mockResolvedValue({
+          data: new Uint8Array([1]),
+          mimeType: 'audio/wav',
+        }),
+        audioLevel: vi.fn().mockReturnValue(0.42),
+      };
+
+      const { result } = renderHook(() =>
+        useVoiceInput({
+          enabled: true,
+          mode: 'hold',
+          voiceModel: 'qwen3-asr-flash',
+          buffer,
+          createRecorder: () => recorder,
+          transcribe: vi.fn().mockResolvedValue('hold text'),
+        }),
+      );
+
+      await act(async () => {
+        result.current.handleKeypress(voiceKey);
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      expect(recorder.audioLevel).toHaveBeenCalled();
+      expect(result.current.audioLevel).toBe(0.42);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('hold mode: finalizes after key repeat stops', async () => {
     vi.useFakeTimers();
     try {
