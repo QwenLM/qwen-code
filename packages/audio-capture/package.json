@@ -27,6 +27,7 @@
     "build": "node-gyp rebuild && tsc --build",
     "build:ts": "tsc --build",
     "test": "vitest run",
+    "test:ci": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
