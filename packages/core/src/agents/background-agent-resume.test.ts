@@ -1962,6 +1962,7 @@ describe('BackgroundAgentResumeService', () => {
     const { service, subagentManager } = createService();
     const missingMetaAgentId = 'completed-missing-meta';
     const missingOutputAgentId = 'completed-missing-output';
+    const corruptOutputAgentId = 'completed-corrupt-output';
 
     registry.register({
       agentId: missingMetaAgentId,
@@ -2001,18 +2002,110 @@ describe('BackgroundAgentResumeService', () => {
     });
     registry.complete(missingOutputAgentId, 'done');
 
+    const corruptMetaPath = path.join(tempDir, 'corrupt-output.meta.json');
+    const corruptOutputPath = path.join(tempDir, 'corrupt-output.jsonl');
+    writeAgentMeta(corruptMetaPath, {
+      agentId: corruptOutputAgentId,
+      agentType: 'researcher',
+      description: 'corrupt output',
+      parentSessionId: 'session-corrupt-output',
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(corruptOutputPath, 'not-json\n', 'utf8');
+    registry.register({
+      agentId: corruptOutputAgentId,
+      description: 'corrupt output',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: corruptOutputPath,
+      metaPath: corruptMetaPath,
+    });
+    registry.complete(corruptOutputAgentId, 'done');
+
     await expect(
       service.reviveCompletedBackgroundAgent(missingMetaAgentId, 'go'),
     ).resolves.toBeUndefined();
     await expect(
       service.reviveCompletedBackgroundAgent(missingOutputAgentId, 'go'),
     ).resolves.toBeUndefined();
+    await expect(
+      service.reviveCompletedBackgroundAgent(corruptOutputAgentId, 'go'),
+    ).resolves.toBeUndefined();
 
     expect(registry.get(missingMetaAgentId)?.status).toBe('completed');
     expect(registry.get(missingMetaAgentId)?.result).toBe('done');
     expect(registry.get(missingOutputAgentId)?.status).toBe('completed');
     expect(registry.get(missingOutputAgentId)?.result).toBe('done');
+    expect(registry.get(corruptOutputAgentId)?.status).toBe('completed');
+    expect(registry.get(corruptOutputAgentId)?.result).toBe('done');
     expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
+
+  it('restores the completed entry when revive setup fails after the state flip', async () => {
+    const sessionId = 'session-revive-setup-fails';
+    const agentId = 'agent-revive-setup-fails';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Finished research',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Finished research' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Finished research',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'All done');
+    const original = registry.get(agentId);
+    expect(original?.notified).toBe(true);
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockRejectedValue(
+      new Error('setup failed'),
+    );
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
+    ).resolves.toBeUndefined();
+
+    const restored = registry.get(agentId);
+    expect(restored?.status).toBe('completed');
+    expect(restored?.result).toBe('All done');
+    expect(restored?.notified).toBe(true);
   });
 
   it('emits one start event and one terminal notification when a completed agent is revived', async () => {

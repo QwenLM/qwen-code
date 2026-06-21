@@ -553,7 +553,15 @@ export class BackgroundAgentResumeService {
       return undefined;
     }
     try {
-      await jsonl.read<ChatRecord>(entry.outputFile);
+      const records = await jsonl.read<ChatRecord>(entry.outputFile, {
+        throwOnNonEnoentError: true,
+      });
+      if (records.length === 0) {
+        debugLogger.warn(
+          `[BackgroundAgentResume] Cannot revive "${agentId}": transcript is empty or unreadable.`,
+        );
+        return undefined;
+      }
     } catch (error) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": transcript could not be read: ` +
@@ -570,8 +578,27 @@ export class BackgroundAgentResumeService {
           `${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    try {
+      registry.assertCanStartBackgroundAgent();
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+    const completedEntry = {
+      ...entry,
+      pendingMessages: [...(entry.pendingMessages ?? [])],
+      recentActivities: [...(entry.recentActivities ?? [])],
+      pendingApprovals: [...(entry.pendingApprovals ?? [])],
+    };
     this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
-    return this.resumeBackgroundAgent(agentId, initialMessage);
+    const revived = await this.resumeBackgroundAgent(agentId, initialMessage);
+    if (!revived) {
+      this.restoreCompletedEntry(completedEntry);
+    }
+    return revived;
   }
 
   private async resumeBackgroundAgentInternal(
@@ -609,7 +636,6 @@ export class BackgroundAgentResumeService {
         stats: undefined,
         recentActivities: [],
         pendingMessages: [...(existing.pendingMessages ?? [])],
-        suppressRegisterCallback: true,
       });
     } catch (error) {
       const errorMessage =
@@ -811,6 +837,7 @@ export class BackgroundAgentResumeService {
         prompt: recovery.initialPrompt ?? existing.prompt,
         recentActivities: [],
         pendingMessages,
+        suppressRegisterCallback: true,
       };
       const entry = registry.register(registration);
       const lateContinuationMessages = operation.continuationMessages.slice(
@@ -1093,6 +1120,22 @@ export class BackgroundAgentResumeService {
       suppressRegisterCallback: options.suppressRegisterCallback,
     };
     return registry.register(registration);
+  }
+
+  private restoreCompletedEntry(entry: AgentTask): AgentTask {
+    const registry = this.config.getBackgroundTaskRegistry();
+    const restored = registry.register({
+      ...entry,
+      isBackgrounded: true,
+      status: 'completed',
+      pendingMessages: [...(entry.pendingMessages ?? [])],
+      recentActivities: [...(entry.recentActivities ?? [])],
+      pendingApprovals: [...(entry.pendingApprovals ?? [])],
+      suppressRegisterCallback: true,
+    });
+    restored.notified = entry.notified;
+    restored.outputOffset = entry.outputOffset;
+    return restored;
   }
 
   private async createResumedForkSubagent(
