@@ -12,6 +12,80 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.18.5](https://github.com/QwenLM/qwen-code/releases/tag/v0.18.5) - 2026-06-21
+
+### Added
+
+- core: add Requesty provider ([#5478](https://github.com/QwenLM/qwen-code/pull/5478))
+- ci: on-demand tmux real-user testing for PRs ([#5203](https://github.com/QwenLM/qwen-code/pull/5203))
+- mcp: support MCP resources and reliably surface prompts ([#5544](https://github.com/QwenLM/qwen-code/pull/5544))
+
+### Fixed
+
+- core: require opt-in for plan mode prompt ([#5433](https://github.com/QwenLM/qwen-code/pull/5433))
+- core: evaluate ignore files named with dot prefixes ([#5458](https://github.com/QwenLM/qwen-code/pull/5458))
+- core: enforce shell directory workspace boundary ([#5454](https://github.com/QwenLM/qwen-code/pull/5454))
+- core: validate lsp socket ports ([#5493](https://github.com/QwenLM/qwen-code/pull/5493))
+- core: parse max output token env strictly ([#5491](https://github.com/QwenLM/qwen-code/pull/5491))
+- core: detect providers by hostname ([#5450](https://github.com/QwenLM/qwen-code/pull/5450))
+- cli: validate ACP glob max results ([#5480](https://github.com/QwenLM/qwen-code/pull/5480))
+- core: allow dot-prefixed plans directories ([#5460](https://github.com/QwenLM/qwen-code/pull/5460))
+- extensions: fetch http marketplaces with http client ([#5452](https://github.com/QwenLM/qwen-code/pull/5452))
+- cli: parse FORCE_HYPERLINK strictly ([#5489](https://github.com/QwenLM/qwen-code/pull/5489))
+- core: parse tool concurrency env strictly ([#5496](https://github.com/QwenLM/qwen-code/pull/5496))
+- cli: enforce custom theme home boundary ([#5456](https://github.com/QwenLM/qwen-code/pull/5456))
+- dingtalk: skip uppercase webhook reaction targets ([#5466](https://github.com/QwenLM/qwen-code/pull/5466))
+- desktop: accept uppercase icon URL schemes ([#5470](https://github.com/QwenLM/qwen-code/pull/5470))
+- cli: reject partial session size values ([#5475](https://github.com/QwenLM/qwen-code/pull/5475))
+- telegram: clear typing intervals on disconnect ([#5477](https://github.com/QwenLM/qwen-code/pull/5477))
+- cli: respect installation path boundaries ([#5441](https://github.com/QwenLM/qwen-code/pull/5441))
+- accept uppercase endpoint URL schemes ([#5443](https://github.com/QwenLM/qwen-code/pull/5443))
+- core: reject fractional computer-use integer strings ([#5500](https://github.com/QwenLM/qwen-code/pull/5500))
+- core: match provider base URL slash variants ([#5448](https://github.com/QwenLM/qwen-code/pull/5448))
+- cli: enforce temp path boundaries for at-file ([#5446](https://github.com/QwenLM/qwen-code/pull/5446))
+- desktop: preserve uppercase favicon URLs ([#5463](https://github.com/QwenLM/qwen-code/pull/5463))
+- desktop: parse NO_PROXY ports strictly ([#5498](https://github.com/QwenLM/qwen-code/pull/5498))
+- serve: validate session reaper timeouts ([#5484](https://github.com/QwenLM/qwen-code/pull/5484))
+- extensions: handle uppercase npm registry schemes ([#5437](https://github.com/QwenLM/qwen-code/pull/5437))
+- core: add missing Token Plan models (qwen3.7-plus, glm-5.2, kimi-k2.7-code) ([#5505](https://github.com/QwenLM/qwen-code/pull/5505))
+- cli: wire ACP model-invocable commands ([#5504](https://github.com/QwenLM/qwen-code/pull/5504))
+- cli: reject partial cpu profile durations ([#5486](https://github.com/QwenLM/qwen-code/pull/5486))
+- desktop: restore locale parity ([#5537](https://github.com/QwenLM/qwen-code/pull/5537))
+- extension: accept uppercase URL schemes in Claude plugin sources ([#5461](https://github.com/QwenLM/qwen-code/pull/5461))
+- desktop: parse server ports strictly ([#5509](https://github.com/QwenLM/qwen-code/pull/5509))
+- desktop: validate generic oauth token responses ([#5511](https://github.com/QwenLM/qwen-code/pull/5511))
+- core: don't treat an empty-parts message as a function call/response ([#5494](https://github.com/QwenLM/qwen-code/pull/5494))
+- desktop: allow double dots in bundle filenames ([#5515](https://github.com/QwenLM/qwen-code/pull/5515))
+- cli: handle truncated remote input files ([#5473](https://github.com/QwenLM/qwen-code/pull/5473))
+- vscode: keep UNC paths absolute ([#5542](https://github.com/QwenLM/qwen-code/pull/5542))
+- desktop: keep sibling paths absolute ([#5517](https://github.com/QwenLM/qwen-code/pull/5517))
+- cli: allow dotfile paths in Web Shell sendFile ([#5541](https://github.com/QwenLM/qwen-code/pull/5541))
+- cli: allow double dots in update archives ([#5521](https://github.com/QwenLM/qwen-code/pull/5521))
+- desktop: separate transform data output lines ([#5525](https://github.com/QwenLM/qwen-code/pull/5525))
+- desktop: handle Windows file mentions ([#5523](https://github.com/QwenLM/qwen-code/pull/5523))
+- desktop: consolidate path boundary checks ([#5545](https://github.com/QwenLM/qwen-code/pull/5545))
+- desktop: reject fractional transfer sizes ([#5527](https://github.com/QwenLM/qwen-code/pull/5527))
+- cli: validate ACP file read windows ([#5482](https://github.com/QwenLM/qwen-code/pull/5482))
+- extensions: accept uppercase marketplace source schemes ([#5435](https://github.com/QwenLM/qwen-code/pull/5435))
+
+### Performance
+
+- core: read current git branch directly from .git instead of spawning git ([#5432](https://github.com/QwenLM/qwen-code/pull/5432))
+
+### Documentation
+
+- triage: Add reuse-before-new-code review check ([#5547](https://github.com/QwenLM/qwen-code/pull/5547))
+
+### Other
+
+- test(core): drop duplicate gitdiff untracked count case ([#5468](https://github.com/QwenLM/qwen-code/pull/5468))
+- test(desktop): update blocked scheme open-url assertion ([#5529](https://github.com/QwenLM/qwen-code/pull/5529))
+- test(core): wait for cron lock probe takeover ([#5535](https://github.com/QwenLM/qwen-code/pull/5535))
+- test(desktop): align interceptor packaging contract ([#5531](https://github.com/QwenLM/qwen-code/pull/5531))
+- test(desktop): enable feedback flag in permission tests ([#5533](https://github.com/QwenLM/qwen-code/pull/5533))
+- ci(release): trigger CI from release branch pushes ([#5543](https://github.com/QwenLM/qwen-code/pull/5543))
+- Use VS Code theme tokens for companion scrollbar ([#5488](https://github.com/QwenLM/qwen-code/pull/5488))
+
 ## [0.18.4](https://github.com/QwenLM/qwen-code/releases/tag/v0.18.4) - 2026-06-20
 
 ### Added
