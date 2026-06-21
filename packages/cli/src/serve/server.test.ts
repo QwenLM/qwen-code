@@ -1799,6 +1799,32 @@ describe('createServeApp', () => {
       expect(res.status).toBe(500);
     });
 
+    it('serves the shell when webShellDir is under a dotfile path (e.g. ~/.nvm)', async () => {
+      // Regression: the send library defaults to dotfiles:'ignore', which
+      // returns 404 for any path containing a segment starting with '.'.
+      // Users who installed qwen via nvm have the package under
+      // ~/.nvm/.../web-shell/index.html.
+      const dotParent = await fsp.mkdtemp(path.join(os.tmpdir(), '.fake-nvm-'));
+      const nestedShellDir = path.join(dotParent, 'web-shell');
+      await fsp.mkdir(nestedShellDir, { recursive: true });
+      await fsp.writeFile(path.join(nestedShellDir, 'index.html'), INDEX_HTML);
+      await fsp.mkdir(path.join(nestedShellDir, 'assets'));
+      await fsp.writeFile(
+        path.join(nestedShellDir, 'assets', 'app.js'),
+        'export const x = 1;\n',
+      );
+      try {
+        const app = createServeApp(baseOpts, undefined, {
+          webShellDir: nestedShellDir,
+        });
+        const res = await request(app).get('/').set('Host', host);
+        expect(res.status).toBe(200);
+        expect(res.text).toContain('<div id="root">');
+      } finally {
+        await fsp.rm(dotParent, { recursive: true, force: true });
+      }
+    });
+
     it('isDocumentNavigation recognizes each navigation signal', () => {
       const nav = (headers: Record<string, string>) =>
         isDocumentNavigation({ headers } as never);
