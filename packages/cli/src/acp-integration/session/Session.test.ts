@@ -1285,6 +1285,18 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 
+    it('rejects while notification work is mutating history', async () => {
+      (
+        session as unknown as { notificationProcessing: boolean }
+      ).notificationProcessing = true;
+      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+
+      await expect(session.continueTurn()).rejects.toMatchObject({
+        code: 409,
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('re-submits an orphaned trailing user prompt under the same turn id without recording a user message', async () => {
       setHistoryTail([{ role: 'user', parts: [{ text: 'do the thing' }] }]);
       const stripSpy = getStripSpy();

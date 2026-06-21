@@ -1288,6 +1288,12 @@ export class Session implements SessionContext {
         'A turn is already in flight; continue only applies to a stopped session.',
       );
     }
+    if (this.cronProcessing || this.notificationProcessing) {
+      throw new RequestError(
+        409,
+        'A background turn is already in flight; continue only applies to a stopped session.',
+      );
+    }
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
 
