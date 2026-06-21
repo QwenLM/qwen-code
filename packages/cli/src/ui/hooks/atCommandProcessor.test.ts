@@ -1470,5 +1470,36 @@ describe('handleAtCommand', () => {
         '(content too large — skipped)',
       );
     });
+
+    it('caps CUMULATIVE blob size: two sub-limit blobs whose sum exceeds the cap', async () => {
+      // Each 5M blob is under the 8M per-blob cap, but together they exceed it.
+      // The first is injected; the second pushes the running total over and is
+      // skipped — the per-blob check alone would have let both through.
+      const blob = 'A'.repeat(5_000_000);
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [
+          { uri: 'res://m', mimeType: 'image/png', blob },
+          { uri: 'res://m', mimeType: 'image/png', blob },
+        ],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://m',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 610,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const inlineCount = (
+        result.processedQuery as Array<Record<string, unknown>>
+      ).filter((p) => 'inlineData' in p).length;
+      expect(inlineCount).toBe(1); // only the first blob fit
+      expect(result.toolDisplays![0].resultDisplay).toBe(
+        'Injected 1 attachment (truncated)',
+      );
+    });
   });
 });

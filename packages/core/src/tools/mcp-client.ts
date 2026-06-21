@@ -373,10 +373,20 @@ export class McpClient {
     // server dropped between discoveries must not linger in the registry.
     // Mirrors `SessionMcpView.applyResources`' remove-then-register on the
     // pool path.
+    //
+    // Guard on `resources.length > 0`: `listMcpResources` swallows ALL errors
+    // (including transient network failures / timeouts) and returns [], so an
+    // unconditional clear would silently purge a server's resources whenever a
+    // `resources/list` call transiently fails while tools/prompts succeed. We
+    // only replace the set when we actually got one back. (Trade-off: a server
+    // that legitimately drops to zero resources keeps the stale set until a
+    // non-empty discovery — far less harmful than wiping good resources.)
     const resourceRegistry = cliConfig.getResourceRegistry();
-    resourceRegistry.removeResourcesByServer(this.serverName);
-    for (const resource of resources) {
-      resourceRegistry.registerResource(resource);
+    if (resources.length > 0) {
+      resourceRegistry.removeResourcesByServer(this.serverName);
+      for (const resource of resources) {
+        resourceRegistry.registerResource(resource);
+      }
     }
   }
 

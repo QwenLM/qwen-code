@@ -485,11 +485,13 @@ export async function resolveAtCommandQuery({
     // such as resource links / metadata).
     const summary: string[] = [];
     if (textChars > 0) {
-      summary.push(`${textChars} chars${truncated ? ' (truncated)' : ''}`);
+      summary.push(`${textChars} chars`);
     }
     if (blobCount > 0) {
       summary.push(`${blobCount} attachment${blobCount === 1 ? '' : 's'}`);
     }
+    // `truncated` is a top-level suffix so it also surfaces for skipped/
+    // capped blobs, not just text.
     resourceDisplays.push({
       callId,
       name: 'Read MCP Resource',
@@ -497,7 +499,7 @@ export async function resolveAtCommandQuery({
       status: ToolCallStatus.Success,
       resultDisplay:
         summary.length > 0
-          ? `Injected ${summary.join(' + ')}`
+          ? `Injected ${summary.join(' + ')}${truncated ? ' (truncated)' : ''}`
           : truncated
             ? '(content too large — skipped)'
             : '(no readable content)',
