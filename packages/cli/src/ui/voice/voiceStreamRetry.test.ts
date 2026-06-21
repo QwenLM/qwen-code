@@ -85,4 +85,14 @@ describe('openVoiceStreamWithRetry', () => {
     await expect(openVoiceStreamWithRetry(open)).rejects.toBe(error);
     expect(open).toHaveBeenCalledTimes(1);
   });
+
+  it('does not retry rate limit errors', async () => {
+    const error = new Error('429 rate limit exceeded');
+    const open = vi
+      .fn<() => Promise<VoiceStreamSession>>()
+      .mockRejectedValueOnce(error);
+
+    await expect(openVoiceStreamWithRetry(open)).rejects.toBe(error);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
 });

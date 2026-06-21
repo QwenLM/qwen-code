@@ -23,6 +23,7 @@ export interface QwenRealtimeDeps {
 
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
+const MAX_BUFFERED_AUDIO_BYTES = 1024 * 1024;
 
 export function deriveQwenRealtimeUrl(baseUrl: string, model: string): string {
   return `${deriveWebSocketBase(baseUrl)}/api-ws/v1/realtime?model=${encodeURIComponent(model)}`;
@@ -166,6 +167,7 @@ export function openQwenAsrRealtimeStream(
           resolve({
             pushAudio: (pcm) => {
               if (ws.readyState !== ws.OPEN || pcm.length === 0) return;
+              if ((ws.bufferedAmount ?? 0) > MAX_BUFFERED_AUDIO_BYTES) return;
               sendJson({
                 type: 'input_audio_buffer.append',
                 audio: Buffer.from(pcm).toString('base64'),

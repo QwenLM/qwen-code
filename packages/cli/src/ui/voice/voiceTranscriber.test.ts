@@ -361,6 +361,26 @@ describe('voiceTranscriber', () => {
     ).toBe('http://localhost:8080/v1');
   });
 
+  it('strips userinfo from voice base URLs', () => {
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Qwen ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl:
+          'https://user:secret@dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+    ]);
+
+    expect(
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings({}, 'sk-primary'),
+        voiceModel: 'qwen3-asr-flash',
+      }).baseUrl,
+    ).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1');
+  });
+
   it('detects keyterm echoes in non-Latin scripts', () => {
     expect(isKeytermEcho('提交 分支 架构 测试', '提交 分支 架构 测试')).toBe(
       true,
@@ -486,7 +506,11 @@ describe('voiceTranscriber', () => {
       ok: false,
       status: 500,
       statusText: 'Internal Server Error',
-      text: vi.fn().mockResolvedValue(`Bearer sk-secret ${'x'.repeat(500)}`),
+      text: vi
+        .fn()
+        .mockResolvedValue(
+          `Bearer sk-secret Invalid API key: sk-test ${'x'.repeat(500)}`,
+        ),
     });
 
     let error: unknown;
@@ -516,6 +540,7 @@ describe('voiceTranscriber', () => {
     const message = (error as Error).message;
     expect(message).toContain('Bearer [REDACTED]');
     expect(message).not.toContain('sk-secret');
+    expect(message).not.toContain('sk-test');
     expect(message).toMatch(/\.\.\.$/);
   });
 

@@ -59,10 +59,13 @@ describe('package asset scripts', () => {
     const distPackageJson = JSON.parse(
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
     );
+    const rootPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'package.json'), 'utf8'),
+    );
 
     expect(distPackageJson.files).toContain('examples');
     expect(distPackageJson.optionalDependencies).toMatchObject({
-      '@qwen-code/audio-capture': '0.17.0',
+      '@qwen-code/audio-capture': rootPackageJson.version,
     });
     expect(
       existsSync(

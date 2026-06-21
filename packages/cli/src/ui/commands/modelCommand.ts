@@ -209,11 +209,15 @@ export const modelCommand: SlashCommand = {
       if (!modelName) {
         if (context.executionMode !== 'interactive') {
           const voiceModel =
-            context.services.settings?.merged?.voiceModel?.trim() || 'not set';
+            context.services.settings?.merged?.voiceModel?.trim() ||
+            t('not set');
           return {
             type: 'message',
             messageType: 'info',
-            content: `Current voice model: ${voiceModel}\nUse "/model --voice <model-id>" to set voice model.`,
+            content: t(
+              'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
+              { voiceModel },
+            ),
           };
         }
         return {
@@ -246,7 +250,10 @@ export const modelCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'error',
-          content: `Voice model '${modelName}' is ambiguous. Configure a unique model id before using /model --voice.`,
+          content: t(
+            "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
+            { modelName },
+          ),
         };
       }
       if (!isTranscribableVoiceModel(matches[0]!)) {

@@ -55,6 +55,20 @@ struct RecorderState {
 
 RecorderState gRecorder;
 
+void StopRecorderDevice() {
+  if (!gRecorder.recording || !gRecorder.deviceInitialized) {
+    return;
+  }
+  ma_device_stop(&gRecorder.device);
+  ma_device_uninit(&gRecorder.device);
+  gRecorder.recording = false;
+  gRecorder.deviceInitialized = false;
+}
+
+void CleanupRecorder(void*) {
+  StopRecorderDevice();
+}
+
 bool GetBoolProperty(
     napi_env env,
     napi_value object,
@@ -273,10 +287,7 @@ napi_value StopRecording(napi_env env, napi_callback_info info) {
     return nullptr;
   }
 
-  ma_device_stop(&gRecorder.device);
-  ma_device_uninit(&gRecorder.device);
-  gRecorder.recording = false;
-  gRecorder.deviceInitialized = false;
+  StopRecorderDevice();
 
   std::vector<int16_t> pcm;
   uint32_t sampleRate = 16000;
@@ -373,6 +384,7 @@ napi_value MicrophoneAuthorizationStatus(
 }
 
 napi_value Init(napi_env env, napi_value exports) {
+  napi_add_env_cleanup_hook(env, CleanupRecorder, nullptr);
   napi_property_descriptor descriptors[] = {
       {"startRecording", nullptr, StartRecording, nullptr, nullptr, nullptr,
        napi_default, nullptr},

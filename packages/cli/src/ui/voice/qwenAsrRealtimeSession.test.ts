@@ -13,6 +13,7 @@ import {
 class FakeSocket {
   readonly OPEN = 1;
   readyState = this.OPEN;
+  bufferedAmount = 0;
   readonly sent: Array<string | Uint8Array> = [];
   private readonly handlers = new Map<
     string,
@@ -154,6 +155,29 @@ describe('qwenAsrRealtimeSession', () => {
     );
 
     await expect(transcriptPromise).resolves.toBe('hello world');
+  });
+
+  it('drops realtime audio chunks when the socket buffer is backed up', async () => {
+    const socket = new FakeSocket();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    socket.bufferedAmount = 1024 * 1024 + 1;
+    session.pushAudio(new Uint8Array([1, 2, 3]));
+
+    expect(socket.sent).toEqual([]);
   });
 
   it('rejects finish when the server never sends session.finished', async () => {

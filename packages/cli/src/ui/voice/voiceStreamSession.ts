@@ -39,6 +39,7 @@ export interface VoiceStreamSession {
 export interface SocketLike {
   readyState: number;
   OPEN: number;
+  bufferedAmount?: number;
   send: (data: string | Uint8Array) => void;
   close: () => void;
   on: (event: string, cb: (...args: unknown[]) => void) => void;

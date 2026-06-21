@@ -1374,6 +1374,10 @@ export default {
   audio: '音頻',
   video: '視頻',
   'not set': '未設置',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    "語音模型 '{{modelName}}' 不唯一。請先配置唯一的模型 ID，再使用 /model --voice。",
   none: '無',
   unknown: '未知',
   'Manage folder trust settings': '管理檔案夾信任設置',

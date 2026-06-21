@@ -1617,6 +1617,10 @@ export default {
   audio: 'audio',
   video: 'video',
   'not set': 'not set',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
   none: 'none',
   unknown: 'unknown',
   // ============================================================================

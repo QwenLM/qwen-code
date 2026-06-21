@@ -91,7 +91,11 @@ class NativeAudioRecorder implements VoiceRecorder {
             }
           } catch (error) {
             this.clearSilencePoll();
-            debugLogger.debug('[voice] silence detection poll failed:', error);
+            debugLogger.warn(
+              '[voice] silence detection failed, auto-stopping:',
+              error,
+            );
+            onAutoStop();
           }
         }, SILENCE_POLL_INTERVAL_MS);
       }

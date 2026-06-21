@@ -69,6 +69,32 @@ describe('createNativeAudioRecorder', () => {
     }
   });
 
+  it('auto-stops when native silence polling fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = {
+        startRecording: vi.fn(),
+        stopRecording: vi.fn(() => new Uint8Array([1])),
+        isRecording: vi.fn(() => true),
+        silenceDetected: vi.fn(() => {
+          throw new Error('silence poll failed');
+        }),
+        microphoneAuthorizationStatus: vi.fn(() => 'unknown' as const),
+      };
+      const onAutoStop = vi.fn();
+      const recorder = createNativeAudioRecorder({
+        loadBackend: () => backend,
+      });
+
+      await recorder.start({ silenceDetection: true, onAutoStop });
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(onAutoStop).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('rejects a second start while already recording', async () => {
     const backend = {
       startRecording: vi.fn(),

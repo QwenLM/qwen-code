@@ -591,4 +591,54 @@ describe('useVoiceInput', () => {
 
     expect(buffer.insert).not.toHaveBeenCalled();
   });
+
+  it('does not wait forever for a previous stop before starting again', async () => {
+    vi.useFakeTimers();
+    try {
+      buffer = createBuffer();
+      const firstRecorder = {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn(() => new Promise<never>(() => {})),
+      };
+      const secondRecorder = {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn(),
+      };
+      const createRecorder = vi
+        .fn()
+        .mockReturnValueOnce(firstRecorder)
+        .mockReturnValueOnce(secondRecorder);
+
+      const { result } = renderHook(() =>
+        useVoiceInput({
+          enabled: true,
+          mode: 'tap',
+          voiceModel: 'qwen3-asr-flash',
+          buffer,
+          createRecorder,
+          transcribe: vi.fn(),
+        }),
+      );
+
+      await act(async () => {
+        result.current.handleKeypress(voiceKey);
+      });
+      act(() => {
+        result.current.handleKeypress(escapeKey);
+      });
+      act(() => {
+        result.current.handleKeypress(voiceKey);
+      });
+
+      expect(secondRecorder.start).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(secondRecorder.start).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

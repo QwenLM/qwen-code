@@ -51,6 +51,7 @@ export type VoiceInputStatus = 'idle' | 'recording' | 'transcribing';
 export type VoiceInputMode = 'hold' | 'tap';
 
 const VOICE_ERROR_RETRY_DELAY_MS = 2000;
+const PREVIOUS_STOP_WAIT_TIMEOUT_MS = 5000;
 // Terminals emit no key-up event. In hold mode we infer release from the gap
 // between auto-repeat keypresses: arm a longer timer on first press (covers the
 // OS initial-repeat delay), then a short timer on each repeat. When repeats stop
@@ -89,6 +90,21 @@ interface UseVoiceInputReturn {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function waitForPreviousStop(stopPromise: Promise<void> | null): Promise<void> {
+  if (!stopPromise) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, PREVIOUS_STOP_WAIT_TIMEOUT_MS);
+    void stopPromise
+      .catch(() => undefined)
+      .then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+  });
 }
 
 function insertTranscript(
@@ -192,7 +208,7 @@ export function useVoiceInput({
         setInterimText('');
         setAudioLevelState(0);
       }
-      const startPromise = (stopPromiseRef.current ?? Promise.resolve())
+      const startPromise = waitForPreviousStop(stopPromiseRef.current)
         .then(() =>
           Promise.resolve(
             recorder.start({

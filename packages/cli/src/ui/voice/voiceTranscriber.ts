@@ -98,6 +98,8 @@ function normalizeBaseUrl(baseUrl: string, modelName: string): string {
   } catch {
     throw new Error(`Voice model '${modelName}' has an invalid baseUrl.`);
   }
+  url.username = '';
+  url.password = '';
   return trimTrailingSlashes(url.toString());
 }
 
@@ -312,8 +314,18 @@ export function isKeytermEcho(
 // is ~32 KB/s, so guard before encoding to give a clear error on overlong holds.
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 
-function sanitizeResponseDetails(raw: string): string {
-  const redacted = raw.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sanitizeResponseDetails(raw: string, apiKey?: string): string {
+  let redacted = raw.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+  if (apiKey) {
+    redacted = redacted.replace(
+      new RegExp(escapeRegExp(apiKey), 'g'),
+      '[REDACTED]',
+    );
+  }
   return redacted.length > 200 ? `${redacted.slice(0, 200)}...` : redacted;
 }
 
@@ -390,7 +402,10 @@ async function transcribeViaQwenAsr(
   if (!response.ok) {
     let details = '';
     try {
-      details = sanitizeResponseDetails(await response.text());
+      details = sanitizeResponseDetails(
+        await response.text(),
+        voiceConfig.apiKey,
+      );
     } catch {
       details = '';
     }
