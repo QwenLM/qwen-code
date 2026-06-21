@@ -71,7 +71,10 @@ vi.mock('../utils/debugLogger.js', () => ({
  */
 function cfgWithResources(): Config {
   return {
-    getResourceRegistry: () => ({ registerResource: vi.fn() }),
+    getResourceRegistry: () => ({
+      registerResource: vi.fn(),
+      removeResourcesByServer: vi.fn(),
+    }),
   } as unknown as Config;
 }
 
@@ -665,8 +668,12 @@ describe('mcp-client', () => {
 
     it('discover() registers discovered resources into the Config ResourceRegistry', async () => {
       const registerResource = vi.fn();
+      const removeResourcesByServer = vi.fn();
       const cfg = {
-        getResourceRegistry: () => ({ registerResource }),
+        getResourceRegistry: () => ({
+          registerResource,
+          removeResourcesByServer,
+        }),
       } as unknown as Config;
       const mockedClient = {
         connect: vi.fn(),
@@ -701,6 +708,9 @@ describe('mcp-client', () => {
       );
       await client.connect();
       await client.discover(cfg);
+      // Clear-then-register so re-discovery (reconnect) is idempotent and a
+      // dropped resource doesn't linger.
+      expect(removeResourcesByServer).toHaveBeenCalledWith('srv');
       expect(registerResource).toHaveBeenCalledWith(
         expect.objectContaining({ uri: 'res://a', serverName: 'srv' }),
       );

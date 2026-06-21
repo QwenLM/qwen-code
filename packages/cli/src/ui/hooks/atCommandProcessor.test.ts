@@ -1444,5 +1444,31 @@ describe('handleAtCommand', () => {
         'Injected 100000 chars (truncated)',
       );
     });
+
+    it('skips an oversized blob and flags the card', async () => {
+      // 8M cap + 1 → skipped entirely (no inlineData injected).
+      const bigBlob = 'A'.repeat(8_000_001);
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://huge', mimeType: 'image/png', blob: bigBlob }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://huge',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 609,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const hasInline = (
+        result.processedQuery as Array<Record<string, unknown>>
+      ).some((p) => 'inlineData' in p);
+      expect(hasInline).toBe(false);
+      expect(result.toolDisplays![0].resultDisplay).toBe(
+        '(content too large — skipped)',
+      );
+    });
   });
 });

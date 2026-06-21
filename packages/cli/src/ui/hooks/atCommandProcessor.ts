@@ -428,6 +428,7 @@ export async function resolveAtCommandQuery({
     // its user's prompt and untrusted server-supplied content.
     const contentParts: Part[] = [];
     let textChars = 0;
+    let blobChars = 0;
     let blobCount = 0;
     let truncated = false;
     for (const content of outcome.value.contents ?? []) {
@@ -449,11 +450,14 @@ export async function resolveAtCommandQuery({
           textChars += text.length;
         }
       } else if ('blob' in content && typeof content.blob === 'string') {
-        if (content.blob.length > MAX_MCP_RESOURCE_BLOB_CHARS) {
-          // Skip an oversized attachment rather than risk OOM.
+        // Cap CUMULATIVE blob size per resource, not just each blob: a server
+        // returning many sub-limit blobs in one response could otherwise still
+        // inject unbounded data (e.g. 50 × 7.9 MB) into the prompt / API call.
+        if (blobChars + content.blob.length > MAX_MCP_RESOURCE_BLOB_CHARS) {
           truncated = true;
           continue;
         }
+        blobChars += content.blob.length;
         contentParts.push({
           inlineData: {
             mimeType:
@@ -588,6 +592,11 @@ export async function resolveAtCommandQuery({
     }
   }
 
+  // File and resource content are grouped by type, NOT interleaved by their
+  // position in the user's query. The model correlates each @-reference with
+  // its content block via the "--- Content from ... ---" delimiter labels (and
+  // the verbatim `@server:uri` / `@path` left in the prompt text), not by
+  // positional alignment, so grouping is safe.
   const processedQueryParts: PartListUnion = [
     { text: initialQueryText },
     ...fileParts,

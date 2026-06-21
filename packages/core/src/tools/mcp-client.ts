@@ -367,7 +367,14 @@ export class McpClient {
     // already `cliConfig.getPromptRegistry()` on this non-pool path, so
     // this is the same single global registry — fetching it here avoids
     // threading a 4th registry through all ~20 `new McpClient(...)` sites.
+    //
+    // Clear-then-register makes re-discovery (health-monitor reconnect,
+    // incremental settings-change discovery) idempotent: a resource the
+    // server dropped between discoveries must not linger in the registry.
+    // Mirrors `SessionMcpView.applyResources`' remove-then-register on the
+    // pool path.
     const resourceRegistry = cliConfig.getResourceRegistry();
+    resourceRegistry.removeResourcesByServer(this.serverName);
     for (const resource of resources) {
       resourceRegistry.registerResource(resource);
     }
