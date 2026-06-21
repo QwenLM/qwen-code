@@ -4566,6 +4566,16 @@ export class Config {
     );
   }
 
+  async reviveCompletedBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
+    return this.getBackgroundAgentResumeService().reviveCompletedBackgroundAgent(
+      agentId,
+      initialMessage,
+    );
+  }
+
   abandonBackgroundAgent(agentId: string): boolean {
     return this.getBackgroundAgentResumeService().abandonBackgroundAgent(
       agentId,

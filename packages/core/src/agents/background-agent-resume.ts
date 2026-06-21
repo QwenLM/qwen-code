@@ -487,6 +487,61 @@ export class BackgroundAgentResumeService {
     return operation.promise;
   }
 
+  /**
+   * Revive a *completed* background sub-agent so the model can keep iterating
+   * on it via `send_message`. The resume engine only accepts `paused` entries,
+   * so flip the finished entry back to a resumable `paused` state (this clears
+   * its result/stats and, via `register`, resets `notified` so the revived run
+   * emits its own terminal notification) and hand it to `resumeBackgroundAgent`.
+   *
+   * Returns `undefined` (and logs why) when the agent can't be revived: not an
+   * in-registry, finished background agent with a persisted transcript, or the
+   * background-agent concurrency cap is full. Cross-session / evicted completed
+   * agents are out of scope (see QwenLM/qwen-code#5540).
+   */
+  async reviveCompletedBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<AgentTask | undefined> {
+    // A resume/revive already in flight for this id owns the lifecycle — fold
+    // into it. (The status flip below is await-free, so this guards a genuinely
+    // concurrent in-flight operation, not a same-tick re-entry.)
+    if (this.resumeOperations.has(agentId)) {
+      return this.resumeBackgroundAgent(agentId, initialMessage);
+    }
+    const registry = this.config.getBackgroundTaskRegistry();
+    const entry = registry.get(agentId);
+    if (
+      !entry ||
+      !entry.isBackgrounded ||
+      entry.status !== 'completed' ||
+      !entry.metaPath ||
+      !entry.outputFile
+    ) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": not a completed ` +
+          `background agent with a persisted transcript (present=${!!entry}, ` +
+          `backgrounded=${entry?.isBackgrounded ?? false}, ` +
+          `status=${entry?.status ?? 'none'}).`,
+      );
+      return undefined;
+    }
+    // Honor the background-agent concurrency cap before flipping the finished
+    // entry back to paused, so an at-capacity revive fails cleanly instead of
+    // stranding the entry as paused.
+    try {
+      registry.assertCanStartBackgroundAgent();
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+    this.restorePausedEntry(agentId);
+    return this.resumeBackgroundAgent(agentId, initialMessage);
+  }
+
   private async resumeBackgroundAgentInternal(
     agentId: string,
     operation: ResumeOperation,
