@@ -51,7 +51,9 @@ Workflow:
 - Responsive: relative units, flex/grid, max-width:100% on media; wide content (tables, diagrams, code) scrolls inside its own overflow-x:auto container.
 - Set a concise \`title\` — it names the browser tab.
 
-To update an artifact, call Artifact again with the SAME file path: it redeploys to the same URL. A different path creates a separate Artifact.`;
+To update an artifact, call Artifact again with the SAME file path: it redeploys to the same URL. A different path creates a separate Artifact.
+
+Set QWEN_ARTIFACT_NO_AUTO_OPEN=1 to publish without launching a browser.`;
 
 class ArtifactToolInvocation extends BaseToolInvocation<
   ArtifactToolParams,

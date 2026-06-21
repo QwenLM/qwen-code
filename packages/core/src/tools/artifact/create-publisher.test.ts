@@ -10,11 +10,19 @@ import type { ArtifactHostConfig } from './publisher.js';
 import { createArtifactPublisher } from './create-publisher.js';
 import { LocalPublisher } from './local-publisher.js';
 import { HostPublisher } from './host-publisher.js';
+import { OssPublisher } from './oss-publisher.js';
 
-const cfg = (kind: 'local' | 'host', host?: ArtifactHostConfig): Config =>
+const cfg = (
+  kind: 'local' | 'host' | 'oss',
+  host?: ArtifactHostConfig,
+): Config =>
   ({
     getArtifactPublisherKind: () => kind,
     getArtifactHostConfig: () => host,
+    getArtifactOssConfig: () => ({
+      bucket: 'artifact-bucket',
+      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+    }),
   }) as unknown as Config;
 
 describe('createArtifactPublisher', () => {
@@ -36,5 +44,9 @@ describe('createArtifactPublisher', () => {
 
   it('returns HostPublisher even when host config is missing (defers to publish-time error)', () => {
     expect(createArtifactPublisher(cfg('host'))).toBeInstanceOf(HostPublisher);
+  });
+
+  it('returns OssPublisher for the oss kind', () => {
+    expect(createArtifactPublisher(cfg('oss'))).toBeInstanceOf(OssPublisher);
   });
 });

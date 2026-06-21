@@ -117,6 +117,26 @@ describe('ArtifactTool', () => {
     expect(res.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
   });
 
+  it('returns EXECUTION_FAILED when the publisher throws', async () => {
+    const file = await writeFragment('page.html', '<p>x</p>');
+    const failingTool = new ArtifactTool(
+      makeConfig(),
+      {
+        kind: 'fail',
+        publish: async () => {
+          throw new Error('network timeout');
+        },
+      },
+      openSpy as unknown as UrlOpener,
+    );
+
+    const res = await failingTool.build({ file_path: file }).execute(signal);
+
+    expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(res.llmContent).toContain('network timeout');
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
   it('enforces the size cap', async () => {
     const big = '<p>' + 'a'.repeat(MAX_ARTIFACT_BYTES) + '</p>';
     const file = await writeFragment('big.html', big);
