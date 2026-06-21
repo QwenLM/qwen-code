@@ -2142,17 +2142,33 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
-        // Always-on safety checks (turn tool-call cap). These fire before
-        // the skipLoopDetection gate so they cannot be bypassed by
-        // configuration.
+        // Always-on safety checks (consecutive-identical tool-call guard +
+        // per-turn tool-call cap). These fire before the skipLoopDetection
+        // gate so they cannot be bypassed by configuration.
         const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
         if (alwaysOnLoop) {
-          // The tripping response may carry several tool calls collected
-          // before the cap fired. Drop them so the run halts here instead of
-          // executing them, spawning a continuation, and re-tripping the cap
-          // (which would double-print the halt message and waste a request).
-          turn.pendingToolCalls.length = 0;
           const loopType = this.loopDetector.getLastLoopType();
+          if (
+            event.type === GeminiEventType.ToolCallRequest &&
+            loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS
+          ) {
+            // Consecutive-identical halt: drop only the repeated tail so any
+            // distinct calls collected earlier in the same response still run.
+            const repeatedCount =
+              this.loopDetector.getConsecutiveToolCallCount();
+            const repeatedStartIndex = Math.max(
+              0,
+              turn.pendingToolCalls.length - repeatedCount,
+            );
+            turn.pendingToolCalls.splice(repeatedStartIndex);
+          } else {
+            // Turn-cap halt: the tripping response may carry several tool calls
+            // collected before the cap fired. Drop them all so the run halts
+            // here instead of executing them, spawning a continuation, and
+            // re-tripping the cap (which would double-print the halt message
+            // and waste a request).
+            turn.pendingToolCalls.length = 0;
+          }
           yield {
             type: GeminiEventType.LoopDetected,
             ...(loopType && { value: { loopType } }),
@@ -2167,35 +2183,20 @@ export class GeminiClient {
           return turn;
         }
 
-        // Loop detection is opt-in: `model.skipLoopDetection` defaults to true
-        // (see settingsSchema) to avoid false-positive interruptions. Keep BOTH
-        // the deterministic identical-tool-call check and the heuristic checks
-        // behind this single flag so the documented `model.skipLoopDetection`
-        // escape hatch stays honest (including the non-interactive hint in
-        // nonInteractiveCli.ts). The deterministic split, retry-reset, and
-        // pending-call splice below still apply once detection is enabled.
+        // Heuristic loop detection is opt-in: `model.skipLoopDetection`
+        // defaults to true (see settingsSchema) to avoid false-positive
+        // interruptions. Only the historically false-positive-prone heuristics
+        // (content/thought repetition, read-file and action stagnation,
+        // global-duplicate and alternating tool-call patterns) sit behind this
+        // flag. The precise consecutive-identical guard and the per-turn cap
+        // run unconditionally in checkAlwaysOnSafeties above, so the documented
+        // escape hatch only relaxes the heuristics (see nonInteractiveCli.ts).
         const skipLoopDetection = this.config.getSkipLoopDetection();
-        const deterministicToolCallLoop =
-          !skipLoopDetection &&
-          this.loopDetector.addAndCheckDeterministicToolCallLoop(event);
         const heuristicLoop =
-          !deterministicToolCallLoop &&
           !skipLoopDetection &&
           this.loopDetector.addAndCheckHeuristicLoops(event);
-        if (deterministicToolCallLoop || heuristicLoop) {
+        if (heuristicLoop) {
           const loopType = this.loopDetector.getLastLoopType();
-          if (
-            event.type === GeminiEventType.ToolCallRequest &&
-            loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS
-          ) {
-            const repeatedCount =
-              this.loopDetector.getConsecutiveToolCallCount();
-            const repeatedStartIndex = Math.max(
-              0,
-              turn.pendingToolCalls.length - repeatedCount,
-            );
-            turn.pendingToolCalls.splice(repeatedStartIndex);
-          }
           yield {
             type: GeminiEventType.LoopDetected,
             ...(loopType && { value: { loopType } }),

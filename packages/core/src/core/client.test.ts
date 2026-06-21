@@ -4318,10 +4318,7 @@ hello
       const alwaysOnSpy = vi
         .spyOn(loopDetector, 'checkAlwaysOnSafeties')
         .mockReturnValue(true);
-      const deterministicSpy = vi.spyOn(
-        loopDetector,
-        'addAndCheckDeterministicToolCallLoop',
-      );
+      const heuristicSpy = vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops');
       vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
         LoopType.TURN_TOOL_CALL_CAP,
       );
@@ -4358,7 +4355,7 @@ hello
 
       // Always-on cap fires and short-circuits before the gated detectors run.
       expect(alwaysOnSpy).toHaveBeenCalled();
-      expect(deterministicSpy).not.toHaveBeenCalled();
+      expect(heuristicSpy).not.toHaveBeenCalled();
       const loopEvent = events.find(
         (e) => e.type === GeminiEventType.LoopDetected,
       );
@@ -6269,7 +6266,6 @@ Other open files:
       // Replace loop detector with spies
       const ldMock = {
         checkAlwaysOnSafeties: vi.fn().mockReturnValue(false),
-        addAndCheckDeterministicToolCallLoop: vi.fn().mockReturnValue(false),
         addAndCheckHeuristicLoops: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       };
@@ -6298,15 +6294,12 @@ Other open files:
         // consume stream
       }
 
-      // Assert - always-on safeties still run, but opt-in detectors don't
+      // Assert - always-on safeties still run, but opt-in heuristics don't
       expect(ldMock.checkAlwaysOnSafeties).toHaveBeenCalled();
-      expect(
-        ldMock.addAndCheckDeterministicToolCallLoop,
-      ).not.toHaveBeenCalled();
       expect(ldMock.addAndCheckHeuristicLoops).not.toHaveBeenCalled();
     });
 
-    it('does not hard-stop identical tool calls when skipLoopDetection is true', async () => {
+    it('hard-stops identical tool calls even when skipLoopDetection is true (always-on guard)', async () => {
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
 
       mockTurnRunFn.mockReturnValue(
@@ -6338,11 +6331,13 @@ Other open files:
         ),
       );
 
-      // skipLoopDetection defaults to true, so even repeated identical calls
-      // must not be halted — the documented escape hatch stays effective.
-      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
-        false,
-      );
+      // The consecutive-identical guard is always-on: it halts the repetition
+      // regardless of skipLoopDetection so the DashScope server never sees
+      // enough repeats to reject the conversation (issue #5019).
+      expect(events.at(-1)).toEqual({
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
+      });
     });
 
     it('hard-stops identical tool calls when loop detection is enabled', async () => {
