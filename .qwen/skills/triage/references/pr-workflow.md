@@ -147,6 +147,15 @@ Now read the diff. Compare the PR's approach against your independent proposal:
 - Are there correctness bugs, security holes, or regressions your approach would have avoided?
 - Does the implementation follow the project's conventions, or does it over-abstract / duplicate code / put logic in the wrong package?
 
+**Reuse-before-new-code check:** for new non-trivial logic, run a small
+reuse ladder: is there an existing shared function/module/API in this repo? Does
+the standard library or platform API cover it? Does an already-installed
+dependency cover it? Prefer reusing or extending a compatible implementation
+instead of adding a parallel utility or per-file helper. Comment only when you
+can name the reusable implementation/API/dependency, or when the same
+non-trivial logic is repeated across changed files. Do not flag trivial
+one-liners, different semantics, or speculative extraction.
+
 Keep it tight — only flag two kinds of issues:
 
 - **Critical blockers** — correctness bugs, security holes, regressions.
