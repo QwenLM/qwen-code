@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-telegram",
-  "version": "0.18.3",
+  "version": "0.18.3-nightly.20260621.6b2f800ab",
   "description": "Telegram channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
