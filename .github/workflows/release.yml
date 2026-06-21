@@ -541,16 +541,59 @@ jobs:
         )
       }}
     permissions:
+      actions: 'write'
       issues: 'write'
 
     steps:
-      - name: 'Create Issue on Failure'
+      - name: 'Create Issue and Dispatch Autofix'
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           GH_REPO: '${{ github.repository }}'
           RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
-          gh issue create \
-            --title "Release Failed for ${RELEASE_TAG} on $(date +'%Y-%m-%d')" \
-            --body "The release workflow failed. See the full run for details: ${DETAILS_URL}"
+          failed_jobs="$(gh run view "${GITHUB_RUN_ID}" --repo "${GH_REPO}" \
+            --json jobs --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name' || true)"
+          failed_log="$(gh run view "${GITHUB_RUN_ID}" --repo "${GH_REPO}" --log-failed 2> /dev/null \
+            | tail -n 200 | head -c 60000 || true)"
+
+          body_file="$(mktemp)"
+          {
+            echo "The release workflow failed. The full run is available here: ${DETAILS_URL}"
+            echo
+            echo "Release tag: ${RELEASE_TAG}"
+            echo
+            echo "Failed jobs:"
+            if [[ -n "${failed_jobs}" ]]; then
+              echo "${failed_jobs}"
+            else
+              echo "- Unable to resolve failed jobs from the run metadata."
+            fi
+            echo
+            echo "Last 200 lines from failed job logs:"
+            echo '```'
+            if [[ -n "${failed_log}" ]]; then
+              echo "${failed_log}"
+            else
+              echo "Failed logs were not available when this issue was created."
+            fi
+            echo '```'
+            echo
+            echo "This issue was created automatically by the release workflow. Qwen Autofix will be dispatched with this issue number."
+          } > "${body_file}"
+
+          issue_url="$(gh issue create \
+            --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
+            --body-file "${body_file}" \
+            --label "type/bug" \
+            --label "category/development" \
+            --label "scope/ci-cd" \
+            --label "scope/github-actions" \
+            --label "priority/P1" \
+            --label "status/ready-for-agent")"
+          issue_number="${issue_url##*/}"
+
+          gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
+            -f phase=issue \
+            -f issue_number="${issue_number}" \
+            -f dry_run=false

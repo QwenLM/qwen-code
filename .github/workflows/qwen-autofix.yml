@@ -479,16 +479,21 @@ jobs:
           # Run tests only for the packages this fix touches: a pre-existing
           # red or flaky test elsewhere on main must not block every fix.
           # Cross-package regressions are covered by regular CI on the PR.
-          CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+          CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
+          CHANGED_PKGS="$(echo "${CHANGED_FILES}" | grep -oE '^packages/[^/]+' | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
-            echo "❌ Fix does not touch any package"
-            exit 1
+            if echo "${CHANGED_FILES}" | grep -Eq '^(\.github/(actions|scripts|workflows)/|integration-tests/|scripts/|package(-lock)?\.json$)'; then
+              echo "ℹ️ No package-specific tests for release/CI-only changes."
+            else
+              echo "❌ Fix does not touch any package or release/CI automation file"
+              exit 1
+            fi
+          else
+            for p in ${CHANGED_PKGS}; do
+              echo "🧪 Testing ${p}..."
+              npm run test --workspace "${p}" --if-present
+            done
           fi
-          for p in ${CHANGED_PKGS}; do
-            echo "🧪 Testing ${p}..."
-            npm run test --workspace "${p}" --if-present
-          done
 
       - name: 'Show run artifacts'
         if: |-
@@ -964,17 +969,22 @@ jobs:
           # Test only the packages this PR touches: a pre-existing red/flaky test
           # elsewhere on main must not block a valid response. Cross-package
           # regressions are covered by regular CI on the PR after the push.
-          CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+          CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
+          CHANGED_PKGS="$(echo "${CHANGED_FILES}" | grep -oE '^packages/[^/]+' | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
-            echo "❌ PR does not touch any package"
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
+            if echo "${CHANGED_FILES}" | grep -Eq '^(\.github/(actions|scripts|workflows)/|integration-tests/|scripts/|package(-lock)?\.json$)'; then
+              echo "ℹ️ No package-specific tests for release/CI-only changes."
+            else
+              echo "❌ PR does not touch any package or release/CI automation file"
+              echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+              exit 1
+            fi
+          else
+            for p in ${CHANGED_PKGS}; do
+              echo "🧪 Testing ${p}..."
+              npm run test --workspace "${p}" --if-present
+            done
           fi
-          for p in ${CHANGED_PKGS}; do
-            echo "🧪 Testing ${p}..."
-            npm run test --workspace "${p}" --if-present
-          done
           echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
 
       - name: 'Show run artifacts'
