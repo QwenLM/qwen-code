@@ -149,6 +149,31 @@ describe('voiceTranscriber', () => {
     expect(funStreamConfig.keytermsContext).toBeUndefined();
   });
 
+  it('does not include project path metadata in voice keyterms', () => {
+    const config = {
+      ...createConfig([
+        {
+          id: 'qwen3-asr-flash-realtime',
+          label: 'Qwen ASR Realtime',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.example/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ]),
+      getProjectRoot: vi.fn(() => '/tmp/secret-project-codename'),
+    } as unknown as Config;
+
+    const streamConfig = resolveVoiceStreamConfig({
+      config,
+      settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+      voiceModel: 'qwen3-asr-flash-realtime',
+    });
+
+    expect(streamConfig.keytermsContext).toContain('Qwen');
+    expect(streamConfig.keytermsContext).not.toContain('secret');
+    expect(streamConfig.keytermsContext).not.toContain('codename');
+  });
+
   it('treats colon-containing voice model values as literal model ids', () => {
     const config = createConfig([
       {
@@ -369,6 +394,29 @@ describe('voiceTranscriber', () => {
         }),
       ).toThrow(/private-network baseUrl/);
     }
+  });
+
+  it('rejects voice model hosts that resolve to private-network IPs', async () => {
+    await expect(
+      transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Qwen ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://asr.example/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ]),
+          settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+          voiceModel: 'qwen3-asr-flash',
+          lookupHost: vi.fn().mockResolvedValue({ address: '10.0.0.8' }),
+          fetchFn: vi.fn(),
+        },
+      ),
+    ).rejects.toThrow(/private-network address/);
   });
 
   it('allows localhost voice URLs for development', () => {

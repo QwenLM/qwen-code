@@ -8,6 +8,14 @@ import { describe, expect, it, vi } from 'vitest';
 import type { VoiceRecorder } from '../hooks/useVoiceInput.js';
 import { createVoiceRecorder } from './voiceRecorder.js';
 
+const debugLogger = vi.hoisted(() => ({
+  warn: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  createDebugLogger: () => debugLogger,
+}));
+
 function recorder(overrides: Partial<VoiceRecorder> = {}): VoiceRecorder {
   return {
     start: vi.fn().mockResolvedValue(undefined),
@@ -143,5 +151,28 @@ describe('createVoiceRecorder', () => {
     expect(nativeRecorder.warmup).toHaveBeenCalledTimes(1);
     expect(nativeRecorder.microphoneStatus).toHaveBeenCalledTimes(1);
     expect(nativeRecorder.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs warmup failures and still lets start fall back', async () => {
+    const nativeRecorder = recorder({
+      warmup: vi.fn().mockRejectedValue(new Error('native load failed')),
+      start: vi.fn().mockRejectedValue(new Error('native unavailable')),
+    });
+    const soxRecorder = recorder();
+
+    const voiceRecorder = createVoiceRecorder({
+      createNativeRecorder: vi.fn(() => nativeRecorder),
+      createSoxRecorder: vi.fn(() => soxRecorder),
+      platform: 'darwin',
+    });
+
+    await voiceRecorder.warmup?.();
+    await voiceRecorder.start();
+
+    expect(debugLogger.warn).toHaveBeenCalledWith(
+      '[voice] recorder warmup failed:',
+      new Error('native load failed'),
+    );
+    expect(soxRecorder.start).toHaveBeenCalledTimes(1);
   });
 });

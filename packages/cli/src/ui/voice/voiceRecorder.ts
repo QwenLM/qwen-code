@@ -5,6 +5,7 @@
  */
 
 import process from 'node:process';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type {
   RecordedVoiceAudio,
   VoiceRecorder,
@@ -13,6 +14,8 @@ import type {
 import { createArecordRecorder } from './arecordRecorder.js';
 import { createNativeAudioRecorder } from './nativeAudioRecorder.js';
 import { createSoxRecorder } from './soxRecorder.js';
+
+const debugLogger = createDebugLogger('VOICE_RECORDER');
 
 interface VoiceRecorderOptions {
   createNativeRecorder?: () => VoiceRecorder;
@@ -69,7 +72,8 @@ class FallbackVoiceRecorder implements VoiceRecorder {
     for (const factory of this.factories) {
       try {
         await this.recorderFor(factory).warmup?.();
-      } catch {
+      } catch (error) {
+        debugLogger.warn('[voice] recorder warmup failed:', error);
         // Ignore — start() will still try/fall back at record time.
       }
     }

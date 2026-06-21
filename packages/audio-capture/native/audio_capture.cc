@@ -44,6 +44,7 @@ struct RecorderState {
   uint32_t sampleRate = 16000;
   uint32_t channels = 1;
   std::vector<int16_t> pcm;
+  size_t pcmSize = 0;
   std::mutex mutex;
   std::atomic<bool> silenceDetectionEnabled{false};
   std::atomic<bool> speechStarted{false};
@@ -198,12 +199,13 @@ void DataCallback(
 
   std::lock_guard<std::mutex> lock(state->mutex);
   state->level = meanAbs / 32768.0;
-  const size_t remaining = state->pcm.size() < kMaxPcmSamples
-                               ? kMaxPcmSamples - state->pcm.size()
+  const size_t remaining = state->pcmSize < kMaxPcmSamples
+                               ? kMaxPcmSamples - state->pcmSize
                                : 0;
   const size_t toCopy = std::min(sampleCount, remaining);
   if (toCopy > 0) {
-    state->pcm.insert(state->pcm.end(), samples, samples + toCopy);
+    std::copy(samples, samples + toCopy, state->pcm.begin() + state->pcmSize);
+    state->pcmSize += toCopy;
   }
   if (toCopy < sampleCount) {
     state->silenceDetected.store(true);
@@ -256,8 +258,8 @@ napi_value StartRecording(napi_env env, napi_callback_info info) {
     gRecorder.silentFrames.store(0);
     gRecorder.level = 0.0;
     gRecorder.silenceDetected.store(false);
-    gRecorder.pcm.clear();
-    gRecorder.pcm.reserve(kMaxPcmSamples);
+    gRecorder.pcm.assign(kMaxPcmSamples, 0);
+    gRecorder.pcmSize = 0;
   }
 
   ma_result result = ma_device_init(nullptr, &config, &gRecorder.device);
@@ -295,7 +297,8 @@ napi_value StopRecording(napi_env env, napi_callback_info info) {
   uint32_t channels = 1;
   {
     std::lock_guard<std::mutex> lock(gRecorder.mutex);
-    pcm.swap(gRecorder.pcm);
+    pcm.assign(gRecorder.pcm.begin(), gRecorder.pcm.begin() + gRecorder.pcmSize);
+    gRecorder.pcmSize = 0;
     sampleRate = gRecorder.sampleRate;
     channels = gRecorder.channels;
   }
@@ -329,12 +332,10 @@ napi_value SilenceDetected(napi_env env, napi_callback_info info) {
 napi_value DrainAudio(napi_env env, napi_callback_info info) {
   (void)info;
   std::vector<int16_t> pcm;
-  std::vector<int16_t> next;
-  next.reserve(static_cast<size_t>(gRecorder.sampleRate) * gRecorder.channels);
   {
     std::lock_guard<std::mutex> lock(gRecorder.mutex);
-    pcm.swap(gRecorder.pcm);
-    gRecorder.pcm.swap(next);
+    pcm.assign(gRecorder.pcm.begin(), gRecorder.pcm.begin() + gRecorder.pcmSize);
+    gRecorder.pcmSize = 0;
   }
   napi_value buffer;
   const size_t bytes = pcm.size() * sizeof(int16_t);

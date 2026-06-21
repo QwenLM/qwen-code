@@ -5,9 +5,9 @@
  */
 
 import process from 'node:process';
+import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import type { AvailableModel, Config } from '@qwen-code/qwen-code-core';
-import { getGitBranch } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { RecordedVoiceAudio } from '../hooks/useVoiceInput.js';
 import { buildVoiceKeyterms } from './voiceKeyterms.js';
@@ -29,6 +29,10 @@ export type { VoiceTransport } from './voiceModel.js';
 export type VoiceStreamingTransport =
   | 'qwen-asr-realtime'
   | 'dashscope-task-realtime';
+
+type VoiceHostLookup = (
+  hostname: string,
+) => Promise<{ address: string } | Array<{ address: string }>>;
 
 function readVoiceLanguage(settings: LoadedSettings): string | undefined {
   const language = (
@@ -59,6 +63,7 @@ interface ResolveVoiceTranscriptionConfigArgs {
 
 interface TranscribeVoiceAudioArgs extends ResolveVoiceTranscriptionConfigArgs {
   fetchFn?: typeof fetch;
+  lookupHost?: VoiceHostLookup;
 }
 
 function trimTrailingSlashes(value: string): string {
@@ -148,6 +153,34 @@ function isPrivateNetworkIp(hostname: string): boolean {
     );
   }
   return false;
+}
+
+async function defaultLookupHost(
+  hostname: string,
+): Promise<Array<{ address: string }>> {
+  return dnsLookup(hostname, { all: true });
+}
+
+export async function assertVoiceBaseUrlNetworkAllowed(
+  voiceConfig: VoiceTranscriptionConfig,
+  lookupHost?: VoiceHostLookup,
+): Promise<void> {
+  const hostname = new URL(voiceConfig.baseUrl).hostname;
+  if (isLoopbackHost(hostname) || isIP(normalizeHostname(hostname)) !== 0) {
+    return;
+  }
+  let result: { address: string } | Array<{ address: string }>;
+  try {
+    result = await (lookupHost ?? defaultLookupHost)(hostname);
+  } catch {
+    return;
+  }
+  const records = Array.isArray(result) ? result : [result];
+  if (records.some((record) => isPrivateNetworkIp(record.address))) {
+    throw new Error(
+      `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
+    );
+  }
 }
 
 function readApiKey(
@@ -297,14 +330,8 @@ function buildKeytermsContext(
   args: ResolveVoiceTranscriptionConfigArgs,
 ): string | undefined {
   try {
-    const projectRoot =
-      typeof args.config.getProjectRoot === 'function'
-        ? args.config.getProjectRoot()
-        : undefined;
-    const keyterms = buildVoiceKeyterms({
-      projectRoot,
-      gitBranch: projectRoot ? getGitBranch(projectRoot) : undefined,
-    });
+    void args;
+    const keyterms = buildVoiceKeyterms();
     return keyterms.length > 0 ? keyterms.join(' ') : undefined;
   } catch {
     return undefined;
@@ -515,6 +542,7 @@ export async function transcribeVoiceAudio(
   args: TranscribeVoiceAudioArgs,
 ): Promise<string> {
   const voiceConfig = resolveVoiceTranscriptionConfig(args);
+  await assertVoiceBaseUrlNetworkAllowed(voiceConfig, args.lookupHost);
   const fetchFn = args.fetchFn ?? fetch;
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
   const keytermsContext = buildKeytermsContext(args);

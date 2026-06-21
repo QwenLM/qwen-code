@@ -89,7 +89,8 @@ export function openVoiceStream(
       }) as unknown as SocketLike);
 
   return new Promise<VoiceStreamSession>((resolve, reject) => {
-    const ws = createWebSocket(deriveStreamUrl(config.baseUrl), {
+    const streamUrl = deriveStreamUrl(config.baseUrl);
+    const ws = createWebSocket(streamUrl, {
       headers: config.apiKey
         ? { Authorization: `Bearer ${config.apiKey}` }
         : {},
@@ -294,7 +295,7 @@ export function openVoiceStream(
         clearConnectTimer();
         fail(
           new Error(
-            `Voice stream failed (${msg.header?.error_code ?? 'error'}): ${
+            `Voice stream failed at ${streamUrl} task ${taskId} (${msg.header?.error_code ?? 'error'}): ${
               msg.header?.error_message ?? 'unknown'
             }`,
           ),

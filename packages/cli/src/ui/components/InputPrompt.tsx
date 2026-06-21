@@ -68,6 +68,7 @@ import {
 } from '../hooks/useVoiceInput.js';
 import { createVoiceRecorder } from '../voice/voiceRecorder.js';
 import {
+  assertVoiceBaseUrlNetworkAllowed,
   isKeytermEcho,
   isStreamingVoiceModel,
   resolveVoiceStreamConfig,
@@ -383,19 +384,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         settings,
         voiceModel,
       });
-      return openVoiceStreamWithRetry(() =>
-        streamConfig.transport === 'qwen-asr-realtime'
-          ? openQwenAsrRealtimeStream(streamConfig, callbacks)
-          : openVoiceStream(streamConfig, callbacks),
-      ).then((session) => ({
-        ...session,
-        finish: async () => {
-          const transcript = await session.finish();
-          return isKeytermEcho(transcript, streamConfig.keytermsContext)
-            ? ''
-            : transcript;
-        },
-      }));
+      return assertVoiceBaseUrlNetworkAllowed(streamConfig)
+        .then(() =>
+          openVoiceStreamWithRetry(() =>
+            streamConfig.transport === 'qwen-asr-realtime'
+              ? openQwenAsrRealtimeStream(streamConfig, callbacks)
+              : openVoiceStream(streamConfig, callbacks),
+          ),
+        )
+        .then((session) => ({
+          ...session,
+          finish: async () => {
+            const transcript = await session.finish();
+            return isKeytermEcho(transcript, streamConfig.keytermsContext)
+              ? ''
+              : transcript;
+          },
+        }));
     },
     [config, settings, voiceModel],
   );
@@ -679,6 +684,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleInput = useCallback(
     (key: Key): boolean => {
+      // When the Background tasks dialog is open, swallow every key so
+      // nothing reaches the composer buffer — the dialog's own keypress
+      // handler owns selection, open/close, and stop actions. Keep this ahead
+      // of active voice handling so modal UI remains the key owner.
+      if (bgDialogOpen) {
+        return true;
+      }
+
       if (voiceInput.status !== 'idle') {
         return voiceInput.handleKeypress(key);
       }
@@ -774,16 +787,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return false; // let BaseTextInput type the character
         }
         return true; // consume non-printable keys
-      }
-
-      // When the Background tasks dialog is open, swallow every key so
-      // nothing reaches the composer buffer — the dialog's own keypress
-      // handler owns selection, open/close, and stop actions. Unlike
-      // the tab bar we do NOT let printable chars type through, because
-      // the dialog doesn't auto-close on printable input and users
-      // would leak text into the hidden composer.
-      if (bgDialogOpen) {
-        return true;
       }
 
       // TODO(jacobr): this special case is likely not needed anymore.

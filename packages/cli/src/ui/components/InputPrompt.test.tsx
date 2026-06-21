@@ -419,6 +419,34 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('does not route voice keys while the background dialog is open', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    mockedUseBackgroundTaskViewState.mockReturnValue({
+      entries: [],
+      selectedIndex: 0,
+      dialogMode: 'list',
+      dialogOpen: true,
+      pillFocused: false,
+      livePanelFocused: false,
+      livePanelSelectedIndex: 0,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('lets non-voice keys fall through while voice recording is active', async () => {
     const handleVoiceKeypress = vi.fn(() => false);
     mockedUseVoiceInput.mockReturnValue({

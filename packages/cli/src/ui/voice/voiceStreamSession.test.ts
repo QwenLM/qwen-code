@@ -175,5 +175,8 @@ describe('voiceStreamSession', () => {
     );
 
     await expect(transcriptPromise).rejects.toThrow('rate limited');
+    await expect(transcriptPromise).rejects.toThrow(
+      'wss://dashscope.example/api-ws/v1/inference',
+    );
   });
 });
