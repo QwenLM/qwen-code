@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdtempSync, renameSync } from 'fs';
-import { extname, basename, resolve, join, relative } from 'path';
+import { extname, basename, resolve, join, relative, isAbsolute, sep } from 'path';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 
@@ -828,15 +828,19 @@ function readImageFile(tempFile: string): FileAttachment | null {
  * @returns Relative path prefixed with ./ or original path if outside cwd
  */
 export function formatSinglePathToRelative(absolutePath: string, cwd?: string): string {
-  const basePath = cwd || process.cwd();
+  const basePath = resolve(cwd || process.cwd());
+  const targetPath = resolve(absolutePath);
+  const relativePath = relative(basePath, targetPath);
 
-  if (absolutePath.startsWith(basePath)) {
-    const relativePath = relative(basePath, absolutePath);
-    if (relativePath && !relativePath.startsWith('..') && !relativePath.startsWith('./')) {
-      return './' + relativePath;
-    }
-    return relativePath || absolutePath;
+  if (
+    relativePath &&
+    relativePath !== '..' &&
+    !relativePath.startsWith(`..${sep}`) &&
+    !isAbsolute(relativePath)
+  ) {
+    return './' + relativePath;
   }
+
   return absolutePath;
 }
 
