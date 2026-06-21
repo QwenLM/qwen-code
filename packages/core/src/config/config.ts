@@ -2593,12 +2593,17 @@ export class Config {
       if (rawSelector.authType) return rawSelector;
 
       const currentAuthType = this.getContentGeneratorConfig()?.authType;
-      if (!currentAuthType) return undefined;
+      if (!currentAuthType) {
+        this.debugLogger.debug(
+          'No active auth type; skipping bare fast model resolution',
+        );
+        return undefined;
+      }
 
       return resolveModelId(this.fastModel, {
         currentAuthType,
-        getAvailableModels: (authTypes) =>
-          this.getAllConfiguredModels(authTypes ?? [currentAuthType]),
+        getAvailableModels: () =>
+          this.getAllConfiguredModels([currentAuthType]),
       });
     } catch {
       return undefined;
