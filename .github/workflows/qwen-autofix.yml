@@ -10,11 +10,16 @@ name: 'Qwen Autofix'
 # tick runs only the phase(s) that make sense, decided by the `route` job:
 #   • every tick           → review phase (sweep the bot's open PRs)
 #   • every 12h (00/12 UTC) → also the issue phase (locate + fix one new bug)
+#   • status/ready-for-agent issue events → issue phase for that issue
 # workflow_dispatch can force a phase, an issue, or a PR.
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
 # through CI_DEV_BOT_PAT so the bot acts as a single identity, qwen-code-dev-bot.
 on:
+  issues:
+    types:
+      - 'opened'
+      - 'labeled'
   schedule:
     - cron: '0 */4 * * *' # Review every 4h; issue phase additionally at 00/12 UTC
   workflow_dispatch:
@@ -85,20 +90,31 @@ jobs:
           PHASE: '${{ inputs.phase }}'
           FORCED_ISSUE: '${{ inputs.issue_number }}'
           FORCED_PR: '${{ inputs.pr_number }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          EVENT_ACTION: '${{ github.event.action }}'
+          EVENT_LABEL: '${{ github.event.label.name }}'
+          EVENT_READY_LABEL: "${{ contains(github.event.issue.labels.*.name, 'status/ready-for-agent') }}"
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
-          case "${PHASE}" in
-            issue) DO_ISSUE=true ;;
-            review) DO_REVIEW=true ;;
-            both) DO_ISSUE=true; DO_REVIEW=true ;;
-            *)
-              # auto (the scheduled default): review every tick, issue every 12h.
-              DO_REVIEW=true
-              HOUR="$(date -u +%H)"
-              if (( 10#${HOUR} % 12 == 0 )); then DO_ISSUE=true; fi
-              ;;
-          esac
+          if [[ "${EVENT_NAME}" == "issues" ]]; then
+            if [[ "${EVENT_ACTION}" == "labeled" && "${EVENT_LABEL}" == "status/ready-for-agent" ]] ||
+               [[ "${EVENT_ACTION}" == "opened" && "${EVENT_READY_LABEL}" == "true" ]]; then
+              DO_ISSUE=true
+            fi
+          else
+            case "${PHASE}" in
+              issue) DO_ISSUE=true ;;
+              review) DO_REVIEW=true ;;
+              both) DO_ISSUE=true; DO_REVIEW=true ;;
+              *)
+                # auto (the scheduled default): review every tick, issue every 12h.
+                DO_REVIEW=true
+                HOUR="$(date -u +%H)"
+                if (( 10#${HOUR} % 12 == 0 )); then DO_ISSUE=true; fi
+                ;;
+            esac
+          fi
           # Forcing a specific issue/PR implies running that phase.
           [[ -n "${FORCED_ISSUE}" ]] && DO_ISSUE=true
           [[ -n "${FORCED_PR}" ]] && DO_REVIEW=true
@@ -158,8 +174,10 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           FORCED_ISSUE: '${{ inputs.issue_number }}'
+          EVENT_ISSUE: '${{ github.event.issue.number }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          FORCED_ISSUE="${FORCED_ISSUE:-${EVENT_ISSUE}}"
 
           if [[ -n "${FORCED_ISSUE}" ]]; then
             echo "🎯 Forced issue #${FORCED_ISSUE}"
@@ -168,11 +186,18 @@ jobs:
               | jq -c '[.]' > "${WORKDIR}/candidates.json"
           else
             MIN_CREATED="$(date -u -d '2 days ago' +%Y-%m-%d)"
-            echo "🔍 Scanning for recent, unattended bugs created before ${MIN_CREATED} (newest first)..."
+            echo "🔍 Scanning for ready-for-agent bugs (newest first)..."
             gh issue list --repo "${REPO}" \
-              --search "is:open is:issue label:type/bug no:assignee created:<${MIN_CREATED} -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc" \
+              --search "is:open is:issue label:type/bug label:status/ready-for-agent no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc" \
               --limit 30 --json number,title,body,labels,createdAt,url,comments \
               > "${WORKDIR}/scan.json"
+            if [[ "$(jq length "${WORKDIR}/scan.json")" == "0" ]]; then
+              echo "🔍 Scanning for recent, unattended bugs created before ${MIN_CREATED} (newest first)..."
+              gh issue list --repo "${REPO}" \
+                --search "is:open is:issue label:type/bug no:assignee created:<${MIN_CREATED} -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc" \
+                --limit 30 --json number,title,body,labels,createdAt,url,comments \
+                > "${WORKDIR}/scan.json"
+            fi
 
             # Triage bots comment on most new issues, so "unattended" means:
             # no comments at all, or every commenter is a known bot account.

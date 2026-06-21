@@ -541,87 +541,18 @@ jobs:
         )
       }}
     permissions:
-      actions: 'write'
       issues: 'write'
-      pull-requests: 'read'
 
     steps:
-      - name: 'Create Issue and Dispatch Autofix'
+      - name: 'Create Issue on Failure'
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           GH_REPO: '${{ github.repository }}'
           RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
-          set -euo pipefail
-
-          failed_jobs="$(gh run view "${GITHUB_RUN_ID}" --repo "${GH_REPO}" \
-            --json jobs --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name' || true)"
-
-          body_file="$(mktemp)"
-          trap 'rm -f "${body_file}"' EXIT
-          {
-            echo "The release workflow failed. The full run is available here: ${DETAILS_URL}"
-            echo
-            echo "Release tag: ${RELEASE_TAG}"
-            echo
-            echo "Failed jobs:"
-            if [[ -n "${failed_jobs}" ]]; then
-              echo "${failed_jobs}"
-            else
-              echo "- Unable to resolve failed jobs from the run metadata."
-            fi
-            echo
-            echo "Raw failed logs are not copied into this public issue to avoid leaking secrets. Use the run link above for full logs."
-            echo "This issue was created automatically by the release workflow. Qwen Autofix will be dispatched unless this release failure is already being handled."
-          } > "${body_file}"
-
-          issue_title="Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')"
-          title_prefix="Release Failed for ${RELEASE_TAG}"
-          issue_labels="type/bug,category/development,scope/ci-cd,scope/github-actions,priority/P1,status/ready-for-agent"
-          existing_issue_url="$(gh issue list --repo "${GH_REPO}" --state open \
-            --search '"Release Failed for" in:title' --limit 100 --json title,url \
-            | jq -r --arg title_prefix "${title_prefix}" 'map(select(.title | startswith($title_prefix + " on "))) | .[0].url // ""' \
-            || true)"
-          created_issue="false"
-
-          if [[ -n "${existing_issue_url}" ]]; then
-            issue_url="${existing_issue_url}"
-            issue_number="${issue_url##*/}"
-            gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
-              || echo "::warning::Failed to comment on existing issue; continuing with dispatch."
-          else
-            issue_url="$(gh issue create --repo "${GH_REPO}" \
-              --title "${issue_title}" \
-              --body-file "${body_file}")"
-            created_issue="true"
-          fi
-
-          issue_number="${issue_url##*/}"
-          if [[ ! "${issue_number}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::Could not parse issue number from: ${issue_url}"
-            exit 1
-          fi
-          if [[ "${created_issue}" == "true" ]]; then
-            gh issue edit "${issue_number}" --repo "${GH_REPO}" --add-label "${issue_labels}" \
-              || echo "::warning::Failed to apply labels; continuing with dispatch."
-          fi
-
-          echo "Created or updated issue ${issue_url} (#${issue_number}); dispatching autofix."
-
-          has_in_progress="$(gh issue view "${issue_number}" --repo "${GH_REPO}" \
-            --json labels --jq 'any(.labels[].name; . == "autofix/in-progress")' || echo 'false')"
-          open_autofix_prs="$(gh pr list --repo "${GH_REPO}" --state open \
-            --head "autofix/issue-${issue_number}" --json number --jq 'length' || echo '0')"
-
-          if [[ "${has_in_progress}" == "true" || "${open_autofix_prs}" != "0" ]]; then
-            echo "Autofix is already in progress for #${issue_number}; skipping duplicate dispatch."
-          elif ! gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
-            -f phase=issue \
-            -f issue_number="${issue_number}" \
-            -f dry_run=false; then
-            gh issue comment "${issue_number}" --repo "${GH_REPO}" \
-              --body "Autofix dispatch failed. Please dispatch \`qwen-autofix.yml\` manually with \`phase=issue\` and \`issue_number=${issue_number}\`." \
-              || echo "::warning::Failed to comment on dispatch failure."
-            echo "::warning::Issue #${issue_number} was created or updated, but autofix dispatch failed."
-          fi
+          gh issue create --repo "${GH_REPO}" \
+            --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
+            --body "The release workflow failed. See the full run for details: ${DETAILS_URL}" \
+            --label "type/bug" \
+            --label "status/ready-for-agent"
