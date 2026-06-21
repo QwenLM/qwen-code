@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   isStreamingVoiceModel,
+  isKeytermEcho,
   resolveVoiceStreamConfig,
   resolveVoiceTranscriptionConfig,
   resolveVoiceTransport,
@@ -31,6 +32,14 @@ function createSettings(
 }
 
 describe('voiceTranscriber', () => {
+  beforeEach(() => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('resolves a plain voice model id from configured models', () => {
     const config = createConfig([
       {
@@ -273,35 +282,26 @@ describe('voiceTranscriber', () => {
   });
 
   it('does not forward OPENAI_API_KEY to third-party voice hosts without envKey', () => {
-    const original = process.env['OPENAI_API_KEY'];
-    process.env['OPENAI_API_KEY'] = 'sk-openai';
-    try {
-      const config = createConfig([
-        {
-          id: 'qwen3-asr-flash',
-          label: 'Custom ASR',
-          authType: AuthType.USE_OPENAI,
-          baseUrl: 'https://asr.example/v1',
-        },
-      ]);
-
-      expect(
-        resolveVoiceTranscriptionConfig({
-          config,
-          settings: createSettings(),
-          voiceModel: 'qwen3-asr-flash',
-        }),
-      ).toEqual({
-        model: 'qwen3-asr-flash',
+    vi.stubEnv('OPENAI_API_KEY', 'sk-openai');
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Custom ASR',
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://asr.example/v1',
-      });
-    } finally {
-      if (original === undefined) {
-        delete process.env['OPENAI_API_KEY'];
-      } else {
-        process.env['OPENAI_API_KEY'] = original;
-      }
-    }
+      },
+    ]);
+
+    expect(
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://asr.example/v1',
+    });
   });
 
   it('rejects invalid voice base URLs', () => {
@@ -323,7 +323,7 @@ describe('voiceTranscriber', () => {
     ).toThrow("Voice model 'qwen3-asr-flash' has an invalid baseUrl.");
   });
 
-  it('rejects non-https voice URLs when an API key would be sent', () => {
+  it('rejects non-https voice URLs', () => {
     const config = createConfig([
       {
         id: 'qwen3-asr-flash',
@@ -340,6 +340,31 @@ describe('voiceTranscriber', () => {
         voiceModel: 'qwen3-asr-flash',
       }),
     ).toThrow(/must use an https baseUrl/);
+  });
+
+  it('allows localhost voice URLs for development', () => {
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Local ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'http://localhost:8080/v1',
+      },
+    ]);
+
+    expect(
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }).baseUrl,
+    ).toBe('http://localhost:8080/v1');
+  });
+
+  it('detects keyterm echoes in non-Latin scripts', () => {
+    expect(isKeytermEcho('提交 分支 架构 测试', '提交 分支 架构 测试')).toBe(
+      true,
+    );
   });
 
   it('posts audio to chat/completions as input_audio content', async () => {

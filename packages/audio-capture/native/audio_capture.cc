@@ -219,7 +219,8 @@ napi_value StartRecording(napi_env env, napi_callback_info info) {
     }
   }
 
-  if (sampleRate == 0 || channels == 0 || channels > 2) {
+  if (sampleRate == 0 || sampleRate > 192000 || channels == 0 ||
+      channels > 2) {
     Throw(env, "Native audio capture requires 1 or 2 channels and a sample rate.");
     return nullptr;
   }

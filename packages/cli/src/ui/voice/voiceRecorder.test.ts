@@ -63,6 +63,30 @@ describe('createVoiceRecorder', () => {
     expect(soxRecorder.stop).toHaveBeenCalledTimes(1);
   });
 
+  it('prefers sox before arecord on Linux so tap mode can auto-stop on silence', async () => {
+    const nativeRecorder = recorder({
+      start: vi.fn().mockRejectedValue(new Error('native unavailable')),
+    });
+    const arecordRecorder = recorder();
+    const soxRecorder = recorder();
+
+    const voiceRecorder = createVoiceRecorder({
+      createNativeRecorder: vi.fn(() => nativeRecorder),
+      createArecordRecorder: vi.fn(() => arecordRecorder),
+      createSoxRecorder: vi.fn(() => soxRecorder),
+      platform: 'linux',
+    });
+
+    await voiceRecorder.start({ silenceDetection: true });
+    await voiceRecorder.stop();
+
+    expect(soxRecorder.start).toHaveBeenCalledWith({
+      silenceDetection: true,
+    });
+    expect(soxRecorder.stop).toHaveBeenCalledTimes(1);
+    expect(arecordRecorder.start).not.toHaveBeenCalled();
+  });
+
   it('reports streaming support from the active native recorder', async () => {
     const nativeRecorder = recorder({
       supportsStreaming: vi.fn(() => true),

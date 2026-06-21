@@ -5,6 +5,7 @@
  */
 
 import type { NativeAudioCaptureBackend } from '@qwen-code/audio-capture';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type {
   RecordedVoiceAudio,
   VoiceRecorder,
@@ -13,6 +14,7 @@ import type {
 
 // Native silence detection sets a flag we poll for; older addons lack it.
 const SILENCE_POLL_INTERVAL_MS = 200;
+const debugLogger = createDebugLogger('VOICE_NATIVE_RECORDER');
 
 interface NativeAudioRecorderOptions {
   loadBackend?: () =>
@@ -87,8 +89,9 @@ class NativeAudioRecorder implements VoiceRecorder {
               this.clearSilencePoll();
               onAutoStop();
             }
-          } catch {
+          } catch (error) {
             this.clearSilencePoll();
+            debugLogger.debug('[voice] silence detection poll failed:', error);
           }
         }, SILENCE_POLL_INTERVAL_MS);
       }

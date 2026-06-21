@@ -117,8 +117,10 @@ export function createVoiceRecorder(
   ];
   // arecord (ALSA) only exists on Linux; elsewhere it would just fail fast.
   if (platform === 'linux') {
+    factories.push(options.createSoxRecorder ?? createSoxRecorder);
     factories.push(options.createArecordRecorder ?? createArecordRecorder);
+  } else {
+    factories.push(options.createSoxRecorder ?? createSoxRecorder);
   }
-  factories.push(options.createSoxRecorder ?? createSoxRecorder);
   return new FallbackVoiceRecorder(factories);
 }

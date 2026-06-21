@@ -156,15 +156,20 @@ export function resolveVoiceTranscriptionConfig({
     throw new Error(`Voice model '${voiceModel}' does not define a baseUrl.`);
   }
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl, voiceModel);
+  const parsedBaseUrl = new URL(normalizedBaseUrl);
+  const isLocalhost =
+    parsedBaseUrl.hostname === 'localhost' ||
+    parsedBaseUrl.hostname === '127.0.0.1' ||
+    parsedBaseUrl.hostname === '[::1]';
+  if (parsedBaseUrl.protocol !== 'https:' && !isLocalhost) {
+    throw new Error(
+      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext.`,
+    );
+  }
 
   const apiKey = readApiKey(settings, model, normalizedBaseUrl);
   if (model.envKey && !apiKey) {
     throw new Error(`Voice model '${voiceModel}' requires ${model.envKey}.`);
-  }
-  if (apiKey && new URL(normalizedBaseUrl).protocol !== 'https:') {
-    throw new Error(
-      `Voice model '${voiceModel}' must use an https baseUrl when sending an API key.`,
-    );
   }
 
   return {
@@ -276,7 +281,7 @@ interface ChatCompletionResponse {
 function tokenize(value: string): string[] {
   return value
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .split(/\s+/)
     .filter(Boolean);
 }
