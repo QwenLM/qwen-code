@@ -383,7 +383,7 @@ describe('qwenAsrRealtimeSession', () => {
     );
   });
 
-  it('salvages the committed transcript when the socket closes after finish', async () => {
+  it('rejects committed partial transcript when the socket closes after finish', async () => {
     const socket = new FakeSocket();
     const sessionPromise = openQwenAsrRealtimeStream(
       {
@@ -412,6 +412,8 @@ describe('qwenAsrRealtimeSession', () => {
     const transcriptPromise = session.finish();
     socket.emit('close');
 
-    await expect(transcriptPromise).resolves.toBe('hello world');
+    await expect(transcriptPromise).rejects.toThrow(
+      'Qwen ASR realtime connection closed unexpectedly.',
+    );
   });
 });

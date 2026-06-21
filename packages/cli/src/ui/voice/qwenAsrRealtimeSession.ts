@@ -283,16 +283,11 @@ export function openQwenAsrRealtimeStream(
         return;
       }
       if (finishReject) {
-        // The socket can close right after finish() without a trailing
-        // session.finished. If we already committed a transcript, hand it back
-        // instead of failing the whole dictation.
-        const salvaged = committed.trim();
-        if (salvaged) {
-          finishedTranscript = salvaged;
-          finishResolve?.(finishedTranscript);
-        } else {
-          finishReject(new Error('Qwen ASR realtime connection closed.'));
-        }
+        finishReject(
+          new Error(
+            'Qwen ASR realtime connection closed unexpectedly. Transcript may be incomplete.',
+          ),
+        );
         finishResolve = null;
         finishReject = null;
       } else {
