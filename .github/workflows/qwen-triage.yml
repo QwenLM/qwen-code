@@ -389,13 +389,15 @@ jobs:
           set +e
           {
             printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
-            runuser -u node -- npm ci --prefer-offline --no-audit --progress=false
+            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV \
+              npm ci --prefer-offline --no-audit --progress=false
             install_status=$?
             if [ "$install_status" -ne 0 ]; then
               printf '\n%s\n' "npm ci failed with exit code ${install_status}."
             else
               printf '\n%s\n' '$ npm run build'
-              runuser -u node -- npm run build
+              runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV \
+                npm run build
               build_status=$?
               if [ "$build_status" -ne 0 ]; then
                 printf '\n%s\n' "npm run build failed with exit code ${build_status}."
@@ -823,7 +825,7 @@ jobs:
             case "$PREPARE_FAILURE_PHASE" in
               install) PREPARE_COMMAND='npm ci' ;;
               build) PREPARE_COMMAND='npm run build' ;;
-              *) PREPARE_COMMAND="$PREPARE_FAILURE_PHASE" ;;
+              *) PREPARE_COMMAND='install/build' ;;
             esac
             {
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
@@ -835,17 +837,28 @@ jobs:
           else
             REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
             TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
-            VERDICT_LABEL="${VERDICT:-unknown}"
-            if [ "${VERDICT:-}" = "infra-error" ]; then
-              VERDICT_LABEL='infra-error (crash/OOM)'
-              DESCRIPTION='The tmux test did not complete because the qwen process failed or was killed. This is not a pass/fail result for the affected flow; check runner resources and PR code for crashes or memory leaks.'
-            elif [ "${VERDICT:-}" = "timeout" ]; then
-              DESCRIPTION='The tmux test did not complete before the time limit. This is not a pass/fail result for the affected flow; see the workflow run and artifacts for details.'
-            elif [ "${VERDICT:-}" = "pass" ] || [ "${VERDICT:-}" = "fail" ]; then
-              DESCRIPTION='Launched the changed app in a real tmux session and exercised the affected flow.'
-            else
-              DESCRIPTION='The tmux test produced an unrecognized verdict, so this is not a pass/fail result for the affected flow. See the workflow run and artifacts for details.'
-            fi
+            case "${VERDICT:-}" in
+              infra-error)
+                VERDICT_LABEL='infra-error (crash/OOM)'
+                DESCRIPTION='The tmux test did not complete because the qwen process failed or was killed. This is not a pass/fail result for the affected flow; check runner resources and PR code for crashes or memory leaks.'
+                ;;
+              timeout)
+                VERDICT_LABEL='timeout'
+                DESCRIPTION='The tmux test did not complete before the time limit. This is not a pass/fail result for the affected flow; see the workflow run and artifacts for details.'
+                ;;
+              pass)
+                VERDICT_LABEL='pass'
+                DESCRIPTION='Launched the changed app in a real tmux session and exercised the affected flow.'
+                ;;
+              fail)
+                VERDICT_LABEL='fail'
+                DESCRIPTION='Launched the changed app in a real tmux session and exercised the affected flow.'
+                ;;
+              *)
+                VERDICT_LABEL='unknown'
+                DESCRIPTION='The tmux test produced an unrecognized verdict, so this is not a pass/fail result for the affected flow. See the workflow run and artifacts for details.'
+                ;;
+            esac
             {
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
               printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT_LABEL" "$RUN_URL"
