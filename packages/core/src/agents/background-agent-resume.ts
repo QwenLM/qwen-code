@@ -522,7 +522,8 @@ export class BackgroundAgentResumeService {
         `[BackgroundAgentResume] Cannot revive "${agentId}": not a completed ` +
           `background agent with a persisted transcript (present=${!!entry}, ` +
           `backgrounded=${entry?.isBackgrounded ?? false}, ` +
-          `status=${entry?.status ?? 'none'}).`,
+          `status=${entry?.status ?? 'none'}, ` +
+          `meta=${!!entry?.metaPath}, output=${!!entry?.outputFile}).`,
       );
       return undefined;
     }
