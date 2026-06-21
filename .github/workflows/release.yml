@@ -546,7 +546,7 @@ jobs:
     steps:
       - name: 'Create Issue on Failure'
         env:
-          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           GH_REPO: '${{ github.repository }}'
           RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
