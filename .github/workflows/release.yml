@@ -621,6 +621,7 @@ jobs:
             -f issue_number="${issue_number}" \
             -f dry_run=false; then
             gh issue comment "${issue_number}" --repo "${GH_REPO}" \
-              --body "Autofix dispatch failed. Please dispatch \`qwen-autofix.yml\` manually with \`phase=issue\` and \`issue_number=${issue_number}\`."
+              --body "Autofix dispatch failed. Please dispatch \`qwen-autofix.yml\` manually with \`phase=issue\` and \`issue_number=${issue_number}\`." \
+              || echo "::warning::Failed to comment on dispatch failure."
             echo "::warning::Issue #${issue_number} was created or updated, but autofix dispatch failed."
           fi
