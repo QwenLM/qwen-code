@@ -70,4 +70,49 @@ describe('fake OpenAI server', () => {
     expect(streamText).toContain('data: [DONE]');
     expect(server.requests).toHaveLength(2);
   });
+
+  it('returns 404 for wrong methods or paths', async () => {
+    server = await startFakeOpenAIServer(() => ({ content: 'unused' }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'GET',
+    });
+
+    expect(response.status).toBe(404);
+  });
+
+  it('returns 400 for malformed JSON bodies', async () => {
+    server = await startFakeOpenAIServer(() => ({ content: 'unused' }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: 'not json',
+    });
+
+    expect(response.status).toBe(400);
+  });
+
+  it('returns 500 without exposing handler error details', async () => {
+    server = await startFakeOpenAIServer(() => {
+      throw new Error('secret stack detail');
+    });
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        message: 'fake OpenAI server handler failed',
+        type: 'server_error',
+      },
+    });
+  });
 });

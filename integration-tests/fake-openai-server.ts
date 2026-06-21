@@ -76,30 +76,30 @@ export async function startFakeOpenAIServer(
       return;
     }
 
-    const rawBody = await readRequestBody(req);
-    const body = parseJsonBody(rawBody);
-    if (!body) {
-      res.writeHead(400);
-      res.end('bad json');
-      return;
-    }
-
-    const requestIndex = requests.length;
-    requests.push({ body });
-
     try {
+      const rawBody = await readRequestBody(req);
+      const body = parseJsonBody(rawBody);
+      if (!body) {
+        res.writeHead(400);
+        res.end('bad json');
+        return;
+      }
+
+      const requestIndex = requests.length;
+      requests.push({ body });
+
       const response = await handler({ body, requestIndex });
       if (body['stream'] === true) {
         writeStreamed(res, getModel(body), response);
       } else {
         writeNonStreamed(res, getModel(body), response);
       }
-    } catch (error) {
+    } catch {
       res.writeHead(500, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
           error: {
-            message: error instanceof Error ? error.message : String(error),
+            message: 'fake OpenAI server handler failed',
             type: 'server_error',
           },
         }),
@@ -107,8 +107,18 @@ export async function startFakeOpenAIServer(
     }
   });
 
-  await new Promise<void>((resolve) => {
-    server.listen(0, '127.0.0.1', resolve);
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(0, '127.0.0.1');
   });
 
   const address = server.address();
@@ -249,6 +259,7 @@ function nowSeconds(): number {
 
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
+    server.closeAllConnections();
     server.close((error) => (error ? reject(error) : resolve()));
   });
 }
