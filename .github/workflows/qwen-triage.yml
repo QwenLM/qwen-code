@@ -272,11 +272,11 @@ jobs:
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
     steps:
-      - name: 'Install tmux runner tools'
+      - name: 'Install PR resolver tools'
         run: |-
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq tmux util-linux
+          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq
 
           install -d -m 755 /etc/apt/keyrings
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -287,10 +287,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends gh
 
-          npm install -g '@qwen-code/qwen-code@latest'
-          qwen --version
           gh --version
-          tmux -V
 
       - name: 'Resolve PR and check state'
         id: 'pr'
@@ -364,6 +361,17 @@ jobs:
           persist-credentials: false
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
+
+      - name: 'Install tmux runner tools'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends tmux util-linux
+
+          npm install -g '@qwen-code/qwen-code@latest'
+          qwen --version
+          tmux -V
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -654,6 +662,7 @@ jobs:
             "GH_TOKEN="
             "OPENAI_API_KEY=qwen-loopback-proxy"
             "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
+            "OPENAI_MODEL=$OPENAI_MODEL"
             "NO_PROXY=${NO_PROXY:-}"
             "no_proxy=${no_proxy:-}"
             "QWEN_CI_HTTPS_PROXY=${QWEN_CI_HTTPS_PROXY:-}"
@@ -778,9 +787,7 @@ jobs:
             if [ "$(wc -c < "$file")" -gt "$max" ]; then
               content="${content}"$'\n\n...truncated -- full log in the run artifacts.'
             fi
-            content="${content//&/&amp;}"
-            content="${content//</&lt;}"
-            content="${content//>/&gt;}"
+            content="$(printf '%s' "$content" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
             printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary"
             printf '%s\n' "$content"
             printf '</code></pre>\n\n</details>\n\n'
@@ -814,6 +821,17 @@ jobs:
               printf '**tmux real-user testing: fail** - [workflow run](%s)\n\n' "$RUN_URL"
               printf 'The PR app could not be launched because `%s` failed before the tmux session started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
+              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+            } > "$BODY_FILE"
+          elif [ "$VERDICT" = "timeout" ] || [ "$VERDICT" = "infra-error" ]; then
+            REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
+            TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
+            {
+              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+              printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT" "$RUN_URL"
+              printf 'The tmux test did not complete, so this is not a pass/fail result for the affected flow. See the workflow run and artifacts for details.\n\n'
+              emit_block 'E2E test report' "$REPORT" 20000
+              emit_block 'Full tmux transcript' "$TRANSCRIPT" 30000
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'
             } > "$BODY_FILE"
           else
