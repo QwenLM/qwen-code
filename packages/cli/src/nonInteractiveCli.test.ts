@@ -21,6 +21,7 @@ import {
   FatalInputError,
   ApprovalMode,
   SendMessageType,
+  SYSTEM_REMINDER_OPEN,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
@@ -377,6 +378,42 @@ describe('runNonInteractive', () => {
       );
     });
 
+    it('adds plan mode reminders to an interrupted prompt replay', async () => {
+      setupMetricsMock();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockGeminiClient.stripOrphanedUserEntriesFromHistory = vi.fn();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryTail: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-plan', {
+        continueInterrupted: true,
+      });
+
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      expect(request).toEqual([
+        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
+        { text: 'do the thing' },
+      ]);
+    });
+
     it('restores an orphaned trailing user prompt when Retry exits before sending', async () => {
       setupMetricsMock();
       const orphanedPrompt = [{ text: 'do the thing' }];
@@ -489,6 +526,54 @@ describe('runNonInteractive', () => {
             response: { error: expect.stringContaining('not recorded') },
           },
         },
+      ]);
+    });
+
+    it('adds plan mode reminders to a continued tool result without moving function responses', async () => {
+      setupMetricsMock();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryTail: vi.fn().mockReturnValue([
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+          },
+        ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c-tool-plan',
+        {
+          continueInterrupted: true,
+        },
+      );
+
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+      expect(request).toEqual([
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { error: expect.stringContaining('not recorded') },
+          },
+        },
+        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
       ]);
     });
 

@@ -35,6 +35,9 @@ import {
   ApprovalMode,
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
+  getPlanModeSystemReminder,
+  getArenaSystemReminder,
+  isSystemReminderContent,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -90,6 +93,39 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
   return structuredCaptured
     ? SUPPRESSED_OUTPUT_SUCCESS
     : SUPPRESSED_OUTPUT_RETRY;
+}
+
+function buildContinuationSystemReminders(config: Config): Part[] {
+  const reminders: Part[] = [];
+
+  if (config.getApprovalMode() === ApprovalMode.PLAN) {
+    reminders.push({ text: getPlanModeSystemReminder(config.getSdkMode?.()) });
+  }
+
+  const arenaManager = config.getArenaManager?.();
+  if (arenaManager) {
+    try {
+      const sessionDir = arenaManager.getArenaSessionDir();
+      const configPath = `${sessionDir}/config.json`;
+      reminders.push({ text: getArenaSystemReminder(configPath) });
+    } catch {
+      // Arena config not yet initialized; match the regular send path.
+    }
+  }
+
+  return reminders;
+}
+
+function insertAfterFunctionResponses(
+  parts: Part[],
+  additions: Part[],
+): Part[] {
+  const firstNonFunctionResponse = parts.findIndex(
+    (part) => !part.functionResponse,
+  );
+  const insertAt =
+    firstNonFunctionResponse === -1 ? parts.length : firstNonFunctionResponse;
+  return [...parts.slice(0, insertAt), ...additions, ...parts.slice(insertAt)];
 }
 import {
   normalizePartList,
@@ -526,6 +562,20 @@ export async function runNonInteractive(
             ORPHAN_TOOL_USE_REPAIR_REASON,
           );
           continueSendType = SendMessageType.ToolResult;
+        }
+
+        const reminderParts = buildContinuationSystemReminders(config);
+        if (reminderParts.length > 0 && initialPartList) {
+          const continuationParts = normalizePartList(initialPartList);
+          const hasSystemReminderPart = continuationParts.some((part) =>
+            isSystemReminderContent({ role: 'user', parts: [part] }),
+          );
+          if (!hasSystemReminderPart) {
+            initialPartList = insertAfterFunctionResponses(
+              continuationParts,
+              reminderParts,
+            );
+          }
         }
       }
 
@@ -1140,19 +1190,14 @@ export async function runNonInteractive(
 
         // Start assistant message for this turn
         adapter.startAssistantMessage();
-        let eventSeen = false;
         const isSendStartEvent = (event: { type: GeminiEventType }) =>
           event.type !== GeminiEventType.SessionTokenLimitExceeded;
 
         for await (const event of responseStream) {
-          if (!isSendStartEvent(event)) {
+          if (isSendStartEvent(event)) {
+            continuationSendStarted = true;
+          } else {
             restoreStrippedContinuationEntries();
-          }
-          if (!eventSeen) {
-            if (isSendStartEvent(event)) {
-              continuationSendStarted = true;
-            }
-            eventSeen = true;
           }
           if (abortController.signal.aborted) {
             // Pair the startAssistantMessage() above so stream-json mode

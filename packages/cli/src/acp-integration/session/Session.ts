@@ -422,6 +422,18 @@ interface CronQueueItem {
 
 const MAX_NOTIFICATION_QUEUE = 20;
 
+function insertAfterFunctionResponses(
+  parts: Part[],
+  additions: Part[],
+): Part[] {
+  const firstNonFunctionResponse = parts.findIndex(
+    (part) => !part.functionResponse,
+  );
+  const insertAt =
+    firstNonFunctionResponse === -1 ? parts.length : firstNonFunctionResponse;
+  return [...parts.slice(0, insertAt), ...additions, ...parts.slice(insertAt)];
+}
+
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
@@ -1084,14 +1096,18 @@ export class Session implements SessionContext {
 
     try {
       const result = await this.#executePrompt(params, pendingSend);
-      this.pendingPrompt = null;
+      if (this.pendingPrompt === pendingSend) {
+        this.pendingPrompt = null;
+      }
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
       return result;
     } finally {
-      this.pendingPrompt = null;
+      if (this.pendingPrompt === pendingSend) {
+        this.pendingPrompt = null;
+      }
       // Start the scheduler in finally, not the success path: a turn can arm
       // a wakeup via LoopWakeup and then throw on a later step. Gated on
       // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
@@ -1280,13 +1296,20 @@ export class Session implements SessionContext {
       this.followupAbort = null;
     }
 
+    let drainedBackgroundTurns = false;
+    let resolveCompletion: () => void = () => {};
+    let hasCompletion = false;
     try {
-      // Background cron/notification turns mutate the same chat history;
-      // stop and drain them before continuing, mirroring prompt().
-      await this.#abortAndDrainCronTurn();
-      await this.#abortAndDrainNotificationTurn();
+      // Wait for any just-finished prompt cleanup to settle so continuation
+      // detection sees a stable chat history.
+      if (this.pendingPromptCompletion) {
+        try {
+          await this.pendingPromptCompletion;
+        } catch {
+          // Expected: previous prompt was cancelled or errored.
+        }
+      }
 
-      // Cancelled while draining background turns.
       if (pendingSend.signal.aborted) {
         return {
           stopReason: 'cancelled',
@@ -1295,27 +1318,62 @@ export class Session implements SessionContext {
         };
       }
 
-      // Track this turn's completion for the next prompt to await.
-      let resolveCompletion!: () => void;
-      this.pendingPromptCompletion = new Promise<void>((resolve) => {
-        resolveCompletion = resolve;
-      });
+      const historyTail = this.#getCurrentChat().getHistoryTail(
+        TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+      );
+      const detection = detectTurnInterruption(historyTail);
+
+      if (detection.kind !== 'none') {
+        // Background cron/notification turns mutate the same chat history;
+        // only stop and drain them when there is real continuation work.
+        await this.#abortAndDrainCronTurn();
+        await this.#abortAndDrainNotificationTurn();
+        drainedBackgroundTurns = true;
+
+        // Cancelled while draining background turns.
+        if (pendingSend.signal.aborted) {
+          return {
+            stopReason: 'cancelled',
+            resumed: false,
+            interruption: 'none',
+          };
+        }
+
+        // Track this turn's completion for the next prompt to await.
+        this.pendingPromptCompletion = new Promise<void>((resolve) => {
+          resolveCompletion = resolve;
+          hasCompletion = true;
+        });
+      }
+
       try {
-        const result = await this.#executeContinue(pendingSend);
-        this.pendingPrompt = null;
-        void this.#startCronSchedulerIfNeeded();
-        void this.#drainCronQueue();
-        void this.#drainNotificationQueue();
+        const result = await this.#executeContinue(
+          pendingSend,
+          detection,
+          historyTail.length,
+        );
         if (result.resumed) {
           this.#maybeEmitFollowupSuggestion(result);
         }
         return result;
       } finally {
-        resolveCompletion();
-        this.pendingPromptCompletion = null;
+        if (this.pendingPrompt === pendingSend) {
+          this.pendingPrompt = null;
+        }
+        if (hasCompletion) {
+          resolveCompletion();
+          this.pendingPromptCompletion = null;
+        }
+        if (drainedBackgroundTurns) {
+          void this.#startCronSchedulerIfNeeded();
+          void this.#drainCronQueue();
+          void this.#drainNotificationQueue();
+        }
       }
     } finally {
-      this.pendingPrompt = null;
+      if (this.pendingPrompt === pendingSend) {
+        this.pendingPrompt = null;
+      }
     }
   }
 
@@ -1336,6 +1394,8 @@ export class Session implements SessionContext {
    */
   async #executeContinue(
     pendingSend: AbortController,
+    detection: TurnInterruption,
+    historyTailCount: number,
   ): Promise<ContinueTurnResponse> {
     return sessionIdContext.run(this.config.getSessionId(), () =>
       Storage.runWithRuntimeBaseDir(
@@ -1351,13 +1411,9 @@ export class Session implements SessionContext {
               messageType: 'acp_continue',
             },
             async () => {
-              const historyTail = this.#getCurrentChat().getHistoryTail(
-                TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-              );
-              const detection = detectTurnInterruption(historyTail);
               debugLogger.info('[Session] continueTurn detected interruption', {
                 kind: detection.kind,
-                historyTailCount: historyTail.length,
+                historyTailCount,
                 danglingCallCount:
                   detection.kind === 'interrupted_turn'
                     ? detection.danglingCalls.length
@@ -1399,16 +1455,20 @@ export class Session implements SessionContext {
               if (systemReminders.length > 0 && !hasSystemReminderPart) {
                 // Keep functionResponse parts first for backends that require
                 // tool results to precede text blocks in the same user turn.
-                const reminderIndex = parts.findIndex(
-                  (part) => !part.functionResponse,
-                );
-                const insertAt =
-                  reminderIndex === -1 ? parts.length : reminderIndex;
-                parts = [
-                  ...parts.slice(0, insertAt),
-                  ...systemReminders,
-                  ...parts.slice(insertAt),
-                ];
+                parts = insertAfterFunctionResponses(parts, systemReminders);
+              }
+
+              if (this.pendingWorktreeNotice) {
+                parts = insertAfterFunctionResponses(parts, [
+                  {
+                    text: `<system-reminder>
+${this.pendingWorktreeNotice}
+</system-reminder>
+
+`,
+                  },
+                ]);
+                this.pendingWorktreeNotice = null;
               }
 
               let turnCount = 0;

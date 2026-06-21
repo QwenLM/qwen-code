@@ -1249,11 +1249,40 @@ describe('Session', () => {
       };
       const internals = session as unknown as NotificationInternals;
       internals.notificationCompletion = Promise.resolve();
-      setHistoryTail([{ role: 'model', parts: [{ text: 'done' }] }]);
+      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+      getStripSpy().mockReturnValue([]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
 
       await session.continueTurn();
 
       expect(internals.notificationCompletion).toBeNull();
+    });
+
+    it('does not abort notification work when there is no interrupted turn', async () => {
+      type NotificationInternals = {
+        notificationAbortController: AbortController | null;
+        notificationCompletion: Promise<void> | null;
+      };
+      const notificationAbortController = new AbortController();
+      const abortSpy = vi.spyOn(notificationAbortController, 'abort');
+      const internals = session as unknown as NotificationInternals;
+      internals.notificationAbortController = notificationAbortController;
+      internals.notificationCompletion = Promise.resolve();
+      setHistoryTail([{ role: 'model', parts: [{ text: 'done' }] }]);
+
+      await expect(session.continueTurn()).resolves.toEqual({
+        stopReason: 'end_turn',
+        resumed: false,
+        interruption: 'none',
+      });
+
+      expect(abortSpy).not.toHaveBeenCalled();
+      expect(internals.notificationAbortController).toBe(
+        notificationAbortController,
+      );
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 
     it('re-submits an orphaned trailing user prompt under the same turn id without recording a user message', async () => {
@@ -1547,6 +1576,49 @@ describe('Session', () => {
       );
     });
 
+    it('adds pending worktree notice without moving function responses', async () => {
+      (
+        session as unknown as { pendingWorktreeNotice: string | null }
+      ).pendingWorktreeNotice = 'Restored worktree /tmp/qwen-worktree.';
+      setHistoryTail([
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+        },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.continueTurn();
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'qwen3-code-plus',
+        {
+          message: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'shell',
+                response: { error: expect.stringContaining('not recorded') },
+              },
+            },
+            {
+              text: expect.stringContaining(
+                'Restored worktree /tmp/qwen-worktree.',
+              ),
+            },
+          ],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        'test-session-id########0',
+      );
+      expect(
+        (session as unknown as { pendingWorktreeNotice: string | null })
+          .pendingWorktreeNotice,
+      ).toBeNull();
+    });
+
     it('does not duplicate persisted system reminders on interrupted prompt replay', async () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       const persistedReminder = {
@@ -1653,6 +1725,103 @@ describe('Session', () => {
 
       releaseStream();
       await promptPromise;
+    });
+
+    it('does not clear a newer prompt controller when a cancelled continue turn finishes', async () => {
+      type NotificationInternals = {
+        notificationAbortController: AbortController | null;
+        notificationCompletion: Promise<void> | null;
+      };
+      let releaseNotification!: () => void;
+      const notificationCompletion = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      const notificationAbortController = new AbortController();
+      const internals = session as unknown as NotificationInternals;
+      internals.notificationAbortController = notificationAbortController;
+      internals.notificationCompletion = notificationCompletion;
+      (
+        mockChat as unknown as { getHistoryTail: ReturnType<typeof vi.fn> }
+      ).getHistoryTail = vi
+        .fn()
+        .mockReturnValueOnce([{ role: 'user', parts: [{ text: 'resume me' }] }])
+        .mockReturnValue([{ role: 'model', parts: [{ text: 'done' }] }]);
+
+      let releasePrompt!: () => void;
+      const promptGate = new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+        await promptGate;
+        return createEmptyStream();
+      });
+
+      const continuePromise = session.continueTurn();
+      await vi.waitFor(() => {
+        expect(notificationAbortController.signal.aborted).toBe(true);
+      });
+
+      const promptPromise = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'new prompt' }],
+      });
+      releaseNotification();
+
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      try {
+        await expect(session.continueTurn()).rejects.toMatchObject({
+          code: 409,
+        });
+      } finally {
+        releasePrompt();
+        await Promise.allSettled([continuePromise, promptPromise]);
+      }
+    });
+
+    it('restarts queued notification work after a continuation failure', async () => {
+      type NotificationInternals = {
+        notificationQueue: Array<{
+          displayText: string;
+          modelText: string;
+          meta: { agentId: string; status: string; toolUseId?: string };
+        }>;
+      };
+      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+      getStripSpy().mockReturnValue([]);
+      (session as unknown as NotificationInternals).notificationQueue = [
+        {
+          displayText: 'Background agent "worker" completed.',
+          modelText:
+            '<task-notification><status>completed</status></task-notification>',
+          meta: { agentId: 'agent-1', status: 'completed' },
+        },
+      ];
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('continue failed'))
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await expect(session.continueTurn()).rejects.toThrow('continue failed');
+
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        'qwen3-code-plus',
+        {
+          message: [
+            {
+              text: '<task-notification><status>completed</status></task-notification>',
+            },
+          ],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        expect.stringMatching(/^test-session-id########notification\d+$/),
+      );
     });
   });
 

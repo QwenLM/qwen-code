@@ -483,6 +483,10 @@ class Session {
   private async requestContinueLastTurn(): Promise<Record<string, unknown>> {
     await this.waitForInitialization();
 
+    if (this.isShuttingDown || this.abortController.signal.aborted) {
+      return { accepted: false, interruption: 'none' };
+    }
+
     const geminiClient = this.config.getGeminiClient();
     if (!geminiClient || !geminiClient.isInitialized()) {
       return { accepted: false, interruption: 'none' };
@@ -513,6 +517,14 @@ class Session {
    */
   private async processContinueTurn(): Promise<void> {
     this.continueTurnInProgress = true;
+    let resultAlreadyEmitted = false;
+    const originalEmitResult = this.outputAdapter.emitResult;
+    this.outputAdapter.emitResult = (
+      options: Parameters<StreamJsonOutputAdapter['emitResult']>[0],
+    ) => {
+      resultAlreadyEmitted = true;
+      originalEmitResult.call(this.outputAdapter, options);
+    };
     try {
       await this.waitForInitialization();
 
@@ -527,9 +539,13 @@ class Session {
       });
     } catch (error) {
       debugLogger.error('[Session] Continue turn execution error:', error);
+      if (resultAlreadyEmitted) {
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Continue turn failed: ${message}`, { cause: error });
     } finally {
+      this.outputAdapter.emitResult = originalEmitResult;
       this.continueTurnInProgress = false;
     }
   }

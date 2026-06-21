@@ -253,12 +253,16 @@ describe('runNonInteractiveStreamJson', () => {
     vi.restoreAllMocks();
   });
 
+  type CapturedControlContext = {
+    onContinueLastTurn?: () => Promise<Record<string, unknown>>;
+    onInterrupt?: () => void;
+  };
+
   function installContinueDispatch(): {
     continueResults: Array<Record<string, unknown> | undefined>;
+    getControlContext: () => CapturedControlContext | undefined;
   } {
-    let controlContext:
-      | { onContinueLastTurn?: () => Promise<Record<string, unknown>> }
-      | undefined;
+    let controlContext: CapturedControlContext | undefined;
     const pendingDispatches = new Set<Promise<unknown>>();
     const continueResults: Array<Record<string, unknown> | undefined> = [];
 
@@ -272,6 +276,10 @@ describe('runNonInteractiveStreamJson', () => {
     );
     mockDispatcher.dispatch.mockImplementation((request: CLIControlRequest) => {
       const work = (async () => {
+        if (request.request.subtype === 'interrupt') {
+          controlContext?.onInterrupt?.();
+          return undefined;
+        }
         if (request.request.subtype !== 'continue_last_turn') {
           return undefined;
         }
@@ -292,7 +300,7 @@ describe('runNonInteractiveStreamJson', () => {
       },
     );
 
-    return { continueResults };
+    return { continueResults, getControlContext: () => controlContext };
   }
 
   function createInitializedGeminiClient(historyTail: Content[]) {
@@ -449,6 +457,30 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
+  it('rejects continue_last_turn after the session has been interrupted', async () => {
+    const { continueResults, getControlContext } = installContinueDispatch();
+    createInitializedGeminiClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    const initRequest = createControlRequest('initialize');
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      await vi.waitFor(() => {
+        expect(getControlContext()).toBeDefined();
+      });
+      getControlContext()?.onInterrupt?.();
+      continueResults.push(await getControlContext()?.onContinueLastTurn?.());
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(continueResults).toEqual([
+      { accepted: false, interruption: 'none' },
+    ]);
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+  });
+
   it('emits an error result when a scheduled continue turn fails', async () => {
     const { continueResults } = installContinueDispatch();
     createInitializedGeminiClient([
@@ -475,6 +507,47 @@ describe('runNonInteractiveStreamJson', () => {
       expect.objectContaining({
         isError: true,
         errorMessage: 'Continue turn failed: continue failed',
+      }),
+    );
+  });
+
+  it('does not emit a second result when a failed continue turn already reported one', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedGeminiClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    const initRequest = createControlRequest('initialize');
+    const continueRequest = createContinueRequest();
+    runNonInteractiveMock.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[4] as { adapter: StreamJsonOutputAdapter };
+      options.adapter.emitResult({
+        isError: true,
+        errorMessage: 'raw continue failure',
+        durationMs: 1,
+        apiDurationMs: 1,
+        numTurns: 0,
+      });
+      throw new Error('raw continue failure');
+    });
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield continueRequest;
+      await vi.waitFor(() => {
+        expect(continueResults).toHaveLength(1);
+      });
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(continueResults).toEqual([
+      { accepted: true, interruption: 'interrupted_prompt' },
+    ]);
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: 'raw continue failure',
       }),
     );
   });
