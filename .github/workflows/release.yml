@@ -551,12 +551,14 @@ jobs:
           GH_REPO: '${{ github.repository }}'
           RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          BUG_LABEL: 'type/bug'
+          READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
         run: |-
           issue_url="$(gh issue create --repo "${GH_REPO}" \
             --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
             --body "The release workflow failed. See the full run for details: ${DETAILS_URL}" \
-            --label "type/bug" \
-            --label "status/ready-for-agent")"
+            --label "${BUG_LABEL}" \
+            --label "${READY_FOR_AGENT_LABEL}")"
           issue_number="${issue_url##*/}"
 
           echo "Created ${issue_url}; dispatching autofix."

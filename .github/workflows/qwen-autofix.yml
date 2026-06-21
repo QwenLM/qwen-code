@@ -123,6 +123,9 @@ jobs:
     env:
       REPO: '${{ github.repository }}'
       WORKDIR: '/tmp/autofix'
+      BUG_LABEL: 'type/bug'
+      READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+      AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
       # Comments from these accounts (triage/followup bots and the autofix bot's
       # own qwen-code-dev-bot identity) do not count as human engagement when
       # judging whether an issue is unattended — otherwise the bot's own
@@ -168,24 +171,29 @@ jobs:
               | jq -c '[.]' > "${WORKDIR}/candidates.json"
           else
             MIN_CREATED="$(date -u -d '2 days ago' +%Y-%m-%d)"
+            filter_unattended_candidates() {
+              # Triage bots comment on most new issues, so "unattended" means:
+              # no comments at all, or every commenter is a known bot account.
+              jq -c --argjson bots "${KNOWN_BOTS}" \
+                '[ .[] | select(([(.comments // [])[].author.login] | map(select(. != null))) - $bots == []) ] | .[0:10] | map(del(.comments))' \
+                "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
+            }
+
             echo "🔍 Scanning for ready-for-agent bugs (newest first)..."
             gh issue list --repo "${REPO}" \
-              --search "is:open is:issue label:type/bug label:status/ready-for-agent no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc" \
+              --search "is:open is:issue label:${BUG_LABEL} label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
               --limit 30 --json number,title,body,labels,createdAt,url,comments \
               > "${WORKDIR}/scan.json"
-            if [[ "$(jq length "${WORKDIR}/scan.json")" == "0" ]]; then
+            filter_unattended_candidates
+
+            if [[ "$(jq length "${WORKDIR}/candidates.json")" == "0" ]]; then
               echo "🔍 Scanning for recent, unattended bugs created before ${MIN_CREATED} (newest first)..."
               gh issue list --repo "${REPO}" \
-                --search "is:open is:issue label:type/bug no:assignee created:<${MIN_CREATED} -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc" \
+                --search "is:open is:issue label:${BUG_LABEL} created:<${MIN_CREATED} ${AUTOFIX_ISSUE_EXCLUDES}" \
                 --limit 30 --json number,title,body,labels,createdAt,url,comments \
                 > "${WORKDIR}/scan.json"
+              filter_unattended_candidates
             fi
-
-            # Triage bots comment on most new issues, so "unattended" means:
-            # no comments at all, or every commenter is a known bot account.
-            jq -c --argjson bots "${KNOWN_BOTS}" \
-              '[ .[] | select(([(.comments // [])[].author.login] | map(select(. != null))) - $bots == []) ] | .[0:10] | map(del(.comments))' \
-              "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
           fi
 
           COUNT="$(jq length "${WORKDIR}/candidates.json")"
