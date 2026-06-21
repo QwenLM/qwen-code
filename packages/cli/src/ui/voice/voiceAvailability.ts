@@ -6,6 +6,7 @@
 
 import { existsSync } from 'node:fs';
 import process from 'node:process';
+import { t } from '../../i18n/index.js';
 
 // Pre-flight environment check so users get a clear message at /voice-enable
 // time, instead of a cryptic recorder failure when no microphone can work
@@ -41,7 +42,9 @@ export function getVoiceUnavailableReason(
   const fileExists = environment.fileExists ?? existsSync;
 
   if (!SUPPORTED_PLATFORMS.includes(platform)) {
-    return `Voice dictation is not supported on ${platform}.`;
+    return t('Voice dictation is not supported on {{platform}}.', {
+      platform,
+    });
   }
 
   if (
@@ -50,9 +53,8 @@ export function getVoiceUnavailableReason(
     !env['PULSE_SERVER'] &&
     !fileExists('/mnt/wslg/PulseServer')
   ) {
-    return (
-      'Voice dictation needs microphone access, which is unavailable in this WSL ' +
-      'session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.'
+    return t(
+      'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.',
     );
   }
 

@@ -325,8 +325,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     [config, settings],
   );
   const voiceMicWarnedRef = useRef(false);
+  const voiceRecorderRef = useRef<ReturnType<
+    typeof createVoiceRecorder
+  > | null>(null);
+  const getVoiceRecorder = useCallback(() => {
+    voiceRecorderRef.current ??= createVoiceRecorder();
+    return voiceRecorderRef.current;
+  }, []);
   const warmupVoice = useCallback(() => {
-    const recorder = createVoiceRecorder();
+    const recorder = getVoiceRecorder();
     void Promise.resolve(recorder.warmup?.()).catch(() => {});
     void Promise.resolve(recorder.microphoneStatus?.())
       .then((status) => {
@@ -335,14 +342,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           uiState.historyManager?.addItem(
             {
               type: 'error',
-              text: 'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.',
+              text: t(
+                'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.',
+              ),
             },
             Date.now(),
           );
         }
       })
       .catch(() => {});
-  }, [uiState.historyManager]);
+  }, [getVoiceRecorder, uiState.historyManager]);
   const voiceStreaming = voiceModel ? isStreamingVoiceModel(voiceModel) : false;
   const openVoiceStreamSession = useCallback(
     (callbacks: { onInterim: (text: string) => void }) => {
@@ -376,7 +385,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     voiceModel,
     buffer,
     addItem: uiState.historyManager?.addItem,
-    createRecorder: createVoiceRecorder,
+    createRecorder: getVoiceRecorder,
     transcribe: transcribeVoice,
     onSubmit: () => voiceSubmitRef.current(),
     warmup: warmupVoice,

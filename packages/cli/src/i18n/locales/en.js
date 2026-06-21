@@ -1418,11 +1418,40 @@ export default {
   'Toggle voice dictation input': 'Toggle voice dictation input',
   'Set the model for voice transcription':
     'Set the model for voice transcription',
+  'Select Fast Model': 'Select Fast Model',
   'Select Voice Model': 'Select Voice Model',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
     "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).',
+  'model: {{voiceModel}}': 'model: {{voiceModel}}',
+  'no voice model selected': 'no voice model selected',
+  'Voice dictation disabled.': 'Voice dictation disabled.',
+  'Usage: /voice [hold|tap|off|status]': 'Usage: /voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    'No voice model selected. Run /model --voice to choose one before enabling voice dictation.',
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.',
+  'No models are configured.': 'No models are configured.',
+  'Configured models: {{models}}.': 'Configured models: {{models}}.',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.',
+  "Voice model '{{modelName}}' is not configured.":
+    "Voice model '{{modelName}}' is not configured.",
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    "Voice model '{{modelName}}' cannot be used for transcription.",
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.',
+  'Voice dictation is not supported on {{platform}}.':
+    'Voice dictation is not supported on {{platform}}.',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.',
   'Voice: recording': 'Voice: recording',
   'Voice: transcribing': 'Voice: transcribing',
   'listening…': 'listening…',

@@ -107,7 +107,9 @@ describe('createVoiceRecorder', () => {
     const nativeRecorder = recorder({
       start: vi.fn().mockRejectedValue(new Error('native unavailable')),
     });
-    const soxRecorder = recorder();
+    const soxRecorder = recorder({
+      drain: vi.fn(() => new Uint8Array(0)),
+    });
 
     const voiceRecorder = createVoiceRecorder({
       createNativeRecorder: vi.fn(() => nativeRecorder),

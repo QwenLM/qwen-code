@@ -1216,10 +1216,39 @@ export default {
     '設置用於輸入建議和推測執行的輕量模型',
   'Toggle voice dictation input': '切換語音聽寫輸入',
   'Set the model for voice transcription': '設定語音轉寫模型',
+  'Select Fast Model': '選擇快速模型',
   'Select Voice Model': '選擇語音模型',
   'Selected voice model is unavailable.': '所選語音模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
     "語音模型 '{{model}}' 被配置了多次。請先移除重複的模型 ID，再將其選為語音轉寫模型。",
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    '語音聽寫：{{status}}（模式：{{mode}}，{{modelText}}）。',
+  'model: {{voiceModel}}': '模型：{{voiceModel}}',
+  'no voice model selected': '未選擇語音模型',
+  'Voice dictation disabled.': '語音聽寫已停用。',
+  'Usage: /voice [hold|tap|off|status]': '用法：/voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    '未選擇語音模型。請先執行 /model --voice 選擇模型，再啟用語音聽寫。',
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    '語音聽寫已啟用（點按模式）。在空輸入框中點按 Space 開始，再點按一次或停頓後停止並提交，使用 {{voiceModel}}。',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    '語音聽寫已啟用（按住模式）。在空輸入框中按住 Space，使用 {{voiceModel}} 聽寫。',
+  'No models are configured.': '未設定模型。',
+  'Configured models: {{models}}.': '已設定模型：{{models}}。',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    '請在 settings.modelProviders 中設定唯一的模型 ID，或執行 /model --voice 選擇可用模型。',
+  "Voice model '{{modelName}}' is not configured.":
+    "語音模型 '{{modelName}}' 未設定。",
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    "語音模型 '{{modelName}}' 不能用於轉寫。",
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    '請在 settings.modelProviders 中設定帶 baseUrl 的 OpenAI 相容模型。',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    '麥克風存取被拒絕。請在系統設定 → 隱私權與安全性 → 麥克風中允許目前終端機存取，然後重新啟動語音聽寫。',
+  'Voice dictation is not supported on {{platform}}.':
+    '語音聽寫不支援 {{platform}}。',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    '語音聽寫需要麥克風存取，但目前 WSL 會話不可用。請使用 WSLg/PulseAudio，或在具備麥克風的主機上執行 Qwen Code。',
   'Voice: recording': '語音：錄音中',
   'Voice: transcribing': '語音：轉寫中',
   'listening…': '聆聽中…',

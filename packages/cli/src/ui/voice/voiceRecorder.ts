@@ -80,10 +80,7 @@ class FallbackVoiceRecorder implements VoiceRecorder {
   }
 
   supportsStreaming(): boolean {
-    return (
-      this.activeRecorder?.supportsStreaming?.() ??
-      typeof this.activeRecorder?.drain === 'function'
-    );
+    return this.activeRecorder?.supportsStreaming?.() ?? false;
   }
 
   audioLevel(): number {

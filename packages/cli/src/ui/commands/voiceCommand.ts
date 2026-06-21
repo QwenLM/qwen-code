@@ -60,12 +60,19 @@ export const voiceCommand: SlashCommand = {
       const voiceModel = getVoiceModel(settings);
       const status = isVoiceEnabled(settings) ? 'enabled' : 'disabled';
       const modelText = voiceModel
-        ? `model: ${voiceModel}`
-        : 'no voice model selected';
+        ? t('model: {{voiceModel}}', { voiceModel })
+        : t('no voice model selected');
       return {
         type: 'message',
         messageType: 'info',
-        content: `Voice dictation: ${status} (mode: ${getVoiceMode(settings)}, ${modelText}).`,
+        content: t(
+          'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).',
+          {
+            status,
+            mode: getVoiceMode(settings),
+            modelText,
+          },
+        ),
       };
     }
 
@@ -78,7 +85,7 @@ export const voiceCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: 'Voice dictation disabled.',
+        content: t('Voice dictation disabled.'),
       };
     }
 
@@ -86,7 +93,7 @@ export const voiceCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'warning',
-        content: 'Usage: /voice [hold|tap|off|status]',
+        content: t('Usage: /voice [hold|tap|off|status]'),
       };
     }
 
@@ -99,7 +106,7 @@ export const voiceCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: 'Voice dictation disabled.',
+        content: t('Voice dictation disabled.'),
       };
     }
 
@@ -108,8 +115,9 @@ export const voiceCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'warning',
-        content:
+        content: t(
           'No voice model selected. Run /model --voice to choose one before enabling voice dictation.',
+        ),
       };
     }
 
@@ -136,8 +144,14 @@ export const voiceCommand: SlashCommand = {
       messageType: 'info',
       content:
         mode === 'tap'
-          ? `Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using ${voiceModel}.`
-          : `Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with ${voiceModel}.`,
+          ? t(
+              'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.',
+              { voiceModel },
+            )
+          : t(
+              'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.',
+              { voiceModel },
+            ),
     };
   },
 };
