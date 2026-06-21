@@ -25,6 +25,7 @@ import {
   SESSION_BACKEND_TOOL_NAMES,
   SESSION_TOOL_REGISTRY,
   getSessionToolDefs,
+  isPathInsideOrEqual,
   TOOL_DESCRIPTIONS as BASE_DESCRIPTIONS,
   // Types
   type ToolResult,
@@ -140,7 +141,7 @@ export function getSessionPlansDir(workspacePath: string, sessionId: string): st
  */
 export function isPathInPlansDir(path: string, workspacePath: string, sessionId: string): boolean {
   const plansDir = getSessionPlansDir(workspacePath, sessionId);
-  return path.startsWith(plansDir);
+  return isPathInsideOrEqual(plansDir, path);
 }
 
 // ============================================================

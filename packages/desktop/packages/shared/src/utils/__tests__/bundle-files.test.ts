@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync } from 'fs'
+import { join, sep } from 'path'
 import { tmpdir } from 'os'
 import {
   collectDirectoryFiles,
@@ -245,6 +245,21 @@ describe('bundle-files', () => {
       expect(readFileSync(join(target, 'test.txt'), 'utf-8')).toBe('restored content')
     })
 
+    it('restores files when target directory has a trailing separator', () => {
+      const content = Buffer.from('restored content')
+      const files: BundleFile[] = [{
+        relativePath: 'test.txt',
+        contentBase64: content.toString('base64'),
+        size: content.length,
+      }]
+
+      const target = join(tmpDir, 'target')
+      mkdirSync(target)
+      restoreFiles(`${target}${sep}`, files)
+
+      expect(readFileSync(join(target, 'test.txt'), 'utf-8')).toBe('restored content')
+    })
+
     it('creates subdirectories as needed', () => {
       const content = Buffer.from('nested')
       const files: BundleFile[] = [{
@@ -282,6 +297,50 @@ describe('bundle-files', () => {
       const target = join(tmpDir, 'target')
       mkdirSync(target)
       expect(() => restoreFiles(target, files)).toThrow('Invalid bundle file')
+    })
+
+    it('rejects writes through a symlinked parent directory', () => {
+      if (process.platform === 'win32') {
+        return
+      }
+
+      const content = Buffer.from('x')
+      const files: BundleFile[] = [{
+        relativePath: 'link/pwn.txt',
+        contentBase64: content.toString('base64'),
+        size: content.length,
+      }]
+
+      const target = join(tmpDir, 'target')
+      const outside = join(tmpDir, 'outside')
+      mkdirSync(target)
+      mkdirSync(outside)
+      symlinkSync(outside, join(target, 'link'), 'dir')
+
+      expect(() => restoreFiles(target, files)).toThrow('Path escapes target directory')
+      expect(existsSync(join(outside, 'pwn.txt'))).toBe(false)
+    })
+
+    it('rejects writes through a broken final symlink', () => {
+      if (process.platform === 'win32') {
+        return
+      }
+
+      const content = Buffer.from('x')
+      const files: BundleFile[] = [{
+        relativePath: 'link.txt',
+        contentBase64: content.toString('base64'),
+        size: content.length,
+      }]
+
+      const target = join(tmpDir, 'target')
+      const outside = join(tmpDir, 'outside')
+      mkdirSync(target)
+      mkdirSync(outside)
+      symlinkSync(join(outside, 'created.txt'), join(target, 'link.txt'), 'file')
+
+      expect(() => restoreFiles(target, files)).toThrow('Path escapes target directory')
+      expect(existsSync(join(outside, 'created.txt'))).toBe(false)
     })
 
     it('round-trips with collectDirectoryFiles', () => {
