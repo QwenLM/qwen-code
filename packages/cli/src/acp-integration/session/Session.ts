@@ -66,8 +66,6 @@ import {
   createHookOutput,
   generateToolUseId,
   MessageBusType,
-  getPlanModeSystemReminder,
-  getArenaSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
   evaluatePermissionFlow,
@@ -131,7 +129,11 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
-import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import {
+  buildInitialSystemReminders,
+  insertAfterFunctionResponses,
+  normalizePartList,
+} from '../../utils/nonInteractiveHelpers.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -421,18 +423,6 @@ interface CronQueueItem {
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
-
-function insertAfterFunctionResponses(
-  parts: Part[],
-  additions: Part[],
-): Part[] {
-  const firstNonFunctionResponse = parts.findIndex(
-    (part) => !part.functionResponse,
-  );
-  const insertAt =
-    firstNonFunctionResponse === -1 ? parts.length : firstNonFunctionResponse;
-  return [...parts.slice(0, insertAt), ...additions, ...parts.slice(insertAt)];
-}
 
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
@@ -3862,26 +3852,7 @@ ${this.pendingWorktreeNotice}
    * separately as part of the broader middleware-alignment work.
    */
   async #buildInitialSystemReminders(): Promise<Part[]> {
-    const reminders: Part[] = [];
-
-    if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
-      reminders.push({
-        text: getPlanModeSystemReminder(this.config.getSdkMode?.()),
-      });
-    }
-
-    const arenaManager = this.config.getArenaManager?.();
-    if (arenaManager) {
-      try {
-        const sessionDir = arenaManager.getArenaSessionDir();
-        const configPath = `${sessionDir}/config.json`;
-        reminders.push({ text: getArenaSystemReminder(configPath) });
-      } catch {
-        // Arena config not yet initialized — skip (matches client.ts).
-      }
-    }
-
-    return reminders;
+    return buildInitialSystemReminders(this.config);
   }
 
   private async runTool(

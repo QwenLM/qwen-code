@@ -35,8 +35,6 @@ import {
   ApprovalMode,
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
-  getPlanModeSystemReminder,
-  getArenaSystemReminder,
   isSystemReminderContent,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
@@ -95,38 +93,6 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
     : SUPPRESSED_OUTPUT_RETRY;
 }
 
-function buildContinuationSystemReminders(config: Config): Part[] {
-  const reminders: Part[] = [];
-
-  if (config.getApprovalMode() === ApprovalMode.PLAN) {
-    reminders.push({ text: getPlanModeSystemReminder(config.getSdkMode?.()) });
-  }
-
-  const arenaManager = config.getArenaManager?.();
-  if (arenaManager) {
-    try {
-      const sessionDir = arenaManager.getArenaSessionDir();
-      const configPath = `${sessionDir}/config.json`;
-      reminders.push({ text: getArenaSystemReminder(configPath) });
-    } catch {
-      // Arena config not yet initialized; match the regular send path.
-    }
-  }
-
-  return reminders;
-}
-
-function insertAfterFunctionResponses(
-  parts: Part[],
-  additions: Part[],
-): Part[] {
-  const firstNonFunctionResponse = parts.findIndex(
-    (part) => !part.functionResponse,
-  );
-  const insertAt =
-    firstNonFunctionResponse === -1 ? parts.length : firstNonFunctionResponse;
-  return [...parts.slice(0, insertAt), ...additions, ...parts.slice(insertAt)];
-}
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -134,6 +100,8 @@ import {
   createToolProgressHandler,
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
+  buildInitialSystemReminders,
+  insertAfterFunctionResponses,
 } from './utils/nonInteractiveHelpers.js';
 
 // Human-readable labels for the detectors that can fire mid-stream.
@@ -571,7 +539,7 @@ export async function runNonInteractive(
           continueSendType = SendMessageType.ToolResult;
         }
 
-        const reminderParts = buildContinuationSystemReminders(config);
+        const reminderParts = buildInitialSystemReminders(config);
         if (reminderParts.length > 0 && initialPartList) {
           const continuationParts = normalizePartList(initialPartList);
           const hasSystemReminderPart = continuationParts.some((part) =>
