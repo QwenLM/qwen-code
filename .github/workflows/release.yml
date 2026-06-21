@@ -577,9 +577,13 @@ jobs:
           } > "${body_file}"
 
           title_prefix="Release Failed for ${RELEASE_TAG}"
-          existing_issue_url="$(gh issue list --repo "${GH_REPO}" --state open \
-            --search '"Release Failed for" in:title' --limit 100 --json title,url \
-            | jq -r --arg title_prefix "${title_prefix}" 'map(select(.title | contains($title_prefix))) | .[0].url // ""')"
+          existing_issue_url=""
+          if [[ "${RELEASE_TAG}" != "N/A" ]]; then
+            existing_issue_url="$(gh issue list --repo "${GH_REPO}" --state open \
+              --limit 100 --json title,url \
+              | jq -r --arg title_prefix "${title_prefix}" 'map(select(.title | startswith($title_prefix + " on "))) | .[0].url // ""' \
+              || true)"
+          fi
 
           if [[ -n "${existing_issue_url}" ]]; then
             issue_url="${existing_issue_url}"
@@ -602,8 +606,6 @@ jobs:
             echo "::error::Could not parse issue number from: ${issue_url}"
             exit 1
           fi
-          gh issue edit "${issue_number}" --repo "${GH_REPO}" \
-            --add-label "type/bug,category/development,scope/ci-cd,scope/github-actions,priority/P1,status/ready-for-agent"
 
           echo "Created or updated issue ${issue_url} (#${issue_number}); dispatching autofix."
 

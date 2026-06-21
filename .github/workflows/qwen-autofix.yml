@@ -479,15 +479,17 @@ jobs:
           # Run tests only for the packages this fix touches: a pre-existing
           # red or flaky test elsewhere on main must not block every fix.
           # Cross-package regressions are covered by regular CI on the PR.
-          CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
-          CHANGED_PKGS="$(echo "${CHANGED_FILES}" | grep -oE '^packages/[^/]+' | sort -u || true)"
+          CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}" || true)"
+          CHANGED_PKGS="$(printf '%s\n' "${CHANGED_FILES}" | grep -oE '^packages/[^/]+' | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
-            if echo "${CHANGED_FILES}" | grep -Eq '^(\.github/|scripts/|package(-lock)?\.json$)'; then
-              echo "ℹ️ No package-specific tests for automation/root-manifest-only changes."
-            else
+            if printf '%s\n' "${CHANGED_FILES}" | grep -Evq '^(\.github/|scripts/|package(-lock)?\.json$)'; then
               echo "❌ Fix does not touch any package or automation/root manifest file"
               exit 1
             fi
+            if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^\.github/workflows/.*\.ya?ml$'; then
+              node scripts/lint.js --actionlint
+            fi
+            echo "ℹ️ No package-specific tests for automation/root-manifest-only changes."
           else
             for p in ${CHANGED_PKGS}; do
               echo "🧪 Testing ${p}..."
@@ -969,17 +971,19 @@ jobs:
           # Test only the packages this PR touches: a pre-existing red/flaky test
           # elsewhere on main must not block a valid response. Cross-package
           # regressions are covered by regular CI on the PR after the push.
-          CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
-          CHANGED_PKGS="$(echo "${CHANGED_FILES}" | grep -oE '^packages/[^/]+' | sort -u || true)"
+          CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}" || true)"
+          CHANGED_PKGS="$(printf '%s\n' "${CHANGED_FILES}" | grep -oE '^packages/[^/]+' | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
-            if echo "${CHANGED_FILES}" | grep -Eq '^(\.github/|scripts/|package(-lock)?\.json$)'; then
-              echo "ℹ️ No package-specific tests for automation/root-manifest-only changes."
-              echo "outcome=automation-only" >> "${GITHUB_OUTPUT}"
-            else
+            if printf '%s\n' "${CHANGED_FILES}" | grep -Evq '^(\.github/|scripts/|package(-lock)?\.json$)'; then
               echo "❌ PR does not touch any package or automation/root manifest file"
               echo "outcome=failed" >> "${GITHUB_OUTPUT}"
               exit 1
             fi
+            if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^\.github/workflows/.*\.ya?ml$'; then
+              node scripts/lint.js --actionlint
+            fi
+            echo "ℹ️ No package-specific tests for automation/root-manifest-only changes."
+            echo "outcome=automation-only" >> "${GITHUB_OUTPUT}"
           else
             for p in ${CHANGED_PKGS}; do
               echo "🧪 Testing ${p}..."
