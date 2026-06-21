@@ -354,7 +354,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   }, [getVoiceRecorder, uiState.historyManager]);
   const voiceStreaming = voiceModel ? isStreamingVoiceModel(voiceModel) : false;
   const openVoiceStreamSession = useCallback(
-    (callbacks: { onInterim: (text: string) => void }) => {
+    (callbacks: {
+      onInterim: (text: string) => void;
+      onError?: (error: Error) => void;
+    }) => {
       if (!voiceModel) {
         return Promise.reject(new Error('No voice model selected.'));
       }
@@ -385,7 +388,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     voiceModel,
     buffer,
     addItem: uiState.historyManager?.addItem,
-    createRecorder: getVoiceRecorder,
+    createRecorder: createVoiceRecorder,
     transcribe: transcribeVoice,
     onSubmit: () => voiceSubmitRef.current(),
     warmup: warmupVoice,

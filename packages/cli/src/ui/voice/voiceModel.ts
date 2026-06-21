@@ -17,13 +17,10 @@ export function isTranscribableVoiceModel(model: AvailableModel): boolean {
 }
 
 export function formatUnsupportedVoiceModelMessage(modelName: string): string {
-  return (
-    t("Voice model '{{modelName}}' cannot be used for transcription.", {
+  return t(
+    "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.",
+    {
       modelName,
-    }) +
-    ' ' +
-    t(
-      'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.',
-    )
+    },
   );
 }

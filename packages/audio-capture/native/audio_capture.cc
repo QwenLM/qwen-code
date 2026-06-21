@@ -330,7 +330,7 @@ napi_value DrainAudio(napi_env env, napi_callback_info info) {
   (void)info;
   std::vector<int16_t> pcm;
   std::vector<int16_t> next;
-  next.reserve(kMaxPcmSamples);
+  next.reserve(static_cast<size_t>(gRecorder.sampleRate) * gRecorder.channels);
   {
     std::lock_guard<std::mutex> lock(gRecorder.mutex);
     pcm.swap(gRecorder.pcm);

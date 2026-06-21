@@ -1444,6 +1444,8 @@ export default {
     "Voice model '{{modelName}}' is not configured.",
   "Voice model '{{modelName}}' cannot be used for transcription.":
     "Voice model '{{modelName}}' cannot be used for transcription.",
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.",
   'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
     'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.',
   'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':

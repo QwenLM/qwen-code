@@ -1355,6 +1355,8 @@ export default {
     "语音模型 '{{modelName}}' 未配置。",
   "Voice model '{{modelName}}' cannot be used for transcription.":
     "语音模型 '{{modelName}}' 不能用于转写。",
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    "语音模型 '{{modelName}}' 不能用于转写。请在 settings.modelProviders 中配置带 baseUrl 的 OpenAI 兼容模型。",
   'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
     '请在 settings.modelProviders 中配置带 baseUrl 的 OpenAI 兼容模型。',
   'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
