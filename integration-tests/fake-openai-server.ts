@@ -36,7 +36,6 @@ export type FakeOpenAIResponse = {
 };
 
 export type FakeOpenAIRequest = {
-  rawBody: string;
   body: JsonObject;
 };
 
@@ -47,7 +46,6 @@ export type FakeOpenAIServer = {
 };
 
 export type FakeOpenAIHandler = (ctx: {
-  rawBody: string;
   body: JsonObject;
   requestIndex: number;
 }) => FakeOpenAIResponse | Promise<FakeOpenAIResponse>;
@@ -55,7 +53,7 @@ export type FakeOpenAIHandler = (ctx: {
 export function fakeToolCall(
   name: string,
   args: JsonObject,
-  id = `call_${randomUUID().replaceAll('-', '').slice(0, 16)}`,
+  id = `call_${randomUUID()}`,
 ): FakeOpenAIToolCall {
   return {
     id,
@@ -87,14 +85,14 @@ export async function startFakeOpenAIServer(
     }
 
     const requestIndex = requests.length;
-    requests.push({ rawBody, body });
+    requests.push({ body });
 
     try {
-      const response = await handler({ rawBody, body, requestIndex });
+      const response = await handler({ body, requestIndex });
       if (body['stream'] === true) {
-        writeStreamed(res, getModel(body), response, rawBody);
+        writeStreamed(res, getModel(body), response);
       } else {
-        writeNonStreamed(res, getModel(body), response, rawBody);
+        writeNonStreamed(res, getModel(body), response);
       }
     } catch (error) {
       res.writeHead(500, { 'content-type': 'application/json' });
@@ -155,7 +153,6 @@ function writeNonStreamed(
   res: ServerResponse,
   model: string,
   message: FakeOpenAIResponse,
-  rawBody: string,
 ): void {
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(
@@ -175,7 +172,7 @@ function writeNonStreamed(
           finish_reason: finishReason(message),
         },
       ],
-      usage: message.usage ?? defaultUsage(rawBody, message),
+      usage: message.usage ?? DEFAULT_USAGE,
     }),
   );
 }
@@ -184,7 +181,6 @@ function writeStreamed(
   res: ServerResponse,
   model: string,
   message: FakeOpenAIResponse,
-  rawBody: string,
 ): void {
   res.writeHead(200, {
     'cache-control': 'no-cache',
@@ -228,13 +224,7 @@ function writeStreamed(
       }),
     );
   }
-  send(
-    chunk(
-      {},
-      finishReason(message),
-      message.usage ?? defaultUsage(rawBody, message),
-    ),
-  );
+  send(chunk({}, finishReason(message), message.usage ?? DEFAULT_USAGE));
   res.write('data: [DONE]\n\n');
   res.end();
 }
@@ -243,27 +233,11 @@ function finishReason(message: FakeOpenAIResponse): string {
   return message.finishReason ?? (message.toolCalls ? 'tool_calls' : 'stop');
 }
 
-function defaultUsage(
-  rawBody: string,
-  message: FakeOpenAIResponse,
-): NonNullable<FakeOpenAIResponse['usage']> {
-  const completionText =
-    (message.content ?? '') +
-    (message.toolCalls
-      ?.map((toolCall) => toolCall.function.arguments)
-      .join('') ?? '');
-  const promptTokens = approxTokens(rawBody);
-  const completionTokens = approxTokens(completionText);
-  return {
-    prompt_tokens: promptTokens,
-    completion_tokens: completionTokens,
-    total_tokens: promptTokens + completionTokens,
-  };
-}
-
-function approxTokens(value: string): number {
-  return Math.ceil(value.length / 4);
-}
+const DEFAULT_USAGE: NonNullable<FakeOpenAIResponse['usage']> = {
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+};
 
 function chatCompletionId(): string {
   return `chatcmpl-${randomUUID()}`;
