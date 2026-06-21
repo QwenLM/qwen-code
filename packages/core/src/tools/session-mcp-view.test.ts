@@ -343,7 +343,7 @@ describe('SessionMcpView', () => {
     expect(resources.registerResource).toHaveBeenCalledTimes(2);
   });
 
-  it('applyResources([]) is a no-op (does NOT clear) — transient-failure guard', () => {
+  it('applyResources([]) is a no-op so pre-existing resources survive — transient-failure guard', () => {
     // An empty snapshot can mean "resources/list failed" (swallowed to []),
     // not "no resources", so it must not wipe the session's resources.
     const { tools, prompts, resources } = mkRegistries();
@@ -355,9 +355,17 @@ describe('SessionMcpView', () => {
       'srv',
       cfg,
     );
+    // Pre-populate from an earlier (successful) snapshot.
+    view.applyResources([mkResource('file:///a'), mkResource('file:///b')]);
+    expect(resources._list).toHaveLength(2);
+    (resources.removeResourcesByServer as ReturnType<typeof vi.fn>).mockClear();
+    (resources.registerResource as ReturnType<typeof vi.fn>).mockClear();
+
+    // A later empty snapshot (transient failure) must preserve them.
     view.applyResources([]);
     expect(resources.removeResourcesByServer).not.toHaveBeenCalled();
     expect(resources.registerResource).not.toHaveBeenCalled();
+    expect(resources._list).toHaveLength(2);
   });
 
   it('applyResources does NOT apply the includeTools/excludeTools filter', () => {

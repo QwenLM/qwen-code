@@ -1241,6 +1241,28 @@ describe('McpTransportPool', () => {
         initialResourceRemoveCalls,
       );
     });
+
+    it('a transiently-empty resources/list on restart keeps the snapshot for new sessions', async () => {
+      // Initial discovery exposes a resource.
+      mockMcpSuccess({ toolNames: ['t1'], resourceNames: ['res://keep'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
+
+      // The restart's re-read returns NO resources (a transient resources/list
+      // failure swallowed to []). The next spawned client uses this mock.
+      mockMcpSuccess({ toolNames: ['t1'], resourceNames: [] });
+      await pool.restartByName('srv');
+
+      // A NEW session attaching after the restart must still receive the prior
+      // resource: the entry's snapshot was preserved, not overwritten with [].
+      const r2 = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts, r2.resources);
+      expect(r2.resources.registerResource).toHaveBeenCalledWith(
+        expect.objectContaining({ uri: 'res://keep', serverName: 'srv' }),
+      );
+    });
   });
 
   describe('getSnapshot', () => {

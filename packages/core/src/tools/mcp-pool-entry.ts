@@ -1086,7 +1086,18 @@ export class PoolEntry {
     }
     this.toolsSnapshot = snap.tools;
     this.promptsSnapshot = snap.prompts;
-    this.resourcesSnapshot = snap.resources;
+    // Only overwrite the resource snapshot when the re-read returned
+    // something: `discoverAndReturn` / `listMcpResources` swallow a transient
+    // `resources/list` failure to [], so storing that empty snapshot would
+    // make every session that attaches AFTER the restart receive zero
+    // resources (the `SessionMcpView.applyResources` no-op only protects
+    // already-attached sessions). Keeping the prior snapshot preserves
+    // resources for new and existing subscribers alike. (Trade-off, as in
+    // `McpClient.discover()`: a legitimate drop-to-zero keeps the stale set
+    // until a non-empty re-read. Tools/prompts keep their existing behavior.)
+    if (snap.resources.length > 0) {
+      this.resourcesSnapshot = snap.resources;
+    }
     // subscribers don't
     // listen on the entry's EventEmitter, so emitting toolsChanged /
     // promptsChanged alone leaves session ToolRegistry instances
