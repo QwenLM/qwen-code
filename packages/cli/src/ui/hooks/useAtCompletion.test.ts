@@ -616,5 +616,36 @@ describe('useAtCompletion', () => {
         'myserver:api/doc',
       ]);
     });
+
+    it('does not surface resource URIs in an untrusted folder', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        isTrustedFolder: () => false,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [
+            { uri: 'res://secret', name: 's', serverName: 'myserver' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'myserver:res',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      // getMcpResourceSuggestions returns null in an untrusted folder, so the
+      // hook falls through to filesystem search (which finds nothing for
+      // 'myserver:res'); the resource URI must never appear.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(result.current.suggestions.map((s) => s.value)).not.toContain(
+        'myserver:res://secret',
+      );
+    });
   });
 });

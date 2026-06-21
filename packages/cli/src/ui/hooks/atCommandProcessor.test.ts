@@ -1501,5 +1501,30 @@ describe('handleAtCommand', () => {
         'Injected 1 attachment (truncated)',
       );
     });
+
+    it('resolves a server name that itself contains a colon (@my:server:uri)', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://x', text: 'COLON BODY' }],
+      });
+      const config = {
+        ...mockConfig,
+        getMcpServers: () => ({ 'my:server': {} }),
+        getToolRegistry: () => ({ readMcpResource }),
+      } as unknown as Config;
+
+      const result = await handleAtCommand({
+        query: '@my:server:res://x',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 611,
+        signal: abortController.signal,
+      });
+
+      // Longest-prefix match picks the full "my:server", not "my".
+      expect(readMcpResource).toHaveBeenCalledWith('my:server', 'res://x', {
+        signal: abortController.signal,
+      });
+      expect(JSON.stringify(result.processedQuery)).toContain('COLON BODY');
+    });
   });
 });

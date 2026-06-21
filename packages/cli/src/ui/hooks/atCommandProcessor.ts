@@ -154,11 +154,22 @@ function parseMcpResourceRef(
   pathName: string,
   mcpServerNames: ReadonlySet<string>,
 ): { serverName: string; uri: string } | null {
-  const colon = pathName.indexOf(':');
-  if (colon <= 0) return null;
-  const serverName = pathName.slice(0, colon);
-  const uri = pathName.slice(colon + 1);
-  if (!uri || !mcpServerNames.has(serverName)) return null;
+  // Match the LONGEST configured server name that prefixes `<name>:` rather
+  // than splitting on the first ':'. A server name may itself contain a ':'
+  // (a valid settings.json key, e.g. "my:server"), which a naive first-colon
+  // split would mangle into serverName="my".
+  let serverName: string | null = null;
+  for (const name of mcpServerNames) {
+    if (
+      pathName.startsWith(`${name}:`) &&
+      (serverName === null || name.length > serverName.length)
+    ) {
+      serverName = name;
+    }
+  }
+  if (serverName === null) return null;
+  const uri = pathName.slice(serverName.length + 1);
+  if (!uri) return null;
   return { serverName, uri };
 }
 

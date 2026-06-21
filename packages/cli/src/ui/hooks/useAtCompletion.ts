@@ -27,16 +27,21 @@ function getMcpResourceSuggestions(
   pattern: string,
 ): Suggestion[] | null {
   if (!config) return null;
-  const colon = pattern.indexOf(':');
-  if (colon <= 0) return null;
-  const serverName = pattern.slice(0, colon);
+  // Don't surface resource URIs in an untrusted folder: the read path
+  // (`ToolRegistry.readMcpResource`) is blocked there, so completing them
+  // would both mislead and leak the existence of a server's resources.
+  if (config.isTrustedFolder?.() === false) return null;
+  // Match the LONGEST configured server name that prefixes `<name>:` rather
+  // than splitting on the first ':' — a server name may contain a ':'.
+  // `Object.keys`, not `in`/prototype walking, so inherited keys
+  // (`__proto__`, `constructor`, …) are never treated as servers.
   const mcpServers = config.getMcpServers?.() || {};
-  // `Object.hasOwn`, not `in`: `getMcpServers()` is a plain object, so `in`
-  // would match inherited keys (`__proto__`, `constructor`, `toString`, …)
-  // and treat `@__proto__:foo` as a resource ref for a non-existent server.
-  if (!Object.hasOwn(mcpServers, serverName)) return null;
+  const serverName = Object.keys(mcpServers)
+    .filter((name) => pattern.startsWith(`${name}:`))
+    .sort((a, b) => b.length - a.length)[0];
+  if (!serverName) return null;
 
-  const partialUri = pattern.slice(colon + 1);
+  const partialUri = pattern.slice(serverName.length + 1);
   const resources =
     config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
   const matches = resources

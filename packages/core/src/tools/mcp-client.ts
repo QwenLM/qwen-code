@@ -1010,17 +1010,16 @@ export async function discoverTools(
 
 /**
  * True when an MCP request failed because the method is not implemented.
- * JSON-RPC guarantees the numeric code (`-32601`); the human-readable
- * message is server-supplied and may be localized or worded differently
- * (e.g. "Method not implemented"), so we check the code first and only fall
- * back to the conventional message substring.
+ * JSON-RPC guarantees the numeric code (`-32601`), so that is the primary,
+ * precise check. The message fallback (for transports that drop the code)
+ * keeps the original case-sensitive exact substring `'Method not found'` —
+ * deliberately NOT a broad `/method not found/i`, which would also swallow
+ * unrelated errors like "Error in method not found handler: ...".
  */
 function isMethodNotFound(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   if (code === -32601) return true;
-  return (
-    error instanceof Error && /method not found/i.test(error.message ?? '')
-  );
+  return error instanceof Error && error.message.includes('Method not found');
 }
 
 /**
