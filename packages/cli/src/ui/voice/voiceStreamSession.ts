@@ -347,9 +347,11 @@ export function openVoiceStream(
       } else if (!started) {
         fail(new Error('Voice stream closed before it started.'));
       } else {
-        terminalError ??= new Error(
+        const err = new Error(
           'Voice stream connection closed unexpectedly. Transcript may be incomplete.',
         );
+        terminalError ??= err;
+        callbacks.onError?.(err);
       }
     });
   });

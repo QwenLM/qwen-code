@@ -38,13 +38,16 @@ class FakeSocket {
   }
 }
 
-function startSession(socket: FakeSocket) {
+function startSession(
+  socket: FakeSocket,
+  callbacks: Parameters<typeof openVoiceStream>[1] = {},
+) {
   const sessionPromise = openVoiceStream(
     {
       baseUrl: 'https://dashscope.example/v1',
       model: 'paraformer-realtime-v2',
     },
-    {},
+    callbacks,
     { createWebSocket: () => socket },
   );
   socket.emit('open');
@@ -79,6 +82,21 @@ describe('voiceStreamSession', () => {
 
     await expect(transcriptPromise).rejects.toThrow(
       'Voice stream connection closed unexpectedly.',
+    );
+  });
+
+  it('notifies immediately when the task stream closes while recording', async () => {
+    const socket = new FakeSocket();
+    const onError = vi.fn();
+    await startSession(socket, { onError });
+
+    socket.emit('close');
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message:
+          'Voice stream connection closed unexpectedly. Transcript may be incomplete.',
+      }),
     );
   });
 
