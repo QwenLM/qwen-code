@@ -1952,6 +1952,63 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
   });
 
+  it('does not mutate a completed entry when revive preflight fails', async () => {
+    const { service, subagentManager } = createService();
+    const missingMetaAgentId = 'completed-missing-meta';
+    const missingOutputAgentId = 'completed-missing-output';
+
+    registry.register({
+      agentId: missingMetaAgentId,
+      description: 'missing meta',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: path.join(tempDir, 'missing-meta.jsonl'),
+      metaPath: path.join(tempDir, 'missing-meta.meta.json'),
+    });
+    registry.complete(missingMetaAgentId, 'done');
+
+    const validMetaPath = path.join(tempDir, 'missing-output.meta.json');
+    writeAgentMeta(validMetaPath, {
+      agentId: missingOutputAgentId,
+      agentType: 'researcher',
+      description: 'missing output',
+      parentSessionId: 'session-missing-output',
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    registry.register({
+      agentId: missingOutputAgentId,
+      description: 'missing output',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: path.join(tempDir, 'missing-output.jsonl'),
+      metaPath: validMetaPath,
+    });
+    registry.complete(missingOutputAgentId, 'done');
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(missingMetaAgentId, 'go'),
+    ).resolves.toBeUndefined();
+    await expect(
+      service.reviveCompletedBackgroundAgent(missingOutputAgentId, 'go'),
+    ).resolves.toBeUndefined();
+
+    expect(registry.get(missingMetaAgentId)?.status).toBe('completed');
+    expect(registry.get(missingMetaAgentId)?.result).toBe('done');
+    expect(registry.get(missingOutputAgentId)?.status).toBe('completed');
+    expect(registry.get(missingOutputAgentId)?.result).toBe('done');
+    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
+
   it('emits exactly one new terminal notification when a completed agent is revived', async () => {
     const sessionId = 'session-revive-notify';
     const agentId = 'agent-revive-notify';

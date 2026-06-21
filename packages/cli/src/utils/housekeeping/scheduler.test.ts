@@ -17,7 +17,7 @@ import {
   _runHousekeepingForTesting,
   _runPassForTesting,
   _FILE_HISTORY_MARKER_FOR_TESTING,
-  _SUBAGENT_MARKER_FOR_TESTING,
+  _getSubagentMarkerPathForTesting,
 } from './scheduler.js';
 import {
   noteInteraction,
@@ -140,8 +140,11 @@ describe('_runHousekeepingForTesting', () => {
       'recent-session',
     ]);
     expect(
-      fs.existsSync(path.join(projectDir, _SUBAGENT_MARKER_FOR_TESTING)),
+      fs.existsSync(_getSubagentMarkerPathForTesting(qwenHome, projectDir)),
     ).toBe(true);
+    expect(fs.existsSync(path.join(projectDir, '.subagent-cleanup'))).toBe(
+      false,
+    );
   });
 
   it('throttles the subagent sweep per project (second pass does not re-sweep)', async () => {
@@ -157,7 +160,7 @@ describe('_runHousekeepingForTesting', () => {
     );
     expect(fs.existsSync(path.join(subagentsRoot, 'stale-1'))).toBe(false);
     expect(
-      fs.existsSync(path.join(projectDir, _SUBAGENT_MARKER_FOR_TESTING)),
+      fs.existsSync(_getSubagentMarkerPathForTesting(qwenHome, projectDir)),
     ).toBe(true);
 
     // A fresh old dir + an immediate second pass: the per-project marker

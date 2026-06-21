@@ -5,6 +5,7 @@
  */
 
 import { stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
   Storage,
@@ -81,6 +82,14 @@ async function needsCatchUp(markerPath: string): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+function getSubagentMarkerPath(qwenDir: string, projectDir: string): string {
+  const projectKey = createHash('sha256')
+    .update(projectDir)
+    .digest('hex')
+    .slice(0, 16);
+  return join(qwenDir, `${SUBAGENT_MARKER}-${projectKey}`);
 }
 
 async function runPass(
@@ -164,17 +173,17 @@ async function runHousekeeping(
   );
 
   // Subagent transcripts live per-project under <projectDir>/subagents/.
-  // Throttle per-project (marker in the project dir) so every project gets
-  // swept, not just whichever one is opened first each day. Guard the access:
-  // real Config always exposes storage; the optional chain keeps housekeeping
-  // best-effort if a caller doesn't.
+  // Throttle per-project without writing marker dotfiles into the user's
+  // checkout. Guard the access: real Config always exposes storage; the
+  // optional chain keeps housekeeping best-effort if a caller doesn't.
   const projectDir = config.storage?.getProjectDir?.();
   if (projectDir) {
+    const markerPath = getSubagentMarkerPath(qwenDir, projectDir);
     await runThrottledOnce(
       {
         name: 'subagent-cleanup',
-        markerPath: join(projectDir, SUBAGENT_MARKER),
-        lockPath: join(projectDir, SUBAGENT_MARKER + '.lock'),
+        markerPath,
+        lockPath: markerPath + '.lock',
       },
       async () => {
         const r = await cleanupOldSubagentTranscripts({
@@ -200,3 +209,4 @@ export const _runHousekeepingForTesting = runHousekeeping;
 export const _runPassForTesting = runPass;
 export const _FILE_HISTORY_MARKER_FOR_TESTING = FILE_HISTORY_MARKER;
 export const _SUBAGENT_MARKER_FOR_TESTING = SUBAGENT_MARKER;
+export const _getSubagentMarkerPathForTesting = getSubagentMarkerPath;

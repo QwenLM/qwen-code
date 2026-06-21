@@ -539,6 +539,27 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
+    if (!readAgentMeta(entry.metaPath)) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": metadata could not be read.`,
+      );
+      return undefined;
+    }
+    if (!jsonl.exists(entry.outputFile)) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": transcript is missing or empty.`,
+      );
+      return undefined;
+    }
+    try {
+      await jsonl.read<ChatRecord>(entry.outputFile);
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": transcript could not be read: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
     this.restorePausedEntry(agentId);
     return this.resumeBackgroundAgent(agentId, initialMessage);
   }
