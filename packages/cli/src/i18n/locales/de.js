@@ -2059,6 +2059,7 @@ export default {
   'Agents:': 'Agenten:',
   Prompt: 'Eingabe',
   'Prompts:': 'Eingaben:',
+  'Resources:': 'Ressourcen:',
   'Ref:': 'Referenz:',
   'Skills:': 'Fähigkeiten:',
   remote: 'entfernt',

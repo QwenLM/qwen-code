@@ -582,5 +582,39 @@ describe('useAtCompletion', () => {
         'notes.txt',
       );
     });
+
+    it('ranks prefix matches above mid-string matches', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [
+            // contains 'doc' mid-string
+            { uri: 'api/doc', name: 'a', serverName: 'myserver' },
+            // starts with 'doc'
+            { uri: 'doc/readme', name: 'b', serverName: 'myserver' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'myserver:doc',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      // Prefix match first, then the mid-string match.
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'myserver:doc/readme',
+        'myserver:api/doc',
+      ]);
+    });
   });
 });

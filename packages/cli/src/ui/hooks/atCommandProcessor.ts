@@ -23,6 +23,16 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 
+/**
+ * Per-resource caps for `@server:uri` injection. Files are bounded by
+ * `readManyFiles`; MCP resource content is server-supplied and otherwise
+ * unbounded, so cap the text that lands in the context window and skip
+ * attachments too large to inline, to avoid context overflow / OOM from a
+ * misbehaving or hostile server.
+ */
+const MAX_MCP_RESOURCE_TEXT_CHARS = 100_000;
+const MAX_MCP_RESOURCE_BLOB_CHARS = 8_000_000; // ~6 MB binary as base64
+
 export interface ResolveAtCommandParams {
   query: string;
   config: Config;
@@ -375,75 +385,120 @@ export async function resolveAtCommandQuery({
     onDebugMessage(message);
   }
 
-  // Read any MCP resource references collected above. Each is read
-  // individually via the tool registry (gated on folder trust). A failure
-  // surfaces as an error tool-card but does NOT abort the turn — the model
-  // still sees the rest of the query.
+  // Read all MCP resource references in parallel — each is an independent RPC
+  // to a (possibly different) server, mirroring how the file path batches via
+  // `readManyFiles`. Order is preserved so cards/labels line up with the refs.
+  // A failure surfaces as an error tool-card but does NOT abort the turn.
+  const resourceReads = await Promise.allSettled(
+    mcpResourceRefs.map((ref) =>
+      config
+        .getToolRegistry()
+        .readMcpResource(ref.serverName, ref.uri, { signal }),
+    ),
+  );
+
   const resourceParts: Part[] = [];
   const resourceDisplays: IndividualToolCallDisplay[] = [];
   const resourceLabels: string[] = [];
   for (let i = 0; i < mcpResourceRefs.length; i++) {
     const ref = mcpResourceRefs[i];
     const label = `${ref.serverName}:${ref.uri}`;
-    try {
-      const result = await config
-        .getToolRegistry()
-        .readMcpResource(ref.serverName, ref.uri, { signal });
-      let textChars = 0;
-      let blobCount = 0;
-      for (const content of result.contents ?? []) {
-        if ('text' in content && typeof content.text === 'string') {
-          resourceParts.push({ text: content.text });
-          textChars += content.text.length;
-        } else if ('blob' in content && typeof content.blob === 'string') {
-          resourceParts.push({
-            inlineData: {
-              mimeType:
-                typeof content.mimeType === 'string'
-                  ? content.mimeType
-                  : 'application/octet-stream',
-              data: content.blob,
-            },
-          });
-          blobCount += 1;
-        }
-      }
-      resourceLabels.push(label);
-      // Reflect what was actually injected so a success card never hides an
-      // empty read (no `contents`, or only non-text/non-blob entries such as
-      // resource links / metadata) — otherwise a partially-empty multi-ref
-      // read would be invisible.
-      const summary: string[] = [];
-      if (textChars > 0) {
-        summary.push(`${textChars} chars`);
-      }
-      if (blobCount > 0) {
-        summary.push(`${blobCount} attachment${blobCount === 1 ? '' : 's'}`);
-      }
-      resourceDisplays.push({
-        callId: `client-mcp-resource-${userMessageTimestamp}-${i}`,
-        name: 'Read MCP Resource',
-        description: `Read resource ${label}`,
-        status: ToolCallStatus.Success,
-        resultDisplay:
-          summary.length > 0
-            ? `Injected ${summary.join(' + ')}`
-            : '(no readable content)',
-        confirmationDetails: undefined,
-      });
-    } catch (error) {
+    const callId = `client-mcp-resource-${userMessageTimestamp}-${i}`;
+    const outcome = resourceReads[i];
+
+    if (outcome.status === 'rejected') {
       onDebugMessage(
-        `Failed to read MCP resource ${label}: ${getErrorMessage(error)}`,
+        `Failed to read MCP resource ${label}: ${getErrorMessage(outcome.reason)}`,
       );
       resourceDisplays.push({
-        callId: `client-mcp-resource-${userMessageTimestamp}-${i}`,
+        callId,
         name: 'Read MCP Resource',
         description: `Read resource ${label}`,
         status: ToolCallStatus.Error,
-        resultDisplay: `Failed to read resource ${label}: ${getErrorMessage(error)}`,
+        resultDisplay: `Failed to read resource ${label}: ${getErrorMessage(outcome.reason)}`,
         confirmationDetails: undefined,
       });
+      continue;
     }
+
+    // Build the injected parts framed with attribution delimiters, and cap
+    // the text so a misbehaving/hostile server can't blow the context window
+    // (files are capped by readManyFiles; resource content was previously
+    // uncapped). The framing also gives the model a clear boundary between
+    // its user's prompt and untrusted server-supplied content.
+    const contentParts: Part[] = [];
+    let textChars = 0;
+    let blobCount = 0;
+    let truncated = false;
+    for (const content of outcome.value.contents ?? []) {
+      if ('text' in content && typeof content.text === 'string') {
+        const remaining = MAX_MCP_RESOURCE_TEXT_CHARS - textChars;
+        if (remaining <= 0) {
+          truncated = content.text.length > 0 || truncated;
+          continue;
+        }
+        const text =
+          content.text.length > remaining
+            ? content.text.slice(0, remaining)
+            : content.text;
+        if (text.length < content.text.length) {
+          truncated = true;
+        }
+        if (text.length > 0) {
+          contentParts.push({ text });
+          textChars += text.length;
+        }
+      } else if ('blob' in content && typeof content.blob === 'string') {
+        if (content.blob.length > MAX_MCP_RESOURCE_BLOB_CHARS) {
+          // Skip an oversized attachment rather than risk OOM.
+          truncated = true;
+          continue;
+        }
+        contentParts.push({
+          inlineData: {
+            mimeType:
+              typeof content.mimeType === 'string'
+                ? content.mimeType
+                : 'application/octet-stream',
+            data: content.blob,
+          },
+        });
+        blobCount += 1;
+      }
+    }
+
+    if (contentParts.length > 0) {
+      resourceParts.push({
+        text: `\n--- Content from MCP resource ${label} ---\n`,
+      });
+      resourceParts.push(...contentParts);
+      resourceParts.push({ text: `\n--- End of MCP resource ${label} ---\n` });
+    }
+    resourceLabels.push(label);
+
+    // Reflect what was actually injected so a success card never hides an
+    // empty/truncated read (no `contents`, or only non-text/non-blob entries
+    // such as resource links / metadata).
+    const summary: string[] = [];
+    if (textChars > 0) {
+      summary.push(`${textChars} chars${truncated ? ' (truncated)' : ''}`);
+    }
+    if (blobCount > 0) {
+      summary.push(`${blobCount} attachment${blobCount === 1 ? '' : 's'}`);
+    }
+    resourceDisplays.push({
+      callId,
+      name: 'Read MCP Resource',
+      description: `Read resource ${label}`,
+      status: ToolCallStatus.Success,
+      resultDisplay:
+        summary.length > 0
+          ? `Injected ${summary.join(' + ')}`
+          : truncated
+            ? '(content too large — skipped)'
+            : '(no readable content)',
+      confirmationDetails: undefined,
+    });
   }
 
   // Fallback for lone "@" or completely invalid @-commands resulting in empty
@@ -515,13 +570,17 @@ export async function resolveAtCommandQuery({
         typeof errorToolCallDisplay.resultDisplay === 'string'
           ? errorToolCallDisplay.resultDisplay
           : undefined;
+      // Resource labels are merged in too: a resource may have been read
+      // successfully before the file read failed, and its card is already in
+      // `resourceDisplays` above — the audit trail must not drop it.
+      const labelsOnError = [...contentLabelsForDisplay, ...resourceLabels];
       return {
         processedQuery: null,
         shouldProceed: false,
         toolDisplays: [...resourceDisplays, errorToolCallDisplay],
-        filesRead: contentLabelsForDisplay,
+        filesRead: labelsOnError,
         recording: {
-          filesRead: contentLabelsForDisplay,
+          filesRead: labelsOnError,
           status: 'error',
           message: errorMessage,
         },

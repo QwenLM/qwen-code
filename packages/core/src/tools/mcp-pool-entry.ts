@@ -532,7 +532,9 @@ export class PoolEntry {
   markActive(
     initialTools: DiscoveredMCPTool[],
     initialPrompts: DiscoveredMCPPrompt[],
-    initialResources: DiscoveredMCPResource[] = [],
+    // Required (no `= []` default): an omitted arg would silently wipe a
+    // server's resources from session registries via `applyResources([])`.
+    initialResources: DiscoveredMCPResource[],
   ): void {
     // never resurrect a
     // torn-down entry. `forceShutdown` may run concurrently with the

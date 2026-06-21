@@ -409,15 +409,22 @@ export class McpClient {
     }
 
     try {
-      const prompts = await listMcpPrompts(this.serverName, this.client);
-      const resources = await listMcpResources(this.serverName, this.client);
-      const tools = await discoverTools(
-        this.serverName,
-        this.serverConfig,
-        this.client,
-        cliConfig,
-        { applyConfigFilters: opts?.applyConfigFilters ?? true },
-      );
+      // Prompts, resources, and tools are independent reads with no data
+      // dependency; run them concurrently (the SDK client multiplexes
+      // requests by JSON-RPC id) to save round-trips per server at startup.
+      // Each helper swallows its own errors and returns [], so Promise.all
+      // never rejects here.
+      const [prompts, resources, tools] = await Promise.all([
+        listMcpPrompts(this.serverName, this.client),
+        listMcpResources(this.serverName, this.client),
+        discoverTools(
+          this.serverName,
+          this.serverConfig,
+          this.client,
+          cliConfig,
+          { applyConfigFilters: opts?.applyConfigFilters ?? true },
+        ),
+      ]);
 
       if (
         prompts.length === 0 &&
@@ -973,10 +980,7 @@ export async function discoverTools(
     }
     return discoveredTools;
   } catch (error) {
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
+    if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error discovering tools from ${mcpServerName}: ${getErrorMessage(
           error,
@@ -1107,10 +1111,7 @@ export async function invokeMcpPrompt(
 
     return response;
   } catch (error) {
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
+    if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error invoking prompt '${promptName}' from ${mcpServerName} ${promptParams}: ${getErrorMessage(
           error,

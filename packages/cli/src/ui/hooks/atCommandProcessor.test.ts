@@ -1397,5 +1397,52 @@ describe('handleAtCommand', () => {
         data: 'AAAA',
       });
     });
+
+    it('frames resource content with attribution delimiters', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://d', text: 'HELLO' }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://d',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 607,
+        signal: abortController.signal,
+      });
+
+      const serialized = JSON.stringify(result.processedQuery);
+      // The body is fenced so the model can tell server content from the
+      // user's own prompt.
+      expect(serialized).toContain(
+        '--- Content from MCP resource myserver:res://d ---',
+      );
+      expect(serialized).toContain('HELLO');
+      expect(serialized).toContain(
+        '--- End of MCP resource myserver:res://d ---',
+      );
+    });
+
+    it('caps oversized resource text and flags it as truncated', async () => {
+      const big = 'x'.repeat(100_001);
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://big', text: big }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://big',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 608,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.toolDisplays![0].resultDisplay).toBe(
+        'Injected 100000 chars (truncated)',
+      );
+    });
   });
 });

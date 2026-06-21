@@ -17,9 +17,10 @@ import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
  * `null` otherwise to let the caller fall through to filesystem search.
  *
  * Matching is a case-sensitive substring on the URI (an empty partial matches
- * every resource — `'x'.includes('')` is `true`). The resource list comes
- * from the post-discovery `ResourceRegistry`, so an empty result before
- * discovery completes simply shows no suggestions.
+ * every resource — `'x'.includes('')` is `true`), with prefix matches ranked
+ * above mid-string matches. The resource list comes from the post-discovery
+ * `ResourceRegistry`, so an empty result before discovery completes simply
+ * shows no suggestions.
  */
 function getMcpResourceSuggestions(
   config: Config | undefined,
@@ -38,7 +39,15 @@ function getMcpResourceSuggestions(
   const partialUri = pattern.slice(colon + 1);
   const resources =
     config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
-  const matches = resources.filter((r) => r.uri.includes(partialUri));
+  const matches = resources
+    .filter((r) => r.uri.includes(partialUri))
+    .sort((a, b) => {
+      // Rank URIs that start with the partial above mid-string matches,
+      // then alphabetically for a stable order.
+      const aPrefix = a.uri.startsWith(partialUri) ? 0 : 1;
+      const bPrefix = b.uri.startsWith(partialUri) ? 0 : 1;
+      return aPrefix - bPrefix || a.uri.localeCompare(b.uri);
+    });
   return matches.slice(0, MAX_SUGGESTIONS_TO_SHOW * 3).map((r) => ({
     label: `${serverName}:${r.uri}`,
     value: `${serverName}:${r.uri}`,
