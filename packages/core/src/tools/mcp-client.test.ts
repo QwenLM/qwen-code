@@ -662,6 +662,91 @@ describe('mcp-client', () => {
       expect(toolRegistry.registerTool).toHaveBeenCalledTimes(1);
       expect(promptRegistry.registerPrompt).toHaveBeenCalledTimes(2);
     });
+
+    it('discover() registers discovered resources into the Config ResourceRegistry', async () => {
+      const registerResource = vi.fn();
+      const cfg = {
+        getResourceRegistry: () => ({ registerResource }),
+      } as unknown as Config;
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockImplementation((req: { method?: string }) =>
+            req.method === 'resources/list'
+              ? Promise.resolve({ resources: [{ uri: 'res://a', name: 'a' }] })
+              : Promise.resolve({ prompts: [] }),
+          ),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await client.discover(cfg);
+      expect(registerResource).toHaveBeenCalledWith(
+        expect.objectContaining({ uri: 'res://a', serverName: 'srv' }),
+      );
+    });
+
+    it('discoverAndReturn connects a resource-only server (does not throw)', async () => {
+      // The failed-discovery guard now counts resources: a server exposing
+      // only resources (no tools/prompts) is a successful discovery.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockImplementation((req: { method?: string }) =>
+            req.method === 'resources/list'
+              ? Promise.resolve({ resources: [{ uri: 'res://a', name: 'a' }] })
+              : Promise.resolve({ prompts: [] }),
+          ),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      const snap = await client.discoverAndReturn(cfgWithResources());
+      expect(snap.resources).toHaveLength(1);
+      expect(snap.tools).toHaveLength(0);
+      expect(snap.prompts).toHaveLength(0);
+    });
   });
 
   describe('listMcpPrompts (F2 pure helper)', () => {
