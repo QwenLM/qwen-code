@@ -29,9 +29,12 @@ describe('parseExtensionSourceType', () => {
   it.each([
     ['anthropics/skills', 'github'],
     ['https://github.com/owner/repo', 'github'],
+    ['HTTPS://github.com/owner/repo', 'github'],
     ['git@github.com:owner/repo.git', 'git'],
     ['sso://team/repo', 'git'],
     ['https://example.com/marketplace.json', 'http'],
+    ['HTTPS://example.com/marketplace.json', 'http'],
+    ['HTTP://example.com/marketplace.json', 'http'],
     ['./local/marketplace', 'local'],
     ['/abs/path/marketplace', 'local'],
   ] as const)('classifies %s as %s', (input, expected) => {
