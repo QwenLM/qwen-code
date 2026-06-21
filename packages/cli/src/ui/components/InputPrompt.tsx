@@ -388,7 +388,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     voiceModel,
     buffer,
     addItem: uiState.historyManager?.addItem,
-    createRecorder: createVoiceRecorder,
+    createRecorder: getVoiceRecorder,
     transcribe: transcribeVoice,
     onSubmit: () => voiceSubmitRef.current(),
     warmup: warmupVoice,

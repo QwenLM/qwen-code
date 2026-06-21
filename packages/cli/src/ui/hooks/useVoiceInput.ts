@@ -161,6 +161,7 @@ export function useVoiceInput({
     null,
   );
   const pumpTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sessionIdRef = useRef(0);
 
   const isStreaming = streaming === true && typeof openStream === 'function';
 
@@ -214,9 +215,15 @@ export function useVoiceInput({
     }
   }, []);
 
+  const isCurrentSession = useCallback(
+    (recorder: VoiceRecorder, sessionId: number) =>
+      recorderRef.current === recorder && sessionIdRef.current === sessionId,
+    [],
+  );
+
   const handleStreamError = useCallback(
-    (recorder: VoiceRecorder, error: Error) => {
-      if (recorderRef.current !== recorder) {
+    (recorder: VoiceRecorder, sessionId: number, error: Error) => {
+      if (!isCurrentSession(recorder, sessionId)) {
         return;
       }
       clearReleaseTimer();
@@ -234,6 +241,7 @@ export function useVoiceInput({
     [
       clearPump,
       clearReleaseTimer,
+      isCurrentSession,
       reportError,
       resetStreamUi,
       setVoiceStatus,
@@ -244,6 +252,7 @@ export function useVoiceInput({
   const startRecording = useCallback(
     (silenceDetection: boolean) => {
       const recorder = createRecorder();
+      const sessionId = ++sessionIdRef.current;
       recorderRef.current = recorder;
       setVoiceStatus('recording');
       if (mountedRef.current) {
@@ -262,7 +271,7 @@ export function useVoiceInput({
         .then(async () => {
           // Streaming: open the WS session and pump drained PCM into it while
           // recording, surfacing partial transcripts live.
-          if (!isStreaming || recorderRef.current !== recorder) {
+          if (!isStreaming || !isCurrentSession(recorder, sessionId)) {
             return;
           }
           if (recorder.supportsStreaming?.() === false) {
@@ -272,13 +281,15 @@ export function useVoiceInput({
           }
           const streamPromise = openStream!({
             onInterim: (text) => {
-              if (mountedRef.current) setInterimText(text);
+              if (mountedRef.current && isCurrentSession(recorder, sessionId)) {
+                setInterimText(text);
+              }
             },
-            onError: (error) => handleStreamError(recorder, error),
+            onError: (error) => handleStreamError(recorder, sessionId, error),
           });
           streamSessionPromiseRef.current = streamPromise;
           const session = await streamPromise;
-          if (recorderRef.current !== recorder) {
+          if (!isCurrentSession(recorder, sessionId)) {
             session.abort();
             void stopRecorderQuietly(recorder);
             return;
@@ -289,6 +300,7 @@ export function useVoiceInput({
           }
           pumpTimerRef.current = setInterval(() => {
             try {
+              if (!isCurrentSession(recorder, sessionId)) return;
               const active = recorderRef.current;
               if (!active) return;
               const pcm = active.drain?.();
@@ -324,7 +336,7 @@ export function useVoiceInput({
       startPromiseRef.current = startPromise;
       void startPromise.catch((error: unknown) => {
         if (
-          recorderRef.current === recorder &&
+          isCurrentSession(recorder, sessionId) &&
           statusRef.current === 'recording'
         ) {
           recorderRef.current = null;
@@ -351,6 +363,7 @@ export function useVoiceInput({
       clearReleaseTimer,
       createRecorder,
       handleStreamError,
+      isCurrentSession,
       isStreaming,
       openStream,
       reportError,
@@ -368,6 +381,7 @@ export function useVoiceInput({
       if (!recorder || !voiceModel) {
         return;
       }
+      const sessionId = sessionIdRef.current;
       clearReleaseTimer();
       clearPump();
       const startPromise = startPromiseRef.current ?? Promise.resolve();
@@ -390,7 +404,7 @@ export function useVoiceInput({
           return transcribe(audio, { voiceModel });
         })
         .then((transcript) => {
-          if (!mountedRef.current || recorderRef.current !== recorder) {
+          if (!mountedRef.current || !isCurrentSession(recorder, sessionId)) {
             return;
           }
           const inserted = insertTranscript(buffer, transcript);
@@ -399,7 +413,7 @@ export function useVoiceInput({
           }
         })
         .catch((error: unknown) => {
-          if (recorderRef.current !== recorder) {
+          if (!isCurrentSession(recorder, sessionId)) {
             return;
           }
           if (wasStreaming) {
@@ -413,9 +427,8 @@ export function useVoiceInput({
           reportError(error);
         })
         .finally(() => {
-          if (recorderRef.current === recorder) {
-            recorderRef.current = null;
-          }
+          if (!isCurrentSession(recorder, sessionId)) return;
+          recorderRef.current = null;
           streamSessionRef.current = null;
           streamSessionPromiseRef.current = null;
           startPromiseRef.current = null;
@@ -427,6 +440,7 @@ export function useVoiceInput({
       buffer,
       clearPump,
       clearReleaseTimer,
+      isCurrentSession,
       stopRecorderQuietly,
       isStreaming,
       onSubmit,
@@ -440,6 +454,7 @@ export function useVoiceInput({
   finalizeRef.current = finalize;
 
   const cancelRecording = useCallback(() => {
+    sessionIdRef.current += 1;
     clearReleaseTimer();
     clearPump();
     const session = streamSessionRef.current;

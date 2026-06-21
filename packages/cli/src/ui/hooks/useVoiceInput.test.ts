@@ -656,6 +656,54 @@ describe('useVoiceInput', () => {
     expect(buffer.insert).not.toHaveBeenCalled();
   });
 
+  it('ignores stale transcription when a singleton recorder starts a new session', async () => {
+    buffer = createBuffer();
+    const transcript = deferred<string>();
+    const recorder = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue({
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'audio/wav',
+      }),
+    };
+
+    const { result } = renderHook(() =>
+      useVoiceInput({
+        enabled: true,
+        mode: 'tap',
+        voiceModel: 'qwen3-asr-flash',
+        buffer,
+        createRecorder: () => recorder,
+        transcribe: vi.fn(() => transcript.promise),
+      }),
+    );
+
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+      result.current.handleKeypress(voiceKey);
+    });
+    await waitFor(() => {
+      expect(result.current.status).toBe('transcribing');
+    });
+
+    act(() => {
+      result.current.handleKeypress(escapeKey);
+    });
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('recording');
+
+    await act(async () => {
+      transcript.resolve('stale text');
+      await transcript.promise;
+    });
+
+    expect(buffer.insert).not.toHaveBeenCalled();
+    expect(result.current.status).toBe('recording');
+  });
+
   it('does not wait forever for a previous stop before starting again', async () => {
     vi.useFakeTimers();
     try {
