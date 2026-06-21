@@ -45,9 +45,8 @@ function escapeForTitle(s: string): string {
  *
  * This is a deliberately simple scanner, not a full HTML/CSS/JS parser: it
  * catches the common mistakes (full-document wrappers, CDN scripts, external
- * stylesheets/fonts/images, protocol-relative URLs). For local publishing the
- * page runs from file:// with no network anyway; the strict no-egress
- * guarantee belongs to the host's CSP once remote publishing (option C) lands.
+ * stylesheets/fonts/images, JS network calls, protocol-relative URLs). The
+ * generated wrapper also adds a browser CSP as a second no-egress guard.
  */
 export function validateSelfContained(fragment: string): string | null {
   if (!fragment.trim()) {
@@ -68,12 +67,30 @@ export function validateSelfContained(fragment: string): string | null {
     return `Write a body-only fragment — it starts with a full-document tag (${wrapperTag[0].trim()}). Omit <!doctype>, <html>, <head>, and <body>; they are added at publish time.`;
   }
 
-  // External resource references (src=/href= → http(s):// or protocol-relative //).
-  const extResource = /\b(?:src|href)\s*=\s*["']?\s*(?:https?:)?\/\//i.exec(
-    fragment,
-  );
+  // External resource references (src=/href=/srcset=/poster= → http(s):// or //).
+  const extResource =
+    /\b(?:src|href|srcset|poster)\s*=\s*["']?\s*(?:https?:)?\/\//i.exec(
+      fragment,
+    );
   if (extResource) {
     return `Artifact must be self-contained — found an external reference (${truncate(extResource[0])}). Inline scripts/styles and embed assets as data: URIs.`;
+  }
+
+  const extScript =
+    /\b(?:fetch|WebSocket)\s*\(\s*["']\s*(?:https?|wss?):\/\//i.exec(
+      fragment,
+    ) ??
+    /\bnavigator\.sendBeacon\s*\(\s*["']\s*(?:https?:)?\/\//i.exec(fragment);
+  if (extScript) {
+    return `Artifact must be self-contained — found browser network egress (${truncate(extScript[0])}). Embed data in the artifact instead of fetching it at runtime.`;
+  }
+
+  const metaRefresh =
+    /<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*\burl\s*=\s*(?:https?:)?\/\//i.exec(
+      fragment,
+    );
+  if (metaRefresh) {
+    return `Artifact must be self-contained — found a meta refresh redirect (${truncate(metaRefresh[0])}).`;
   }
 
   // External CSS via @import or url(...) (fonts, background images, etc.).
@@ -105,6 +122,7 @@ export function wrapArtifactHtml(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none';">
 <title>${safeTitle}</title>
 <style>${CSS_RESET}</style>
 </head>
