@@ -55,6 +55,8 @@ export interface SideQueryJsonOptions<TResponse> {
    * pass `1` to avoid burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
+  /** Called immediately before the provider request is dispatched. */
+  onDispatch?: () => void;
   /**
    * Skip appending the user's `output-language.md` rule. Defaults to false so
    * new user-visible side queries honor the preference automatically.
@@ -103,6 +105,8 @@ export interface SideQueryTextOptions {
    * burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
+  /** Called immediately before the provider request is dispatched. */
+  onDispatch?: () => void;
   /**
    * Skip appending the user's `output-language.md` rule. Defaults to false so
    * new user-visible side queries honor the preference automatically.
@@ -234,6 +238,7 @@ export async function runSideQuery<TResponse>(
       ...(options.maxAttempts !== undefined && {
         maxAttempts: options.maxAttempts,
       }),
+      onDispatch: options.onDispatch,
     })) as TResponse;
 
     const schemaError = SchemaValidator.validate(options.schema, response);
@@ -261,6 +266,7 @@ export async function runSideQuery<TResponse>(
     ...(options.maxAttempts !== undefined && {
       maxAttempts: options.maxAttempts,
     }),
+    onDispatch: options.onDispatch,
   });
 
   const customError = options.validate?.(result.text);

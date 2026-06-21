@@ -88,6 +88,8 @@ export interface GenerateTextOptions {
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
+  /** Called immediately before each provider request attempt is dispatched. */
+  onDispatch?: () => void;
 }
 
 /**
@@ -167,6 +169,8 @@ export interface GenerateJsonOptions {
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
+  /** Called immediately before each provider request attempt is dispatched. */
+  onDispatch?: () => void;
 }
 
 /**
@@ -235,8 +239,9 @@ export class BaseLlmClient {
     });
 
     try {
-      const apiCall = () =>
-        contentGenerator.generateContent(
+      const apiCall = () => {
+        options.onDispatch?.();
+        return contentGenerator.generateContent(
           {
             model: requestModel,
             config: {
@@ -247,6 +252,7 @@ export class BaseLlmClient {
           },
           promptId ?? '',
         );
+      };
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
@@ -355,8 +361,9 @@ export class BaseLlmClient {
     });
 
     try {
-      const apiCall = () =>
-        contentGenerator.generateContent(
+      const apiCall = () => {
+        options.onDispatch?.();
+        return contentGenerator.generateContent(
           {
             model: requestModel,
             config: requestConfig,
@@ -364,6 +371,7 @@ export class BaseLlmClient {
           },
           promptId ?? '',
         );
+      };
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,

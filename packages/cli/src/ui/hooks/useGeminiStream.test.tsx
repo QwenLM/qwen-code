@@ -589,6 +589,40 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).not.toHaveBeenCalled();
     });
 
+    it('does not show a bridge notice after cancellation before dispatch', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockImplementation(({ signal }) => {
+        Object.defineProperty(signal, 'aborted', {
+          value: true,
+          configurable: true,
+        });
+        return Promise.resolve({
+          applied: false,
+          status: 'skipped',
+          imageCount: 1,
+          convertedCount: 0,
+          omittedCount: 0,
+          omittedInvalidCount: 0,
+          omittedCappedCount: 0,
+          modelId: 'vm',
+        });
+      });
+
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('were sent to'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('skips the bridge when the primary model already accepts images', async () => {
       enableBridge(/* primaryAcceptsImages */ true);
       const { result, mockSendMessageStream } = renderTestHook();
@@ -603,20 +637,35 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('skips the bridge when primary model modalities are unknown', async () => {
+    it('runs the bridge when primary model modalities are unknown', async () => {
       enableBridge();
       Object.assign(mockConfig, {
-        getEffectiveInputModalities: () => undefined,
+        getEffectiveInputModalities: () => ({}),
+      });
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        transcript: '[transcribed image]',
+        imageCount: 1,
+        convertedCount: 1,
+        omittedCount: 0,
+        omittedInvalidCount: 0,
+        omittedCappedCount: 0,
+        modelId: 'vm',
       });
       const { result, mockSendMessageStream } = renderTestHook();
       await act(async () => {
         await result.current.submitQuery('@img.png describe');
       });
       await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
-      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(mockRunVisionBridge).toHaveBeenCalledTimes(1);
       expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
-        'inlineData',
+        '[transcribed image]',
       );
+      expect(
+        JSON.stringify(mockSendMessageStream.mock.calls[0][0]),
+      ).not.toContain('inlineData');
     });
 
     it('skips the bridge when no image-capable model is available', async () => {

@@ -153,14 +153,15 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
   });
 
-  it('does not preserve unsupported images when primary modalities are unknown', async () => {
+  it('preserves unsupported images when primary modalities are unknown and bridge is available', async () => {
     const imagePath = path.join(testRootDir, 'image.png');
     await fsPromises.writeFile(imagePath, Buffer.from('fake png data'));
     const unknownModelConfig = {
       ...mockConfig,
       getModel: () => 'custom-model',
       getContentGeneratorConfig: () => ({ modalities: {} }),
-      getEffectiveInputModalities: () => undefined,
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
     } as unknown as Config;
 
     const result = await handleAtCommand({
@@ -172,13 +173,11 @@ describe('handleAtCommand', () => {
     });
 
     const parts = result.processedQuery as Array<{
-      text?: string;
-      inlineData?: unknown;
+      inlineData?: { mimeType?: string };
     }>;
-    expect(parts.some((part) => part.inlineData)).toBe(false);
-    expect(parts.map((part) => part.text ?? '').join('')).toContain(
-      'Unsupported image file',
-    );
+    expect(
+      parts.some((part) => part.inlineData?.mimeType === 'image/png'),
+    ).toBe(true);
   });
 
   it('preserves unsupported images for known text-only models by default', async () => {

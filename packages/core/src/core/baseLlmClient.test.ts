@@ -613,6 +613,24 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('returns the main generator when baseUrl hint matches the main provider', async () => {
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.QWEN_OAUTH,
+        model: 'main-model',
+        baseUrl: 'https://main.example.com/v1',
+      });
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const resolved = await c.resolveForModel('main-model', {
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'https://main.example.com/v1',
+      });
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(getResolvedModel).not.toHaveBeenCalled();
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
     it('returns the active runtime generator when model matches the runtime view', async () => {
       const runtimeContentGenerator = {
         generateContent: vi.fn(),

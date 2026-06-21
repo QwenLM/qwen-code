@@ -351,8 +351,7 @@ export async function resolveAtCommandQuery({
   try {
     const effectiveInputModalities = config.getEffectiveInputModalities?.();
     const preserveUnsupportedImageForBridge =
-      effectiveInputModalities !== undefined &&
-      effectiveInputModalities.image !== true &&
+      effectiveInputModalities?.image !== true &&
       config.getDefaultVisionBridgeModel?.() !== undefined;
     const result = await readManyFiles(config, {
       paths: pathSpecsToRead,

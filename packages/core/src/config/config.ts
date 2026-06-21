@@ -2551,9 +2551,10 @@ export class Config {
    * falls back to name-based detection when the model name is known. Used to
    * decide whether the vision bridge should run.
    *
-   * @returns The resolved input modalities, or `undefined` when unknown.
+   * @returns The resolved input modalities. Unknown models are treated as
+   * text-only so bridge features can conservatively adapt image inputs.
    */
-  getEffectiveInputModalities(): InputModalities | undefined {
+  getEffectiveInputModalities(): InputModalities {
     const cg = this.getContentGeneratorConfig();
     const model = cg?.model ?? this.getModel();
     if (cg?.modalities !== undefined) {
@@ -2562,11 +2563,11 @@ export class Config {
         source?.kind === 'computed' &&
         detectDefaultModalities(model) === undefined
       ) {
-        return undefined;
+        return {};
       }
       return cg.modalities;
     }
-    return detectDefaultModalities(model);
+    return detectDefaultModalities(model) ?? {};
   }
 
   /**

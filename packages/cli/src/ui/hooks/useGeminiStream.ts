@@ -158,10 +158,7 @@ function formatVisionBridgeNotice(result: VisionBridgeResult): string {
     }.${egress} The image was not interpreted.`;
   }
   if (result.status === 'skipped') {
-    if (result.egressOccurred) {
-      return `🔎 Vision bridge cancelled. Your image and prompt/context were sent to ${target}.`;
-    }
-    return '🔎 Vision bridge skipped (no images to convert).';
+    return `🔎 Vision bridge cancelled. Your image and prompt/context were sent to ${target}.`;
   }
   const omittedReasons = formatOmittedReasons(
     result.omittedInvalidCount,
@@ -994,11 +991,10 @@ export const useGeminiStream = (
         const effectiveInputModalities = config.getEffectiveInputModalities?.();
         const visionBridgeModel = config.getDefaultVisionBridgeModel?.();
         if (
-          effectiveInputModalities !== undefined &&
           visionBridgeModel !== undefined &&
           localQueryToSendToGemini !== null &&
           hasImageParts(localQueryToSendToGemini) &&
-          effectiveInputModalities.image !== true
+          effectiveInputModalities?.image !== true
         ) {
           debugLogger.debug('vision bridge: gate matched, running conversion');
           const bridgeResult = await runVisionBridge({
