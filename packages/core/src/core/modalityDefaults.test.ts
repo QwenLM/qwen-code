@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { defaultModalities } from './modalityDefaults.js';
+import {
+  defaultModalities,
+  detectDefaultModalities,
+} from './modalityDefaults.js';
 
 describe('defaultModalities', () => {
   describe('Google Gemini', () => {
@@ -258,6 +261,14 @@ describe('defaultModalities', () => {
   describe('unknown models', () => {
     it('returns text-only for unrecognized models', () => {
       expect(defaultModalities('some-random-model-xyz')).toEqual({});
+    });
+
+    it('returns undefined from known-only detection for unrecognized models', () => {
+      expect(detectDefaultModalities('some-random-model-xyz')).toBeUndefined();
+    });
+
+    it('returns known text-only modalities from known-only detection', () => {
+      expect(detectDefaultModalities('qwen3.7-max')).toEqual({});
     });
   });
 

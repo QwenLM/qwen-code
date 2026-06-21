@@ -20,7 +20,7 @@ import type {
   ContentGeneratorConfig,
   InputModalities,
 } from '../core/contentGenerator.js';
-import { defaultModalities } from '../core/modalityDefaults.js';
+import { detectDefaultModalities } from '../core/modalityDefaults.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
@@ -2565,14 +2565,25 @@ export class Config {
    * Resolve the effective input modalities of the current primary model.
    *
    * Prefers explicitly configured modalities (e.g. from `modelProviders`) and
-   * falls back to name-based detection — the same precedence the request
-   * pipeline uses. Used to decide whether the vision bridge should run.
+   * falls back to name-based detection when the model name is known. Used to
+   * decide whether the vision bridge should run.
    *
-   * @returns The resolved input modalities for the current model.
+   * @returns The resolved input modalities, or `undefined` when unknown.
    */
-  getEffectiveInputModalities(): InputModalities {
+  getEffectiveInputModalities(): InputModalities | undefined {
     const cg = this.getContentGeneratorConfig();
-    return cg?.modalities ?? defaultModalities(cg?.model ?? this.getModel());
+    const model = cg?.model ?? this.getModel();
+    if (cg?.modalities !== undefined) {
+      const source = this.getContentGeneratorConfigSources()?.['modalities'];
+      if (
+        source?.kind === 'computed' &&
+        detectDefaultModalities(model) === undefined
+      ) {
+        return undefined;
+      }
+      return cg.modalities;
+    }
+    return detectDefaultModalities(model);
   }
 
   /**

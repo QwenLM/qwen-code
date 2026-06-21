@@ -994,11 +994,13 @@ export const useGeminiStream = (
         // model is text-only. No-op unless explicitly enabled in settings and
         // the resolved query actually carries image parts.
         const visionBridge = config.getVisionBridgeConfig?.();
+        const effectiveInputModalities = config.getEffectiveInputModalities?.();
         if (
           visionBridge?.enabled &&
+          effectiveInputModalities !== undefined &&
           localQueryToSendToGemini !== null &&
           hasImageParts(localQueryToSendToGemini) &&
-          config.getEffectiveInputModalities?.()?.image !== true
+          effectiveInputModalities.image !== true
         ) {
           debugLogger.debug('vision bridge: gate matched, running conversion');
           const bridgeResult = await runVisionBridge({

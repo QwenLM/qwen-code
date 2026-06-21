@@ -605,6 +605,22 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('skips the bridge when primary model modalities are unknown', async () => {
+      enableBridge();
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: () => undefined,
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
+        'inlineData',
+      );
+    });
+
     it('skips the bridge when disabled', async () => {
       enableBridge(/* primaryAcceptsImages */ false, /* enabled */ false);
       const { result, mockSendMessageStream } = renderTestHook();
