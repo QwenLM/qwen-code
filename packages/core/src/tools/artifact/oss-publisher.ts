@@ -29,7 +29,14 @@ export type HttpPut = (
 ) => Promise<void>;
 
 const defaultHttpPut: HttpPut = async (url, headers, body, signal) => {
-  const res = await fetch(url, { method: 'PUT', headers, body, signal });
+  const timeout = AbortSignal.timeout(60_000);
+  const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers,
+    body,
+    signal: combinedSignal,
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(
@@ -93,6 +100,19 @@ export function signOssPut(params: {
 
 const CONTENT_TYPE = 'text/html';
 
+function normalizeEndpoint(raw: string): string {
+  const endpoint = raw
+    .trim()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+  if (!/^[a-z0-9.-]+\.aliyuncs\.com$/i.test(endpoint)) {
+    throw new Error(
+      `artifact.oss.endpoint does not look like a valid Aliyun OSS endpoint: ${endpoint}`,
+    );
+  }
+  return endpoint;
+}
+
 /**
  * Option C, native Aliyun OSS backend (zero new dependencies). Uploads the
  * artifact with a self-signed PUT Object request over the built-in fetch and
@@ -117,15 +137,16 @@ export class OssPublisher implements ArtifactPublisher {
     signal?: AbortSignal,
   ): Promise<PublishedArtifact> {
     const bucket = this.config.bucket?.trim();
-    const endpoint = this.config.endpoint?.trim().replace(/^https?:\/\//, '');
+    const rawEndpoint = this.config.endpoint?.trim();
     if (!bucket) {
       throw new Error('artifact.oss.bucket is not configured.');
     }
-    if (!endpoint) {
+    if (!rawEndpoint) {
       throw new Error(
         'artifact.oss.endpoint is not configured (e.g. "oss-cn-hangzhou.aliyuncs.com").',
       );
     }
+    const endpoint = normalizeEndpoint(rawEndpoint);
     const credentials = (this.deps.credentials ?? ossCredentialsFromEnv)();
     if (!credentials) {
       throw new Error(

@@ -120,6 +120,23 @@ describe('OssPublisher', () => {
     );
   });
 
+  it('uses a timeout signal for default uploads', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response('', { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await new OssPublisher(
+        { bucket: 'bkt', endpoint: 'oss-cn-hangzhou.aliyuncs.com' },
+        { credentials: () => creds, now: fixedNow },
+      ).publish(input);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('honors a custom keyPrefix', async () => {
     let url = '';
     const httpPut: HttpPut = async (u) => {
@@ -148,10 +165,21 @@ describe('OssPublisher', () => {
     ).rejects.toThrow(/endpoint/i);
     await expect(
       new OssPublisher(
-        { bucket: 'b', endpoint: 'e' },
+        { bucket: 'b', endpoint: 'oss-cn-hangzhou.aliyuncs.com' },
         { httpPut, credentials: () => undefined },
       ).publish(input),
     ).rejects.toThrow(/credentials/i);
+    expect(httpPut).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-Aliyun OSS endpoints before signing credentials', async () => {
+    const httpPut = vi.fn<HttpPut>(async () => {});
+    await expect(
+      new OssPublisher(
+        { bucket: 'b', endpoint: 'evil.example.com' },
+        { httpPut, credentials: () => creds },
+      ).publish(input),
+    ).rejects.toThrow(/aliyun oss endpoint/i);
     expect(httpPut).not.toHaveBeenCalled();
   });
 
@@ -161,7 +189,7 @@ describe('OssPublisher', () => {
     };
     await expect(
       new OssPublisher(
-        { bucket: 'b', endpoint: 'e' },
+        { bucket: 'b', endpoint: 'oss-cn-hangzhou.aliyuncs.com' },
         { httpPut, credentials: () => creds, now: fixedNow },
       ).publish(input),
     ).rejects.toThrow(/403/);

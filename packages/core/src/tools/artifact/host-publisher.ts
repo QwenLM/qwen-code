@@ -71,6 +71,10 @@ function substitute(token: string, file: string, key: string): string {
   return token.split('{file}').join(file).split('{key}').join(key);
 }
 
+function substituteKey(token: string, key: string): string {
+  return token.split('{key}').join(key);
+}
+
 /**
  * Option C: uploads the artifact via a user-configured command and returns the
  * shareable URL. The remote key is `{prefix}/{id}/index.html` (id = source path
@@ -106,13 +110,19 @@ export class HostPublisher implements ArtifactPublisher {
         'artifact.host.uploadCommand must include the {file} placeholder (the local HTML path to upload).',
       );
     }
+    if (!urlTemplate.includes('{key}')) {
+      throw new Error(
+        'artifact.host.urlTemplate must include the {key} placeholder (the remote object key).',
+      );
+    }
 
     const prefix = (this.config.keyPrefix ?? 'artifacts').replace(
       /^\/+|\/+$/g,
       '',
     );
     const key = `${prefix}/${input.id}/index.html`;
-    const file = path.join(os.tmpdir(), `qwen-artifact-${input.id}.html`);
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-art-'));
+    const file = path.join(dir, 'index.html');
     await fs.writeFile(file, input.html, 'utf8');
 
     try {
@@ -125,9 +135,9 @@ export class HostPublisher implements ArtifactPublisher {
       }
       await this.run(command, args, signal);
     } finally {
-      await fs.rm(file, { force: true });
+      await fs.rm(dir, { recursive: true, force: true });
     }
 
-    return { id: input.id, url: substitute(urlTemplate, file, key) };
+    return { id: input.id, url: substituteKey(urlTemplate, key) };
   }
 }

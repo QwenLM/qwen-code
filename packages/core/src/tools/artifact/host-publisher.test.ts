@@ -86,6 +86,45 @@ describe('HostPublisher', () => {
     await expect(fs.access(filePath)).rejects.toThrow();
   });
 
+  it('uses a unique temp file for each upload of the same artifact', async () => {
+    const filePaths: string[] = [];
+    const run: RunCommand = async (_c, args) => {
+      filePaths.push(args.find((a) => a.endsWith('.html'))!);
+    };
+    const pub = new HostPublisher(
+      { uploadCommand: 'up {file}', urlTemplate: 'https://h/{key}' },
+      run,
+    );
+
+    await pub.publish(input);
+    await pub.publish(input);
+
+    expect(filePaths[0]).not.toBe(filePaths[1]);
+  });
+
+  it('rejects urlTemplate without the key placeholder', async () => {
+    const run = vi.fn<RunCommand>(async () => {});
+    await expect(
+      new HostPublisher(
+        { uploadCommand: 'up {file}', urlTemplate: 'https://h/static' },
+        run,
+      ).publish(input),
+    ).rejects.toThrow(/\{key\}/i);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('does not substitute file paths into the returned url', async () => {
+    const run = vi.fn<RunCommand>(async () => {});
+    const res = await new HostPublisher(
+      {
+        uploadCommand: 'up {file} {key}',
+        urlTemplate: 'https://h/{key}?src={file}',
+      },
+      run,
+    ).publish(input);
+    expect(res.url).toBe('https://h/artifacts/deadbeef/index.html?src={file}');
+  });
+
   it('honors a custom keyPrefix and strips surrounding slashes', async () => {
     const run = vi.fn<RunCommand>(async () => {});
     const res = await new HostPublisher(
